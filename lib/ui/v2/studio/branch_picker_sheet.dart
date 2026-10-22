@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
-import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 
 // TODO(l10n): move this sheet's English copy to the ARB files in the next wave.
@@ -32,14 +32,16 @@ class V2BranchPickerData {
     this.status = V2BranchPickerStatus.content,
     this.current,
     this.branches = const <V2Branch>[],
-    this.stashNote =
-        'Switching will copy your uncommitted changes to a stash. Nothing will be lost.',
+    this.stashNote = '',
     this.errorMessage,
   });
 
   final V2BranchPickerStatus status;
   final V2Branch? current;
   final List<V2Branch> branches;
+
+  /// Kept for wiring compatibility. The sheet no longer prints an explanatory
+  /// paragraph: switching branches is not destructive.
   final String stashNote;
   final String? errorMessage;
 }
@@ -54,6 +56,7 @@ class V2BranchPickerSheet extends StatefulWidget {
     this.onCreateBranch,
     this.onSearch,
     this.onRetry,
+    this.onClose,
     this.showHandle = true,
   });
 
@@ -62,6 +65,7 @@ class V2BranchPickerSheet extends StatefulWidget {
   final VoidCallback? onCreateBranch;
   final ValueChanged<String>? onSearch;
   final VoidCallback? onRetry;
+  final VoidCallback? onClose;
   final bool showHandle;
 
   @override
@@ -103,63 +107,45 @@ class _V2BranchPickerSheetState extends State<V2BranchPickerSheet> {
       color: c.surface,
       child: SafeArea(
         top: false,
-        child: Column(
-          mainAxisSize: MainAxisSize.max,
-          children: [
-            if (widget.showHandle) ...[
-              const SizedBox(height: OSpace.s),
-              Container(
-                width: 36,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: c.hairlineStrong,
-                  borderRadius: BorderRadius.circular(2),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 560),
+            child: Column(
+              mainAxisSize: MainAxisSize.max,
+              children: [
+                if (widget.showHandle) ...[
+                  const SizedBox(height: OSpace.s),
+                  Container(
+                    width: 36,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: c.hairlineStrong,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ],
+                OSheetHeader(
+                  title: 'Switch branch',
+                  onClose:
+                      widget.onClose ?? () => Navigator.of(context).maybePop(),
+                  closeKey: const Key('branch-picker-close'),
+                  closeLabel: 'Close branch picker',
                 ),
-              ),
-            ],
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                OSpace.xl,
-                OSpace.l,
-                OSpace.xl,
-                OSpace.m,
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Semantics(
-                          container: true,
-                          header: true,
-                          child: Text(
-                            'Switch branch',
-                            style: OType.h2.copyWith(color: c.text),
-                          ),
-                        ),
-                      ),
-                      Icon(Icons.alt_route_rounded, size: 22, color: c.accent),
-                    ],
-                  ),
-                  const SizedBox(height: OSpace.xs),
-                  Text(
-                    'Your current work stays safe.',
-                    style: OType.bodySm.copyWith(color: c.textMuted),
-                  ),
-                  const SizedBox(height: OSpace.l),
-                  OSearchField(
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: OSpace.l),
+                  child: OSearchField(
                     controller: _search,
                     hint: 'Search branches',
                     onChanged: _onSearch,
                   ),
-                ],
-              ),
+                ),
+                const SizedBox(height: OSpace.s),
+                Expanded(
+                  child: OFadeIn(child: _buildBody(context, current, visible)),
+                ),
+              ],
             ),
-            Expanded(
-              child: OFadeSlide(child: _buildBody(context, current, visible)),
-            ),
-          ],
+          ),
         ),
       ),
     );
@@ -176,43 +162,21 @@ class _V2BranchPickerSheetState extends State<V2BranchPickerSheet> {
         return const OSkeletonList(rows: 4);
       case V2BranchPickerStatus.error:
         return OErrorState(
-          message:
-              data.errorMessage ??
-              'We could not load your branches. Check your connection and try again.',
+          message: data.errorMessage ?? 'Branches did not load.',
           onRetry: widget.onRetry,
         );
       case V2BranchPickerStatus.empty:
-        return OEmptyState(
-          compact: true,
-          icon: Icons.account_tree_outlined,
-          title: 'No branches yet',
-          message: 'Create a branch to start making changes.',
-          action: OButton(
-            label: 'Create new branch',
-            icon: Icons.add_rounded,
-            onPressed: widget.onCreateBranch,
-          ),
-        );
+        return _buildEmpty();
       case V2BranchPickerStatus.content:
         if (current == null && data.branches.isEmpty) {
-          return OEmptyState(
-            compact: true,
-            icon: Icons.account_tree_outlined,
-            title: 'No branches yet',
-            message: 'Create a branch to start making changes.',
-            action: OButton(
-              label: 'Create new branch',
-              icon: Icons.add_rounded,
-              onPressed: widget.onCreateBranch,
-            ),
-          );
+          return _buildEmpty();
         }
         if (visible.isEmpty && _query.isNotEmpty) {
           return OEmptyState(
             compact: true,
             icon: Icons.search_off_rounded,
             title: 'No branches found',
-            message: 'Try another search.',
+            message: '',
             action: OButton(
               label: 'Clear search',
               variant: OButtonVariant.secondary,
@@ -221,72 +185,50 @@ class _V2BranchPickerSheetState extends State<V2BranchPickerSheet> {
           );
         }
         return ListView(
-          padding: const EdgeInsets.fromLTRB(
-            OSpace.xl,
-            0,
-            OSpace.xl,
-            OSpace.xl,
-          ),
+          padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.xl),
           children: [
             if (current != null && _matches(current)) ...[
-              const _SectionLabel(label: 'Current branch'),
-              const SizedBox(height: OSpace.xs),
+              OSectionTitle(title: 'Current'),
               _CurrentBranchCard(branch: current),
               const SizedBox(height: OSpace.l),
             ],
-            _SectionLabel(
-              label: 'Recent branches (${visible.length})',
-              trailing: 'Local',
-            ),
+            for (final branch in visible)
+              Padding(
+                padding: const EdgeInsets.only(bottom: OSpace.s),
+                child: _BranchRow(
+                  branch: branch,
+                  onTap: widget.onSelectBranch == null
+                      ? null
+                      : () => widget.onSelectBranch!(branch),
+                ),
+              ),
             const SizedBox(height: OSpace.xs),
-            OStagger(
-              children: [
-                for (final branch in visible)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: OSpace.s),
-                    child: _BranchRow(
-                      branch: branch,
-                      onTap: () => widget.onSelectBranch?.call(branch),
-                    ),
-                  ),
-              ],
-            ),
-            const SizedBox(height: OSpace.xs),
-            OButton(
-              label: 'Create new branch',
-              icon: Icons.add_rounded,
-              variant: OButtonVariant.secondary,
-              expand: true,
-              onPressed: widget.onCreateBranch,
-            ),
-            const SizedBox(height: OSpace.m),
-            _StashNote(note: data.stashNote),
+            if (widget.onCreateBranch != null)
+              OButton(
+                label: 'Create new branch',
+                icon: Icons.add_rounded,
+                variant: OButtonVariant.secondary,
+                expand: true,
+                onPressed: widget.onCreateBranch,
+              ),
           ],
         );
     }
   }
-}
 
-class _SectionLabel extends StatelessWidget {
-  const _SectionLabel({required this.label, this.trailing});
-
-  final String label;
-  final String? trailing;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Row(
-      children: [
-        Expanded(
-          child: Text(
-            label.toUpperCase(),
-            style: OType.overline.copyWith(color: c.textMuted),
-          ),
-        ),
-        if (trailing != null)
-          Text(trailing!, style: OType.caption.copyWith(color: c.textFaint)),
-      ],
+  Widget _buildEmpty() {
+    return OEmptyState(
+      compact: true,
+      icon: Icons.account_tree_outlined,
+      title: 'No branches yet',
+      message: '',
+      action: widget.onCreateBranch == null
+          ? null
+          : OButton(
+              label: 'Create new branch',
+              icon: Icons.add_rounded,
+              onPressed: widget.onCreateBranch,
+            ),
     );
   }
 }
@@ -299,6 +241,9 @@ class _CurrentBranchCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    final meta = branch.lastCommitLabel.isNotEmpty
+        ? branch.lastCommitLabel
+        : (branch.isDefault ? 'Default' : '');
     return Container(
       padding: const EdgeInsets.all(OSpace.m),
       decoration: BoxDecoration(
@@ -308,90 +253,32 @@ class _CurrentBranchCard extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Container(
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              color: c.accentSoft,
-              shape: BoxShape.circle,
-            ),
-            child: Icon(Icons.fork_right_rounded, size: 19, color: c.accent),
-          ),
+          Icon(Icons.fork_right_rounded, size: 19, color: c.accent),
           const SizedBox(width: OSpace.m),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
-                SizedBox(
-                  width: double.infinity,
-                  child: Wrap(
-                    alignment: WrapAlignment.spaceBetween,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    spacing: OSpace.s,
-                    runSpacing: OSpace.xs,
-                    children: [
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Flexible(
-                            child: Text(
-                              branch.name,
-                              style: OType.bodyStrong.copyWith(color: c.text),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          const SizedBox(width: OSpace.xs),
-                          Icon(
-                            Icons.check_circle_rounded,
-                            size: 16,
-                            color: c.accent,
-                          ),
-                        ],
-                      ),
-                      const _ActiveBadge(),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 2),
                 Text(
-                  branch.isDefault
-                      ? 'Default · Synced with remote'
-                      : 'Synced with remote',
-                  style: OType.caption.copyWith(color: c.textMuted),
+                  branch.name,
+                  style: OType.bodyStrong.copyWith(color: c.text),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
+                if (meta.isNotEmpty)
+                  Text(
+                    meta,
+                    style: OType.caption.copyWith(color: c.textMuted),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
               ],
             ),
           ),
+          const SizedBox(width: OSpace.s),
+          Icon(Icons.check_circle_rounded, size: 18, color: c.accent),
         ],
-      ),
-    );
-  }
-}
-
-/// Content-sized "Active" pill. [OPill] has a fixed height, which would clip its
-/// label when the user raises the text size.
-class _ActiveBadge extends StatelessWidget {
-  const _ActiveBadge();
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      constraints: const BoxConstraints(minHeight: 24),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(
-        color: c.accentSoft,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-      ),
-      child: Text(
-        'Active',
-        style: OType.caption.copyWith(
-          color: c.accent,
-          fontWeight: FontWeight.w600,
-        ),
       ),
     );
   }
@@ -416,87 +303,61 @@ class _BranchRow extends StatelessWidget {
       enabled: onTap != null,
       label: label,
       onTap: onTap,
-      child: OCard(
-        onTap: onTap,
-        padding: const EdgeInsets.symmetric(
-          horizontal: OSpace.m,
-          vertical: OSpace.s,
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 36,
-              height: 36,
-              decoration: BoxDecoration(
-                color: c.surfaceAlt,
-                shape: BoxShape.circle,
-              ),
-              child: Icon(
-                Icons.fork_right_rounded,
-                size: 19,
-                color: c.textMuted,
-              ),
+      child: Material(
+        color: c.surface,
+        borderRadius: BorderRadius.circular(ORadius.l),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(ORadius.l),
+          child: Container(
+            constraints: const BoxConstraints(minHeight: OSpace.listRow),
+            padding: const EdgeInsets.symmetric(
+              horizontal: OSpace.m,
+              vertical: OSpace.s,
             ),
-            const SizedBox(width: OSpace.m),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    branch.name,
-                    style: OType.body.copyWith(
-                      color: c.text,
-                      fontWeight: FontWeight.w500,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(ORadius.l),
+              border: Border.all(color: c.hairline),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.fork_right_rounded, size: 19, color: c.textMuted),
+                const SizedBox(width: OSpace.m),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        branch.name,
+                        style: OType.body.copyWith(
+                          color: c.text,
+                          fontWeight: FontWeight.w500,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      if (branch.lastCommitLabel.isNotEmpty)
+                        Text(
+                          branch.lastCommitLabel,
+                          style: OType.caption.copyWith(color: c.textMuted),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                    ],
                   ),
-                  if (branch.lastCommitLabel.isNotEmpty)
-                    Text(
-                      branch.lastCommitLabel,
-                      style: OType.caption.copyWith(color: c.textMuted),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                ],
-              ),
-            ),
-            const SizedBox(width: OSpace.s),
-            Icon(Icons.arrow_forward_rounded, size: 20, color: c.textFaint),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _StashNote extends StatelessWidget {
-  const _StashNote({required this.note});
-
-  final String note;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      padding: const EdgeInsets.all(OSpace.m),
-      decoration: BoxDecoration(
-        color: c.warn.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(ORadius.m),
-        border: Border.all(color: c.warn.withValues(alpha: 0.25)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.shield_outlined, size: 19, color: c.warn),
-          const SizedBox(width: OSpace.s),
-          Expanded(
-            child: Text(
-              note,
-              style: OType.caption.copyWith(color: c.textMuted),
+                ),
+                const SizedBox(width: OSpace.s),
+                if (onTap != null)
+                  Icon(
+                    Icons.arrow_forward_rounded,
+                    size: 18,
+                    color: c.textFaint,
+                  ),
+              ],
             ),
           ),
-        ],
+        ),
       ),
     );
   }

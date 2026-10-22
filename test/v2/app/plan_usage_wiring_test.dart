@@ -174,24 +174,22 @@ void main() {
     expect(find.byType(UsagePage), findsOneWidget);
     expect(paths, contains('/usage/history'));
 
-    // Daily: today's real input + output tokens (1.5M).
+    // One hero: today's real input + output tokens (1.5M) against the cap.
     expect(find.text('1.5M'), findsOneWidget);
-    expect(find.text('of 50M tokens used'), findsOneWidget);
-    // Monthly: the ledger's 30-day total (3.0M), not a money value.
-    expect(find.text('3.0M used'), findsOneWidget);
-    expect(find.text('1.5B limit'), findsOneWidget);
+    expect(find.text('of 50M tokens'), findsOneWidget);
     // Countdown derived from the server's resets_at.
     expect(find.textContaining('Resets in 6 h'), findsOneWidget);
-    // Today's real request and image counters.
-    expect(find.text('7'), findsOneWidget);
-    expect(find.text('3'), findsOneWidget);
-    // Storage is not reported by either endpoint: an honest unknown, no 0 GB.
-    expect(find.text('Not tracked yet'), findsOneWidget);
+    // One chart with one range switch.
+    expect(find.text('Activity'), findsOneWidget);
+    expect(find.text('7 days'), findsOneWidget);
+    expect(find.text('30 days'), findsOneWidget);
+    // The multi-card dashboard is gone.
+    expect(find.text('3.0M used'), findsNothing);
+    expect(find.text('1.5B limit'), findsNothing);
+    expect(find.text('Not tracked yet'), findsNothing);
     expect(find.text('0 GB'), findsNothing);
-    // The per-model split comes from today.by_model.
-    expect(find.text('Auto'), findsOneWidget);
-    expect(find.text('GPT X'), findsOneWidget);
-    expect(find.text('2 models'), findsOneWidget);
+    expect(find.text('Auto'), findsNothing);
+    expect(find.text('GPT X'), findsNothing);
 
     usage.release();
   });

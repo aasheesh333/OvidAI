@@ -5,6 +5,7 @@ import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/chat/chat_page.dart';
 import 'package:ovid_ai/ui/v2/chat/composer_attachments.dart';
+import 'package:ovid_ai/ui/v2/chat/composer_row.dart';
 import 'package:ovid_ai/ui/v2/chat/model_chip.dart';
 import 'package:ovid_ai/ui/v2/chat/queue_dock.dart';
 
@@ -20,16 +21,20 @@ void main() {
 
     expect(find.text('Ovid Si'), findsOneWidget);
     expect(find.text('Auto'), findsOneWidget);
-    expect(find.text('What should we build today?'), findsOneWidget);
+    expect(find.text('What should we build?'), findsOneWidget);
     expect(
       find.text('Ask anything. Ovid works in the background.'),
       findsOneWidget,
     );
-    expect(find.text('Build me a landing page'), findsOneWidget);
-    expect(find.text('Research a topic for me'), findsOneWidget);
-    expect(find.text('Fix a bug in my repo'), findsOneWidget);
-    expect(find.text('Auto · 50M tokens left today'), findsOneWidget);
-    expect(find.text('General'), findsOneWidget);
+    expect(find.text('Build a landing page'), findsOneWidget);
+    expect(find.text('Research a topic'), findsOneWidget);
+    expect(find.text('Fix a repo bug'), findsOneWidget);
+    // The model and token line above the composer was permanent chrome; the
+    // model chip in the header is the one place model state lives.
+    expect(find.text('Auto · 50M tokens left today'), findsNothing);
+    expect(find.text('Fast agent'), findsNothing);
+    // The permission chip is a control: with no handler it is not shown at all.
+    expect(find.text('General'), findsNothing);
   });
 
   testWidgets('renders in dark', (tester) async {
@@ -38,8 +43,7 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 400));
 
-    expect(find.text('What should we build today?'), findsOneWidget);
-    expect(find.text('Auto · 50M tokens left today'), findsOneWidget);
+    expect(find.text('What should we build?'), findsOneWidget);
   });
 
   testWidgets('suggestion card fires and fills the composer', (tester) async {
@@ -54,13 +58,13 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 400));
 
-    await tester.tap(find.text('Build me a landing page'));
+    await tester.tap(find.text('Build a landing page'));
     await tester.pump();
 
     expect(tapped, isNotNull);
-    expect(tapped!.title, 'Build me a landing page');
+    expect(tapped!.title, 'Build a landing page');
     final field = tester.widget<TextField>(find.byType(TextField));
-    expect(field.controller!.text, 'Build me a landing page');
+    expect(field.controller!.text, 'Build a landing page');
   });
 
   testWidgets('draft is controlled by data and emits changes', (tester) async {
@@ -127,6 +131,38 @@ void main() {
     expect(studioTaps, 1);
     expect(browserTaps, 1);
     expect(moreTaps, 1);
+  });
+
+  testWidgets('tablet centres the home column and the composer', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1000, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(_app(const V2ChatPage(data: V2ChatPageData())));
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final scroll = find
+        .ancestor(
+          of: find.text('What should we build?'),
+          matching: find.byType(SingleChildScrollView),
+        )
+        .first;
+    expect(tester.getSize(scroll).width, lessThanOrEqualTo(720));
+    expect(tester.getCenter(scroll).dx, closeTo(500, 1));
+
+    final composer = find.byKey(const ValueKey('v2-chat-composer-column'));
+    expect(tester.getSize(composer).width, lessThanOrEqualTo(720));
+    expect(tester.getTopLeft(composer).dx, closeTo((1000 - 720) / 2, 1));
+
+    // 600–899 dp keeps the contract's 640 column, still centred and never
+    // wider than the 720 cap.
+    tester.view.physicalSize = const Size(800, 800);
+    await tester.pumpWidget(_app(const V2ChatPage(data: V2ChatPageData())));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(tester.getSize(composer).width, lessThanOrEqualTo(640));
+    expect(tester.getCenter(composer).dx, closeTo(400, 1));
   });
 
   testWidgets('loading state shows history skeletons', (tester) async {
@@ -280,6 +316,7 @@ void main() {
       _app(
         V2ChatPage(
           data: const V2ChatPageData(),
+          onMenu: () {},
           onMore: () {},
           onAttach: () => attaches++,
           onMic: () => mics++,
@@ -291,8 +328,6 @@ void main() {
 
     for (final label in [
       'Open menu',
-      'Open Studio',
-      'Open Browser',
       'More options',
       'Add attachment or action',
       'Voice input',
@@ -302,6 +337,9 @@ void main() {
       expect(size.width, greaterThanOrEqualTo(48), reason: label);
       expect(size.height, greaterThanOrEqualTo(48), reason: label);
     }
+    // Below 360 dp the header keeps one action (the contract's budget).
+    expect(find.bySemanticsLabel('Open Studio'), findsNothing);
+    expect(find.bySemanticsLabel('Open Browser'), findsNothing);
 
     final permission = find.byWidgetPredicate(
       (widget) =>
@@ -311,6 +349,36 @@ void main() {
     );
     expect(permission, findsOneWidget);
     expect(tester.getSize(permission).height, greaterThanOrEqualTo(48));
+
+    // Exactly one control row, in the contract order:
+    // +, permission, field, mic, send.
+    final stack = tester.widget<Column>(
+      find.byKey(const ValueKey('v2-chat-composer-stack')),
+    );
+    expect(stack.children.whereType<V2ComposerRow>(), hasLength(1));
+    expect(stack.children.whereType<Row>(), isEmpty);
+
+    final plus = find.bySemanticsLabel('Add attachment or action');
+    final field = find.byType(TextField);
+    final mic = find.bySemanticsLabel('Voice input');
+    final send = find.bySemanticsLabel('Send');
+    final centres = [plus, permission, field, mic, send]
+        .map(tester.getCenter)
+        .toList();
+    for (var i = 1; i < centres.length; i++) {
+      expect(
+        centres[i].dx,
+        greaterThan(centres[i - 1].dx),
+        reason: 'control $i must sit right of control ${i - 1}',
+      );
+      expect(
+        centres[i].dy,
+        closeTo(centres.first.dy, 1),
+        reason: 'control $i must share the composer row',
+      );
+    }
+    expect(tester.widget<TextField>(field).minLines, 1);
+    expect(tester.widget<TextField>(field).maxLines, 3);
 
     // The "+" opens the composer's own menu; its File row reaches the host's
     // legacy attach seam.
@@ -330,11 +398,61 @@ void main() {
     expect(permissions, 1);
   });
 
+  testWidgets('at 320 dp and 200 % text the permission chip moves to the + sheet', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    var permissions = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: OTheme.light(),
+        home: MediaQuery(
+          data: const MediaQueryData(
+            size: Size(320, 640),
+            textScaler: TextScaler.linear(2),
+          ),
+          child: V2ChatPage(
+            data: const V2ChatPageData(),
+            onPermissionTap: () => permissions++,
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+
+    // The row stays one line: the chip leaves it instead of wrapping.
+    expect(find.bySemanticsLabel('Permission: General. Change'), findsNothing);
+    expect(
+      tester
+          .widget<Column>(find.byKey(const ValueKey('v2-chat-composer-stack')))
+          .children
+          .whereType<Row>(),
+      isEmpty,
+    );
+
+    await tester.tap(find.bySemanticsLabel('Add attachment or action'));
+    await tester.pumpAndSettle();
+    final row = find.byKey(const ValueKey('composer-plus-permission'));
+    expect(row, findsOneWidget);
+    expect(find.text('Permission: General'), findsOneWidget);
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+    expect(permissions, 1);
+  });
+
   testWidgets('send is announced as disabled until a draft exists', (
     tester,
   ) async {
     final handle = tester.ensureSemantics();
-    await tester.pumpWidget(_app(const V2ChatPage(data: V2ChatPageData())));
+    // A composer with a real send handler: with none, Send stays disabled by
+    // design (no control may announce a send that goes nowhere).
+    await tester.pumpWidget(
+      _app(V2ChatPage(data: const V2ChatPageData(), onSend: (_) {})),
+    );
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(
@@ -504,8 +622,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.byType(V2QueueDock), findsOneWidget);
-    expect(find.text('2 queued messages'), findsOneWidget);
-    expect(find.text('Add the pricing page'), findsOneWidget);
+    expect(find.text('2 queued'), findsOneWidget);
     expect(
       tester.getTopLeft(find.byType(V2QueueDock)).dy,
       lessThan(tester.getTopLeft(find.byType(TextField)).dy),
@@ -552,7 +669,10 @@ void main() {
     expect(find.byKey(const ValueKey('composer-plus-file')), findsOneWidget);
     expect(find.byKey(const ValueKey('composer-plus-photo')), findsOneWidget);
     // Connectors has no route in the composer, so it is not offered dead.
-    expect(find.byKey(const ValueKey('composer-plus-connectors')), findsNothing);
+    expect(
+      find.byKey(const ValueKey('composer-plus-connectors')),
+      findsNothing,
+    );
 
     final photo = find.byKey(const ValueKey('composer-plus-photo'));
     await tester.ensureVisible(photo);
@@ -582,10 +702,7 @@ void main() {
     String? sent;
     await tester.pumpWidget(
       _app(
-        V2ChatPage(
-          data: const V2ChatPageData(),
-          onSend: (text) => sent = text,
-        ),
+        V2ChatPage(data: const V2ChatPageData(), onSend: (text) => sent = text),
       ),
     );
     await tester.pump(const Duration(milliseconds: 400));
@@ -611,10 +728,7 @@ void main() {
     String? sent;
     await tester.pumpWidget(
       _app(
-        V2ChatPage(
-          data: const V2ChatPageData(),
-          onSend: (text) => sent = text,
-        ),
+        V2ChatPage(data: const V2ChatPageData(), onSend: (text) => sent = text),
       ),
     );
     await tester.pump(const Duration(milliseconds: 400));
@@ -655,8 +769,7 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 400));
 
-    expect(find.text('1 queued message'), findsOneWidget);
-    expect(find.text('Queued prompt'), findsOneWidget);
+    expect(find.text('1 queued'), findsOneWidget);
 
     await tester.tap(find.text('Send now'));
     await tester.pump();

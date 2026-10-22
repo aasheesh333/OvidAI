@@ -182,26 +182,14 @@ class V2VoiceReplyCard extends StatelessWidget {
                           onSeek: onSeek,
                         ),
                         const SizedBox(height: OSpace.xs),
-                        Row(
-                          children: [
-                            Icon(
-                              Icons.graphic_eq_rounded,
-                              size: 14,
-                              color: c.accent,
-                            ),
-                            const SizedBox(width: OSpace.xs),
-                            Expanded(
-                              child: Text(
-                                '${formatVoiceDuration(position)} / '
-                                '${formatVoiceDuration(total)}',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: OType.caption.copyWith(
-                                  color: c.textMuted,
-                                ),
-                              ),
-                            ),
-                          ],
+                        // The time is the only text under the waveform; the
+                        // waveform itself already says this is audio.
+                        Text(
+                          '${formatVoiceDuration(position)} / '
+                          '${formatVoiceDuration(total)}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: OType.caption.copyWith(color: c.textMuted),
                         ),
                       ],
                     ),
@@ -391,7 +379,7 @@ class _VoiceWaveform extends StatelessWidget {
               child: Row(
                 children: [
                   for (var i = 0; i < _bars.length; i++) ...[
-                    if (i > 0) const SizedBox(width: 2),
+                    if (i > 0) const SizedBox(width: OSpace.xxs),
                     Expanded(
                       child: Align(
                         alignment: Alignment.center,
@@ -520,7 +508,7 @@ class _VoiceMetrics extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                         style: OType.h3.copyWith(color: c.text),
                       ),
-                      const SizedBox(height: 2),
+                      const SizedBox(height: OSpace.xxs),
                       Text(
                         metrics[i].label,
                         maxLines: 2,

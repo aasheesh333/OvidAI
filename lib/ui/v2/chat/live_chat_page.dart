@@ -6,15 +6,16 @@ import 'package:flutter/services.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import '../a11y/live_region.dart';
 import 'composer_attachments.dart';
 import 'composer_mentions.dart';
 import 'composer_plus_sheet.dart';
+import 'composer_row.dart';
 import 'composer_voice.dart';
 import 'message_blocks.dart';
 import 'model_chip.dart';
-import 'permission_sheet.dart';
 import 'queue_dock.dart';
 import 'transcript_actions.dart';
 import 'transcript_tiles.dart';
@@ -121,8 +122,8 @@ class V2LiveChatData {
     this.stopHint = 'Press stop to pause',
     this.draft = '',
     this.composerHint = 'Ask Ovid to do anything...',
-    this.emptyTitle = 'No messages yet',
-    this.emptyMessage = 'Ask Ovid to build something and it will show up here.',
+    this.emptyTitle = 'Ask Ovid anything',
+    this.emptyMessage = 'Replies and files appear here.',
     this.emptyActionLabel = 'Start a chat',
     this.queuedCount = 0,
     this.queuedPreview,
@@ -470,6 +471,10 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
       onPhoto: () => unawaited(_pickAttachments(images: true)),
       onFile: () => unawaited(_pickAttachments(images: false)),
       onOpenStudio: widget.onStudio,
+      // The chip's fallback: at 320 dp / 200 % text the row cannot hold it,
+      // so the same sheet action keeps permission reachable.
+      permissionLabel: widget.permissionLabel,
+      onPermission: widget.onPermissionTap,
     );
   }
 
@@ -532,6 +537,7 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
 
   void _send() {
     final text = _controller.text.trim();
+    if (widget.onSubmit == null && widget.onSend == null) return;
     if (text.isEmpty && _attachments.isEmpty) return;
     if (text.isEmpty && widget.onSubmit == null) return;
     if (_voice.listening) unawaited(_voice.stop());
@@ -637,8 +643,12 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
     final canUseComposer = !data.running && !data.loading;
     return OScaffold(
       appBar: _LiveTopBar(
-        title: data.title,
-        subtitle: data.sessionTitle,
+        // The session name is the useful identity here; the app name is not
+        // repeated on every screen. The subtitle is state-only: idle has none.
+        title: data.sessionTitle.trim().isEmpty
+            ? data.title
+            : data.sessionTitle,
+        subtitle: data.running ? 'Working' : null,
         modelLabel: data.modelLabel,
         autoOnly: data.autoOnly,
         subagentCount: data.subagentCount,
@@ -674,34 +684,47 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
                 maxHeight: constraints.maxHeight * 0.62,
               ),
               child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (data.queuedCount > 0)
-                      V2QueueDock(
-                        count: data.queuedCount,
-                        preview: data.queuedPreview ?? '',
-                        onSendNow: widget.onSendQueuedNow ?? widget.onStop,
-                        onDismiss: widget.onDismissQueued,
-                      ),
-                    _LiveComposer(
-                      data: data,
-                      controller: _controller,
-                      onSubmitEnabled: widget.onSubmit != null,
-                      attachments: _attachments,
-                      attachmentError: _attachmentError,
-                      voiceError: _voice.error,
-                      listening: _voice.listening,
-                      onRemoveAttachment: _removeAttachment,
-                      onSend: _send,
-                      onStop: widget.onStop,
-                      onAttach: _attach,
-                      onMic: _toggleVoice,
-                      onPermissionTap: widget.onPermissionTap,
-                      permissionLabel: widget.permissionLabel,
+                child: Align(
+                  alignment: Alignment.topCenter,
+                  // The composer shares the transcript's column, so a tablet
+                  // does not stretch the input across the window.
+                  child: ConstrainedBox(
+                    key: const ValueKey('v2-live-composer-column'),
+                    constraints: BoxConstraints(
+                      maxWidth: OResponsive.of(context).maxContentWidth,
                     ),
-                    OLiveRegion(message: _announcement),
-                  ],
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (data.queuedCount > 0)
+                          V2QueueDock(
+                            count: data.queuedCount,
+                            preview: data.queuedPreview ?? '',
+                            onSendNow: widget.onSendQueuedNow ?? widget.onStop,
+                            onDismiss: widget.onDismissQueued,
+                          ),
+                        _LiveComposer(
+                          data: data,
+                          controller: _controller,
+                          onSubmitEnabled: widget.onSubmit != null,
+                          sendEnabled:
+                              widget.onSubmit != null || widget.onSend != null,
+                          attachments: _attachments,
+                          attachmentError: _attachmentError,
+                          voiceError: _voice.error,
+                          listening: _voice.listening,
+                          onRemoveAttachment: _removeAttachment,
+                          onSend: _send,
+                          onStop: widget.onStop,
+                          onAttach: _attach,
+                          onMic: _toggleVoice,
+                          onPermissionTap: widget.onPermissionTap,
+                          permissionLabel: widget.permissionLabel,
+                        ),
+                        OLiveRegion(message: _announcement),
+                      ],
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -718,136 +741,176 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
       return OErrorState(message: data.errorMessage!, onRetry: widget.onRetry);
     }
     if (data.items.isEmpty) {
-      return OEmptyState(
-        icon: Icons.forum_outlined,
-        title: data.emptyTitle,
-        message: data.emptyMessage,
-        action: OButton(
-          label: data.emptyActionLabel,
-          onPressed: widget.onStartChat,
-        ),
-      );
+      return _LiveEmptyState(data: data, onStart: widget.onStartChat);
     }
 
     final items = data.items;
+    final gutter = OResponsive.of(context).gutter;
     // Lazy list: a 5,000-message session builds only the rows in (and just
     // around) the viewport instead of the whole transcript every frame.
-    final firstCount = items.length < 8 ? items.length : 8;
-    return ListView.builder(
-      key: const ValueKey<String>('v2-live-transcript'),
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.l,
-        OSpace.m,
-        OSpace.l,
-        OSpace.l,
+    final firstCount = items.length < 6 ? items.length : 6;
+    return Align(
+      alignment: Alignment.topCenter,
+      // At 600 dp+ the transcript keeps a readable line length and centres.
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: OResponsive.of(context).maxContentWidth,
+        ),
+        child: ListView.builder(
+          key: const ValueKey<String>('v2-live-transcript'),
+          padding: EdgeInsets.fromLTRB(gutter, OSpace.m, gutter, OSpace.l),
+          itemCount: items.length,
+          itemBuilder: (context, index) {
+            final row = Padding(
+              padding: const EdgeInsets.only(bottom: OSpace.l),
+              child: _buildItem(context, items[index]),
+            );
+            if (index >= firstCount) return row;
+            // A short entrance for the first screenful only. Delay plus
+            // duration stays within 200 ms, so the transcript is still before
+            // the user can read past the first row.
+            final stagger = OMotion.stagger * index;
+            final delay = stagger > const Duration(milliseconds: 80)
+                ? const Duration(milliseconds: 80)
+                : stagger;
+            return OFadeSlide(
+              duration: OMotion.base - delay,
+              delay: delay,
+              child: row,
+            );
+          },
+        ),
       ),
-      itemCount: items.length,
-      itemBuilder: (context, index) {
-        final row = Padding(
-          padding: const EdgeInsets.only(bottom: OSpace.l),
-          child: _buildItem(context, index, items[index]),
-        );
-        if (index >= firstCount) return row;
-        // Keep the short entrance stagger for the first screenful only.
-        final delay = OMotion.stagger * index;
-        return OFadeSlide(
-          delay: delay > const Duration(milliseconds: 400)
-              ? const Duration(milliseconds: 400)
-              : delay,
-          child: row,
-        );
-      },
     );
   }
 
-  Widget _buildItem(BuildContext context, int index, V2LiveChatItem item) {
-    final items = widget.data.items;
-    final showAvatar = index == 0 || items[index - 1] is V2LiveUserMessage;
+  Widget _buildItem(BuildContext context, V2LiveChatItem item) {
     return switch (item) {
       V2LiveUserMessage message => _UserBubble(item: message),
-      V2LiveAssistantMessage message => _AssistantFrame(
-        showAvatar: showAvatar,
-        child: _AssistantBubble(
-          item: message,
-          onCopyCode: widget.onCopyCode,
-          onOpenLink: _handleOpenLink,
-          onDownloadLink: _handleDownloadLink,
-        ),
-      ),
-      V2LiveThinking message => _AssistantFrame(
-        showAvatar: showAvatar,
-        child: V2ThinkingTile(
-          key: ValueKey('thinking-${message.id}'),
-          label: message.label,
-          details: message.details,
-          expanded: _expandedThinking.contains(message.id),
-          onToggle: () => _toggleThinking(message),
-        ),
-      ),
-      V2LiveTool message => _AssistantFrame(
-        showAvatar: showAvatar,
-        child: V2ToolTile(
-          key: ValueKey('tool-${message.id}'),
-          title: message.title,
-          status: message.status,
-          progress: message.progress,
-          icon: message.icon,
-          details: message.details,
-          expanded: _expandedTools.contains(message.id),
-          onToggle: () => _toggleTool(message),
-        ),
-      ),
-      V2LiveArtifact message => _AssistantFrame(
-        showAvatar: showAvatar,
-        child: V2ArtifactTile(
-          key: ValueKey('artifact-${message.id}'),
-          fileName: message.fileName,
-          meta: message.meta,
-          statusLabel: message.statusLabel,
-          previewLabel: message.previewLabel,
-          icon: message.icon,
-          onOpen: widget.onArtifactTap != null
-              ? () => widget.onArtifactTap!(message.id)
-              : () => openV2ArtifactDetail(
-                  context,
-                  fileName: message.fileName,
-                  meta: message.meta,
-                  statusLabel: message.statusLabel,
-                  previewLabel: message.previewLabel,
-                  icon: message.icon,
-                ),
-          onDownload: widget.onDownload != null
-              ? () => widget.onDownload!(message.id)
-              : message.href == null
-              ? null
-              : () => startV2ArtifactDownload(
-                  context,
-                  message.href!,
-                  suggestedName: message.fileName,
-                ),
-        ),
-      ),
-      V2LiveVoiceReply message => _AssistantFrame(
-        showAvatar: showAvatar,
-        child: V2VoiceReplyCard(
-          key: ValueKey('voice-reply-${message.id}'),
-          data: message.reply,
-          transcriptExpanded: _expandedTranscripts.contains(message.id),
-          onPlay: widget.onVoicePlay == null
-              ? null
-              : () => widget.onVoicePlay!(message.id),
-          onSeek: widget.onVoiceSeek == null
-              ? null
-              : (position) => widget.onVoiceSeek!(message.id, position),
-          onOpenAction: widget.onVoiceAction == null
-              ? null
-              : () => widget.onVoiceAction!(message.id),
-          onToggleTranscript: message.reply.hasTranscript
-              ? (expanded) => _toggleTranscript(message, expanded)
-              : null,
+      // Assistant output has no avatar or header row; the content is the row.
+      _ => Align(
+        alignment: Alignment.topLeft,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 560),
+          child: switch (item) {
+            V2LiveAssistantMessage message => _AssistantBubble(
+              item: message,
+              onCopyCode: widget.onCopyCode,
+              onOpenLink: _handleOpenLink,
+              onDownloadLink: _handleDownloadLink,
+            ),
+            V2LiveThinking message => V2ThinkingTile(
+              key: ValueKey('thinking-${message.id}'),
+              label: message.label,
+              details: message.details,
+              expanded: _expandedThinking.contains(message.id),
+              onToggle: () => _toggleThinking(message),
+            ),
+            V2LiveTool message => V2ToolTile(
+              key: ValueKey('tool-${message.id}'),
+              title: message.title,
+              status: message.status,
+              progress: message.progress,
+              icon: message.icon,
+              details: message.details,
+              expanded: _expandedTools.contains(message.id),
+              onToggle: () => _toggleTool(message),
+            ),
+            V2LiveArtifact message => V2ArtifactTile(
+              key: ValueKey('artifact-${message.id}'),
+              fileName: message.fileName,
+              meta: message.meta,
+              statusLabel: message.statusLabel,
+              previewLabel: message.previewLabel,
+              icon: message.icon,
+              onOpen: widget.onArtifactTap != null
+                  ? () => widget.onArtifactTap!(message.id)
+                  : () => openV2ArtifactDetail(
+                      context,
+                      fileName: message.fileName,
+                      meta: message.meta,
+                      statusLabel: message.statusLabel,
+                      previewLabel: message.previewLabel,
+                      icon: message.icon,
+                    ),
+              onDownload: widget.onDownload != null
+                  ? () => widget.onDownload!(message.id)
+                  : message.href == null
+                  ? null
+                  : () => startV2ArtifactDownload(
+                      context,
+                      message.href!,
+                      suggestedName: message.fileName,
+                    ),
+            ),
+            V2LiveVoiceReply message => V2VoiceReplyCard(
+              key: ValueKey('voice-reply-${message.id}'),
+              data: message.reply,
+              transcriptExpanded: _expandedTranscripts.contains(message.id),
+              onPlay: widget.onVoicePlay == null
+                  ? null
+                  : () => widget.onVoicePlay!(message.id),
+              onSeek: widget.onVoiceSeek == null
+                  ? null
+                  : (position) => widget.onVoiceSeek!(message.id, position),
+              onOpenAction: widget.onVoiceAction == null
+                  ? null
+                  : () => widget.onVoiceAction!(message.id),
+              onToggleTranscript: message.reply.hasTranscript
+                  ? (expanded) => _toggleTranscript(message, expanded)
+                  : null,
+            ),
+            _ => const SizedBox.shrink(),
+          },
         ),
       ),
     };
+  }
+}
+
+/// Title, one line of copy and the single next action. No icon medallion and
+/// no explanatory paragraph.
+class _LiveEmptyState extends StatelessWidget {
+  const _LiveEmptyState({required this.data, required this.onStart});
+
+  final V2LiveChatData data;
+  final VoidCallback? onStart;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(OSpace.xl),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 360),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Semantics(
+                container: true,
+                header: true,
+                child: Text(
+                  data.emptyTitle,
+                  textAlign: TextAlign.center,
+                  style: OType.h2.copyWith(color: c.text),
+                ),
+              ),
+              const SizedBox(height: OSpace.s),
+              Text(
+                data.emptyMessage,
+                textAlign: TextAlign.center,
+                style: OType.bodySm.copyWith(color: c.textMuted),
+              ),
+              if (onStart != null) ...[
+                const SizedBox(height: OSpace.l),
+                OButton(label: data.emptyActionLabel, onPressed: onStart),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -866,7 +929,10 @@ class _LiveTopBar extends StatelessWidget implements PreferredSizeWidget {
   });
 
   final String title;
-  final String subtitle;
+
+  /// State only (`Working` while a run is active). Null when idle, so the
+  /// header is a single line.
+  final String? subtitle;
   final String modelLabel;
   final bool autoOnly;
   final int subagentCount;
@@ -877,86 +943,122 @@ class _LiveTopBar extends StatelessWidget implements PreferredSizeWidget {
   final VoidCallback? onMore;
 
   @override
-  Size get preferredSize => const Size.fromHeight(57);
+  Size get preferredSize => Size.fromHeight(subtitle == null ? 57 : 75);
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // The budget is the space this bar actually got, not the window: at
+        // 600 dp the shell keeps its 280 dp rail, so the header has 320 dp and
+        // two actions overflowed it by 16 dp at 200 % text.
+        final wideHeader = !OBreakpoints.isCompact(constraints.maxWidth);
+        return _buildBar(context, c, wideHeader: wideHeader);
+      },
+    );
+  }
+
+  Widget _buildBar(
+    BuildContext context,
+    OColors c, {
+    required bool wideHeader,
+  }) {
     return Semantics(
       container: true,
       explicitChildNodes: true,
       sortKey: OrdinalSortKey(0),
       child: AppBar(
-      automaticallyImplyLeading: false,
-      titleSpacing: 0,
-      leadingWidth: OSpace.touch,
-      leading: OIconButton(
-        icon: Icons.menu_rounded,
-        semanticLabel: 'Open menu',
-        onPressed: onMenu,
-      ),
-      title: Row(
-        children: [
-          Flexible(
-            flex: 3,
-            child: V2ModelChip(
-              label: modelLabel,
-              autoOnly: autoOnly,
-              subagentCount: subagentCount,
-              enabled: onModelChipTap != null,
-              onTap: onModelChipTap,
+        automaticallyImplyLeading: false,
+        titleSpacing: 0,
+        leadingWidth: OSpace.touch,
+        // Above 600 dp the rail replaces the drawer, so the shell passes no
+        // handler: drawing the glyph anyway would be a dead control.
+        leading: onMenu == null
+            ? null
+            : OIconButton(
+                icon: Icons.menu_rounded,
+                semanticLabel: 'Open menu',
+                onPressed: onMenu,
+              ),
+        title: MediaQuery.withClampedTextScaling(
+          maxScaleFactor: 1.3,
+          child: Row(
+            children: [
+              // The chip keeps its intrinsic width; the title takes the rest.
+              // Squeezing the chip below its icons is what overflowed at 320 dp.
+              V2ModelChip(
+                label: modelLabel,
+                autoOnly: autoOnly,
+                subagentCount: subagentCount,
+                enabled: onModelChipTap != null,
+                onTap: onModelChipTap,
+              ),
+              const SizedBox(width: OSpace.s),
+              Expanded(
+                // Idle is a single line. The state subtitle ("Working") is the
+                // only reason the title ever needs a second line.
+                child: subtitle == null
+                    ? Semantics(
+                        container: true,
+                        header: true,
+                        child: Text(
+                          title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: OType.h2.copyWith(color: c.text),
+                        ),
+                      )
+                    : Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Semantics(
+                            container: true,
+                            header: true,
+                            child: Text(
+                              title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: OType.h2.copyWith(color: c.text),
+                            ),
+                          ),
+                          Text(
+                            subtitle!,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: OType.caption.copyWith(color: c.textMuted),
+                          ),
+                        ],
+                      ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          if (wideHeader) ...[
+            OIconButton(
+              icon: Icons.terminal_rounded,
+              semanticLabel: 'Open Studio',
+              onPressed: onStudio,
             ),
+            OIconButton(
+              icon: Icons.public_rounded,
+              semanticLabel: 'Open Browser',
+              onPressed: onBrowser,
+            ),
+          ],
+          OIconButton(
+            icon: Icons.more_vert_rounded,
+            semanticLabel: 'More options',
+            onPressed: onMore,
           ),
           const SizedBox(width: OSpace.xs),
-          Flexible(
-            flex: 2,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Semantics(
-                  container: true,
-                  header: true,
-                  child: Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.h3.copyWith(color: c.text),
-                  ),
-                ),
-                Text(
-                  subtitle,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ],
-            ),
-          ),
         ],
-      ),
-      actions: [
-        OIconButton(
-          icon: Icons.terminal_rounded,
-          semanticLabel: 'Open Studio',
-          onPressed: onStudio,
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(1),
+          child: Divider(height: 1, color: c.hairline),
         ),
-        OIconButton(
-          icon: Icons.public_rounded,
-          semanticLabel: 'Open Browser',
-          onPressed: onBrowser,
-        ),
-        OIconButton(
-          icon: Icons.more_vert_rounded,
-          semanticLabel: 'More options',
-          onPressed: onMore,
-        ),
-        const SizedBox(width: OSpace.xs),
-      ],
-      bottom: PreferredSize(
-        preferredSize: const Size.fromHeight(1),
-        child: Divider(height: 1, color: c.hairline),
-      ),
       ),
     );
   }
@@ -970,75 +1072,25 @@ class _UserBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    return Align(
-      alignment: Alignment.centerRight,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          ConstrainedBox(
-            constraints: BoxConstraints(
-              maxWidth: MediaQuery.sizeOf(context).width * 0.84,
-            ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // 78 % of the column on a phone, 560 dp absolute cap on a tablet.
+        final cap = constraints.maxWidth * 0.78;
+        return Align(
+          alignment: Alignment.centerRight,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: cap > 560 ? 560 : cap),
             child: Container(
               padding: const EdgeInsets.all(OSpace.l),
               decoration: BoxDecoration(
                 color: c.surfaceRaised,
-                borderRadius: const BorderRadius.only(
-                  topLeft: Radius.circular(ORadius.l),
-                  topRight: Radius.circular(ORadius.s),
-                  bottomLeft: Radius.circular(ORadius.l),
-                  bottomRight: Radius.circular(ORadius.l),
-                ),
-                border: Border.all(color: c.hairline),
+                borderRadius: BorderRadius.circular(ORadius.l),
               ),
               child: Text(item.text, style: OType.body.copyWith(color: c.text)),
             ),
           ),
-          if (item.timeLabel != null) ...[
-            const SizedBox(height: OSpace.xs),
-            Padding(
-              padding: const EdgeInsets.only(right: OSpace.xs),
-              child: Text(
-                item.timeLabel!,
-                style: OType.caption.copyWith(color: c.textFaint),
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _AssistantFrame extends StatelessWidget {
-  const _AssistantFrame({required this.showAvatar, required this.child});
-
-  final bool showAvatar;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        if (showAvatar)
-          Container(
-            width: 32,
-            height: 32,
-            margin: const EdgeInsets.only(top: 2),
-            decoration: BoxDecoration(
-              color: c.surfaceRaised,
-              shape: BoxShape.circle,
-              border: Border.all(color: c.hairline),
-            ),
-            child: Icon(Icons.auto_awesome_rounded, size: 16, color: c.accent),
-          )
-        else
-          const SizedBox(width: 32),
-        const SizedBox(width: OSpace.s),
-        Expanded(child: child),
-      ],
+        );
+      },
     );
   }
 }
@@ -1063,12 +1115,7 @@ class _AssistantBubble extends StatelessWidget {
       padding: const EdgeInsets.all(OSpace.l),
       decoration: BoxDecoration(
         color: c.surface,
-        borderRadius: const BorderRadius.only(
-          topLeft: Radius.circular(ORadius.s),
-          topRight: Radius.circular(ORadius.l),
-          bottomLeft: Radius.circular(ORadius.l),
-          bottomRight: Radius.circular(ORadius.l),
-        ),
+        borderRadius: BorderRadius.circular(ORadius.l),
         border: Border.all(color: c.hairline),
       ),
       child: V2MessageBlocks(
@@ -1086,6 +1133,7 @@ class _LiveComposer extends StatelessWidget {
     required this.data,
     required this.controller,
     required this.onSubmitEnabled,
+    required this.sendEnabled,
     required this.attachments,
     required this.attachmentError,
     required this.voiceError,
@@ -1104,6 +1152,10 @@ class _LiveComposer extends StatelessWidget {
 
   /// Whether an attachment-only send is allowed (a rich submit handler).
   final bool onSubmitEnabled;
+
+  /// Whether any send handler exists at all. A composer with no owner must not
+  /// accept text and then announce that it was sent.
+  final bool sendEnabled;
   final List<V2ComposerAttachment> attachments;
   final String? attachmentError;
   final String? voiceError;
@@ -1125,174 +1177,105 @@ class _LiveComposer extends StatelessWidget {
     // typing never has to rebuild the page (or the transcript).
     bool canSendNow() =>
         !running &&
+        sendEnabled &&
         (controller.text.trim().isNotEmpty ||
             (onSubmitEnabled && attachments.isNotEmpty));
     return Padding(
       padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.s),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (running)
-            Padding(
-              padding: const EdgeInsets.only(bottom: OSpace.s),
-              child: Row(
-                children: [
-                  OPulse(
-                    child: Container(
-                      width: 8,
-                      height: 8,
-                      decoration: BoxDecoration(
-                        color: c.accentFill,
-                        shape: BoxShape.circle,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: OSpace.s),
-                  Expanded(
-                    flex: 3,
-                    child: Text(
-                      data.statusLabel,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: OType.caption.copyWith(color: c.textMuted),
-                    ),
-                  ),
-                  const SizedBox(width: OSpace.s),
-                  Flexible(
-                    flex: 2,
-                    child: Text(
-                      data.stopHint,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.end,
-                      style: OType.caption.copyWith(color: c.textFaint),
-                    ),
-                  ),
-                ],
+      child: Container(
+        padding: const EdgeInsets.all(OSpace.s),
+        decoration: BoxDecoration(
+          color: c.surface,
+          borderRadius: BorderRadius.circular(ORadius.xl),
+          border: Border.all(color: c.hairline),
+        ),
+        child: Column(
+          key: const ValueKey('v2-live-composer-stack'),
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (attachments.isNotEmpty)
+              V2AttachmentChips(
+                attachments: attachments,
+                enabled: enabled,
+                onRemove: onRemoveAttachment,
               ),
-            ),
-          Container(
-            padding: const EdgeInsets.all(OSpace.s),
-            decoration: BoxDecoration(
-              color: c.surface,
-              borderRadius: BorderRadius.circular(ORadius.xl),
-              border: Border.all(color: c.hairline),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (attachments.isNotEmpty)
-                  V2AttachmentChips(
-                    attachments: attachments,
+            if (attachmentError != null)
+              V2ComposerNotice(message: attachmentError!),
+            if (voiceError != null)
+              V2ComposerNotice(
+                message: voiceError!,
+                icon: Icons.mic_off_rounded,
+              ),
+            // One row: plus, permission, field, mic, send. Nothing else. The
+            // running status lives in the field's hint so it never becomes a
+            // second row above the input.
+            V2ComposerRow(
+              field: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: OSpace.xs),
+                child: CallbackShortcuts(
+                  bindings: {
+                    const SingleActivator(LogicalKeyboardKey.enter): () {
+                      if (canSendNow()) onSend();
+                    },
+                    const SingleActivator(LogicalKeyboardKey.numpadEnter): () {
+                      if (canSendNow()) onSend();
+                    },
+                  },
+                  child: TextField(
+                    controller: controller,
                     enabled: enabled,
-                    onRemove: onRemoveAttachment,
-                  ),
-                if (attachmentError != null)
-                  V2ComposerNotice(message: attachmentError!),
-                if (voiceError != null)
-                  V2ComposerNotice(
-                    message: voiceError!,
-                    icon: Icons.mic_off_rounded,
-                  ),
-                if (onPermissionTap != null)
-                  Padding(
-                    padding: const EdgeInsets.only(
-                      left: OSpace.xs,
-                      bottom: OSpace.xs,
-                    ),
-                    child: Align(
-                      alignment: Alignment.centerLeft,
-                      child: V2PermissionChip(
-                        label: permissionLabel,
-                        onTap: onPermissionTap,
+                    minLines: 1,
+                    maxLines: 3,
+                    keyboardType: TextInputType.multiline,
+                    textInputAction: TextInputAction.newline,
+                    style: OType.bodySm.copyWith(color: c.text),
+                    decoration: InputDecoration(
+                      hintText: running ? data.statusLabel : data.composerHint,
+                      hintStyle: OType.bodySm.copyWith(color: c.textFaint),
+                      filled: false,
+                      isDense: true,
+                      border: InputBorder.none,
+                      enabledBorder: InputBorder.none,
+                      focusedBorder: InputBorder.none,
+                      disabledBorder: InputBorder.none,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: OSpace.xs,
+                        vertical: 12,
                       ),
                     ),
                   ),
-                Row(
-                  children: [
-                    OIconButton(
-                      icon: listening
-                          ? Icons.mic_rounded
-                          : Icons.mic_none_rounded,
-                      semanticLabel: listening
-                          ? 'Stop voice input'
-                          : 'Voice input',
-                      active: listening,
-                      onPressed: enabled ? onMic : null,
-                    ),
-                    Expanded(
-                      child: CallbackShortcuts(
-                        bindings: {
-                          const SingleActivator(LogicalKeyboardKey.enter): () {
-                            if (canSendNow()) onSend();
-                          },
-                          const SingleActivator(
-                            LogicalKeyboardKey.numpadEnter,
-                          ): () {
-                            if (canSendNow()) onSend();
-                          },
-                        },
-                        child: TextField(
-                          controller: controller,
-                          enabled: enabled,
-                          minLines: 1,
-                          maxLines: 3,
-                          keyboardType: TextInputType.multiline,
-                          textInputAction: TextInputAction.newline,
-                          style: OType.bodySm.copyWith(color: c.text),
-                          decoration: InputDecoration(
-                            hintText: running
-                                ? 'Generating components...'
-                                : data.composerHint,
-                            hintStyle: OType.bodySm.copyWith(color: c.textFaint),
-                            filled: false,
-                            isDense: true,
-                            border: InputBorder.none,
-                            enabledBorder: InputBorder.none,
-                            focusedBorder: InputBorder.none,
-                            disabledBorder: InputBorder.none,
-                            contentPadding: const EdgeInsets.symmetric(
-                              horizontal: OSpace.xs,
-                              vertical: 12,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                    OIconButton(
-                      icon: Icons.add_rounded,
-                      semanticLabel: 'Add attachment or action',
-                      onPressed: enabled ? onAttach : null,
-                    ),
-                    const SizedBox(width: OSpace.xs),
-                    // Only this button depends on the draft text.
-                    ValueListenableBuilder<TextEditingValue>(
-                      valueListenable: controller,
-                      builder: (context, value, _) {
-                        final canSend =
-                            !running &&
-                            (value.text.trim().isNotEmpty ||
-                                (onSubmitEnabled && attachments.isNotEmpty));
-                        return _LiveRoundAction(
-                          icon: running
-                              ? Icons.stop_rounded
-                              : Icons.arrow_upward_rounded,
-                          label: running ? 'Stop' : 'Send',
-                          danger: running,
-                          onPressed: running
-                              ? onStop
-                              : canSend
-                              ? onSend
-                              : null,
-                        );
-                      },
-                    ),
-                  ],
                 ),
-              ],
+              ),
+              send: ValueListenableBuilder<TextEditingValue>(
+                valueListenable: controller,
+                builder: (context, value, _) {
+                  final canSend =
+                      !running &&
+                      sendEnabled &&
+                      (value.text.trim().isNotEmpty ||
+                          (onSubmitEnabled && attachments.isNotEmpty));
+                  return _LiveRoundAction(
+                    icon: running
+                        ? Icons.stop_rounded
+                        : Icons.arrow_upward_rounded,
+                    label: running ? 'Stop' : 'Send',
+                    danger: running,
+                    onPressed: running
+                        ? onStop
+                        : canSend
+                        ? onSend
+                        : null,
+                  );
+                },
+              ),
+              onPlus: enabled ? onAttach : null,
+              onMic: enabled ? onMic : null,
+              listening: listening,
+              permissionLabel: permissionLabel,
+              onPermission: onPermissionTap,
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

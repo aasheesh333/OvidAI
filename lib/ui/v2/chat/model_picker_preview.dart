@@ -53,13 +53,6 @@ class _V2ModelPickerPreviewState extends State<V2ModelPickerPreview> {
                   selectedId: _selected,
                   manualModelsAllowed: allowed,
                   planLabel: allowed ? 'Plus' : 'Free',
-                  upgradeHint: allowed
-                      ? 'Every model is included on your plan.'
-                      : 'Manual models need Plus or Pro. Free includes Auto and '
-                            'every subagent.',
-                  freePlanNote: allowed
-                      ? 'All models are available on your plan.'
-                      : 'Free uses Auto only.',
                 ),
                 onSelect: _recordSelect,
                 onManageModels: () => setState(() => _lastId = 'manage models'),
@@ -116,7 +109,6 @@ class _V2ModelPickerPreviewState extends State<V2ModelPickerPreview> {
       speed: 'Fast',
       costHint: '1 credit',
       locked: !allowed,
-      tag: allowed ? null : 'Go and up',
     ),
     V2ModelOption(
       id: 'ovid-2-pro',
@@ -125,7 +117,6 @@ class _V2ModelPickerPreviewState extends State<V2ModelPickerPreview> {
       speed: 'Slower',
       costHint: '4 credits',
       locked: !allowed,
-      tag: allowed ? 'Best for code' : 'Plus and up',
     ),
     V2ModelOption(
       id: 'custom-anthropic',
@@ -134,7 +125,6 @@ class _V2ModelPickerPreviewState extends State<V2ModelPickerPreview> {
       speed: 'Standard',
       costHint: 'Your key',
       locked: !allowed,
-      tag: allowed ? null : 'Paid plan',
       icon: Icons.key_rounded,
     ),
   ];

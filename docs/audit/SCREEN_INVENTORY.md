@@ -1,5 +1,10 @@
 # Screen inventory (canonical)
-50 parsed screen blocks in `lib/ui/v2/v2_registry.dart` (51 native ids; 50 carry a builder). 88 entries in the web gallery (`v2_registry_web.dart`) = these 51 plus 37 component/sheet previews.
+
+50 screens registered in `lib/ui/v2/v2_registry.dart` (50 entries, every one with a builder; 7 of them are sheets), across 10 groups.
+
+The web gallery (`v2_registry_web.dart`) has **87** entries: 49 of these 50 screens plus 38 component/sheet previews. `account` is native-only — the gallery test asserts the web registry never imports it.
+
+Regenerate this file from the registry, not from memory: the id, title and summary below are the registry strings verbatim.
 
 ## Identity
 - `splash` — Splash — Mark, tagline, startup progress and a retry path
@@ -11,23 +16,23 @@
 ## Chat
 - `chat` — Chat (empty) — Top bar, model chip, suggestions and composer
 - `live_chat` — Live chat — Transcript, thinking, tools, artifacts and stop
-- `model_picker` — Model picker — Auto recommendation, search and locked paid models
-- `model_chip` — Model chip menu — Quick model switch from the top bar
+- `model_picker` — Model picker *(sheet)* — Auto recommendation, search and locked paid models
+- `model_chip` — Model chip menu *(sheet)* — Quick model switch from the top bar
 - `system_states` — System states — Plan limit, offline, error and empty variants
 
 ## Navigation
 - `sidebar` — Sidebar — Profile, new chat, pinned, projects and sessions
 - `projects` — Projects — Shared projects, storage and member stacks
-- `session_actions` — Chat actions — Pin, rename, move, share, duplicate, export and delete
+- `session_actions` — Chat actions *(sheet)* — Pin, rename, move, share, duplicate, export and delete
 
 ## Work
 - `repo_picker` — Studio repo picker — GitHub connection and repository choice
 - `studio_workspace` — Studio workspace — File tree, editor, sync and changes
-- `branch_picker` — Branch picker — Switch or create a branch with a stash note
+- `branch_picker` — Branch picker *(sheet)* — Switch or create a branch with a stash note
 - `changes` — Changes & diff — Changed files, diff hunks and commit dock
 - `live_preview` — Live preview — Sandbox preview, expiry and share controls
 - `browser` — Browser — Agent-driven tab, live frames, take control
-- `take_control` — Take control — Human control, 45 s countdown and keyboard/trackpad
+- `take_control` — Take control *(sheet)* — Human control, 45 s countdown and keyboard/trackpad
 
 ## Connectors
 - `connectors` — Connectors — Installed and available apps with categories
@@ -44,8 +49,8 @@
 - `schedule_runs` — Schedule runs — Run history, failures, retry and artifacts
 
 ## Sharing
-- `share_sheet` — Share sheet — Read-only link, visibility and share targets
-- `share_chat` — Share chat — Chat-specific share with fork note
+- `share_sheet` — Share sheet *(sheet)* — Read-only link, visibility and share targets
+- `share_chat` — Share chat *(sheet)* — Chat-specific share with fork note
 - `collab_live` — Collaboration live — Up to 50 members, one sender and a turn queue
 - `collab_members` — Collaboration members — Roles, capacity and creator-paid storage
 
@@ -71,9 +76,23 @@
 - `permissions` — Permissions — Camera, microphone, photos, notifications, files
 - `memory_files` — Memory files — Global, project and session files
 
+**Total: 50 screens.**
+
 ## Wiring rule
 
 Every screen is "wired" only when every interactive element has a non-null
 handler that reaches real state (`AppState`, a route builder in
 `lib/ui/v2/app/*_routes.dart`, or a service). A visible control whose handler
-is null, or that only shows a SnackBar saying "coming soon", is a bug.
+is null, or that only shows a SnackBar saying "coming soon", is a bug. Under the
+minimal-UI contract a control with no backing service is removed, not disabled.
+
+## Registry summary vs app wiring
+
+The summaries above describe what each screen's builder can render; they are not
+a claim that the app wires every option. One known mismatch, tracked in
+`TODO.md`:
+
+- `sign_in` — the builder can render an Apple button, but `onApple` is never
+  passed, so the app shows Google and phone only. The email/password field and
+  its two links do render, and each only reports "Use Google or phone to sign
+  in." rather than signing anyone in.

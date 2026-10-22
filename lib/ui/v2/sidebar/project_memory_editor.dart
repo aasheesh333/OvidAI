@@ -257,7 +257,13 @@ class _ProjectMemoryEditorSheetState extends State<ProjectMemoryEditorSheet> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      _Header(data: data, onClose: _close),
+                      OSheetHeader(
+                        title: data.title,
+                        subtitle: data.subtitle,
+                        onClose: _close,
+                        closeLabel: 'Close memory editor',
+                        padding: EdgeInsets.zero,
+                      ),
                       const SizedBox(height: OSpace.l),
                       TextField(
                         key: const Key('v2-memory-editor-name'),
@@ -354,43 +360,6 @@ class _ProjectMemoryEditorSheetState extends State<ProjectMemoryEditorSheet> {
           ],
         ),
       ),
-    );
-  }
-}
-
-class _Header extends StatelessWidget {
-  const _Header({required this.data, required this.onClose});
-
-  final V2ProjectMemoryEditorData data;
-  final VoidCallback onClose;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(data.title, style: OType.h2.copyWith(color: c.text)),
-              const SizedBox(height: 2),
-              Text(
-                data.subtitle,
-                style: OType.caption.copyWith(color: c.textMuted),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(width: OSpace.s),
-        OIconButton(
-          icon: Icons.close_rounded,
-          semanticLabel: 'Close memory editor',
-          onPressed: onClose,
-        ),
-      ],
     );
   }
 }

@@ -85,8 +85,7 @@ class _V2GalleryPageState extends State<V2GalleryPage> {
                       icon: Icons.grid_view_rounded,
                       title: 'Screens are still landing',
                       message:
-                          'The nine screen groups are building in parallel. '
-                          'Pull to refresh when they report done.',
+                          'Screen groups build in parallel. Pull to refresh.',
                       action: OButton(
                         label: 'Refresh',
                         onPressed: () => setState(() {}),

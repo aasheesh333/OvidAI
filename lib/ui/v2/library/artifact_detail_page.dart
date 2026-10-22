@@ -1,9 +1,8 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import '../chat/transcript_actions.dart';
 import 'artifact_actions.dart';
@@ -51,17 +50,12 @@ class V2ArtifactDetailData {
     this.createdLabel = '',
     this.versionLabel = 'Ready',
     this.sourceChatTitle = '',
-    this.sourcePrompt = '',
     V2ArtifactPreviewKind? previewKind,
     this.previewHeadline = '',
-    this.previewSubtitle = '',
-    this.previewTag = '',
     this.previewCodeFile = '',
     this.previewCode = '',
     this.previewTotalLines,
     this.documentText = '',
-    this.previewNote =
-        'This preview is read-only. Open the file to make changes.',
     this.details = const <V2ArtifactDetailRow>[],
     this.thumbnail,
     this.downloadUrl = '',
@@ -78,7 +72,6 @@ class V2ArtifactDetailData {
   final String createdLabel;
   final String versionLabel;
   final String sourceChatTitle;
-  final String sourcePrompt;
   final V2ArtifactPreviewKind? previewKindOverride;
 
   /// What the preview shows. When the wiring layer does not say, the file name
@@ -87,8 +80,6 @@ class V2ArtifactDetailData {
   V2ArtifactPreviewKind get previewKind =>
       previewKindOverride ?? v2ArtifactPreviewKindForName(name);
   final String previewHeadline;
-  final String previewSubtitle;
-  final String previewTag;
   final String previewCodeFile;
   final String previewCode;
 
@@ -98,7 +89,6 @@ class V2ArtifactDetailData {
 
   /// The document's real text, when the wiring layer could read it.
   final String documentText;
-  final String previewNote;
   final List<V2ArtifactDetailRow> details;
   final ImageProvider? thumbnail;
 
@@ -116,8 +106,7 @@ class V2ArtifactDetailData {
 
   /// The URL the external action uses: explicit [openUrl], else the download
   /// URL. Empty when nothing can be opened.
-  String get resolvedOpenUrl =>
-      openUrl.isNotEmpty ? openUrl : downloadUrl;
+  String get resolvedOpenUrl => openUrl.isNotEmpty ? openUrl : downloadUrl;
 
   bool get isCode => previewKind == V2ArtifactPreviewKind.code;
 }
@@ -215,16 +204,7 @@ class ArtifactDetailPage extends StatefulWidget {
 }
 
 class _ArtifactDetailPageState extends State<ArtifactDetailPage> {
-  V2ArtifactDetailTab _tab = V2ArtifactDetailTab.preview;
-  bool _shareCopied = false;
   bool _downloading = false;
-  Timer? _shareResetTimer;
-
-  @override
-  void dispose() {
-    _shareResetTimer?.cancel();
-    super.dispose();
-  }
 
   /// Download is only offered when it can really happen: a host handler, or a
   /// signed URL the page fetches and writes to disk itself.
@@ -236,6 +216,20 @@ class _ArtifactDetailPageState extends State<ArtifactDetailPage> {
   bool get _canShare =>
       widget.onShareLink != null || widget.data.shareUrl.isNotEmpty;
 
+  bool get _canOpen =>
+      widget.onOpenExternally != null || widget.data.resolvedOpenUrl.isNotEmpty;
+
+  bool get _canStudio => widget.data.isCode && widget.onOpenInStudio != null;
+
+  bool get _canDelete => widget.onDelete != null;
+
+  bool get _hasMenu =>
+      widget.onMore != null ||
+      _canDownload ||
+      _canShare ||
+      _canStudio ||
+      _canDelete;
+
   Future<void> _download() async {
     final handler = widget.onDownload;
     if (handler != null) {
@@ -246,11 +240,7 @@ class _ArtifactDetailPageState extends State<ArtifactDetailPage> {
     if (url.isEmpty || _downloading) return;
     setState(() => _downloading = true);
     try {
-      await v2SaveTranscriptLink(
-        context,
-        url,
-        suggestedName: widget.data.name,
-      );
+      await v2SaveTranscriptLink(context, url, suggestedName: widget.data.name);
     } finally {
       if (mounted) setState(() => _downloading = false);
     }
@@ -259,31 +249,92 @@ class _ArtifactDetailPageState extends State<ArtifactDetailPage> {
   Future<void> _share() async {
     final handler = widget.onShareLink;
     if (handler != null) {
+      // The host owns the share result; this screen must not claim the link
+      // was copied when the host may have opened a share sheet instead.
       handler();
-      _flashCopied();
       return;
     }
     final link = widget.data.shareUrl;
     if (link.isEmpty) return;
     final copied = await v2CopyArtifactText(link);
     if (!mounted) return;
-    if (!copied) {
-      ScaffoldMessenger.maybeOf(context)
-        ?..hideCurrentSnackBar()
-        ..showSnackBar(
-          const SnackBar(content: Text('Could not copy the link. Try again.')),
-        );
-      return;
-    }
-    _flashCopied();
+    _notify(copied ? 'Link copied' : 'Could not copy the link');
   }
 
-  void _flashCopied() {
-    setState(() => _shareCopied = true);
-    _shareResetTimer?.cancel();
-    _shareResetTimer = Timer(const Duration(seconds: 2), () {
-      if (mounted) setState(() => _shareCopied = false);
-    });
+  Future<void> _open() async {
+    final handler = widget.onOpenExternally;
+    if (handler != null) {
+      handler();
+      return;
+    }
+    final url = widget.data.resolvedOpenUrl;
+    if (url.isEmpty) return;
+    await v2OpenTranscriptLink(context, url);
+  }
+
+  void _notify(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.maybeOf(context)
+      ?..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _openMenu() async {
+    final host = widget.onMore;
+    if (host != null) {
+      host();
+      return;
+    }
+    final action = await showOSheet<String>(
+      context,
+      title: widget.data.name.isEmpty ? 'Artifact' : widget.data.name,
+      builder: (sheetContext) => ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.only(bottom: OSpace.l),
+        children: [
+          if (_canDownload)
+            OListRow(
+              title: 'Download',
+              icon: Icons.download_rounded,
+              showChevron: false,
+              onTap: () => Navigator.of(sheetContext).pop('download'),
+            ),
+          if (_canShare)
+            OListRow(
+              title: widget.onShareLink != null ? 'Share link' : 'Copy link',
+              icon: Icons.link_rounded,
+              showChevron: false,
+              onTap: () => Navigator.of(sheetContext).pop('share'),
+            ),
+          if (_canStudio)
+            OListRow(
+              title: 'Open in Studio',
+              icon: Icons.terminal_rounded,
+              showChevron: false,
+              onTap: () => Navigator.of(sheetContext).pop('studio'),
+            ),
+          if (_canDelete)
+            OListRow(
+              title: 'Delete',
+              icon: Icons.delete_outline_rounded,
+              danger: true,
+              showChevron: false,
+              onTap: () => Navigator.of(sheetContext).pop('delete'),
+            ),
+        ],
+      ),
+    );
+    if (!mounted || action == null) return;
+    switch (action) {
+      case 'download':
+        await _download();
+      case 'share':
+        await _share();
+      case 'studio':
+        widget.onOpenInStudio?.call();
+      case 'delete':
+        await _confirmDelete();
+    }
   }
 
   Future<void> _confirmDelete() async {
@@ -326,35 +377,34 @@ class _ArtifactDetailPageState extends State<ArtifactDetailPage> {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    return OScaffold(
-      appBar: OAppBar(
-        title: 'Artifact detail',
-        actions: [
-          if (widget.onMore != null)
-            OIconButton(
-              icon: Icons.more_vert_rounded,
-              semanticLabel: 'More options',
-              onPressed: widget.onMore,
-            ),
-        ],
-      ),
-      body: OFadeSlide(
+    final data = widget.data;
+    return OScreen(
+      title: data.name.isEmpty ? 'Artifact' : data.name,
+      showBack: true,
+      actions: [
+        if (_hasMenu)
+          OIconButton(
+            icon: Icons.more_vert_rounded,
+            semanticLabel: 'More options',
+            onPressed: _openMenu,
+          ),
+      ],
+      child: OFadeSlide(
         child: OAnimatedSwap(
-          child: switch (widget.data.status) {
+          child: switch (data.status) {
             V2ArtifactDetailStatus.loading => const OSkeletonList(rows: 5),
             V2ArtifactDetailStatus.error => OErrorState(
-              message: widget.data.errorMessage,
+              message: data.errorMessage,
               onRetry: widget.onRetry,
             ),
             V2ArtifactDetailStatus.missing => OEmptyState(
               icon: Icons.broken_image_outlined,
               title: 'This artifact is gone',
-              message:
-                  'It may have been deleted or moved. Your other artifacts are safe.',
+              message: 'It may have been deleted.',
               action: widget.onBackToArtifacts == null
                   ? null
                   : OButton(
-                      label: 'Back to artifacts',
+                      label: 'Back',
                       icon: Icons.arrow_back_rounded,
                       onPressed: widget.onBackToArtifacts,
                     ),
@@ -368,55 +418,57 @@ class _ArtifactDetailPageState extends State<ArtifactDetailPage> {
 
   Widget _content(OColors c) {
     final data = widget.data;
+    final rows = _metadataRows(data);
     return ListView(
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.screen,
-        OSpace.s,
-        OSpace.screen,
-        OSpace.xxl,
-      ),
+      padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xxl),
       children: [
-        _summary(c),
-        const SizedBox(height: OSpace.m),
-        _sourceChat(c),
-        const SizedBox(height: OSpace.m),
-        _tabs(c),
-        const SizedBox(height: OSpace.m),
-        _actions(),
-        const SizedBox(height: OSpace.m),
-        OAnimatedSwap(
-          child: _tab == V2ArtifactDetailTab.preview
-              ? _preview(data)
-              : _detailsTab(c, data),
-        ),
+        _preview(data),
+        if (_canOpen) ...[
+          const SizedBox(height: OSpace.m),
+          OButton(
+            label: 'Open',
+            icon: Icons.open_in_new_rounded,
+            expand: true,
+            onPressed: _open,
+          ),
+        ],
+        if (rows.isNotEmpty) ...[
+          const SizedBox(height: OSpace.m),
+          _metadata(c, rows),
+        ],
       ],
     );
   }
 
-  // ---------------------------------------------------------------------------
-  // Preview — delegated to the shared cheap preview widget.
-  // ---------------------------------------------------------------------------
+  /// Three facts at most: the detail page shows the file, then the essentials.
+  List<V2ArtifactDetailRow> _metadataRows(V2ArtifactDetailData data) {
+    if (data.details.isNotEmpty) return data.details.take(3).toList();
+    return [
+      if (data.typeLabel.isNotEmpty)
+        V2ArtifactDetailRow(label: 'Type', value: data.typeLabel),
+      if (data.sizeLabel.isNotEmpty)
+        V2ArtifactDetailRow(label: 'Size', value: data.sizeLabel),
+      if (data.createdLabel.isNotEmpty)
+        V2ArtifactDetailRow(label: 'Added', value: data.createdLabel),
+    ];
+  }
 
   Widget _preview(V2ArtifactDetailData data) {
     return V2ArtifactPreview(
+      showName: false,
+      showHeader: false,
+      showFooter: false,
       data: V2ArtifactPreviewData(
         name: data.name,
         type: _previewType(data.previewKind),
         typeLabel: data.typeLabel,
         sizeLabel: data.sizeLabel,
-        metadata: [
-          for (final row in data.details)
-            V2ArtifactPreviewMeta(label: row.label, value: row.value),
-        ],
         image: data.thumbnail,
         code: data.previewCode,
-        codeFile: data.previewCodeFile,
+        codeFile: data.previewCodeFile == data.name ? '' : data.previewCodeFile,
         codeTotalLines: data.previewTotalLines,
         documentText: data.documentText,
-        openUrl: data.resolvedOpenUrl,
-        note: data.previewNote,
       ),
-      onOpenExternally: widget.onOpenExternally,
     );
   }
 
@@ -428,341 +480,12 @@ class _ArtifactDetailPageState extends State<ArtifactDetailPage> {
         V2ArtifactPreviewKind.data => V2ArtifactPreviewType.document,
       };
 
-  Widget _summary(OColors c) {
-    final data = widget.data;
+  Widget _metadata(OColors c, List<V2ArtifactDetailRow> rows) {
     return OCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: Text(
-                  data.name,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.h2.copyWith(color: c.text),
-                ),
-              ),
-              const SizedBox(width: OSpace.s),
-              Flexible(child: _versionBadge(c)),
-            ],
-          ),
-          const SizedBox(height: OSpace.s),
-          Wrap(
-            crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: OSpace.s,
-            runSpacing: OSpace.xs,
-            children: [
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    width: 7,
-                    height: 7,
-                    decoration: BoxDecoration(
-                      color: c.success,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  const SizedBox(width: OSpace.xs),
-                  Flexible(
-                    child: Text(
-                      data.typeLabel,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: OType.bodySm.copyWith(
-                        color: c.text,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              ExcludeSemantics(
-                child: Text(
-                  '•',
-                  style: OType.caption.copyWith(color: c.textFaint),
-                ),
-              ),
-              Text(
-                data.sizeLabel,
-                style: OType.bodySm.copyWith(color: c.textMuted),
-              ),
-              ExcludeSemantics(
-                child: Text(
-                  '•',
-                  style: OType.caption.copyWith(color: c.textFaint),
-                ),
-              ),
-              Text(
-                data.createdLabel,
-                style: OType.bodySm.copyWith(color: c.textMuted),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _versionBadge(OColors c) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
-      decoration: BoxDecoration(
-        color: c.accentSoft,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-      ),
-      child: Text(
-        widget.data.versionLabel,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: OType.caption.copyWith(
-          color: c.accent,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-    );
-  }
-
-  Widget _sourceChat(OColors c) {
-    final data = widget.data;
-    if (data.sourceChatTitle.isEmpty && data.sourcePrompt.isEmpty) {
-      return const SizedBox.shrink();
-    }
-    final canOpen = widget.onOpenChat != null;
-    return OCard(
-      padding: const EdgeInsets.all(OSpace.m),
-      onTap: widget.onOpenChat,
-      semanticLabel: canOpen
-          ? 'Made in chat, ${data.sourceChatTitle}. Open the source chat.'
-          : null,
-      child: Row(
-        children: [
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: c.accentSoft,
-              borderRadius: BorderRadius.circular(ORadius.m),
-            ),
-            child: Icon(Icons.auto_awesome_rounded, size: 20, color: c.accent),
-          ),
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Made in chat',
-                  style: OType.bodySm.copyWith(
-                    color: c.text,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                if (data.sourceChatTitle.isNotEmpty) ...[
-                  const SizedBox(height: 2),
-                  Text(
-                    data.sourceChatTitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                ],
-                if (data.sourcePrompt.isNotEmpty) ...[
-                  const SizedBox(height: 2),
-                  Text(
-                    'Prompted in "${data.sourcePrompt}"',
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                ],
-              ],
-            ),
-          ),
-          if (canOpen)
-            Icon(Icons.chevron_right_rounded, size: 20, color: c.textFaint),
-        ],
-      ),
-    );
-  }
-
-  Widget _tabs(OColors c) {
-    return Container(
-      padding: const EdgeInsets.all(OSpace.xs),
-      decoration: BoxDecoration(
-        color: c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.m),
-        border: Border.all(color: c.hairline),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: _tabButton(
-              c,
-              tab: V2ArtifactDetailTab.preview,
-              label: 'Preview',
-              icon: Icons.visibility_outlined,
-            ),
-          ),
-          const SizedBox(width: OSpace.xs),
-          Expanded(
-            child: _tabButton(
-              c,
-              tab: V2ArtifactDetailTab.details,
-              label: 'Details',
-              icon: Icons.info_outline_rounded,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _tabButton(
-    OColors c, {
-    required V2ArtifactDetailTab tab,
-    required String label,
-    required IconData icon,
-  }) {
-    final selected = _tab == tab;
-    return Semantics(
-      label: label,
-      button: true,
-      selected: selected,
-      child: OPressable(
-        onTap: () => setState(() => _tab = tab),
-        child: AnimatedContainer(
-          duration: OMotion.fast,
-          curve: OMotion.standard,
-          height: OSpace.touch,
-          decoration: BoxDecoration(
-            color: selected ? c.surface : Colors.transparent,
-            borderRadius: BorderRadius.circular(ORadius.s),
-            border: Border.all(
-              color: selected ? c.hairline : Colors.transparent,
-            ),
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(icon, size: 17, color: selected ? c.accent : c.textMuted),
-              const SizedBox(width: OSpace.s),
-              Flexible(
-                child: Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.label.copyWith(
-                    color: selected ? c.text : c.textMuted,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _actions() {
-    final data = widget.data;
-    final canDownload = _canDownload;
-    final canShare = _canShare;
-    final canStudio = data.isCode && widget.onOpenInStudio != null;
-    final canDelete = widget.onDelete != null;
-    if (!canDownload && !canShare && !canStudio && !canDelete) {
-      return const SizedBox.shrink();
-    }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (canDownload)
-          OButton(
-            label: 'Download',
-            icon: Icons.download_rounded,
-            expand: true,
-            loading: _downloading,
-            onPressed: _download,
-          ),
-        if (canDownload && canShare) const SizedBox(height: OSpace.s),
-        if (canShare || canStudio)
-          Row(
-            children: [
-              if (canShare)
-                Expanded(
-                  child: OButton(
-                    label: _shareCopied
-                        ? 'Link copied'
-                        : (widget.onShareLink != null
-                              ? 'Share link'
-                              : 'Copy link'),
-                    icon: _shareCopied
-                        ? Icons.check_rounded
-                        : Icons.link_rounded,
-                    variant: OButtonVariant.secondary,
-                    expand: true,
-                    onPressed: _share,
-                    semanticLabel: _shareCopied
-                        ? 'Link copied to clipboard'
-                        : (widget.onShareLink != null
-                              ? 'Share link'
-                              : 'Copy link'),
-                  ),
-                ),
-              if (canShare && canStudio) const SizedBox(width: OSpace.s),
-              if (canStudio)
-                Expanded(
-                  child: OButton(
-                    label: 'Open in Studio',
-                    icon: Icons.terminal_rounded,
-                    variant: OButtonVariant.secondary,
-                    expand: true,
-                    onPressed: widget.onOpenInStudio,
-                  ),
-                ),
-            ],
-          ),
-        if ((canDownload || canShare || canStudio) && canDelete)
-          const SizedBox(height: OSpace.s),
-        if (canDelete)
-          OButton(
-            label: 'Delete artifact',
-            icon: Icons.delete_outline_rounded,
-            variant: OButtonVariant.danger,
-            expand: true,
-            onPressed: _confirmDelete,
-          ),
-      ],
-    );
-  }
-
-  Widget _detailsTab(OColors c, V2ArtifactDetailData data) {
-    if (data.details.isEmpty) {
-      return Container(
-        padding: const EdgeInsets.all(OSpace.l),
-        decoration: BoxDecoration(
-          color: c.surface,
-          borderRadius: BorderRadius.circular(ORadius.l),
-          border: Border.all(color: c.hairline),
-        ),
-        child: Text(
-          'No technical details were sent with this artifact.',
-          style: OType.bodySm.copyWith(color: c.textMuted),
-        ),
-      );
-    }
-    return Container(
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(ORadius.l),
-        border: Border.all(color: c.hairline),
-      ),
+      padding: EdgeInsets.zero,
       child: Column(
         children: [
-          for (var i = 0; i < data.details.length; i++) ...[
+          for (var i = 0; i < rows.length; i++) ...[
             if (i > 0) Divider(height: 1, color: c.hairline),
             Padding(
               padding: const EdgeInsets.symmetric(
@@ -773,41 +496,24 @@ class _ArtifactDetailPageState extends State<ArtifactDetailPage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Expanded(
+                    flex: 2,
                     child: Text(
-                      data.details[i].label,
+                      rows[i].label,
                       style: OType.bodySm.copyWith(color: c.textMuted),
                     ),
                   ),
                   const SizedBox(width: OSpace.m),
-                  Flexible(
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (data.details[i].tone ==
-                            V2ArtifactDetailTone.success) ...[
-                          Icon(
-                            Icons.check_circle_rounded,
-                            size: 16,
-                            color: c.success,
-                          ),
-                          const SizedBox(width: OSpace.xs),
-                        ],
-                        Flexible(
-                          child: Text(
-                            data.details[i].value,
-                            textAlign: TextAlign.end,
-                            style: OType.bodySm.copyWith(
-                              color:
-                                  data.details[i].tone ==
-                                      V2ArtifactDetailTone.success
-                                  ? c.success
-                                  : c.text,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                        ),
-                      ],
+                  Expanded(
+                    flex: 3,
+                    child: Text(
+                      rows[i].value,
+                      textAlign: TextAlign.end,
+                      style: OType.bodySm.copyWith(
+                        color: rows[i].tone == V2ArtifactDetailTone.success
+                            ? c.success
+                            : c.text,
+                        fontWeight: FontWeight.w500,
+                      ),
                     ),
                   ),
                 ],

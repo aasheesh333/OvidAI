@@ -41,23 +41,22 @@ Widget _scaled(Widget home, {required bool dark}) => MaterialApp(
 const _modeLabels = ['Read-Only', 'General', 'Full Access', 'Studio'];
 
 void main() {
-  testWidgets('renders every mode with plain descriptions in light', (
-    tester,
-  ) async {
+  testWidgets('renders four one-line modes in light', (tester) async {
     await tester.pumpWidget(_app(_sheet()));
     await tester.pumpAndSettle();
 
     expect(find.text('Permissions'), findsOneWidget);
-    expect(find.text('Choose what Ovid may do in this chat.'), findsOneWidget);
+    expect(
+      find.text('Choose what Ovid may do in this chat.'),
+      findsNothing,
+      reason: 'the sheet is a title and four rows, no subtitle',
+    );
     for (final label in _modeLabels) {
       expect(find.text(label), findsOneWidget);
     }
-    expect(find.text('No prompts'), findsOneWidget);
-    expect(find.text('Ovid asks before pushing'), findsOneWidget);
-    expect(
-      find.textContaining('Full Access skips these prompts'),
-      findsOneWidget,
-    );
+    expect(find.text('No prompts'), findsNothing);
+    expect(find.text('Ovid asks before pushing'), findsNothing);
+    expect(find.textContaining('Ovid can look through your files'), findsNothing);
     expect(find.byIcon(Icons.visibility_outlined), findsOneWidget);
     expect(find.byIcon(Icons.tune_outlined), findsOneWidget);
     expect(find.byIcon(Icons.rocket_launch_outlined), findsOneWidget);
@@ -72,7 +71,7 @@ void main() {
     for (final label in _modeLabels) {
       expect(find.text(label), findsOneWidget);
     }
-    expect(find.text('Ovid asks before pushing'), findsOneWidget);
+    expect(find.text('Ovid asks before pushing'), findsNothing);
   });
 
   testWidgets('Full Access is the only danger row', (tester) async {
@@ -84,9 +83,6 @@ void main() {
       find.byIcon(Icons.rocket_launch_outlined),
     );
     expect(rocket.color, c.danger);
-
-    final tag = tester.widget<Text>(find.text('No prompts'));
-    expect(tag.style?.color, c.danger);
 
     // The safe modes keep the ordinary muted icon treatment.
     final readOnly = tester.widget<Icon>(
@@ -172,9 +168,7 @@ void main() {
     handle.dispose();
   });
 
-  testWidgets('loading shows a skeleton and keeps the push note', (
-    tester,
-  ) async {
+  testWidgets('loading shows a skeleton', (tester) async {
     await tester.pumpWidget(
       _app(_sheet(data: const V2PermissionSheetData(loading: true))),
     );
@@ -182,7 +176,6 @@ void main() {
 
     expect(find.byType(OSkeletonList), findsOneWidget);
     expect(find.text('General'), findsNothing);
-    expect(find.text('Ovid asks before pushing'), findsOneWidget);
   });
 
   testWidgets('error state retries', (tester) async {
@@ -256,7 +249,6 @@ void main() {
       for (final label in _modeLabels) {
         expect(find.text(label), findsOneWidget);
       }
-      expect(find.text('Ovid asks before pushing'), findsOneWidget);
     }
   });
 
@@ -335,5 +327,46 @@ void main() {
 
     expect(picked, 'studio');
     expect(find.text('Permissions'), findsNothing);
+  });
+
+  testWidgets('opens as a centred 560 dp dialog at 600 dp and wider', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(900, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: OTheme.light(),
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: Center(
+              child: TextButton(
+                onPressed: () => showV2PermissionSheet(
+                  context,
+                  data: const V2PermissionSheetData(),
+                  onSelect: (_) {},
+                ),
+                child: const Text('Open permissions'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Open permissions'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(Dialog), findsOneWidget);
+    expect(find.byType(BottomSheet), findsNothing);
+
+    final sheet = tester.getRect(find.byType(V2PermissionSheet));
+    expect(sheet.width, lessThanOrEqualTo(560));
+    expect(sheet.center.dx, closeTo(450, 1));
+    for (final label in _modeLabels) {
+      expect(find.text(label), findsOneWidget);
+    }
   });
 }

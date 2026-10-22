@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
-import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 
 // TODO(l10n): extract this card's English copy during the ARB pass.
@@ -73,12 +73,12 @@ class V2SubagentSummaryData {
   });
 }
 
-/// Renders one subagent's strict JSON summary.
+/// Renders one subagent's strict five-field summary as five compact rows.
 ///
 /// Presentational: the parent injects the already-decoded [summary] plus the
-/// callbacks. The card owns only the raw-JSON reveal, which starts closed.
-/// A null [summary] with [V2SubagentSummaryStatus.ready] is treated as empty.
-class SubagentSummaryCard extends StatefulWidget {
+/// callbacks. A null [summary] with [V2SubagentSummaryStatus.ready] is treated
+/// as empty.
+class SubagentSummaryCard extends StatelessWidget {
   const SubagentSummaryCard({
     super.key,
     this.summary,
@@ -107,62 +107,52 @@ class SubagentSummaryCard extends StatefulWidget {
 
   final String errorMessage;
 
-  /// Starts with the raw JSON visible. Only used by galleries and tests; the
-  /// product default keeps raw JSON behind the toggle.
+  /// Retained for callers that used to reveal raw JSON. The minimal card shows
+  /// the five fields only.
   final bool initiallyRaw;
 
   @override
-  State<SubagentSummaryCard> createState() => _SubagentSummaryCardState();
-}
-
-class _SubagentSummaryCardState extends State<SubagentSummaryCard> {
-  late bool _raw = widget.initiallyRaw;
-
-  @override
   Widget build(BuildContext context) {
-    final summary = widget.summary;
+    final c = OColors.of(context);
+    final data = summary;
     return OCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _Header(
-            status: widget.status == V2SubagentSummaryStatus.ready
-                ? (summary?.hasStatus == true ? summary!.status : null)
-                : null,
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Summary',
+                  style: OType.bodySm.copyWith(
+                    color: c.text,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              if (status == V2SubagentSummaryStatus.ready &&
+                  data?.hasStatus == true)
+                OPill(
+                  label: _statusLabel(data!.status),
+                  tone: _statusTone(data.status),
+                ),
+            ],
           ),
           const SizedBox(height: OSpace.m),
-          switch (widget.status) {
+          switch (status) {
             V2SubagentSummaryStatus.loading => const _SummarySkeleton(),
-            V2SubagentSummaryStatus.error => _SummaryNotice(
-              icon: Icons.error_outline_rounded,
+            V2SubagentSummaryStatus.error => _Notice(
+              message: errorMessage,
               danger: true,
-              title: widget.errorMessage,
-              message:
-                  'The subagent may still be finishing. Try again in a moment.',
-              action: OButton(
-                label: 'Try again',
-                icon: Icons.refresh_rounded,
-                expand: true,
-                onPressed: widget.onRetry,
-              ),
+              onRetry: onRetry,
             ),
-            V2SubagentSummaryStatus.empty => _SummaryNotice(
-              icon: Icons.inbox_outlined,
-              title: 'No summary yet',
-              message: 'A subagent sends its JSON summary when it finishes.',
-              action: widget.onRetry == null
-                  ? null
-                  : OButton(
-                      label: 'Check again',
-                      icon: Icons.refresh_rounded,
-                      variant: OButtonVariant.secondary,
-                      expand: true,
-                      onPressed: widget.onRetry,
-                    ),
+            V2SubagentSummaryStatus.empty => _Notice(
+              message: 'No summary yet',
+              onRetry: onRetry,
             ),
-            V2SubagentSummaryStatus.ready => _content(
+            V2SubagentSummaryStatus.ready => _fields(
               context,
-              summary ?? const V2SubagentSummaryData(),
+              data ?? const V2SubagentSummaryData(),
             ),
           },
         ],
@@ -170,240 +160,134 @@ class _SubagentSummaryCardState extends State<SubagentSummaryCard> {
     );
   }
 
-  Widget _content(BuildContext context, V2SubagentSummaryData summary) {
-    final c = OColors.of(context);
+  Widget _fields(BuildContext context, V2SubagentSummaryData data) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'What the subagent returned to the main agent.',
-          style: OType.caption.copyWith(color: c.textMuted),
+        _Field(
+          label: 'Status',
+          child: Text(
+            data.hasStatus ? _statusLabel(data.status) : _notReported,
+            style: OType.bodySm.copyWith(
+              color: OColors.of(context).text,
+            ),
+          ),
         ),
-        const SizedBox(height: OSpace.m),
-        _Section(
-          title: 'Files modified',
-          meta: !summary.hasField('files_modified')
-              ? 'Not reported'
-              : summary.filesModified.length == 1
-              ? '1 file'
-              : '${summary.filesModified.length} files',
-          child: !summary.hasField('files_modified')
-              ? const _None(message: 'Not reported.')
-              : summary.filesModified.isEmpty
-              ? _None(message: 'No files modified.')
+        _Field(
+          label: 'Files modified',
+          child: !data.hasField('files_modified')
+              ? const _None(label: _notReported)
+              : data.filesModified.isEmpty
+              ? const _None(label: 'None')
               : Wrap(
                   spacing: OSpace.s,
                   runSpacing: OSpace.s,
                   children: [
-                    for (final file in summary.filesModified)
-                      _SummaryChip(
+                    for (final file in data.filesModified)
+                      OChip(
                         label: file,
                         icon: Icons.code_rounded,
-                        semanticNoun: 'file',
-                        onTap: widget.onFileTap == null
+                        semanticLabel: onFileTap == null
+                            ? 'file $file'
+                            : 'Open file $file',
+                        onTap: onFileTap == null
                             ? null
-                            : () => widget.onFileTap!(file),
+                            : () => onFileTap!(file),
                       ),
                   ],
                 ),
         ),
-        const SizedBox(height: OSpace.m),
-        _Section(
-          title: 'Artifacts created',
-          meta: !summary.hasField('artifacts_created')
-              ? 'Not reported'
-              : summary.artifactsCreated.length == 1
-              ? '1 artifact'
-              : '${summary.artifactsCreated.length} artifacts',
-          child: !summary.hasField('artifacts_created')
-              ? const _None(message: 'Not reported.')
-              : summary.artifactsCreated.isEmpty
-              ? _None(message: 'No artifacts created.')
+        _Field(
+          label: 'Artifacts created',
+          child: !data.hasField('artifacts_created')
+              ? const _None(label: _notReported)
+              : data.artifactsCreated.isEmpty
+              ? const _None(label: 'None')
               : Wrap(
                   spacing: OSpace.s,
                   runSpacing: OSpace.s,
                   children: [
-                    for (final artifact in summary.artifactsCreated)
-                      _SummaryChip(
+                    for (final artifact in data.artifactsCreated)
+                      OChip(
                         label: artifact,
                         icon: Icons.insert_drive_file_outlined,
-                        semanticNoun: 'artifact',
-                        onTap: widget.onArtifactTap == null
+                        semanticLabel: onArtifactTap == null
+                            ? 'artifact $artifact'
+                            : 'Open artifact $artifact',
+                        onTap: onArtifactTap == null
                             ? null
-                            : () => widget.onArtifactTap!(artifact),
+                            : () => onArtifactTap!(artifact),
                       ),
                   ],
                 ),
         ),
-        const SizedBox(height: OSpace.m),
-        _Section(
-          title: 'Key findings',
-          meta: !summary.hasField('key_findings')
-              ? 'Not reported'
-              : summary.keyFindings.length == 1
-              ? '1 finding'
-              : '${summary.keyFindings.length} findings',
-          child: !summary.hasField('key_findings')
-              ? const _None(message: 'Not reported.')
-              : _Findings(findings: summary.keyFindings),
+        _Field(
+          label: 'Key findings',
+          child: !data.hasField('key_findings')
+              ? const _None(label: _notReported)
+              : data.keyFindings.isEmpty
+              ? const _None(label: 'None')
+              : _Findings(findings: data.keyFindings),
         ),
-        const SizedBox(height: OSpace.m),
-        _Section(
-          title: 'Error if any',
-          child: !summary.hasField('error_if_any')
-              ? const _None(message: 'Not reported.')
-              : summary.hasError
-              ? _ErrorBox(message: summary.errorIfAny!.trim())
-              : _None(message: 'No error reported.'),
+        _Field(
+          label: 'Error if any',
+          last: true,
+          child: !data.hasField('error_if_any')
+              ? const _None(label: _notReported)
+              : data.hasError
+              ? Text(
+                  data.errorIfAny!.trim(),
+                  style: OType.bodySm.copyWith(
+                    color: OColors.of(context).danger,
+                  ),
+                )
+              : const _None(label: 'None'),
         ),
-        const SizedBox(height: OSpace.m),
-        OButton(
-          label: _raw ? 'Hide raw JSON' : 'Show raw JSON',
-          icon: _raw ? Icons.code_off_rounded : Icons.code_rounded,
-          variant: OButtonVariant.ghost,
-          expand: true,
-          onPressed: () => setState(() => _raw = !_raw),
-        ),
-        if (_raw) ...[
-          const SizedBox(height: OSpace.s),
-          OFadeSlide(
-            delay: const Duration(milliseconds: 1),
-            child: _RawJson(json: summary.json),
-          ),
-        ],
       ],
     );
   }
 }
 
-class _Header extends StatelessWidget {
-  const _Header({this.status});
+const String _notReported = 'Not reported';
 
-  /// Null while loading or when the summary has not arrived.
-  final String? status;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Wrap(
-      spacing: OSpace.s,
-      runSpacing: OSpace.xs,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      children: [
-        ExcludeSemantics(
-          child: Icon(Icons.data_object_rounded, size: 18, color: c.accent),
-        ),
-        Text(
-          'JSON summary',
-          style: OType.bodySm.copyWith(
-            color: c.text,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const OPill(label: '≤300 tokens'),
-        if (status != null)
-          Semantics(
-            label: 'Status: ${_statusLabel(status!)}',
-            child: ExcludeSemantics(
-              child: OPill(
-                label: _statusLabel(status!),
-                tone: _statusTone(status!),
-              ),
-            ),
-          ),
-      ],
-    );
-  }
-}
-
-class _Section extends StatelessWidget {
-  const _Section({required this.title, required this.child, this.meta});
-
-  final String title;
-  final String? meta;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Wrap(
-          spacing: OSpace.s,
-          runSpacing: 2,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            Text(
-              title.toUpperCase(),
-              style: OType.overline.copyWith(color: c.textFaint),
-            ),
-            if (meta != null)
-              Text(meta!, style: OType.caption.copyWith(color: c.textFaint)),
-          ],
-        ),
-        const SizedBox(height: OSpace.s),
-        child,
-      ],
-    );
-  }
-}
-
-class _SummaryChip extends StatelessWidget {
-  const _SummaryChip({
+/// One contract field: a quiet label over its value.
+class _Field extends StatelessWidget {
+  const _Field({
     required this.label,
-    required this.icon,
-    required this.semanticNoun,
-    this.onTap,
+    required this.child,
+    this.last = false,
   });
 
   final String label;
-  final IconData icon;
-
-  /// "file" or "artifact", used only for the semantic label.
-  final String semanticNoun;
-  final VoidCallback? onTap;
+  final Widget child;
+  final bool last;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final content = Container(
-      constraints: const BoxConstraints(minHeight: OSpace.touch),
-      padding: const EdgeInsets.symmetric(
-        horizontal: OSpace.s,
-        vertical: OSpace.xs,
-      ),
-      decoration: BoxDecoration(
-        color: c.surfaceRaised,
-        borderRadius: BorderRadius.circular(ORadius.s),
-        border: Border.all(color: c.hairline),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          ExcludeSemantics(child: Icon(icon, size: 14, color: c.accent)),
-          const SizedBox(width: OSpace.xs),
-          Flexible(
-            child: Text(
-              label,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: OType.mono.copyWith(color: c.textMuted),
-            ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: OSpace.s),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label.toUpperCase(),
+                style: OType.overline.copyWith(color: c.textFaint),
+              ),
+              const SizedBox(height: OSpace.xs),
+              child,
+            ],
           ),
-        ],
-      ),
-    );
-    if (onTap == null) {
-      return Semantics(label: '$semanticNoun $label', child: content);
-    }
-    return OPressable(
-      onTap: onTap,
-      semanticLabel: 'Open $semanticNoun $label',
-      child: content,
+        ),
+        if (!last) Divider(height: 1, color: c.hairline),
+      ],
     );
   }
 }
+
 
 class _Findings extends StatelessWidget {
   const _Findings({required this.findings});
@@ -413,7 +297,6 @@ class _Findings extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    if (findings.isEmpty) return _None(message: 'No findings reported.');
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -424,10 +307,7 @@ class _Findings extends StatelessWidget {
               ExcludeSemantics(
                 child: Text(
                   '•',
-                  style: OType.bodySm.copyWith(
-                    color: c.accent,
-                    fontWeight: FontWeight.w700,
-                  ),
+                  style: OType.bodySm.copyWith(color: c.accent),
                 ),
               ),
               const SizedBox(width: OSpace.s),
@@ -439,155 +319,54 @@ class _Findings extends StatelessWidget {
               ),
             ],
           ),
-          if (i < findings.length - 1) const SizedBox(height: OSpace.s),
+          if (i < findings.length - 1) const SizedBox(height: OSpace.xs),
         ],
       ],
     );
   }
 }
 
-class _ErrorBox extends StatelessWidget {
-  const _ErrorBox({required this.message});
-
-  final String message;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Semantics(
-      container: true,
-      label: 'Error: $message',
-      child: ExcludeSemantics(
-        child: Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(OSpace.m),
-          decoration: BoxDecoration(
-            color: c.danger.withValues(alpha: 0.08),
-            borderRadius: BorderRadius.circular(ORadius.m),
-            border: Border.all(color: c.danger.withValues(alpha: 0.3)),
-          ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              ExcludeSemantics(
-                child: Icon(
-                  Icons.error_outline_rounded,
-                  size: 16,
-                  color: c.danger,
-                ),
-              ),
-              const SizedBox(width: OSpace.s),
-              Expanded(
-                child: Text(
-                  message,
-                  style: OType.bodySm.copyWith(color: c.danger),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _None extends StatelessWidget {
-  const _None({required this.message});
+  const _None({required this.label});
 
-  final String message;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Text(message, style: OType.caption.copyWith(color: c.textMuted));
-  }
-}
-
-class _RawJson extends StatelessWidget {
-  const _RawJson({required this.json});
-
-  final String json;
+  final String label;
 
   @override
   Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(OSpace.m),
-      decoration: BoxDecoration(
-        color: c.codeBg,
-        borderRadius: BorderRadius.circular(ORadius.m),
-        border: Border.all(color: c.hairline),
-      ),
-      child: SelectionArea(
-        child: Text(json, style: OType.mono.copyWith(color: c.textMuted)),
-      ),
+    return Text(
+      label,
+      style: OType.caption.copyWith(color: OColors.of(context).textMuted),
     );
   }
 }
 
-class _SummaryNotice extends StatelessWidget {
-  const _SummaryNotice({
-    required this.icon,
-    required this.title,
+class _Notice extends StatelessWidget {
+  const _Notice({
     required this.message,
-    this.action,
+    this.onRetry,
     this.danger = false,
   });
 
-  final IconData icon;
-  final String title;
   final String message;
-  final Widget? action;
+  final VoidCallback? onRetry;
   final bool danger;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final accent = danger ? c.danger : c.accent;
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(OSpace.m),
-      decoration: BoxDecoration(
-        color: c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.m),
-        border: Border.all(color: c.hairline),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: accent.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(ORadius.m),
-                ),
-                child: Icon(icon, size: 19, color: accent),
-              ),
-              const SizedBox(width: OSpace.s),
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.only(top: 6),
-                  child: Text(
-                    title,
-                    style: OType.bodySm.copyWith(
-                      color: c.text,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ),
-            ],
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            message,
+            style: OType.bodySm.copyWith(
+              color: danger ? c.danger : c.textMuted,
+            ),
           ),
-          const SizedBox(height: OSpace.s),
-          Text(message, style: OType.caption.copyWith(color: c.textMuted)),
-          if (action != null) ...[const SizedBox(height: OSpace.m), action!],
-        ],
-      ),
+        ),
+        if (onRetry != null)
+          OTextAction(label: 'Retry', onPressed: onRetry),
+      ],
     );
   }
 }
@@ -599,20 +378,18 @@ class _SummarySkeleton extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const OSkeleton(width: 96, height: 10),
-        const SizedBox(height: OSpace.s),
-        const OSkeleton(width: double.infinity, height: 48, radius: ORadius.s),
-        const SizedBox(height: OSpace.m),
-        const OSkeleton(width: 120, height: 10),
-        const SizedBox(height: OSpace.s),
-        const OSkeleton(width: double.infinity, height: 48, radius: ORadius.s),
-        const SizedBox(height: OSpace.m),
-        const OSkeleton(width: 80, height: 10),
-        const SizedBox(height: OSpace.s),
-        const OSkeleton(width: double.infinity, height: 14),
-        const SizedBox(height: OSpace.s),
-        const OSkeleton(width: 220, height: 14),
+      children: const [
+        OSkeleton(width: 96, height: 10),
+        SizedBox(height: OSpace.s),
+        OSkeleton(width: double.infinity, height: 14),
+        SizedBox(height: OSpace.l),
+        OSkeleton(width: 120, height: 10),
+        SizedBox(height: OSpace.s),
+        OSkeleton(width: double.infinity, height: 14),
+        SizedBox(height: OSpace.l),
+        OSkeleton(width: 80, height: 10),
+        SizedBox(height: OSpace.s),
+        OSkeleton(width: 220, height: 14),
       ],
     );
   }

@@ -133,12 +133,18 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('auto-only plans show a lock and stay tappable', (tester) async {
+  testWidgets('auto-only plans are announced without a second lock glyph', (
+    tester,
+  ) async {
     final handle = tester.ensureSemantics();
     var taps = 0;
     await _pumpChip(tester, autoOnly: true, onTap: () => taps++);
 
-    expect(find.byIcon(Icons.lock_outline_rounded), findsOneWidget);
+    expect(
+      find.byIcon(Icons.lock_outline_rounded),
+      findsNothing,
+      reason: 'the chip is name + chevron; the plan is spoken, not drawn',
+    );
     expect(
       tester.getSemantics(
         find.bySemanticsLabel('Model: Auto. Auto only. Change model'),
@@ -152,7 +158,7 @@ void main() {
       ),
     );
 
-    // The lock explains the plan, but the upgrade menu must still open.
+    // The plan is announced, and the upgrade menu must still open.
     await tester.tap(find.byType(V2ModelChip));
     expect(taps, 1);
     handle.dispose();
@@ -223,7 +229,6 @@ void main() {
 
       for (final finder in [
         find.byIcon(Icons.auto_awesome_rounded),
-        find.byIcon(Icons.lock_outline_rounded),
         find.text('50'),
         find.byIcon(Icons.expand_more_rounded),
       ]) {

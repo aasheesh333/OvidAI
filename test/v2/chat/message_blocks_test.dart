@@ -285,11 +285,10 @@ void main() {
       await tester.pump();
 
       expect(find.text('Flowchart'), findsOneWidget);
-      expect(find.text('Mermaid'), findsOneWidget);
-      expect(
-        find.text('Diagram preview is not available on this device.'),
-        findsOneWidget,
-      );
+      // The source is the label; a static "Mermaid" badge added nothing.
+      expect(find.text('Mermaid'), findsNothing);
+      // The card shows the real source instead of a fake preview sentence.
+      expect(find.textContaining('flowchart LR'), findsOneWidget);
 
       expect(find.text('Hero shot'), findsOneWidget);
       expect(find.text('images.example.com'), findsOneWidget);
@@ -454,14 +453,19 @@ void main() {
       await tester.tap(find.bySemanticsLabel('Copy code'));
       await tester.pump();
 
-      final data = calls
-          .firstWhere((call) => call.method == 'Clipboard.setData')
-          .arguments as Map;
+      final data =
+          calls
+                  .firstWhere((call) => call.method == 'Clipboard.setData')
+                  .arguments
+              as Map;
       expect(data['text'], code);
-      expect(find.text('Copied'), findsOneWidget);
+      // The check glyph and the spoken announcement carry the confirmation;
+      // no extra "Copied" text is added to the header.
+      expect(find.bySemanticsLabel('Code copied'), findsOneWidget);
+      expect(find.text('Copied'), findsNothing);
 
       await tester.pump(const Duration(seconds: 2));
-      expect(find.text('Copied'), findsNothing);
+      expect(find.bySemanticsLabel('Copy code'), findsOneWidget);
     });
 
     testWidgets('inline links are tappable and open the real URL', (
@@ -524,7 +528,9 @@ void main() {
         return true;
       };
 
-      await tester.pumpWidget(_blocksApp('[Open docs](https://docs.example.com)'));
+      await tester.pumpWidget(
+        _blocksApp('[Open docs](https://docs.example.com)'),
+      );
       await tester.pump();
 
       await tester.tap(find.bySemanticsLabel('Open docs'));
@@ -601,10 +607,7 @@ void main() {
       await tester.pump();
 
       expect(find.bySemanticsLabel('Download image'), findsOneWidget);
-      expect(
-        find.bySemanticsLabel(RegExp('Open image: Hero')),
-        findsOneWidget,
-      );
+      expect(find.bySemanticsLabel(RegExp('Open image: Hero')), findsOneWidget);
     });
   });
 
@@ -622,9 +625,7 @@ void main() {
         '[Open $hash](https://example.com/$hash)';
 
     for (final dark in [false, true]) {
-      await tester.pumpWidget(
-        _blocksApp(markdown, dark: dark, textScale: 2),
-      );
+      await tester.pumpWidget(_blocksApp(markdown, dark: dark, textScale: 2));
       await tester.pump();
 
       expect(

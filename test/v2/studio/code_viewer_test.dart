@@ -60,9 +60,10 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('main.dart'), findsOneWidget);
-      expect(find.text('Read only'), findsOneWidget);
-      expect(find.text('DART'), findsOneWidget);
-      expect(find.text('12 lines'), findsOneWidget);
+      // The header is the only chrome: no read-only pill, no type, no count.
+      expect(find.text('Read only'), findsNothing);
+      expect(find.text('DART'), findsNothing);
+      expect(find.text('12 lines'), findsNothing);
       expect(find.text('final line1 = 1;'), findsOneWidget);
       expect(find.text('final line12 = 12;'), findsOneWidget);
       expect(find.byKey(const Key('v2-code-viewer-surface')), findsOneWidget);
@@ -166,19 +167,15 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('10 of 30 lines shown'), findsOneWidget);
+    expect(find.text('10 of 30 lines'), findsOneWidget);
     expect(
-      find.bySemanticsLabel(
-        'Large file. Showing the first 10 of 30 lines. '
-        'Open externally to read the rest.',
-      ),
+      find.bySemanticsLabel('Large file. Showing the first 10 of 30 lines.'),
       findsOneWidget,
     );
     expect(find.byKey(const ValueKey('v2-code-line-10')), findsOneWidget);
     expect(find.byKey(const ValueKey('v2-code-line-11')), findsNothing);
     expect(find.text('generated 10;'), findsOneWidget);
     expect(find.text('generated 11;'), findsNothing);
-    expect(find.text('Preview'), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('v2-code-viewer-open-externally')));
     expect(opens, 1);
@@ -191,8 +188,6 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('demo.dart'), findsOneWidget);
-    expect(find.text('+1'), findsOneWidget);
-    expect(find.text('−1'), findsOneWidget);
     expect(find.text('+'), findsOneWidget);
     expect(find.text('−'), findsOneWidget);
     expect(find.text('final old = 2;'), findsOneWidget);
@@ -319,7 +314,7 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(tester.takeException(), isNull);
-        expect(find.text('Read only'), findsOneWidget);
+        expect(find.text(data.fileName), findsOneWidget);
       }
     }
   });

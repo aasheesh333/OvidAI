@@ -24,6 +24,8 @@ class _FakeAuth extends ChangeNotifier implements V2OnboardingAuth {
 
   int initCalls = 0;
   int socialCalls = 0;
+  int signOutCalls = 0;
+  bool signOutFails = false;
   String? lastProvider;
   Object? socialFailure;
 
@@ -53,6 +55,15 @@ class _FakeAuth extends ChangeNotifier implements V2OnboardingAuth {
   Future<void> retryAccountLogin() async {
     if (!signedIn) return;
     ready = true;
+    notifyListeners();
+  }
+
+  @override
+  Future<void> signOut() async {
+    signOutCalls++;
+    if (signOutFails) throw StateError('sign out failed');
+    signedIn = false;
+    ready = false;
     notifyListeners();
   }
 
@@ -215,6 +226,46 @@ void main() {
     },
   );
 
+  testWidgets('a rejected account can sign out and use another account', (
+    tester,
+  ) async {
+    final auth = _FakeAuth()..signedIn = true;
+    await _pumpGate(tester, auth: auth, settle: false);
+
+    expect(find.text('Confirming your account'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('account-use-another')));
+    await tester.pump();
+    await tester.pumpAndSettle();
+
+    expect(auth.signOutCalls, 1);
+    expect(find.text('Confirming your account'), findsNothing);
+    // The rejected account is gone and the sign-in step can take another one.
+    expect(find.text('Welcome back'), findsOneWidget);
+    expect(find.text('APP CHILD'), findsNothing);
+  });
+
+  testWidgets('a failed sign-out keeps the account screen and explains', (
+    tester,
+  ) async {
+    final auth = _FakeAuth()
+      ..signedIn = true
+      ..signOutFails = true;
+    await _pumpGate(tester, auth: auth, settle: false);
+
+    await tester.tap(find.byKey(const Key('account-use-another')));
+    await tester.pump();
+    await tester.pumpAndSettle();
+
+    expect(auth.signOutCalls, 1);
+    expect(find.text('Confirming your account'), findsOneWidget);
+    expect(
+      find.text('Could not sign out. Check your connection and retry.'),
+      findsOneWidget,
+    );
+    expect(find.text('APP CHILD'), findsNothing);
+  });
+
   testWidgets('welcome → language → sign-in → paywall → child', (tester) async {
     final auth = _FakeAuth();
     await _pumpGate(tester, auth: auth);
@@ -222,7 +273,7 @@ void main() {
     expect(find.text('Your always-on personal agent.'), findsOneWidget);
 
     await _tap(tester, find.byKey(const Key('welcome-get-started')));
-    expect(find.text('Which language do you think in?'), findsOneWidget);
+    expect(find.text('SPOKEN LANGUAGE'), findsOneWidget);
 
     await _tap(tester, find.text('हिन्दी'));
     await _tap(tester, find.byKey(const Key('language-goal-continue')));
@@ -231,7 +282,7 @@ void main() {
     await _tap(tester, find.text('Continue with Google'));
     expect(auth.socialCalls, 1);
     expect(auth.lastProvider, 'google.com');
-    expect(find.text('Do more with Ovid Plus'), findsOneWidget);
+    expect(find.text('Upgrade'), findsOneWidget);
 
     await _tap(tester, find.byIcon(Icons.close_rounded));
     expect(find.text('APP CHILD'), findsOneWidget);
@@ -266,10 +317,7 @@ void main() {
     );
     await _tap(tester, find.byKey(const Key('sign-in-submit')));
 
-    expect(
-      find.text('Email sign-in is not available yet. Use Google or phone.'),
-      findsOneWidget,
-    );
+    expect(find.text('Use Google or phone to sign in.'), findsOneWidget);
     // Nothing to retry: no fake "Try again" that only clears the message.
     expect(find.text('Try again'), findsNothing);
     expect(auth.socialCalls, 0);
@@ -294,7 +342,7 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('APP CHILD'), findsNothing);
-    expect(find.text('Do more with Ovid Plus'), findsNothing);
+    expect(find.text('Upgrade'), findsNothing);
   });
 
   testWidgets('an auth-layer failure is shown as its real message', (
@@ -305,9 +353,7 @@ void main() {
       'ovid_onboarding_language': 'en',
     });
     final auth = _FakeAuth()
-      ..socialFailure = FirebaseAuthException(
-        code: 'network-request-failed',
-      );
+      ..socialFailure = FirebaseAuthException(code: 'network-request-failed');
     await _pumpGate(tester, auth: auth);
 
     await _tap(tester, find.text('Continue with Google'));
@@ -339,7 +385,7 @@ void main() {
     );
 
     await _tap(tester, find.text('Continue with Google'));
-    expect(find.text('Do more with Ovid Plus'), findsOneWidget);
+    expect(find.text('Upgrade'), findsOneWidget);
 
     await _tap(tester, find.text('Ovid Go'));
     await _tap(tester, find.byKey(const Key('paywall-trial')));
@@ -347,6 +393,35 @@ void main() {
     // A declined purchase is not a fake success: the gate simply continues.
     expect(purchased, ['go']);
     expect(find.text('APP CHILD'), findsOneWidget);
+  });
+
+  testWidgets('the paywall currency choice is persisted', (tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      'ovid_welcome_version_v2': '1',
+      'ovid_onboarding_language': 'en',
+    });
+    await _pumpGate(tester, auth: _FakeAuth());
+
+    await _tap(tester, find.text('Continue with Google'));
+    await _tap(tester, find.byKey(const Key('paywall-currency-inr')));
+
+    expect(find.text('₹1,799'), findsOneWidget);
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString('ovid_onboarding_currency'), 'inr');
+  });
+
+  testWidgets('a saved currency is restored on the paywall', (tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      'ovid_welcome_version_v2': '1',
+      'ovid_onboarding_language': 'en',
+      'ovid_onboarding_currency': 'inr',
+    });
+    await _pumpGate(tester, auth: _FakeAuth());
+
+    await _tap(tester, find.text('Continue with Google'));
+
+    expect(find.text('₹1,799'), findsOneWidget);
+    expect(find.text('\$18'), findsNothing);
   });
 
   testWidgets('finishing the welcome persists the v2 marker', (tester) async {
@@ -357,7 +432,7 @@ void main() {
 
     final prefs = await SharedPreferences.getInstance();
     expect(prefs.getString('ovid_welcome_version_v2'), '1');
-    expect(find.text('Which language do you think in?'), findsOneWidget);
+    expect(find.text('SPOKEN LANGUAGE'), findsOneWidget);
   });
 
   testWidgets('startup failure shows an error and retry recovers', (
@@ -422,13 +497,13 @@ void main() {
 
     // A returning user is not asked for the language again.
     expect(find.text('Welcome back'), findsOneWidget);
-    expect(find.text('Which language do you think in?'), findsNothing);
+    expect(find.text('SPOKEN LANGUAGE'), findsNothing);
     expect(find.text('Hindi'), findsOneWidget);
 
     // The goal survives too: Back shows it still selected.
     final handle = tester.ensureSemantics();
     await _tap(tester, find.byKey(const Key('sign-in-back')));
-    expect(find.text('Which language do you think in?'), findsOneWidget);
+    expect(find.text('SPOKEN LANGUAGE'), findsOneWidget);
     final research = tester.getSemantics(find.bySemanticsLabel('Research'));
     expect(research.flagsCollection.isSelected, ui.Tristate.isTrue);
     handle.dispose();
@@ -465,7 +540,7 @@ void main() {
     await _pumpGate(tester, auth: auth);
 
     await _tap(tester, find.byKey(const Key('sign-in-back')));
-    expect(find.text('Which language do you think in?'), findsOneWidget);
+    expect(find.text('SPOKEN LANGUAGE'), findsOneWidget);
 
     await _tap(tester, find.byKey(const Key('language-goal-back')));
     expect(find.text('Welcome back'), findsOneWidget);
@@ -541,7 +616,10 @@ void main() {
     await _tap(tester, find.text('Terms'));
     await _tap(tester, find.text('Privacy Policy'));
 
-    expect(opened, [Uri.parse(LegalLinks.terms), Uri.parse(LegalLinks.privacyPolicy)]);
+    expect(opened, [
+      Uri.parse(LegalLinks.terms),
+      Uri.parse(LegalLinks.privacyPolicy),
+    ]);
   });
 
   for (final dark in [false, true]) {
@@ -561,7 +639,7 @@ void main() {
 
       await _tap(tester, find.byKey(const Key('welcome-get-started')));
       expect(tester.takeException(), isNull);
-      expect(find.text('Which language do you think in?'), findsOneWidget);
+      expect(find.text('SPOKEN LANGUAGE'), findsOneWidget);
 
       await _tap(tester, find.byKey(const Key('language-goal-continue')));
       expect(tester.takeException(), isNull);
@@ -570,7 +648,7 @@ void main() {
 
       await _tap(tester, find.text('Continue with Google'));
       expect(tester.takeException(), isNull);
-      expect(find.text('Do more with Ovid Plus'), findsOneWidget);
+      expect(find.text('Upgrade'), findsOneWidget);
 
       await tester.drag(
         find.byType(SingleChildScrollView),

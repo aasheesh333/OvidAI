@@ -1,5 +1,3 @@
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
@@ -220,10 +218,9 @@ List<int> storagePercentageSplit(List<int> bytes) {
   return result;
 }
 
-/// Donut breakdown of storage by category, with a text legend.
-///
-/// The widget is presentational: it renders [data] and exposes only the
-/// retry / empty-state callbacks it is given. It owns no timers or streams.
+/// One stacked bar plus a text legend. The widget is presentational: it
+/// renders [data] and exposes only the retry / empty-state callbacks it is
+/// given. It owns no timers or streams.
 class StorageBreakdown extends StatelessWidget {
   const StorageBreakdown({super.key, required this.data});
 
@@ -231,28 +228,26 @@ class StorageBreakdown extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return OFadeSlide(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          OSectionHeader(
-            label: data.title,
-            padding: const EdgeInsets.only(bottom: OSpace.s),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        OSectionHeader(
+          label: data.title,
+          padding: const EdgeInsets.only(bottom: OSpace.s),
+        ),
+        switch (data.status) {
+          V2StorageBreakdownStatus.loading => const _BreakdownSkeleton(),
+          V2StorageBreakdownStatus.error => OErrorState(
+            title: 'Storage unavailable',
+            message: data.errorMessage,
+            onRetry: data.onRetry,
           ),
-          switch (data.status) {
-            V2StorageBreakdownStatus.loading => const _BreakdownSkeleton(),
-            V2StorageBreakdownStatus.error => OErrorState(
-              title: 'Storage unavailable',
-              message: data.errorMessage,
-              onRetry: data.onRetry,
-            ),
-            V2StorageBreakdownStatus.empty => _empty(),
-            V2StorageBreakdownStatus.content =>
-              _hasUsage ? _content(context) : _empty(),
-          },
-        ],
-      ),
+          V2StorageBreakdownStatus.empty => _empty(),
+          V2StorageBreakdownStatus.content =>
+            _hasUsage ? _content(context) : _empty(),
+        },
+      ],
     );
   }
 
@@ -265,7 +260,7 @@ class StorageBreakdown extends StatelessWidget {
       data.entries.fold<int>(0, (sum, entry) => sum + entry.safeBytes);
 
   /// The category list and used total as one consistent pair. This is what
-  /// keeps the donut, the centre number and the legend adding up.
+  /// keeps the bar, the heading and the legend adding up.
   V2StorageReconciliation get _reconciled => reconcileStorageBreakdown(
     data.entries,
     data.usedBytes > 0 ? data.usedBytes : _entryBytes,
@@ -304,119 +299,130 @@ class StorageBreakdown extends StatelessWidget {
     final percentages = storagePercentageSplit([
       for (final entry in entries) entry.safeBytes,
     ]);
-    final selectedIndex = data.selectedCategory == null
-        ? -1
-        : entries.indexWhere(
-            (entry) => entry.category == data.selectedCategory,
-          );
-    final selected = selectedIndex < 0 ? null : entries[selectedIndex];
-    final selectedPercent = selected == null
-        ? null
-        : percentages[selectedIndex];
-
-    final centerLabel = selected == null ? amount : _entrySizeLabel(selected);
-    final centerCaption = selected == null
-        ? (total.isEmpty ? 'used' : 'of $total')
-        : '$selectedPercent% of used';
 
     return OCard(
       padding: EdgeInsets.zero,
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(ORadius.l),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                OSpace.l,
-                OSpace.l,
-                OSpace.l,
-                OSpace.m,
-              ),
-              child: Center(
-                child: _Donut(
-                  fraction: data.totalBytes <= 0
-                      ? 1
-                      : (used / data.totalBytes).clamp(0, 1).toDouble(),
-                  slices: [
-                    for (final entry in entries)
-                      _DonutSlice(
-                        value: entry.safeBytes.toDouble(),
-                        color: _categoryColor(c, entry.category).withValues(
-                          alpha:
-                              selected == null ||
-                                  entry.category == selected.category
-                              ? 1
-                              : 0.22,
-                        ),
-                      ),
-                  ],
-                  centerLabel: centerLabel,
-                  centerCaption: centerCaption,
-                  semanticLabel: _chartSemantics(
-                    entries: entries,
-                    amount: amount,
-                    total: total,
-                    percentages: percentages,
-                    selected: selected,
-                    selectedPercent: selectedPercent,
-                  ),
-                ),
-              ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              OSpace.l,
+              OSpace.l,
+              OSpace.l,
+              OSpace.m,
             ),
-            Divider(height: 1, color: c.hairline),
-            if (entries.isEmpty)
-              Padding(
-                padding: const EdgeInsets.all(OSpace.l),
-                child: Text(
-                  'No category detail yet.',
-                  style: OType.caption.copyWith(color: c.textMuted),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Expanded(
+                      child: Text(
+                        amount,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: OType.h2.copyWith(color: c.text),
+                      ),
+                    ),
+                    if (total.isNotEmpty) ...[
+                      const SizedBox(width: OSpace.s),
+                      Text(
+                        'of $total',
+                        maxLines: 1,
+                        style: OType.caption.copyWith(color: c.textMuted),
+                      ),
+                    ],
+                  ],
                 ),
-              )
-            else
-              for (var i = 0; i < entries.length; i++) ...[
-                if (i > 0) Divider(height: 1, color: c.hairline),
-                _LegendRow(
-                  entry: entries[i],
-                  percentage: percentages[i],
-                  fraction: used <= 0 ? 0 : entries[i].safeBytes / used,
-                  color: _categoryColor(c, entries[i].category),
-                  selected: entries[i].category == data.selectedCategory,
-                  onTap: data.onCategoryTap == null
-                      ? null
-                      : () => data.onCategoryTap!(entries[i].category),
+                const SizedBox(height: OSpace.s),
+                _StorageBar(
+                  entries: entries,
+                  percentages: percentages,
+                  amount: amount,
+                  total: total,
                 ),
               ],
+            ),
+          ),
+          Divider(height: 1, color: c.hairline),
+          for (var i = 0; i < entries.length; i++) ...[
+            if (i > 0) Divider(height: 1, color: c.hairline),
+            _LegendRow(
+              entry: entries[i],
+              percentage: percentages[i],
+              color: _categoryColor(c, entries[i].category),
+              selected: entries[i].category == data.selectedCategory,
+              onTap: data.onCategoryTap == null
+                  ? null
+                  : () => data.onCategoryTap!(entries[i].category),
+            ),
           ],
-        ),
+        ],
       ),
     );
   }
+}
 
-  String _chartSemantics({
-    required List<V2StorageCategoryBytes> entries,
-    required String amount,
-    required String total,
-    required List<int> percentages,
-    required V2StorageCategoryBytes? selected,
-    required int? selectedPercent,
-  }) {
+/// The single bar: every category is one segment, so its width is its share of
+/// the total and the legend percentages always sum to 100.
+class _StorageBar extends StatelessWidget {
+  const _StorageBar({
+    required this.entries,
+    required this.percentages,
+    required this.amount,
+    required this.total,
+  });
+
+  final List<V2StorageCategoryBytes> entries;
+  final List<int> percentages;
+  final String amount;
+  final String total;
+
+  String get _semanticLabel {
     final buffer = StringBuffer('Storage: $amount');
     buffer.write(total.isEmpty ? ' used' : ' used of $total');
     for (var i = 0; i < entries.length; i++) {
-      final entry = entries[i];
       buffer.write(
-        '. ${entry.category.label} ${_entrySizeLabel(entry)}, '
+        '. ${entries[i].category.label} ${_entrySizeLabel(entries[i])}, '
         '${percentages[i]}%',
       );
     }
-    if (selected != null) {
-      buffer.write(
-        '. Selected ${selected.category.label}: '
-        '${_entrySizeLabel(selected)}, $selectedPercent% of used',
-      );
-    }
     return buffer.toString();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Semantics(
+      key: const ValueKey('storage-breakdown-chart'),
+      image: true,
+      label: _semanticLabel,
+      child: ExcludeSemantics(
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(ORadius.s),
+          child: SizedBox(
+            height: 12,
+            child: entries.isEmpty
+                ? ColoredBox(color: c.surfaceRaised)
+                : Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      for (final entry in entries)
+                        if (entry.safeBytes > 0)
+                          Expanded(
+                            flex: entry.safeBytes,
+                            child: ColoredBox(
+                              color: _categoryColor(c, entry.category),
+                            ),
+                          ),
+                    ],
+                  ),
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -435,11 +441,12 @@ Color _categoryColor(OColors c, V2StorageCategory category) {
   };
 }
 
+/// One legend line: dot, category, size, share. The size and percentage move
+/// under the label at large text instead of being clipped.
 class _LegendRow extends StatelessWidget {
   const _LegendRow({
     required this.entry,
     required this.percentage,
-    required this.fraction,
     required this.color,
     required this.selected,
     this.onTap,
@@ -447,7 +454,6 @@ class _LegendRow extends StatelessWidget {
 
   final V2StorageCategoryBytes entry;
   final int percentage;
-  final double fraction;
   final Color color;
   final bool selected;
   final VoidCallback? onTap;
@@ -457,8 +463,6 @@ class _LegendRow extends StatelessWidget {
     final c = OColors.of(context);
     final size = _entrySizeLabel(entry);
     final textScale = MediaQuery.textScalerOf(context).scale(14) / 14;
-    // At 200 % the size and percentage cannot share the line with the label
-    // inside a 320 dp phone, so they move under it instead of being clipped.
     final stacked = textScale > 1.3;
 
     final label = Text(
@@ -494,57 +498,39 @@ class _LegendRow extends StatelessWidget {
             horizontal: OSpace.l,
             vertical: OSpace.s,
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            mainAxisSize: MainAxisSize.min,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  Container(
-                    width: 10,
-                    height: 10,
-                    decoration: BoxDecoration(
-                      color: color,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  const SizedBox(width: OSpace.m),
-                  Expanded(
-                    child: stacked
-                        ? Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              label,
-                              const SizedBox(height: 2),
-                              Wrap(
-                                spacing: OSpace.s,
-                                crossAxisAlignment: WrapCrossAlignment.center,
-                                children: [sizeText, percentText],
-                              ),
-                            ],
-                          )
-                        : Row(
-                            children: [
-                              Expanded(child: label),
-                              const SizedBox(width: OSpace.s),
-                              sizeText,
-                              const SizedBox(width: OSpace.m),
-                              percentText,
-                            ],
-                          ),
-                  ),
-                ],
+              Container(
+                width: 10,
+                height: 10,
+                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
               ),
-              const SizedBox(height: OSpace.s),
-              Padding(
-                padding: const EdgeInsets.only(left: 22),
-                child: _CategoryBar(
-                  key: ValueKey('storage-breakdown-bar-${entry.category.name}'),
-                  value: fraction,
-                  color: color,
-                ),
+              const SizedBox(width: OSpace.m),
+              Expanded(
+                child: stacked
+                    ? Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          label,
+                          const SizedBox(height: 2),
+                          Wrap(
+                            spacing: OSpace.s,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [sizeText, percentText],
+                          ),
+                        ],
+                      )
+                    : Row(
+                        children: [
+                          Expanded(child: label),
+                          const SizedBox(width: OSpace.s),
+                          sizeText,
+                          const SizedBox(width: OSpace.m),
+                          percentText,
+                        ],
+                      ),
               ),
             ],
           ),
@@ -567,32 +553,6 @@ class _LegendRow extends StatelessWidget {
   }
 }
 
-class _CategoryBar extends StatelessWidget {
-  const _CategoryBar({super.key, required this.value, required this.color});
-
-  final double value;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return TweenAnimationBuilder<double>(
-      tween: Tween<double>(begin: 0, end: value.clamp(0, 1).toDouble()),
-      duration: OMove.duration(context, OMotion.slow),
-      curve: OMotion.emphasized,
-      builder: (context, animated, _) => ClipRRect(
-        borderRadius: BorderRadius.circular(3),
-        child: LinearProgressIndicator(
-          value: animated,
-          minHeight: 5,
-          backgroundColor: c.surfaceRaised,
-          valueColor: AlwaysStoppedAnimation<Color>(color),
-        ),
-      ),
-    );
-  }
-}
-
 class _BreakdownSkeleton extends StatelessWidget {
   const _BreakdownSkeleton();
 
@@ -603,7 +563,7 @@ class _BreakdownSkeleton extends StatelessWidget {
       padding: const EdgeInsets.all(OSpace.l),
       child: Column(
         children: [
-          const Center(child: OSkeleton(width: 176, height: 176, radius: 88)),
+          const OSkeleton(height: 12, radius: ORadius.s),
           const SizedBox(height: OSpace.l),
           for (var i = 0; i < 4; i++) ...[
             if (i > 0) const SizedBox(height: OSpace.m),
@@ -621,137 +581,4 @@ class _BreakdownSkeleton extends StatelessWidget {
       ),
     );
   }
-}
-
-class _DonutSlice {
-  const _DonutSlice({required this.value, required this.color});
-
-  final double value;
-  final Color color;
-}
-
-class _Donut extends StatelessWidget {
-  const _Donut({
-    required this.fraction,
-    required this.slices,
-    required this.centerLabel,
-    required this.centerCaption,
-    required this.semanticLabel,
-  });
-
-  final double fraction;
-  final List<_DonutSlice> slices;
-  final String centerLabel;
-  final String centerCaption;
-  final String semanticLabel;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Semantics(
-      key: const ValueKey('storage-breakdown-chart'),
-      image: true,
-      label: semanticLabel,
-      child: ExcludeSemantics(
-        child: SizedBox(
-          width: 200,
-          height: 200,
-          child: Stack(
-            alignment: Alignment.center,
-            children: [
-              TweenAnimationBuilder<double>(
-                tween: Tween<double>(
-                  begin: 0,
-                  end: fraction.clamp(0, 1).toDouble(),
-                ),
-                duration: OMove.duration(context, OMotion.slow),
-                curve: OMotion.emphasized,
-                builder: (context, value, _) => CustomPaint(
-                  size: const Size.square(200),
-                  painter: _DonutPainter(
-                    fraction: value,
-                    slices: slices,
-                    trackColor: c.surfaceRaised,
-                    strokeWidth: 18,
-                  ),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: OSpace.xl),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      centerLabel,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.center,
-                      style: OType.h2.copyWith(color: c.text),
-                    ),
-                    Text(
-                      centerCaption,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.center,
-                      style: OType.caption.copyWith(color: c.textMuted),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _DonutPainter extends CustomPainter {
-  const _DonutPainter({
-    required this.fraction,
-    required this.slices,
-    required this.trackColor,
-    required this.strokeWidth,
-  });
-
-  final double fraction;
-  final List<_DonutSlice> slices;
-  final Color trackColor;
-  final double strokeWidth;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = size.center(Offset.zero);
-    final radius = (size.shortestSide - strokeWidth) / 2;
-    final rect = Rect.fromCircle(center: center, radius: radius);
-
-    final track = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = strokeWidth
-      ..color = trackColor;
-    canvas.drawCircle(center, radius, track);
-
-    final total = slices.fold<double>(0, (sum, slice) => sum + slice.value);
-    if (total <= 0) return;
-
-    var start = -math.pi / 2;
-    for (final slice in slices) {
-      final sweep = slice.value / total * math.pi * 2 * fraction;
-      if (sweep <= 0) continue;
-      final paint = Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = strokeWidth
-        ..strokeCap = StrokeCap.butt
-        ..color = slice.color;
-      canvas.drawArc(rect, start, sweep, false, paint);
-      start += sweep;
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _DonutPainter oldDelegate) =>
-      oldDelegate.fraction != fraction ||
-      oldDelegate.slices != slices ||
-      oldDelegate.trackColor != trackColor ||
-      oldDelegate.strokeWidth != strokeWidth;
 }

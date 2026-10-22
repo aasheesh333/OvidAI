@@ -23,12 +23,25 @@ const String kV2OnboardingLanguagePref = 'ovid_onboarding_language';
 /// Durable key for the first goal(s) picked during onboarding.
 const String kV2FirstGoalPref = 'ovid_first_goal';
 
+/// Durable key for the currency the person picked on the paywall.
+const String kV2OnboardingCurrencyPref = 'ovid_onboarding_currency';
+
 /// The legacy key the gate wrote the onboarding language to before
 /// [kV2OnboardingLanguagePref] existed. Read once for migration only.
 const String kV2LegacyLocalePref = 'ovid_locale';
 
-/// Language ids the onboarding grid can offer.
-const Set<String> kV2OnboardingLanguageIds = {'en', 'hi', 'pa', 'ta'};
+/// Language ids the onboarding grid offers: the four spoken languages the app
+/// supports plus Hinglish, which is dictated in Hindi but written in Latin.
+const Set<String> kV2OnboardingLanguageIds = {
+  'en',
+  'hi',
+  'hinglish',
+  'pa',
+  'ta',
+};
+
+/// Currency ids the paywall can show.
+const Set<String> kV2OnboardingCurrencyIds = {'usd', 'inr'};
 
 /// Everything the gate needs from disk to decide where onboarding starts.
 @immutable
@@ -37,6 +50,7 @@ class V2OnboardingSnapshot {
     required this.welcomeSeen,
     this.languageId,
     this.goalIds = const <String>{},
+    this.currencyId,
   });
 
   /// The stored welcome marker matched the current version.
@@ -48,6 +62,10 @@ class V2OnboardingSnapshot {
 
   /// The goal ids picked in a previous run (empty when none were saved).
   final Set<String> goalIds;
+
+  /// The paywall currency picked in a previous run (`usd` or `inr`), or null
+  /// when the person has not changed the default.
+  final String? currencyId;
 
   /// A returning user who already picked a language skips the language step.
   bool get hasChoices => languageId != null;
@@ -68,8 +86,7 @@ class V2OnboardingStore {
   /// surface a real error instead of silently starting over.
   Future<V2OnboardingSnapshot> load({required String welcomeVersion}) async {
     final prefs = await SharedPreferences.getInstance();
-    final welcomeSeen =
-        prefs.getString(kV2WelcomeSeenPref) == welcomeVersion;
+    final welcomeSeen = prefs.getString(kV2WelcomeSeenPref) == welcomeVersion;
 
     final saved = _cleanLanguage(prefs.getString(kV2OnboardingLanguagePref));
     // Migrate the old, colliding key only for people who finished the old
@@ -88,6 +105,7 @@ class V2OnboardingStore {
       welcomeSeen: welcomeSeen,
       languageId: saved ?? legacy,
       goalIds: goals,
+      currencyId: _cleanCurrency(prefs.getString(kV2OnboardingCurrencyPref)),
     );
   }
 
@@ -112,18 +130,32 @@ class V2OnboardingStore {
       kV2OnboardingLanguagePref,
       languageId,
     );
-    final goalsOk = await prefs.setString(
-      kV2FirstGoalPref,
-      sorted.join(','),
-    );
+    final goalsOk = await prefs.setString(kV2FirstGoalPref, sorted.join(','));
     if (!languageOk || !goalsOk) {
       throw StateError('could not persist the onboarding choices');
     }
+  }
+
+  /// Persists the paywall currency. Throws on failure so the gate can tell the
+  /// person the choice was not saved.
+  Future<void> saveCurrency(String currencyId) async {
+    if (!kV2OnboardingCurrencyIds.contains(currencyId)) {
+      throw ArgumentError.value(currencyId, 'currencyId', 'unsupported');
+    }
+    final prefs = await SharedPreferences.getInstance();
+    final ok = await prefs.setString(kV2OnboardingCurrencyPref, currencyId);
+    if (!ok) throw StateError('could not persist the currency choice');
   }
 
   static String? _cleanLanguage(String? raw) {
     final value = raw?.trim();
     if (value == null || value.isEmpty) return null;
     return kV2OnboardingLanguageIds.contains(value) ? value : null;
+  }
+
+  static String? _cleanCurrency(String? raw) {
+    final value = raw?.trim();
+    if (value == null || value.isEmpty) return null;
+    return kV2OnboardingCurrencyIds.contains(value) ? value : null;
   }
 }

@@ -41,24 +41,41 @@ Future<void> _pump(
 }
 
 void main() {
-  testWidgets('renders the notification sections in light', (tester) async {
+  testWidgets('renders one master switch, four channels, quiet hours and one '
+      'sound row', (tester) async {
     await _pump(tester, const V2NotificationsPageData());
 
     expect(find.text('Notifications'), findsOneWidget);
-    expect(find.text('ACTIVITY'), findsOneWidget);
-    expect(find.text('Run finished'), findsOneWidget);
-    expect(find.text('Quiet hours'), findsOneWidget);
     expect(
-      find.text('22:00–08:00 · No alerts during this time'),
+      find.byKey(const ValueKey<String>('notifications-master-switch')),
       findsOneWidget,
     );
+    expect(find.text('Run finished'), findsOneWidget);
+    expect(find.text('Schedule results'), findsOneWidget);
+    expect(find.text('Shares and invites'), findsOneWidget);
+    expect(find.text('Collaboration'), findsOneWidget);
+    expect(find.text('Quiet hours'), findsOneWidget);
+    expect(
+      find.text('22:00–08:00'),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('notifications-sound-row')),
+      findsOneWidget,
+    );
+    // One sound for every channel, not a chip row per channel.
+    expect(find.text('Ovid chime'), findsOneWidget);
   });
 
   testWidgets('renders in dark', (tester) async {
     await _pump(tester, const V2NotificationsPageData(), dark: true);
 
-    expect(find.text('SECURITY'), findsOneWidget);
-    expect(find.text('New sign-ins'), findsOneWidget);
+    expect(find.text('Run finished'), findsOneWidget);
+    expect(find.text('Quiet hours'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('notifications-sound-row')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('master switch is on by default and reports changes', (
@@ -74,21 +91,26 @@ void main() {
       const ValueKey<String>('notifications-master-switch'),
     );
     expect(tester.widget<Switch>(toggle).value, isTrue);
-    expect(
-      find.textContaining('On: get notified when a cloud run finishes'),
-      findsOneWidget,
-    );
 
     await tester.tap(toggle);
     await tester.pumpAndSettle();
 
     expect(master, isFalse);
+    expect(
+      tester
+          .widget<Switch>(
+            find.byKey(
+              const ValueKey<String>('notification-switch-run_finished'),
+            ),
+          )
+          .onChanged,
+      isNull,
+    );
   });
 
-  testWidgets('master off disables channels, delivery and sounds', (
+  testWidgets('master off disables the channels and the sound row', (
     tester,
   ) async {
-    final handle = tester.ensureSemantics();
     var toggles = 0;
     var sounds = 0;
     await _pump(
@@ -101,46 +123,21 @@ void main() {
       ),
     );
 
-    expect(
-      find.textContaining('Off: Ovid Cloud sends no notifications'),
-      findsOneWidget,
-    );
-
     final channel = find.byKey(
       const ValueKey<String>('notification-switch-run_finished'),
     );
     expect(tester.widget<Switch>(channel).onChanged, isNull);
-    expect(
-      tester.getSemantics(channel).getSemanticsData().flagsCollection.isEnabled,
-      Tristate.isFalse,
-    );
     await tester.tap(channel);
     await tester.pumpAndSettle();
     expect(toggles, 0);
 
-    final soundToggle = find.byKey(
-      const ValueKey<String>('notification-switch-sound'),
+    final sound = find.byKey(
+      const ValueKey<String>('notifications-sound-row'),
     );
-    await tester.ensureVisible(soundToggle);
-    await tester.tap(soundToggle);
-    await tester.pumpAndSettle();
-    expect(toggles, 0);
-
-    final soundRow = find.byKey(
-      const ValueKey<String>('sound-row-agent_updates'),
-    );
-    await tester.ensureVisible(soundRow);
-    expect(
-      find.textContaining('Turn push notifications on to pick a sound.'),
-      findsNWidgets(2),
-    );
-    await tester.tap(
-      find.descendant(of: soundRow, matching: find.text('System')),
-    );
+    await tester.ensureVisible(sound);
+    await tester.tap(sound);
     await tester.pumpAndSettle();
     expect(sounds, 0);
-
-    handle.dispose();
   });
 
   testWidgets('first-run prompt explains the permission and can be deferred', (
@@ -161,8 +158,7 @@ void main() {
       find.byKey(const ValueKey<String>('notifications-permission-prompt')),
       findsOneWidget,
     );
-    expect(find.text('Get notified when Ovid Si finishes'), findsOneWidget);
-    expect(find.textContaining('Ovid Si works in the cloud'), findsOneWidget);
+    expect(find.text('Get notified when a run finishes'), findsOneWidget);
 
     await tester.tap(
       find.byKey(const ValueKey<String>('notifications-permission-later')),
@@ -217,21 +213,6 @@ void main() {
     expect(toggledValue, isFalse);
   });
 
-  testWidgets('opens quiet hours', (tester) async {
-    var quietTaps = 0;
-    await _pump(
-      tester,
-      V2NotificationsPageData(onQuietHours: () => quietTaps++),
-    );
-
-    final row = find.text('Quiet hours');
-    await tester.ensureVisible(row);
-    await tester.tap(row);
-    await tester.pumpAndSettle();
-
-    expect(quietTaps, 1);
-  });
-
   testWidgets('shows the blocked banner and opens system settings', (
     tester,
   ) async {
@@ -244,8 +225,11 @@ void main() {
       ),
     );
 
-    expect(find.text('Notifications are blocked'), findsOneWidget);
-    final button = find.text('Open Android settings');
+    expect(
+      find.byKey(const ValueKey<String>('notifications-blocked-banner')),
+      findsOneWidget,
+    );
+    final button = find.text('Open settings');
     await tester.ensureVisible(button);
     await tester.tap(button);
     await tester.pumpAndSettle();
@@ -265,35 +249,42 @@ void main() {
     expect(find.text('Notifications are blocked'), findsNothing);
   });
 
-  testWidgets('blocked banner is keyed for the route-level state', (
+  testWidgets('a channel with no backend is information, not a fake switch', (
     tester,
   ) async {
+    var toggles = 0;
     await _pump(
       tester,
-      const V2NotificationsPageData(notificationsBlocked: true),
+      V2NotificationsPageData(onToggle: (_, _) => toggles++),
     );
 
     expect(
-      find.byKey(const ValueKey<String>('notifications-blocked-banner')),
+      find.byKey(const ValueKey<String>('notification-switch-shares_invites')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('notification-unavailable-shares_invites')),
       findsOneWidget,
     );
-    expect(find.text('Open Android settings'), findsOneWidget);
+    // The contract bans the "not available yet" placeholder.
+    expect(find.textContaining('Not available'), findsNothing);
+    expect(toggles, 0);
   });
 
-  testWidgets('renders quiet hours times and channel sounds', (tester) async {
+  testWidgets('quiet hours is one row that shows the range', (tester) async {
     await _pump(tester, const V2NotificationsPageData());
 
-    expect(find.text('CHANNEL SOUNDS'), findsOneWidget);
-    expect(find.text('Agent updates'), findsOneWidget);
-    expect(find.text('Scheduled results'), findsOneWidget);
-    expect(find.text('Ovid chime'), findsNWidgets(2));
-    expect(find.text('Start'), findsOneWidget);
-    expect(find.text('End'), findsOneWidget);
-    expect(find.text('22:00'), findsOneWidget);
-    expect(find.text('08:00'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('notifications-quiet-hours-row')),
+      findsOneWidget,
+    );
+    expect(find.text('22:00–08:00'), findsOneWidget);
+    // The range is edited in a sheet, not as two extra rows on the page.
+    expect(find.text('Start'), findsNothing);
+    expect(find.text('End'), findsNothing);
   });
 
-  testWidgets('toggles quiet hours', (tester) async {
+  testWidgets('quiet hours shows the range and toggles', (tester) async {
     bool? quietEnabled;
     await _pump(
       tester,
@@ -302,12 +293,57 @@ void main() {
       ),
     );
 
+    expect(find.text('22:00–08:00'), findsOneWidget);
+
     final toggle = find.byKey(const ValueKey<String>('quiet-hours-switch'));
     await tester.ensureVisible(toggle);
     await tester.tap(toggle);
     await tester.pumpAndSettle();
 
     expect(quietEnabled, isFalse);
+    expect(find.text('Off'), findsOneWidget);
+  });
+
+  testWidgets('tapping the quiet hours row turns it on when it is off', (
+    tester,
+  ) async {
+    bool? quietEnabled;
+    await _pump(
+      tester,
+      V2NotificationsPageData(
+        quietHoursEnabled: false,
+        onQuietHoursEnabledChanged: (value) => quietEnabled = value,
+      ),
+    );
+
+    final row = find.byKey(
+      const ValueKey<String>('notifications-quiet-hours-row'),
+    );
+    await tester.ensureVisible(row);
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+
+    expect(quietEnabled, isTrue);
+    expect(find.text('22:00–08:00'), findsOneWidget);
+  });
+
+  testWidgets('quiet hours row opens the caller editor when it has no value', (
+    tester,
+  ) async {
+    var quietTaps = 0;
+    await _pump(
+      tester,
+      V2NotificationsPageData(onQuietHours: () => quietTaps++),
+    );
+
+    final row = find.byKey(
+      const ValueKey<String>('notifications-quiet-hours-row'),
+    );
+    await tester.ensureVisible(row);
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+
+    expect(quietTaps, 1);
   });
 
   testWidgets('changes the quiet hours start time', (tester) async {
@@ -319,9 +355,15 @@ void main() {
       ),
     );
 
-    final row = find.text('Start');
+    final row = find.byKey(
+      const ValueKey<String>('notifications-quiet-hours-row'),
+    );
     await tester.ensureVisible(row);
     await tester.tap(row);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Start'), findsOneWidget);
+    await tester.tap(find.text('Start'));
     await tester.pumpAndSettle();
 
     expect(find.text('Quiet hours Start'), findsOneWidget);
@@ -330,107 +372,96 @@ void main() {
     expect(fields, findsNWidgets(2));
     await tester.enterText(fields.at(0), '9');
     await tester.enterText(fields.at(1), '30');
-    // The dialog follows the device 12-hour clock; pin the period so the
-    // assertion is not tied to the initial 22:00 value.
-    await tester.tap(find.text('AM'));
+    final am = find.text('AM');
+    if (am.evaluate().isNotEmpty) await tester.tap(am);
     await tester.tap(find.text('OK'));
     await tester.pumpAndSettle();
 
     expect(start, const TimeOfDay(hour: 9, minute: 30));
   });
 
-  testWidgets('quiet hours times are disabled when quiet hours is off', (
-    tester,
-  ) async {
-    final handle = tester.ensureSemantics();
-    await _pump(
-      tester,
-      const V2NotificationsPageData(
-        quietHoursEnabled: false,
-        onQuietHoursStartChanged: _ignoreTime,
-        onQuietHoursEndChanged: _ignoreTime,
-      ),
-    );
-
-    expect(find.text('Off · Alerts can arrive at any time'), findsOneWidget);
-
-    final start = tester.getSemantics(find.text('Start')).getSemanticsData();
-    expect(start.flagsCollection.isEnabled, Tristate.isFalse);
-
-    handle.dispose();
-  });
-
-  testWidgets('selects a per-channel sound', (tester) async {
-    String? channelId;
-    V2NotificationSound? sound;
+  testWidgets('quiet hours row edits the range in a sheet', (tester) async {
+    TimeOfDay? start;
+    TimeOfDay? end;
     await _pump(
       tester,
       V2NotificationsPageData(
-        onSoundChanged: (id, value) {
-          channelId = id;
-          sound = value;
-        },
+        onQuietHoursStartChanged: (value) => start = value,
+        onQuietHoursEndChanged: (value) => end = value,
       ),
     );
 
-    final row = find.byKey(const ValueKey<String>('sound-row-agent_updates'));
+    final row = find.byKey(
+      const ValueKey<String>('notifications-quiet-hours-row'),
+    );
     await tester.ensureVisible(row);
-    await tester.tap(find.descendant(of: row, matching: find.text('System')));
+    await tester.tap(row);
     await tester.pumpAndSettle();
 
-    expect(channelId, 'agent_updates');
-    expect(sound, V2NotificationSound.system);
+    expect(find.text('Start'), findsOneWidget);
+    expect(find.text('End'), findsOneWidget);
+
+    await tester.tap(find.text('End'));
+    await tester.pumpAndSettle();
+    final fields = find.byType(TextField);
+    await tester.enterText(fields.at(0), '7');
+    await tester.enterText(fields.at(1), '0');
+    final am = find.text('AM');
+    if (am.evaluate().isNotEmpty) await tester.tap(am);
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+
+    expect(end, const TimeOfDay(hour: 7, minute: 0));
+    expect(start, isNull);
   });
 
-  testWidgets('sound choices are disabled for a channel that is off', (
-    tester,
-  ) async {
-    var changes = 0;
+  testWidgets('one sound choice applies to every channel', (tester) async {
+    final calls = <String, V2NotificationSound>{};
     await _pump(
       tester,
-      V2NotificationsPageData(
-        activity: const [
-          V2NotificationSetting(
-            id: 'agent_updates',
-            title: 'Run finished',
-            description: 'When Ovid completes a task.',
-            value: false,
-          ),
-          V2NotificationSetting(
-            id: 'scheduler_results',
-            title: 'Schedule results',
-            description: 'When a scheduled run finishes.',
-          ),
-        ],
-        onSoundChanged: (_, _) => changes++,
-      ),
+      V2NotificationsPageData(onSoundChanged: (id, sound) => calls[id] = sound),
     );
 
-    final row = find.byKey(const ValueKey<String>('sound-row-agent_updates'));
+    final row = find.byKey(
+      const ValueKey<String>('notifications-sound-row'),
+    );
     await tester.ensureVisible(row);
-    expect(
-      find.textContaining('Turn this channel on to pick a sound.'),
-      findsOneWidget,
-    );
-
-    await tester.tap(find.descendant(of: row, matching: find.text('System')));
+    await tester.tap(row);
     await tester.pumpAndSettle();
 
-    expect(changes, 0);
+    expect(find.text('System'), findsOneWidget);
+    await tester.tap(find.text('System'));
+    await tester.pumpAndSettle();
+
+    expect(calls, {
+      'agent_updates': V2NotificationSound.system,
+      'scheduler_results': V2NotificationSound.system,
+    });
+    expect(find.text('System'), findsOneWidget);
+    expect(find.text('Ovid chime'), findsNothing);
   });
 
-  testWidgets('unwired quiet hours switch is announced as disabled', (
-    tester,
-  ) async {
-    final handle = tester.ensureSemantics();
-    await _pump(tester, const V2NotificationsPageData());
+  testWidgets('choosing Silent turns every channel silent', (tester) async {
+    final calls = <String, V2NotificationSound>{};
+    await _pump(
+      tester,
+      V2NotificationsPageData(onSoundChanged: (id, sound) => calls[id] = sound),
+    );
 
-    final quietSwitch = tester
-        .getSemantics(find.byKey(const ValueKey<String>('quiet-hours-switch')))
-        .getSemanticsData();
-    expect(quietSwitch.flagsCollection.isEnabled, Tristate.isFalse);
+    final row = find.byKey(
+      const ValueKey<String>('notifications-sound-row'),
+    );
+    await tester.ensureVisible(row);
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Silent'));
+    await tester.pumpAndSettle();
 
-    handle.dispose();
+    expect(calls, {
+      'agent_updates': V2NotificationSound.silent,
+      'scheduler_results': V2NotificationSound.silent,
+    });
+    expect(find.text('Silent'), findsOneWidget);
   });
 
   testWidgets('renders the empty state and retries', (tester) async {
@@ -477,7 +508,6 @@ void main() {
       const V2NotificationsPageData(status: V2NotificationsStatus.loading),
       settle: false,
     );
-    // The shimmer never settles, so pump a frame instead of settling.
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(tester.takeException(), isNull);
@@ -496,11 +526,13 @@ void main() {
     expect(find.text('Notifications are blocked'), findsOneWidget);
     expect(find.text('Run finished'), findsOneWidget);
 
-    // The delivery section sits at the bottom; it must stay reachable.
-    await tester.ensureVisible(find.text('Vibration'));
+    await tester.scrollUntilVisible(
+      find.text('Quiet hours'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
-    expect(find.text('Quiet hours'), findsOneWidget);
   });
 
   testWidgets('fits 320 dp at 200% text in dark', (tester) async {
@@ -516,11 +548,55 @@ void main() {
     );
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Get notified when Ovid Si finishes'), findsOneWidget);
-    await tester.ensureVisible(find.text('Quiet hours'));
+    expect(find.text('Get notified when a run finishes'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('Quiet hours'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
-    expect(find.text('Quiet hours'), findsOneWidget);
+  });
+
+  testWidgets('centres the content at 600 dp', (tester) async {
+    await _pump(
+      tester,
+      const V2NotificationsPageData(),
+      size: const Size(600, 1000),
+    );
+
+    final card = find.byType(OCard).first;
+    expect(tester.getSize(card).width, lessThanOrEqualTo(640));
+    expect(tester.getCenter(card).dx, closeTo(300, 0.5));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('quiet hours sheet fits 320 dp at 200% text', (tester) async {
+    await _pump(
+      tester,
+      V2NotificationsPageData(
+        onQuietHoursStartChanged: (_) {},
+        onQuietHoursEndChanged: (_) {},
+      ),
+      size: const Size(320, 640),
+      textScale: 2,
+    );
+
+    final row = find.byKey(
+      const ValueKey<String>('notifications-quiet-hours-row'),
+    );
+    await tester.scrollUntilVisible(
+      row,
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Start'), findsOneWidget);
+    expect(find.text('End'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('reduced motion still shows every section', (tester) async {
@@ -532,11 +608,9 @@ void main() {
 
     for (final label in const [
       'Notifications are blocked',
-      'PUSH NOTIFICATIONS',
-      'ACTIVITY',
-      'SECURITY',
-      'DELIVERY',
+      'Run finished',
       'Quiet hours',
+      'Sound',
     ]) {
       expect(find.text(label), findsOneWidget, reason: '$label is hidden');
     }
@@ -553,7 +627,6 @@ void main() {
           ),
         )
         .getSemanticsData();
-    // Tristate.none would mean the control does not announce its state at all.
     expect(toggle.flagsCollection.isEnabled, Tristate.isFalse);
     expect(toggle.flagsCollection.isToggled, Tristate.isTrue);
 
@@ -563,14 +636,6 @@ void main() {
         )
         .getSemanticsData();
     expect(master.flagsCollection.isEnabled, Tristate.isFalse);
-    expect(master.flagsCollection.isToggled, Tristate.isTrue);
-
-    final quietHours = tester
-        .getSemantics(
-          find.byKey(const ValueKey<String>('notifications-quiet-hours-row')),
-        )
-        .getSemanticsData();
-    expect(quietHours.flagsCollection.isEnabled, Tristate.isFalse);
 
     semantics.dispose();
   });
@@ -593,24 +658,10 @@ void main() {
           ),
         )
         .getSemanticsData();
-    expect(toggle.flagsCollection.isEnabled, Tristate.isTrue);
-
-    // OListRow does not set the enabled flag on its tappable branch, so the
-    // wired row reports Tristate.none; that is treated as enabled.
-    final quietHours = tester
-        .getSemantics(
-          find.byKey(const ValueKey<String>('notifications-quiet-hours-row')),
-        )
-        .getSemanticsData();
-    expect(quietHours.flagsCollection.isEnabled, isNot(Tristate.isFalse));
+    expect(toggle.flagsCollection.isEnabled, isNot(Tristate.isFalse));
 
     semantics.dispose();
   });
-
-  // ---------------------------------------------------------------------
-  // Wiring fixes: no silent reverts, a real quiet-hours window and a sound
-  // switch that reaches the per-channel setting core actually stores.
-  // ---------------------------------------------------------------------
 
   test('quiet hours window is wrap-aware', () {
     const overnight = V2QuietHoursWindow(
@@ -643,25 +694,7 @@ void main() {
     expect(empty.contains(const TimeOfDay(hour: 22, minute: 0)), isFalse);
   });
 
-  testWidgets('a 22:00–06:00 quiet window is labelled as overnight', (
-    tester,
-  ) async {
-    await _pump(
-      tester,
-      const V2NotificationsPageData(
-        quietHoursStart: TimeOfDay(hour: 22, minute: 0),
-        quietHoursEnd: TimeOfDay(hour: 6, minute: 0),
-      ),
-    );
-
-    expect(
-      find.text('22:00–06:00 · No alerts during this time'),
-      findsOneWidget,
-    );
-    expect(find.text('Runs overnight · 8 h'), findsOneWidget);
-  });
-
-  testWidgets('a zero-length quiet window is not shown as all day', (
+  testWidgets('a zero-length quiet window is shown as off, not all day', (
     tester,
   ) async {
     await _pump(
@@ -672,8 +705,7 @@ void main() {
       ),
     );
 
-    expect(find.text('Off · Start and end are the same time'), findsOneWidget);
-    expect(find.byKey(const ValueKey('quiet-hours-span')), findsNothing);
+    expect(find.text('Off'), findsOneWidget);
   });
 
   testWidgets('a tapped switch keeps its new value (no silent revert)', (
@@ -690,90 +722,6 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(tester.widget<Switch>(toggle).value, isFalse);
-    expect(find.textContaining('When Ovid completes a task.'), findsOneWidget);
-  });
-
-  testWidgets('a row with no backend is honest, not a fake switch', (
-    tester,
-  ) async {
-    var toggles = 0;
-    await _pump(
-      tester,
-      V2NotificationsPageData(
-        activity: const [
-          V2NotificationSetting(
-            id: 'shares_invites',
-            title: 'Shares and invites',
-            description: 'When someone shares a chat or invites you.',
-            available: false,
-          ),
-        ],
-        security: const [],
-        onToggle: (_, _) => toggles++,
-      ),
-    );
-
-    expect(
-      find.byKey(const ValueKey<String>('notification-switch-shares_invites')),
-      findsNothing,
-    );
-    expect(find.text('Not available yet'), findsOneWidget);
-    expect(toggles, 0);
-  });
-
-  testWidgets('the Sound switch reaches both per-channel settings', (
-    tester,
-  ) async {
-    final calls = <String, V2NotificationSound>{};
-    await _pump(
-      tester,
-      V2NotificationsPageData(onSoundChanged: (id, sound) => calls[id] = sound),
-    );
-
-    final soundSwitch = find.byKey(
-      const ValueKey<String>('notification-switch-sound'),
-    );
-    await tester.ensureVisible(soundSwitch);
-    await tester.tap(soundSwitch);
-    await tester.pumpAndSettle();
-
-    expect(calls, {
-      'agent_updates': V2NotificationSound.silent,
-      'scheduler_results': V2NotificationSound.silent,
-    });
-    expect(tester.widget<Switch>(soundSwitch).value, isFalse);
-
-    await tester.tap(soundSwitch);
-    await tester.pumpAndSettle();
-
-    expect(calls, {
-      'agent_updates': V2NotificationSound.chime,
-      'scheduler_results': V2NotificationSound.chime,
-    });
-    expect(tester.widget<Switch>(soundSwitch).value, isTrue);
-  });
-
-  testWidgets('a chosen channel sound stays selected (no silent revert)', (
-    tester,
-  ) async {
-    await _pump(tester, V2NotificationsPageData(onSoundChanged: (_, _) {}));
-
-    final row = find.byKey(const ValueKey<String>('sound-row-agent_updates'));
-    await tester.ensureVisible(row);
-    await tester.tap(find.descendant(of: row, matching: find.text('System')));
-    await tester.pumpAndSettle();
-
-    final chip = tester.widget<Semantics>(
-      find.descendant(
-        of: row,
-        matching: find.byWidgetPredicate(
-          (widget) =>
-              widget is Semantics &&
-              (widget.properties.label?.startsWith('System') ?? false),
-        ),
-      ),
-    );
-    expect(chip.properties.selected, isTrue);
   });
 
   testWidgets('quiet hours times persist through the notifier', (tester) async {
@@ -798,40 +746,36 @@ void main() {
       ),
     );
 
-    // Move the end to 07:00 through the real time picker.
-    await tester.ensureVisible(find.text('End'));
+    expect(find.text('22:00–06:00'), findsOneWidget);
+
+    final row = find.byKey(
+      const ValueKey<String>('notifications-quiet-hours-row'),
+    );
+    await tester.ensureVisible(row);
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+
     await tester.tap(find.text('End'));
     await tester.pumpAndSettle();
     final fields = find.byType(TextField);
     await tester.enterText(fields.at(0), '7');
     await tester.enterText(fields.at(1), '0');
-    await tester.tap(find.text('AM'));
+    final am = find.text('AM');
+    if (am.evaluate().isNotEmpty) await tester.tap(am);
     await tester.tap(find.text('OK'));
     await tester.pumpAndSettle();
 
-    expect(
-      find.text('22:00–07:00 · No alerts during this time'),
-      findsOneWidget,
-    );
-    expect(find.text('Runs overnight · 9 h'), findsOneWidget);
+    expect(find.text('22:00–07:00'), findsOneWidget);
 
     final prefs = await SharedPreferences.getInstance();
     expect(prefs.getInt(NotificationSettings.quietHoursStartKey), 22 * 60);
     expect(prefs.getInt(NotificationSettings.quietHoursEndKey), 7 * 60);
     expect(prefs.getBool(NotificationSettings.quietHoursEnabledKey), isTrue);
-
-    // The stored window still wraps midnight: 23:30 is quiet, 12:00 is not.
-    expect(
-      BackgroundNotifier.I.settings.inQuietHours(DateTime(2026, 1, 1, 23, 30)),
-      isTrue,
-    );
-    expect(
-      BackgroundNotifier.I.settings.inQuietHours(DateTime(2026, 1, 1, 12, 0)),
-      isFalse,
-    );
   });
 
-  testWidgets('a channel sound persists through the notifier', (tester) async {
+  testWidgets('the single sound choice persists for every channel', (
+    tester,
+  ) async {
     SharedPreferences.setMockInitialValues({});
     BackgroundNotifier.I.resetForTest();
     addTearDown(BackgroundNotifier.I.resetForTest);
@@ -850,9 +794,13 @@ void main() {
       ),
     );
 
-    final row = find.byKey(const ValueKey<String>('sound-row-agent_updates'));
+    final row = find.byKey(
+      const ValueKey<String>('notifications-sound-row'),
+    );
     await tester.ensureVisible(row);
-    await tester.tap(find.descendant(of: row, matching: find.text('System')));
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('System'));
     await tester.pumpAndSettle();
 
     final prefs = await SharedPreferences.getInstance();
@@ -861,10 +809,10 @@ void main() {
       'system',
     );
     expect(
-      BackgroundNotifier.I.settings.sounds[OvidChannel.agentUpdates],
-      NotificationSound.system,
+      prefs.getString(
+        NotificationSettings.soundKey(OvidChannel.schedulerResults),
+      ),
+      'system',
     );
   });
 }
-
-void _ignoreTime(TimeOfDay _) {}

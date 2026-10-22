@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 
 // TODO(l10n): route all user-facing copy through the ARB pass.
@@ -121,15 +122,19 @@ class _ProjectsPageState extends State<ProjectsPage> {
       appBar: const OAppBar(title: 'Projects'),
       body: OFadeSlide(
         // The whole page scrolls so the filter, explainer and list still fit
-        // when the text is scaled up on a narrow phone.
-        child: CustomScrollView(
-          slivers: [
-            SliverPadding(
-              padding: const EdgeInsets.symmetric(horizontal: OSpace.screen),
-              sliver: SliverToBoxAdapter(child: _buildHeader(context)),
-            ),
-            ..._buildBodySlivers(context),
-          ],
+        // when the text is scaled up on a narrow phone. The column stops at the
+        // breakpoint cap so a desktop does not stretch the filter row.
+        child: OContent(
+          padding: false,
+          child: CustomScrollView(
+            slivers: [
+              SliverPadding(
+                padding: const EdgeInsets.symmetric(horizontal: OSpace.screen),
+                sliver: SliverToBoxAdapter(child: _buildHeader(context)),
+              ),
+              ..._buildBodySlivers(context),
+            ],
+          ),
         ),
       ),
     );

@@ -242,7 +242,10 @@ void main() {
     final valueBefore = tester.getTopLeft(
       find.byKey(const ValueKey('plan-compare-cell-pro-storage')),
     );
-    expect(find.byKey(const ValueKey('plan-compare-hint')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('plan-compare-scroll')),
+      findsOneWidget,
+    );
 
     _tableScrollable(tester).position.jumpTo(220);
     await tester.pump();
@@ -291,7 +294,9 @@ void main() {
     );
   });
 
-  testWidgets('hides the swipe hint when every column fits', (tester) async {
+  testWidgets('every column fits without scrolling on a wide window', (
+    tester,
+  ) async {
     tester.view.physicalSize = const Size(900, 800);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -302,7 +307,6 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const ValueKey('plan-compare-hint')), findsNothing);
     expect(_tableScrollable(tester).position.maxScrollExtent, 0);
     expect(tester.takeException(), isNull);
   });
@@ -355,7 +359,6 @@ void main() {
       expect(find.text('50 / day'), findsOneWidget);
       expect(find.text('640 / day'), findsNWidgets(3));
       expect(find.text('Current'), findsOneWidget);
-      expect(find.byKey(const ValueKey('plan-compare-hint')), findsOneWidget);
       expect(
         find.byKey(const ValueKey('plan-compare-current-pro')),
         findsOneWidget,

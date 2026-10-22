@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import '../design/o_components.dart';
+import '../design/o_screen.dart' show OBreakpoints;
 import '../design/o_tokens.dart';
 import 'app/app_lock_settings_page.dart';
 import 'browser/browser_page.dart';
@@ -118,32 +119,50 @@ Widget _sheetPage(
 ) {
   final c = OColors.of(context);
   final viewport = MediaQuery.sizeOf(context).height;
-  // A real sheet is capped at ~90 % of the screen, but a short browser window
-  // would then clip the sheet mid-list. Give the sheet the height it needs and
-  // let the page scroll, so every row stays reachable for a reviewer.
-  final sheetHeight = math.max(viewport * 0.92, 720.0);
+  final dialog = MediaQuery.sizeOf(context).width >= OBreakpoints.tablet;
   return OScaffold(
     appBar: OAppBar(title: title, subtitle: subtitle, showBack: false),
     body: ColoredBox(
       color: c.scrim.withValues(alpha: 0.16),
       child: LayoutBuilder(
-        builder: (context, constraints) => SingleChildScrollView(
-          child: ConstrainedBox(
-            constraints: BoxConstraints(minHeight: constraints.maxHeight),
-            child: Align(
-              alignment: Alignment.bottomCenter,
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 560),
-                // A bound is required: with loose constraints the sheet's
-                // scrollable body collapses to zero and the rows vanish.
-                child: SizedBox(
-                  height: sheetHeight,
-                  child: Material(color: c.surface, child: child),
+        builder: (context, constraints) {
+          // A real sheet is capped at ~90 % of the screen. On a phone the frame
+          // keeps a 720 dp floor and lets the page scroll so a short browser
+          // window cannot clip the sheet mid-list; a tablet gets a centred
+          // dialog that fits the window instead.
+          final sheetHeight = dialog
+              ? math.min(720.0, constraints.maxHeight - 2 * OSpace.xl)
+              : math.max(viewport * 0.92, 720.0);
+          return SingleChildScrollView(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(minHeight: constraints.maxHeight),
+              child: Align(
+                alignment: dialog ? Alignment.center : Alignment.bottomCenter,
+                child: Padding(
+                  padding: dialog
+                      ? const EdgeInsets.all(OSpace.xl)
+                      : EdgeInsets.zero,
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 560),
+                    // A bound is required: with loose constraints the sheet's
+                    // scrollable body collapses to zero and the rows vanish.
+                    child: SizedBox(
+                      height: sheetHeight,
+                      child: Material(
+                        color: c.surface,
+                        clipBehavior: Clip.antiAlias,
+                        borderRadius: BorderRadius.circular(
+                          dialog ? ORadius.xl : 0,
+                        ),
+                        child: child,
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ),
-          ),
-        ),
+          );
+        },
       ),
     ),
   );
@@ -159,8 +178,10 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     id: 'splash',
     title: 'Splash',
     group: 'Identity',
-    summary: 'Mark, tagline, startup progress and a retry path',
-    builder: (_) => const SplashPage(),
+    summary: 'Mark, wordmark and startup progress',
+    builder: (_) => const SplashPage(
+      data: V2SplashData(progress: 0.62, statusLabel: 'Loading your chats'),
+    ),
   ),
   V2ScreenEntry(
     id: 'sign_in',
@@ -225,7 +246,7 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     title: 'Live chat',
     group: 'Chat',
     summary: 'Transcript, thinking, tools, artifacts and stop',
-    builder: (_) => const V2LiveChatPage(data: V2LiveChatData()),
+    builder: (_) => V2LiveChatPage(data: previewLiveChatData()),
   ),
   V2ScreenEntry(
     id: 'model_picker',
@@ -321,7 +342,7 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     title: 'Projects',
     group: 'Navigation',
     summary: 'Shared projects, storage and member stacks',
-    builder: (_) => const ProjectsPage(data: V2ProjectsData()),
+    builder: (_) => ProjectsPage(data: previewProjectsData()),
   ),
   V2ScreenEntry(
     id: 'project_detail',
@@ -362,25 +383,36 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     title: 'Studio repo picker',
     group: 'Work',
     summary: 'GitHub connection, repository and branch choice',
-    builder: (_) => const V2RepoPickerPage(data: V2RepoPickerData()),
+    builder: (_) => V2RepoPickerPage(data: previewRepoPickerData()),
   ),
   V2ScreenEntry(
     id: 'studio_workspace',
     title: 'Studio workspace',
     group: 'Work',
     summary: 'File tree, editor, sync and changes',
-    builder: (_) => const V2StudioWorkspacePage(
-      data: V2StudioWorkspaceData(repoName: 'owner/repo', branch: 'main'),
+    builder: (_) => V2StudioWorkspacePage(
+      data: V2StudioWorkspaceData(
+        repoName: 'aarav/ovid-app',
+        branch: 'feature/hero-revamp',
+        filesChanged: 3,
+        additions: 48,
+        deletions: 10,
+        syncCount: 2,
+        openFileName: 'auth_service.dart',
+        openFilePath: 'lib/core/auth_service.dart',
+        fileTree: previewStudioFileNodes(),
+        codeLines: previewStudioCodeLines(),
+      ),
     ),
   ),
   V2ScreenEntry(
     id: 'branch_picker',
     title: 'Branch picker',
     group: 'Work',
-    summary: 'Switch or create a branch with a stash note',
+    summary: 'Switch branch or create one',
     isSheet: true,
-    builder: (_) => const V2BranchPickerSheet(
-      data: V2BranchPickerData(),
+    builder: (_) => V2BranchPickerSheet(
+      data: previewBranchPickerData(),
       showHandle: false,
     ),
   ),
@@ -389,7 +421,7 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     title: 'Changes & diff',
     group: 'Work',
     summary: 'Changed files, diff hunks and commit dock',
-    builder: (_) => const V2ChangesPage(data: V2ChangesData()),
+    builder: (_) => V2ChangesPage(data: previewChangesData()),
   ),
   V2ScreenEntry(
     id: 'code_viewer',
@@ -422,14 +454,19 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     title: 'Live preview',
     group: 'Work',
     summary: 'Sandbox preview, expiry and share controls',
-    builder: (_) => const V2LivePreviewPage(data: V2LivePreviewData()),
+    builder: (_) => V2LivePreviewPage(
+      data: previewLivePreviewData(),
+      onShareLink: () {},
+      onOpenInBrowser: () {},
+      onStop: () {},
+    ),
   ),
   V2ScreenEntry(
     id: 'browser',
     title: 'Browser',
     group: 'Work',
     summary: 'Agent-driven tab, live frames, take control',
-    builder: (_) => const BrowserPage(data: V2BrowserData()),
+    builder: (_) => BrowserPage(data: previewBrowserData()),
   ),
   V2ScreenEntry(
     id: 'take_control',
@@ -451,13 +488,7 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     title: 'Connector detail',
     group: 'Connectors',
     summary: 'Permissions, tools, account and disconnect',
-    builder: (_) => const ConnectorDetailPage(
-      data: V2ConnectorDetailData(
-        id: 'github',
-        name: 'GitHub',
-        description: 'Repositories, issues and pull requests.',
-      ),
-    ),
+    builder: (_) => ConnectorDetailPage(data: previewConnectorDetailData()),
   ),
   V2ScreenEntry(
     id: 'connector_permissions',
@@ -486,14 +517,14 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     title: 'Artifact detail',
     group: 'Library',
     summary: 'Preview, metadata, share, delete',
-    builder: (_) => const ArtifactDetailPage(data: V2ArtifactDetailData()),
+    builder: (_) => ArtifactDetailPage(data: previewArtifactDetailData()),
   ),
   V2ScreenEntry(
     id: 'schedules',
     title: 'Schedules',
     group: 'Schedules',
     summary: 'Scheduled prompts, cadence, runs and source chat',
-    builder: (_) => const SchedulesPage(data: V2SchedulesData()),
+    builder: (_) => SchedulesPage(data: previewSchedulesData()),
   ),
   V2ScreenEntry(
     id: 'schedule_editor',
@@ -507,7 +538,7 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     title: 'Schedule runs',
     group: 'Schedules',
     summary: 'Run history, failures, retry and artifacts',
-    builder: (_) => const ScheduleRunsPage(data: V2ScheduleRunsData()),
+    builder: (_) => ScheduleRunsPage(data: previewScheduleRunsData()),
   ),
   V2ScreenEntry(
     id: 'share_chat',
@@ -515,7 +546,7 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     group: 'Sharing',
     summary: 'Collab or read-only with a fork note',
     isSheet: true,
-    builder: (_) => const ShareChatSheet(data: V2ShareChatSheetData(link: '')),
+    builder: (_) => ShareChatSheet(data: previewShareChatData()),
   ),
   V2ScreenEntry(
     id: 'share_sheet',
@@ -530,14 +561,7 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     title: 'Collaboration live',
     group: 'Sharing',
     summary: 'Up to 50 members, one sender and a turn queue',
-    builder: (_) => const CollabLivePage(
-      data: V2CollabLivePageData(
-        totalMembers: 1,
-        turnHolderName: '',
-        turnTimeLeftLabel: '',
-        creatorPaysStorage: true,
-      ),
-    ),
+    builder: (_) => CollabLivePage(data: previewCollabLiveData()),
   ),
   V2ScreenEntry(
     id: 'collab_members',
@@ -550,37 +574,15 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     id: 'trajectory',
     title: 'Run trajectory',
     group: 'Runs',
-    summary: 'Subagent launches, steps, sources and tokens',
-    builder: (_) => const RunTrajectoryPage(
-      data: V2RunTrajectoryPageData(
-        title: 'Run',
-        runLabel: '',
-        prompt: '',
-        model: 'Auto',
-        tokensLabel: '',
-        durationLabel: '',
-      ),
-    ),
+    summary: 'Subagent launches, steps and token spend',
+    builder: (_) => RunTrajectoryPage(data: previewRunTrajectoryData()),
   ),
   V2ScreenEntry(
     id: 'subagent',
     title: 'Subagent',
     group: 'Runs',
     summary: 'Progress, files, log and the 300-token summary',
-    builder: (_) => const SubagentPage(
-      data: V2SubagentPageData(
-        name: 'Subagent',
-        instanceLabel: '',
-        stepLabel: '',
-        paceLabel: '',
-        goal: '',
-        startedLabel: '',
-        elapsedLabel: '',
-        timeLimitLabel: '8 h',
-        remainingLabel: '',
-        totalLogLines: 0,
-      ),
-    ),
+    builder: (_) => SubagentPage(data: previewSubagentData()),
   ),
   V2ScreenEntry(
     id: 'settings',
@@ -601,21 +603,21 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     title: 'Plan & billing',
     group: 'Settings',
     summary: 'Free/Go/Plus/Pro limits, currency, history',
-    builder: (_) => const PlanBillingPage(data: V2PlanBillingData()),
+    builder: (_) => PlanBillingPage(data: previewPlanBillingData()),
   ),
   V2ScreenEntry(
     id: 'usage',
     title: 'Usage',
     group: 'Settings',
     summary: 'Daily and monthly allowance, models and storage',
-    builder: (_) => const UsagePage(data: V2UsageData()),
+    builder: (_) => UsagePage(data: previewUsageData()),
   ),
   V2ScreenEntry(
     id: 'memory',
     title: 'Memory',
     group: 'Settings',
     summary: 'Master switch, shared memory and scopes',
-    builder: (_) => const MemoryPage(data: V2MemoryPageData()),
+    builder: (_) => MemoryPage(data: previewMemoryData()),
   ),
   V2ScreenEntry(
     id: 'shared_memory',
@@ -674,7 +676,7 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     title: 'Storage',
     group: 'Settings',
     summary: 'Plan quota, breakdown and clean-up',
-    builder: (_) => const StoragePage(data: V2StoragePageData()),
+    builder: (_) => StoragePage(data: previewStorageData()),
   ),
   V2ScreenEntry(
     id: 'appearance',
@@ -695,14 +697,14 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     title: 'Credentials',
     group: 'Settings',
     summary: 'Sign-in providers, GitHub and browser logins',
-    builder: (_) => const CredentialsPage(data: V2CredentialsPageData()),
+    builder: (_) => CredentialsPage(data: previewCredentialsData()),
   ),
   V2ScreenEntry(
     id: 'account_health',
     title: 'Account health',
     group: 'Settings',
     summary: 'Status, usage left, deletion state and services',
-    builder: (_) => const AccountHealthPage(data: V2AccountHealthPageData()),
+    builder: (_) => AccountHealthPage(data: previewAccountHealthPageData()),
   ),
   V2ScreenEntry(
     id: 'about',
@@ -730,7 +732,7 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     title: 'Agent presets',
     group: 'Settings',
     summary: 'General, Coder, Researcher, Writer and custom',
-    builder: (_) => const AgentPresetsPage(data: V2AgentPresetsPageData()),
+    builder: (_) => AgentPresetsPage(data: previewPresetsData()),
   ),
   V2ScreenEntry(
     id: 'response_wait',
@@ -744,14 +746,14 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     title: 'Permissions',
     group: 'Settings',
     summary: 'Camera, microphone, photos, notifications, files',
-    builder: (_) => const PermissionsPage(data: V2PermissionsPageData()),
+    builder: (_) => PermissionsPage(data: previewPermissionsData()),
   ),
   V2ScreenEntry(
     id: 'memory_files',
     title: 'Memory files',
     group: 'Settings',
     summary: 'Global, project and session files, editable',
-    builder: (_) => const MemoryFilesPage(data: V2MemoryFilesPageData()),
+    builder: (_) => MemoryFilesPage(data: previewMemoryFilesData()),
   ),
 
   // ── Component previews ──────────────────────────────────────────────────
@@ -819,7 +821,7 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
       return OScaffold(
         appBar: const OAppBar(
           title: 'Queue dock',
-          subtitle: 'Queued messages above the composer',
+          subtitle: 'Messages above the composer',
           showBack: false,
         ),
         body: Column(
@@ -878,7 +880,7 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     builder: (_) => OScaffold(
       appBar: const OAppBar(
         title: 'Sidebar footer',
-        subtitle: 'Three destinations at the bottom of the drawer',
+        subtitle: 'Destinations at the bottom',
         showBack: false,
       ),
       body: Column(
@@ -923,7 +925,6 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
         child: BrowserViewport(
           status: V2ViewportStatus.live,
           cursor: previewViewportCursor(),
-          onTakeControl: () {},
           onRetry: () {},
         ),
       ),
@@ -951,7 +952,6 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
             child: BrowserViewport(
               status: V2ViewportStatus.live,
               cursor: previewViewportCursor(),
-              onTakeControl: () {},
               onRetry: () {},
             ),
           ),

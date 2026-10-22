@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
@@ -39,7 +38,6 @@ V2LegalPageData _data({
   String offlineNote =
       "You're offline. This is the saved copy of the document.",
   VoidCallback? onBack,
-  VoidCallback? onCopy,
   VoidCallback? onRetry,
 }) {
   return V2LegalPageData(
@@ -53,7 +51,6 @@ V2LegalPageData _data({
     offlineNote: offlineNote,
     errorMessage: errorMessage,
     onBack: onBack,
-    onCopy: onCopy,
     onRetry: onRetry,
   );
 }
@@ -131,8 +128,8 @@ void main() {
   ) async {
     await _pump(tester, _data());
 
-    // The title is shown in the app bar and again as the document heading.
-    expect(find.text('Privacy policy'), findsWidgets);
+    // One heading per screen: the title lives in the app bar only.
+    expect(find.text('Privacy policy'), findsOneWidget);
     expect(find.text('Last updated 12 March 2026'), findsOneWidget);
     expect(
       find.text('How Ovid Si collects, uses and protects your data.'),
@@ -151,6 +148,14 @@ void main() {
     expect(find.text('Privacy policy'), findsWidgets);
     expect(find.text('What we collect'), findsOneWidget);
     expect(find.text('Your choices'), findsOneWidget);
+  });
+
+  testWidgets('the document has no copy chrome in the header', (tester) async {
+    await _pump(tester, _data());
+
+    expect(find.byTooltip('Copy document'), findsNothing);
+    expect(find.bySemanticsLabel('Copy document'), findsNothing);
+    expect(find.bySemanticsLabel('Back'), findsOneWidget);
   });
 
   testWidgets('hides the updated row when no date is known', (tester) async {
@@ -199,57 +204,6 @@ void main() {
 
     expect(find.text('Open document'), findsOneWidget);
     expect(find.text('What we collect'), findsNothing);
-  });
-
-  testWidgets('copy action invokes the injected callback', (tester) async {
-    var copies = 0;
-    await _pump(tester, _data(onCopy: () => copies++));
-
-    await tester.tap(find.byTooltip('Copy document'));
-    await tester.pump();
-
-    expect(copies, 1);
-  });
-
-  testWidgets('copy action copies the document when unwired', (tester) async {
-    final calls = <MethodCall>[];
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
-          calls.add(call);
-          return null;
-        });
-    addTearDown(
-      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(SystemChannels.platform, null),
-    );
-
-    await _pump(tester, _data());
-
-    await tester.tap(find.byTooltip('Copy document'));
-    await tester.pumpAndSettle();
-
-    final setData = calls.firstWhere((c) => c.method == 'Clipboard.setData');
-    final text = (setData.arguments as Map)['text'] as String;
-    expect(text, contains('Privacy policy'));
-    expect(text, contains('Last updated 12 March 2026'));
-    expect(text, contains('What we collect'));
-    expect(text, contains('Session messages and attached files'));
-    expect(find.text('Document copied.'), findsOneWidget);
-  });
-
-  testWidgets('copy action stays disabled while the document is loading', (
-    tester,
-  ) async {
-    final handle = tester.ensureSemantics();
-    await _pump(
-      tester,
-      _data(status: V2LegalPageStatus.loading, onCopy: () {}),
-    );
-
-    expect(find.byType(OSkeletonList), findsOneWidget);
-    final node = tester.getSemantics(find.bySemanticsLabel('Copy document'));
-    expect(node, isSemantics(hasEnabledState: true, isEnabled: false));
-    handle.dispose();
   });
 
   testWidgets('shows the offline note with the saved copy', (tester) async {
@@ -320,7 +274,10 @@ void main() {
     );
 
     expect(find.text('Document unavailable'), findsOneWidget);
-    expect(find.textContaining('not available right now'), findsOneWidget);
+    expect(
+      find.textContaining('Check your connection and try again'),
+      findsOneWidget,
+    );
 
     await tester.tap(find.widgetWithText(OButton, 'Try again'));
     await tester.pump();
@@ -389,7 +346,6 @@ void main() {
                 'licence it is distributed under.',
             offline: true,
             onBack: () {},
-            onCopy: () {},
             sections: const <V2LegalSection>[
               V2LegalSection(
                 heading: 'Flutter and the Dart SDK',
@@ -421,8 +377,12 @@ void main() {
 
         expect(errors, isEmpty, reason: errors.join('\n'));
         expect(find.text('Open-source licences'), findsWidgets);
-        expect(find.text('Flutter and the Dart SDK'), findsOneWidget);
         expect(find.textContaining("You're offline"), findsOneWidget);
+        await tester.scrollUntilVisible(
+          find.text('Flutter and the Dart SDK'),
+          200,
+        );
+        expect(find.text('Flutter and the Dart SDK'), findsOneWidget);
       },
     );
   }
@@ -463,6 +423,24 @@ void main() {
     );
 
     expect(errors, isEmpty, reason: errors.join('\n'));
+    await tester.scrollUntilVisible(find.text('Billing'), 200);
     expect(find.text('Billing'), findsOneWidget);
   });
+
+  for (final width in <double>[600, 900]) {
+    testWidgets('content is centred and capped at $width dp', (tester) async {
+      await _pump(tester, _data(), size: Size(width, 1600));
+
+      final body = tester.getRect(find.byType(ListView));
+      final limit = width >= 900 ? 720.0 : 640.0;
+
+      expect(body.width, lessThanOrEqualTo(limit));
+      expect(body.width, lessThan(width), reason: 'text must not stretch');
+      expect(
+        body.center.dx,
+        moreOrLessEquals(width / 2, epsilon: 1),
+        reason: 'content must be centred, not left aligned',
+      );
+    });
+  }
 }

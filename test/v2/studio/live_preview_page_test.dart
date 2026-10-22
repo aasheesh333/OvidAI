@@ -88,7 +88,8 @@ void main() {
         find.text('Ship AI models in seconds, not weeks.'),
         findsOneWidget,
       );
-      expect(find.text('Live · Preview from your workspace'), findsOneWidget);
+      expect(find.text('Online'), findsOneWidget);
+      expect(find.text('acme-cloud.ovid.app'), findsOneWidget);
       expect(find.text('Expires in 55 min'), findsOneWidget);
     }
   });
@@ -141,41 +142,41 @@ void main() {
     expect(retries, 1);
   });
 
-  testWidgets('share preview reports the primary action', (tester) async {
+  testWidgets('share is a compact secondary action', (tester) async {
     var shares = 0;
     await tester.pumpWidget(
       _app(V2LivePreviewPage(data: _preview(), onShareLink: () => shares++)),
     );
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.text('Share preview'));
-    await tester.tap(find.text('Share preview'));
+    await tester.ensureVisible(find.text('Share'));
+    await tester.tap(find.text('Share'));
     expect(shares, 1);
   });
 
-  testWidgets('open in browser calls its action', (tester) async {
+  testWidgets('open calls its action', (tester) async {
     var opens = 0;
     await tester.pumpWidget(
       _app(V2LivePreviewPage(data: _preview(), onOpenInBrowser: () => opens++)),
     );
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.text('Open in browser'));
-    await tester.tap(find.text('Open in browser'));
+    await tester.ensureVisible(find.text('Open'));
+    await tester.tap(find.text('Open'));
     expect(opens, 1);
   });
 
-  testWidgets('states that the preview is read-only', (tester) async {
+  testWidgets('the viewer carries no explanatory paragraphs', (tester) async {
     await tester.pumpWidget(_app(V2LivePreviewPage(data: _preview())));
     await tester.pumpAndSettle();
 
-    expect(find.text('Read-only preview'), findsOneWidget);
+    expect(find.text('Read-only preview'), findsNothing);
+    expect(find.textContaining('Edits happen in Studio'), findsNothing);
     expect(
-      find.text(
-        'This is a view-only copy of your site. Edits happen in Studio.',
-      ),
-      findsOneWidget,
+      find.textContaining('Changes from Studio show up here'),
+      findsNothing,
     );
+    expect(find.text('Live · Preview from your workspace'), findsNothing);
   });
 
   testWidgets('the expiry countdown ticks down and stops when expired', (
@@ -201,7 +202,9 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
-  testWidgets('refresh and extend are wired to callbacks', (tester) async {
+  testWidgets('refresh is wired and extend is not a primary action', (
+    tester,
+  ) async {
     var refreshes = 0;
     var extensions = 0;
     await tester.pumpWidget(
@@ -215,12 +218,11 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('Refresh preview'));
+    await tester.tap(find.byTooltip('Refresh'));
     expect(refreshes, 1);
 
-    await tester.ensureVisible(find.text('+30 min'));
-    await tester.tap(find.text('+30 min'));
-    expect(extensions, 1);
+    expect(find.text('+30 min'), findsNothing);
+    expect(extensions, 0);
   });
 
   testWidgets('lays out at 320 dp with 200 % text in light and dark', (
@@ -232,17 +234,24 @@ void main() {
 
     for (final dark in <bool>[false, true]) {
       await tester.pumpWidget(
-        _app(V2LivePreviewPage(data: _preview()), dark: dark, textScale: 2),
+        _app(
+          V2LivePreviewPage(
+            data: _preview(),
+            onShareLink: () {},
+            onOpenInBrowser: () {},
+            onStop: () {},
+          ),
+          dark: dark,
+          textScale: 2,
+        ),
       );
       await tester.pumpAndSettle();
 
       expect(tester.takeException(), isNull);
       expect(find.text('Live preview'), findsOneWidget);
-      expect(find.text('Live · Preview from your workspace'), findsOneWidget);
-      expect(find.text('Read-only preview'), findsOneWidget);
-      expect(find.text('Share preview'), findsOneWidget);
-      expect(find.text('Open in browser'), findsOneWidget);
-      expect(find.text('+30 min'), findsOneWidget);
+      expect(find.text('Online'), findsOneWidget);
+      expect(find.text('Share'), findsOneWidget);
+      expect(find.text('Open'), findsOneWidget);
       expect(_offScreenText(tester), isEmpty);
     }
   });
@@ -261,9 +270,8 @@ void main() {
 
     expect(find.byKey(const Key('preview-waiting-frame')), findsOneWidget);
     expect(find.text('Online'), findsNothing);
-    expect(find.text('Live · Preview from your workspace'), findsNothing);
-    expect(find.text('Waiting for the first frame'), findsWidgets);
-    expect(find.text('Waiting for preview URL'), findsOneWidget);
+    expect(find.text('Starting'), findsOneWidget);
+    expect(find.text('Waiting for the first frame'), findsOneWidget);
 
     await tester.ensureVisible(find.text('Check again'));
     await tester.tap(find.text('Check again'));
@@ -287,7 +295,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byKey(const Key('preview-frame-error')), findsOneWidget);
-    expect(find.text('The preview frame could not load'), findsOneWidget);
+    expect(find.text('Frame did not load'), findsOneWidget);
   });
 
   testWidgets('empty state hides the start action when it is not wired', (
@@ -304,10 +312,6 @@ void main() {
 
     expect(find.text('No preview running'), findsOneWidget);
     expect(find.text('Start preview'), findsNothing);
-    expect(
-      find.text('A preview cannot be started from here yet.'),
-      findsOneWidget,
-    );
   });
 
   testWidgets('waiting and error states fit 320 dp at 200 % text', (

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 
 // TODO(l10n): route all user-facing copy through the ARB pass.
@@ -108,7 +109,7 @@ class _SessionActionsSheetState extends State<SessionActionsSheet> {
         return SizedBox(
           height: 320,
           child: OErrorState(
-            title: 'Chat actions did not load',
+            title: 'Chat actions failed',
             message:
                 data.errorMessage ?? 'Check your connection and try again.',
             onRetry: widget.onRetry,
@@ -120,16 +121,17 @@ class _SessionActionsSheetState extends State<SessionActionsSheet> {
           child: OEmptyState(
             icon: Icons.chat_bubble_outline_rounded,
             title: 'Chat not found',
-            message:
-                'This chat may have been deleted. Close this sheet and pick another chat.',
+            message: 'This chat may have been deleted.',
             action: OButton(label: 'Close', onPressed: onClose),
           ),
         );
       case V2SessionActionsStatus.content:
         return Container(
           color: c.surface,
-          child: OFadeSlide(
-            child: SingleChildScrollView(
+          child: OContent(
+            padding: false,
+            child: OFadeSlide(
+              child: SingleChildScrollView(
               padding: const EdgeInsets.fromLTRB(
                 OSpace.l,
                 OSpace.l,
@@ -140,14 +142,28 @@ class _SessionActionsSheetState extends State<SessionActionsSheet> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  _Header(data: data, onClose: onClose),
+                  OSheetHeader(
+                    title: data.title.isEmpty ? 'Chat' : data.title,
+                    titleTrailing: Container(
+                      width: 8,
+                      height: 8,
+                      decoration: BoxDecoration(
+                        color: c.success,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    subtitle: data.meta.isEmpty ? null : data.meta,
+                    onClose: onClose,
+                    closeLabel: 'Close chat actions',
+                    padding: EdgeInsets.zero,
+                  ),
                   const SizedBox(height: OSpace.m),
                   Divider(color: c.hairline, height: 1),
                   const SizedBox(height: OSpace.xs),
                   OStagger(
                     children: [
                       OListRow(
-                        title: 'Pin to top of drawer',
+                        title: 'Pin to top',
                         subtitle: 'Keep this chat handy',
                         icon: _pinned
                             ? Icons.push_pin_rounded
@@ -166,16 +182,22 @@ class _SessionActionsSheetState extends State<SessionActionsSheet> {
                       OListRow(
                         title: 'Rename chat',
                         icon: Icons.edit_outlined,
+                        enabled: widget.onRename != null,
                         onTap: widget.onRename,
                       ),
                       OListRow(
                         title: 'Move to project',
                         icon: Icons.folder_outlined,
+                        enabled: widget.onMoveToProject != null,
                         // Flexible keeps the project chip from squeezing the
                         // title on narrow screens or at large text sizes.
-                        trailing: Flexible(
-                          child: _MoveTrailing(projectName: data.projectName),
-                        ),
+                        trailing: widget.onMoveToProject == null
+                            ? null
+                            : Flexible(
+                                child: _MoveTrailing(
+                                  projectName: data.projectName,
+                                ),
+                              ),
                         onTap: widget.onMoveToProject,
                         showChevron: false,
                       ),
@@ -183,20 +205,26 @@ class _SessionActionsSheetState extends State<SessionActionsSheet> {
                         title: 'Share chat',
                         subtitle: 'Send a link or invite people',
                         icon: Icons.share_outlined,
-                        trailing: Icon(
-                          Icons.open_in_new_rounded,
-                          size: 18,
-                          color: c.textFaint,
-                        ),
+                        enabled: widget.onShare != null,
+                        trailing: widget.onShare == null
+                            ? null
+                            : Icon(
+                                Icons.open_in_new_rounded,
+                                size: 18,
+                                color: c.textFaint,
+                              ),
                         onTap: widget.onShare,
                         showChevron: false,
                       ),
                       OListRow(
                         title: 'Duplicate chat',
                         icon: Icons.content_copy_rounded,
-                        trailing: const Flexible(
-                          child: _TrailingPill(label: 'Branch'),
-                        ),
+                        enabled: widget.onDuplicate != null,
+                        trailing: widget.onDuplicate == null
+                            ? null
+                            : const Flexible(
+                                child: OPill(label: 'Branch'),
+                              ),
                         onTap: widget.onDuplicate,
                         showChevron: false,
                       ),
@@ -204,11 +232,14 @@ class _SessionActionsSheetState extends State<SessionActionsSheet> {
                         title: 'Export as Markdown',
                         subtitle: '.md file with code blocks',
                         icon: Icons.download_outlined,
-                        trailing: Icon(
-                          Icons.arrow_downward_rounded,
-                          size: 18,
-                          color: c.textFaint,
-                        ),
+                        enabled: widget.onExportMarkdown != null,
+                        trailing: widget.onExportMarkdown == null
+                            ? null
+                            : Icon(
+                                Icons.arrow_downward_rounded,
+                                size: 18,
+                                color: c.textFaint,
+                              ),
                         onTap: widget.onExportMarkdown,
                         showChevron: false,
                       ),
@@ -220,11 +251,14 @@ class _SessionActionsSheetState extends State<SessionActionsSheet> {
                     subtitle: 'Irreversible action',
                     icon: Icons.delete_outline_rounded,
                     danger: true,
-                    trailing: Icon(
-                      Icons.arrow_forward_rounded,
-                      size: 18,
-                      color: c.danger,
-                    ),
+                    enabled: widget.onDelete != null,
+                    trailing: widget.onDelete == null
+                        ? null
+                        : Icon(
+                            Icons.arrow_forward_rounded,
+                            size: 18,
+                            color: c.danger,
+                          ),
                     onTap: widget.onDelete,
                     showChevron: false,
                   ),
@@ -254,7 +288,7 @@ class _SessionActionsSheetState extends State<SessionActionsSheet> {
                         const SizedBox(width: OSpace.s),
                         Expanded(
                           child: Text(
-                            "Deleting removes this chat's files, artifacts, and learned memory from your cloud account. This cannot be undone.",
+                            'Deletes this chat, its files and memory. Cannot be undone.',
                             style: OType.caption.copyWith(color: c.textMuted),
                           ),
                         ),
@@ -265,73 +299,9 @@ class _SessionActionsSheetState extends State<SessionActionsSheet> {
               ),
             ),
           ),
+        ),
         );
     }
-  }
-}
-
-class _Header extends StatelessWidget {
-  const _Header({required this.data, this.onClose});
-
-  final V2SessionActionsData data;
-  final VoidCallback? onClose;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Row(
-                children: [
-                  Flexible(
-                    child: Semantics(
-                      container: true,
-                      header: true,
-                      child: Text(
-                        data.title.isEmpty ? 'Chat' : data.title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.h2.copyWith(color: c.text),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: OSpace.s),
-                  Container(
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(
-                      color: c.success,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                ],
-              ),
-              if (data.meta.isNotEmpty) ...[
-                const SizedBox(height: OSpace.xs),
-                Text(
-                  data.meta,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ],
-            ],
-          ),
-        ),
-        const SizedBox(width: OSpace.s),
-        OIconButton(
-          icon: Icons.close_rounded,
-          semanticLabel: 'Close chat actions',
-          onPressed: onClose,
-        ),
-      ],
-    );
   }
 }
 
@@ -352,55 +322,12 @@ class _MoveTrailing extends StatelessWidget {
         Flexible(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 130),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                color: c.surfaceRaised,
-                borderRadius: BorderRadius.circular(ORadius.pill),
-              ),
-              child: Text(
-                projectName!,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: OType.caption.copyWith(color: c.textMuted),
-              ),
-            ),
+            child: OPill(label: projectName!),
           ),
         ),
         const SizedBox(width: OSpace.xs),
         Icon(Icons.chevron_right_rounded, size: 20, color: c.textFaint),
       ],
-    );
-  }
-}
-
-/// Compact pill for row trailing content.
-///
-/// Mirrors [OPill]'s neutral look but grows with the text scale instead of
-/// being pinned to 24 dp, so large text is never clipped.
-class _TrailingPill extends StatelessWidget {
-  const _TrailingPill({required this.label});
-
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-      decoration: BoxDecoration(
-        color: c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-      ),
-      child: Text(
-        label,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: OType.caption.copyWith(
-          color: c.textMuted,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
     );
   }
 }

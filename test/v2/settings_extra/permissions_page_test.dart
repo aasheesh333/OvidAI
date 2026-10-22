@@ -48,7 +48,6 @@ V2PermissionsPageData _data({
   ValueChanged<String>? onRequest,
   VoidCallback? onOpenSettings,
   ValueChanged<String>? onOpenSettingsFor,
-  VoidCallback? onResetAll,
   VoidCallback? onRefresh,
   VoidCallback? onRetry,
 }) {
@@ -58,7 +57,6 @@ V2PermissionsPageData _data({
     onRequest: onRequest,
     onOpenSettings: onOpenSettings,
     onOpenSettingsFor: onOpenSettingsFor,
-    onResetAll: onResetAll,
     onRefresh: onRefresh,
     onRetry: onRetry,
   );
@@ -126,28 +124,36 @@ Future<void> _pumpClean(
 }
 
 void main() {
-  testWidgets('renders every permission with a status in light', (
+  testWidgets('renders five permissions, each with a status and one action', (
     tester,
   ) async {
     await _pump(tester, _data());
 
     expect(find.text('Permissions'), findsOneWidget);
-    expect(
-      find.text('Ovid only asks when it needs something.'),
-      findsOneWidget,
-    );
     expect(find.text('Camera'), findsOneWidget);
     expect(find.text('Microphone'), findsOneWidget);
     expect(find.text('Granted'), findsNWidgets(2));
     expect(find.text('Not asked'), findsNWidgets(2));
     expect(find.text('Blocked'), findsOneWidget);
+    expect(find.text('Allow'), findsNWidgets(2));
+    expect(find.text('Settings'), findsNWidgets(3));
+    // The explainer, the reset control and the footer are gone.
+    expect(
+      find.text('Ovid only asks when it needs something.'),
+      findsNothing,
+    );
+    expect(find.text('Reset all permissions'), findsNothing);
+    expect(find.text('Open Android settings'), findsNothing);
   });
 
   testWidgets('renders in dark', (tester) async {
-    await _pump(tester, _data(), dark: true);
+    await _pump(tester, _data(onRefresh: () {}), dark: true);
 
     expect(find.text('Photos'), findsOneWidget);
-    expect(find.text('Open Android settings'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('permissions-refresh')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('fits 320dp at 200% text in light without overflow', (
@@ -208,7 +214,7 @@ void main() {
     String? requested;
     await _pump(tester, _data(onRequest: (id) => requested = id));
 
-    final request = find.text('Request').first;
+    final request = find.text('Allow').first;
     await tester.ensureVisible(request);
     await tester.tap(request);
     await tester.pumpAndSettle();
@@ -221,7 +227,7 @@ void main() {
 
     await _pump(tester, _data());
 
-    final request = tester.getSemantics(find.text('Request').first);
+    final request = tester.getSemantics(find.text('Allow').first);
     expect(request, isSemantics(isButton: true, isEnabled: false));
 
     handle.dispose();
@@ -231,25 +237,24 @@ void main() {
     await _pump(tester, _data(onRequest: (_) {}, onOpenSettings: () {}));
 
     final buttons = tester.widgetList<OButton>(find.byType(OButton)).toList();
-    final request = buttons.firstWhere((button) => button.label == 'Request');
-    expect(request.semanticLabel, 'Request Camera access');
+    final request = buttons.firstWhere((button) => button.label == 'Allow');
+    expect(request.semanticLabel, 'Allow Camera');
 
     final settings = buttons.firstWhere(
-      (button) => button.label == 'Open settings',
+      (button) => button.label == 'Settings',
     );
     expect(settings.semanticLabel, 'Open settings for Microphone');
   });
 
-  testWidgets('opens Android settings from the footer', (tester) async {
-    var opens = 0;
-    await _pump(tester, _data(onOpenSettings: () => opens++));
+  testWidgets('refreshes from the header', (tester) async {
+    var refreshes = 0;
+    await _pump(tester, _data(onRefresh: () => refreshes++));
 
-    final button = find.text('Open Android settings');
-    await tester.ensureVisible(button);
-    await tester.tap(button);
+    final refresh = find.byKey(const ValueKey('permissions-refresh'));
+    await tester.tap(refresh);
     await tester.pumpAndSettle();
 
-    expect(opens, 1);
+    expect(refreshes, 1);
   });
 
   testWidgets('keeps every button at least 48dp tall', (tester) async {
@@ -272,13 +277,9 @@ void main() {
       reduceMotion: true,
     );
 
-    expect(
-      find.text('Ovid only asks when it needs something.'),
-      findsOneWidget,
-    );
     expect(find.text('Camera'), findsOneWidget);
     expect(find.text('Blocked'), findsOneWidget);
-    expect(find.text('Open Android settings'), findsOneWidget);
+    expect(find.text('Settings'), findsNWidgets(3));
   });
 
   testWidgets('shows the empty state and opens settings', (tester) async {
@@ -293,102 +294,25 @@ void main() {
     );
 
     expect(find.text('No permissions to review'), findsOneWidget);
-    await tester.tap(find.text('Open Android settings'));
+    await tester.tap(find.text('Open settings'));
     await tester.pumpAndSettle();
 
     expect(opens, 1);
   });
 
-  testWidgets('reset all permissions confirms before revoking everything', (
-    tester,
-  ) async {
-    var resets = 0;
-    await _pump(tester, _data(onResetAll: () => resets++));
+  testWidgets('centres the list at 600 dp', (tester) async {
+    await _pump(tester, _data(), size: const Size(600, 1000));
 
-    expect(find.text('Reset all permissions'), findsOneWidget);
-    expect(
-      find.textContaining('Revoke camera, microphone, photos'),
-      findsOneWidget,
-    );
-
-    await tester.ensureVisible(find.text('Reset all permissions'));
-    await tester.tap(find.text('Reset all permissions'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Reset all permissions?'), findsOneWidget);
-    expect(
-      find.textContaining('Ovid will lose access to Camera, Microphone'),
-      findsOneWidget,
-    );
-    expect(
-      find.textContaining('does not delete chats, files or memory'),
-      findsOneWidget,
-    );
-
-    await tester.tap(find.text('Cancel'));
-    await tester.pumpAndSettle();
-    expect(resets, 0);
-
-    await tester.ensureVisible(find.text('Reset all permissions'));
-    await tester.tap(find.text('Reset all permissions'));
-    await tester.pumpAndSettle();
-    await tester.tap(
-      find.byKey(const ValueKey('reset-all-permissions-confirm')),
-    );
-    await tester.pumpAndSettle();
-
-    expect(resets, 1);
-  });
-
-  testWidgets('reset row is disabled when no action is wired', (tester) async {
-    final handle = tester.ensureSemantics();
-    await _pump(tester, _data());
-
-    final row = tester.getSemantics(
-      find.byKey(const ValueKey('reset-all-permissions-row')),
-    );
-    expect(row, isSemantics(isButton: false, isEnabled: false));
-
-    handle.dispose();
-  });
-
-  testWidgets('reset confirm fits 320dp at 200% text in both themes', (
-    tester,
-  ) async {
-    for (final dark in [false, true]) {
-      final errors = <FlutterErrorDetails>[];
-      final previous = FlutterError.onError;
-      FlutterError.onError = errors.add;
-
-      await _pump(
-        tester,
-        _data(onResetAll: () {}),
-        dark: dark,
-        size: const Size(320, 640),
-        textScale: 2,
-      );
-      await tester.ensureVisible(find.text('Reset all permissions'));
-      await tester.tap(find.text('Reset all permissions'));
-      await tester.pumpAndSettle();
-
-      FlutterError.onError = previous;
-      expect(
-        errors,
-        isEmpty,
-        reason: errors.map((error) => error.toString()).join('\n'),
-      );
-      expect(find.text('Reset all permissions?'), findsOneWidget);
-
-      await tester.tap(find.text('Cancel'));
-      await tester.pumpAndSettle();
-    }
+    final card = find.byType(OCard).first;
+    expect(tester.getSize(card).width, lessThanOrEqualTo(640));
+    expect(tester.getCenter(card).dx, closeTo(300, 0.5));
   });
 
   testWidgets('each row opens its own Android settings page', (tester) async {
     String? opened;
     await _pump(tester, _data(onOpenSettingsFor: (id) => opened = id));
 
-    final open = find.text('Open settings').first;
+    final open = find.text('Settings').first;
     await tester.ensureVisible(open);
     await tester.tap(open);
     await tester.pumpAndSettle();
@@ -402,7 +326,7 @@ void main() {
     var opens = 0;
     await _pump(tester, _data(onOpenSettings: () => opens++));
 
-    final open = find.text('Open settings').first;
+    final open = find.text('Settings').first;
     await tester.ensureVisible(open);
     await tester.tap(open);
     await tester.pumpAndSettle();
@@ -418,7 +342,7 @@ void main() {
       _data(onRequest: (id) => requested = id, onRefresh: () => refreshes++),
     );
 
-    final request = find.text('Request').first;
+    final request = find.text('Allow').first;
     await tester.ensureVisible(request);
     await tester.tap(request);
     await tester.pumpAndSettle();
@@ -436,18 +360,6 @@ void main() {
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await tester.pump();
-
-    expect(refreshes, 1);
-  });
-
-  testWidgets('the refresh button reloads the real state', (tester) async {
-    var refreshes = 0;
-    await _pump(tester, _data(onRefresh: () => refreshes++));
-
-    final refresh = find.byKey(const ValueKey('permissions-refresh'));
-    await tester.ensureVisible(refresh);
-    await tester.tap(refresh);
-    await tester.pumpAndSettle();
 
     expect(refreshes, 1);
   });

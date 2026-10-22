@@ -191,8 +191,8 @@ class ProjectDetailContent extends StatelessWidget {
         height: 380,
         child: OEmptyState(
           icon: Icons.folder_open_rounded,
-          title: 'Nothing here yet',
-          message: 'Start a chat in this project or add a memory file.',
+          title: 'No memories yet',
+          message: 'Memories from this project appear here.',
           action: onSaveMemory == null
               ? null
               : OButton(
@@ -223,7 +223,7 @@ class ProjectDetailContent extends StatelessWidget {
           ),
           if (data.chats.isNotEmpty) ...[
             const SizedBox(height: OSpace.s),
-            _Section(
+            OSectionHeader(
               label: 'Chats',
               trailing: Text(
                 data.chatLabel,
@@ -233,6 +233,14 @@ class ProjectDetailContent extends StatelessWidget {
                   color: OColors.of(context).textFaint,
                 ),
               ),
+              padding: const EdgeInsets.fromLTRB(
+                OSpace.s,
+                OSpace.l,
+                OSpace.s,
+                OSpace.xs,
+              ),
+            ),
+            OStagger(
               children: [
                 for (final chat in data.chats)
                   _ChatRow(chat: chat, onTap: onChatTap),
@@ -240,7 +248,7 @@ class ProjectDetailContent extends StatelessWidget {
             ),
           ],
           const SizedBox(height: OSpace.s),
-          _Section(
+          OSectionHeader(
             label: 'Memory',
             trailing: onSaveMemory == null
                 ? null
@@ -250,6 +258,14 @@ class ProjectDetailContent extends StatelessWidget {
                     size: 18,
                     onPressed: () => _openEditor(context, null),
                   ),
+            padding: const EdgeInsets.fromLTRB(
+              OSpace.s,
+              OSpace.l,
+              OSpace.s,
+              OSpace.xs,
+            ),
+          ),
+          OStagger(
             children: [
               if (data.memoryFiles.isEmpty)
                 _MemoryHint(
@@ -474,34 +490,6 @@ class _StorageCard extends StatelessWidget {
           OProgressBar(value: fraction),
         ],
       ),
-    );
-  }
-}
-
-class _Section extends StatelessWidget {
-  const _Section({required this.label, required this.children, this.trailing});
-
-  final String label;
-  final List<Widget> children;
-  final Widget? trailing;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        OSectionHeader(
-          label: label,
-          trailing: trailing,
-          padding: const EdgeInsets.fromLTRB(
-            OSpace.s,
-            OSpace.l,
-            OSpace.s,
-            OSpace.xs,
-          ),
-        ),
-        OStagger(children: children),
-      ],
     );
   }
 }

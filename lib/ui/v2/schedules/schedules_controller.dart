@@ -64,7 +64,8 @@ ScheduleTrigger? triggerFromDraft(V2ScheduleDraft draft) {
       return ScheduleTrigger.cron(cadence.cronExpression, tz: zone);
     case V2CadenceFrequency.custom:
       final rrule = normalizedCustomRrule(cadence.customRule);
-      final cron = normalizedCustomExpression(cadence.customRule) ??
+      final cron =
+          normalizedCustomExpression(cadence.customRule) ??
           (rrule == null ? null : rruleToCron(rrule));
       return cron == null ? null : ScheduleTrigger.cron(cron, tz: zone);
   }
@@ -84,8 +85,7 @@ String titleFromDraft(V2ScheduleDraft draft) {
 /// real cadence rather than from a hardcoded label.
 V2ScheduleItem scheduleItemFromDto(ScheduleDto dto, DateTime now) {
   final cadence = cadenceFromTrigger(dto.trigger);
-  final failed =
-      dto.status == 'failed' || dto.lastResult?.status == 'failed';
+  final failed = dto.status == 'failed' || dto.lastResult?.status == 'failed';
   return V2ScheduleItem(
     id: dto.id,
     title: dto.title.trim().isEmpty ? 'Untitled schedule' : dto.title,
@@ -95,17 +95,13 @@ V2ScheduleItem scheduleItemFromDto(ScheduleDto dto, DateTime now) {
     cadence: cadence,
     enabled: dto.status == 'pending',
     lastRunFailed: failed,
-    failureMessage: dto.lastResult?.message,
-    createdLabel: dto.createdAt == null ? null : _dateLabel(dto.createdAt!),
   );
 }
 
 class SchedulesController extends ChangeNotifier {
-  SchedulesController({
-    ScheduleGateway? gateway,
-    DateTime Function()? clock,
-  })  : _gateway = gateway ?? const ScheduleClientGateway(),
-        _clock = clock ?? DateTime.now;
+  SchedulesController({ScheduleGateway? gateway, DateTime Function()? clock})
+    : _gateway = gateway ?? const ScheduleClientGateway(),
+      _clock = clock ?? DateTime.now;
 
   final ScheduleGateway _gateway;
   final DateTime Function() _clock;
@@ -125,11 +121,11 @@ class SchedulesController extends ChangeNotifier {
   bool isBusy(String id) => _busy.contains(id);
 
   V2SchedulesData get data => V2SchedulesData(
-        status: _status,
-        schedules: _items,
-        now: _clock(),
-        errorMessage: _errorMessage,
-      );
+    status: _status,
+    schedules: _items,
+    now: _clock(),
+    errorMessage: _errorMessage,
+  );
 
   void clearNotice() => _notice = null;
 
@@ -199,7 +195,10 @@ class SchedulesController extends ChangeNotifier {
       return true;
     } catch (error) {
       final restored = <V2ScheduleItem>[..._items];
-      restored.insert(index > restored.length ? restored.length : index, removed);
+      restored.insert(
+        index > restored.length ? restored.length : index,
+        removed,
+      );
       _items = restored;
       _status = V2SchedulesStatus.content;
       _notice = 'Could not delete “${removed.title}”. ${_reason(error)}';
@@ -210,7 +209,8 @@ class SchedulesController extends ChangeNotifier {
     }
   }
 
-  Future<bool> runNow(V2ScheduleItem item) async {    if (_busy.contains(item.id)) return false;
+  Future<bool> runNow(V2ScheduleItem item) async {
+    if (_busy.contains(item.id)) return false;
     _busy.add(item.id);
     notifyListeners();
     try {
@@ -257,11 +257,7 @@ class SchedulesController extends ChangeNotifier {
       return 'This cadence cannot be saved yet. Pick a day or a cron rule.';
     }
     try {
-      await _gateway.update(
-        id,
-        description: draft.prompt,
-        trigger: trigger,
-      );
+      await _gateway.update(id, description: draft.prompt, trigger: trigger);
       await load(showLoading: false);
       _notice = 'Schedule updated.';
       return null;
@@ -295,23 +291,4 @@ class SchedulesController extends ChangeNotifier {
 String _zoneShort(String zone) {
   final slash = zone.lastIndexOf('/');
   return slash < 0 ? zone : zone.substring(slash + 1);
-}
-
-String _dateLabel(DateTime at) {
-  const months = <String>[
-    'Jan',
-    'Feb',
-    'Mar',
-    'Apr',
-    'May',
-    'Jun',
-    'Jul',
-    'Aug',
-    'Sep',
-    'Oct',
-    'Nov',
-    'Dec',
-  ];
-  final local = at.toLocal();
-  return '${months[local.month - 1]} ${local.day}, ${local.year}';
 }

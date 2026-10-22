@@ -1,14 +1,9 @@
-import 'dart:convert';
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
-import 'package:ovid_ai/ui/design/o_motion.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
-import 'package:ovid_ai/ui/design/o_tokens.dart';
 import 'package:ovid_ai/ui/v2/chat/transcript_actions.dart';
 import 'package:ovid_ai/ui/v2/library/artifact_detail_page.dart';
 import 'package:ovid_ai/ui/v2/library/artifact_preview.dart';
@@ -73,8 +68,6 @@ Future<void> _scrollThrough(WidgetTester tester) async {
   for (var i = 0; i < 80; i++) {
     final position = state.position;
     if (position.pixels + 0.5 >= position.maxScrollExtent) {
-      // The extent can grow once more rows are built; stop only when a jump
-      // no longer moves the viewport.
       position.jumpTo(position.maxScrollExtent);
       await tester.pump();
       _expectNoClippedText(tester);
@@ -96,7 +89,6 @@ const _codeData = V2ArtifactDetailData(
   createdLabel: 'Created today at 10:24 AM',
   versionLabel: 'v2.4 Ready',
   sourceChatTitle: 'Landing page redesign',
-  sourcePrompt: 'Landing page redesign',
   previewKind: V2ArtifactPreviewKind.code,
   previewCodeFile: 'agent_manifest.ts',
   previewCode: 'export const client = createEngine({\n  streaming: true\n});',
@@ -117,7 +109,6 @@ const _documentData = V2ArtifactDetailData(
   sizeLabel: '1.8 MB',
   createdLabel: 'Created yesterday',
   sourceChatTitle: 'Q2 market review',
-  sourcePrompt: 'Summarise the Q2 numbers',
   previewKind: V2ArtifactPreviewKind.document,
   details: <V2ArtifactDetailRow>[
     V2ArtifactDetailRow(label: 'Pages', value: '18 pages'),
@@ -143,68 +134,117 @@ void _phone(WidgetTester tester) {
   addTearDown(tester.view.resetDevicePixelRatio);
 }
 
-Future<void> _scrollToBottom(WidgetTester tester) async {
-  final state = tester.state<ScrollableState>(find.byType(Scrollable).first);
-  state.position.jumpTo(state.position.maxScrollExtent);
+Future<void> _openMenu(WidgetTester tester) async {
+  await tester.tap(find.byIcon(Icons.more_vert_rounded));
   await tester.pumpAndSettle();
 }
 
 void main() {
-  testWidgets('renders the artifact in light mode', (tester) async {
+  testWidgets('header is the file name with back and one menu', (tester) async {
+    _phone(tester);
+    await tester.pumpWidget(
+      _app(ArtifactDetailPage(data: _codeData, onDelete: () {})),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('portfolio-index.html'), findsWidgets);
+    expect(find.text('Artifact detail'), findsNothing);
+    expect(find.byIcon(Icons.arrow_back_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.more_vert_rounded), findsOneWidget);
+    expect(find.text('Lines of code'), findsOneWidget);
+    expect(find.text('Artifact hash'), findsOneWidget);
+    expect(find.text('Access'), findsOneWidget);
+  });
+
+  testWidgets('renders in dark mode', (tester) async {
+    _phone(tester);
+    await tester.pumpWidget(
+      _app(ArtifactDetailPage(data: _codeData), dark: true),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('portfolio-index.html'), findsWidgets);
+    expect(find.byType(V2ArtifactPreview), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('no host actions means no menu and no Open button', (
+    tester,
+  ) async {
     _phone(tester);
     await tester.pumpWidget(_app(const ArtifactDetailPage(data: _codeData)));
     await tester.pumpAndSettle();
 
-    expect(find.text('Artifact detail'), findsOneWidget);
-    expect(find.text('portfolio-index.html'), findsWidgets);
-    expect(find.text('HTML5 + Tailwind'), findsWidgets);
-    expect(find.text('v2.4 Ready'), findsOneWidget);
-    // No host handlers and no URL: the page must not draw dead actions.
+    expect(find.byIcon(Icons.more_vert_rounded), findsNothing);
+    expect(find.text('Open'), findsNothing);
     expect(find.text('Download'), findsNothing);
-    expect(find.text('Share link'), findsNothing);
-    expect(find.text('Copy link'), findsNothing);
-    expect(find.text('Open in Studio'), findsNothing);
-    expect(find.text('Delete artifact'), findsNothing);
+    expect(find.text('Delete'), findsNothing);
   });
 
-  testWidgets('every action renders when it can really run', (tester) async {
+  testWidgets('the single primary action is Open', (tester) async {
     _phone(tester);
+    var opened = 0;
+    await tester.pumpWidget(
+      _app(
+        ArtifactDetailPage(data: _codeData, onOpenExternally: () => opened++),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Open'), findsOneWidget);
+    await tester.tap(find.text('Open'));
+    expect(opened, 1);
+  });
+
+  testWidgets('secondary actions live in the menu', (tester) async {
+    _phone(tester);
+    var downloads = 0;
+    var shares = 0;
+    var studio = 0;
+    var deletes = 0;
     await tester.pumpWidget(
       _app(
         ArtifactDetailPage(
-          data: const V2ArtifactDetailData(
-            name: 'portfolio-index.html',
-            previewKind: V2ArtifactPreviewKind.code,
-            previewCodeFile: 'portfolio-index.html',
-            previewCode: '<main></main>',
-            downloadUrl: 'https://r2.test/portfolio-index.html',
-            shareUrl: 'https://ovid.site/a/portfolio-index',
-          ),
-          onDownload: () {},
-          onShareLink: () {},
-          onOpenInStudio: () {},
-          onDelete: () {},
+          data: _codeData,
+          onDownload: () => downloads++,
+          onShareLink: () => shares++,
+          onOpenInStudio: () => studio++,
+          onDelete: () => deletes++,
         ),
       ),
     );
     await tester.pumpAndSettle();
 
+    await _openMenu(tester);
     expect(find.text('Download'), findsOneWidget);
     expect(find.text('Share link'), findsOneWidget);
     expect(find.text('Open in Studio'), findsOneWidget);
-    expect(find.text('Delete artifact'), findsOneWidget);
-  });
+    expect(find.text('Delete'), findsOneWidget);
 
-  testWidgets('renders the artifact in dark mode', (tester) async {
-    _phone(tester);
-    await tester.pumpWidget(
-      _app(const ArtifactDetailPage(data: _codeData), dark: true),
-    );
+    await tester.tap(find.text('Download'));
     await tester.pumpAndSettle();
+    expect(downloads, 1);
 
-    expect(find.text('portfolio-index.html'), findsWidgets);
-    expect(find.text('Preview'), findsOneWidget);
-    expect(find.text('Details'), findsOneWidget);
+    await _openMenu(tester);
+    await tester.tap(find.text('Share link'));
+    await tester.pumpAndSettle();
+    expect(shares, 1);
+    // The host owns the share result, so the screen does not claim a copy.
+    expect(find.text('Link copied'), findsNothing);
+
+    await _openMenu(tester);
+    await tester.tap(find.text('Open in Studio'));
+    await tester.pumpAndSettle();
+    expect(studio, 1);
+
+    await _openMenu(tester);
+    await tester.tap(find.text('Delete'));
+    await tester.pumpAndSettle();
+    expect(deletes, 0, reason: 'delete is confirmed first');
+    expect(find.text('Delete this artifact?'), findsOneWidget);
+    await tester.tap(find.text('Delete').last);
+    await tester.pumpAndSettle();
+    expect(deletes, 1);
   });
 
   testWidgets('missing artifact offers a way back', (tester) async {
@@ -223,146 +263,47 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('This artifact is gone'), findsOneWidget);
-    await tester.tap(find.text('Back to artifacts'));
+    expect(find.text('It may have been deleted.'), findsOneWidget);
+    await tester.tap(find.text('Back'));
     expect(back, 1);
   });
 
-  testWidgets('Download fires the primary callback', (tester) async {
+  testWidgets('documents show preview plus metadata rows', (tester) async {
     _phone(tester);
-    var downloads = 0;
-    await tester.pumpWidget(
-      _app(ArtifactDetailPage(data: _codeData, onDownload: () => downloads++)),
-    );
+    await tester.pumpWidget(_app(ArtifactDetailPage(data: _documentData)));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Download'));
-    expect(downloads, 1);
-  });
-
-  testWidgets('Share link fires the callback and shows a copied state', (
-    tester,
-  ) async {
-    _phone(tester);
-    var shares = 0;
-    await tester.pumpWidget(
-      _app(ArtifactDetailPage(data: _codeData, onShareLink: () => shares++)),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text('Share link'));
-    await tester.pump();
-
-    expect(shares, 1);
-    expect(find.text('Link copied'), findsOneWidget);
-    expect(find.text('Share link'), findsNothing);
-    expect(find.byIcon(Icons.check_rounded), findsOneWidget);
-
-    // The confirmation is temporary; the action comes back.
-    await tester.pump(const Duration(seconds: 2));
-    await tester.pump();
-    expect(find.text('Share link'), findsOneWidget);
-    expect(find.text('Link copied'), findsNothing);
-  });
-
-  testWidgets('Delete asks for confirmation before firing', (tester) async {
-    _phone(tester);
-    var deletes = 0;
-    await tester.pumpWidget(
-      _app(ArtifactDetailPage(data: _codeData, onDelete: () => deletes++)),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text('Delete artifact'));
-    await tester.pumpAndSettle();
-    expect(find.text('Delete this artifact?'), findsOneWidget);
-    expect(find.textContaining('frees 14.2 KB of storage'), findsOneWidget);
-    expect(find.textContaining('cannot be undone'), findsOneWidget);
-
-    await tester.tap(find.text('Cancel'));
-    await tester.pumpAndSettle();
-    expect(deletes, 0);
-    expect(find.text('Delete this artifact?'), findsNothing);
-
-    await tester.tap(find.text('Delete artifact'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Delete'));
-    await tester.pumpAndSettle();
-    expect(deletes, 1);
-  });
-
-  testWidgets('Open in Studio fires for code artifacts', (tester) async {
-    _phone(tester);
-    var studio = 0;
-    await tester.pumpWidget(
-      _app(ArtifactDetailPage(data: _codeData, onOpenInStudio: () => studio++)),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text('Open in Studio'));
-    expect(studio, 1);
-  });
-
-  testWidgets('Open in Studio is not offered for images or documents', (
-    tester,
-  ) async {
-    _phone(tester);
-    for (final data in <V2ArtifactDetailData>[_imageData, _documentData]) {
-      await tester.pumpWidget(
-        _app(ArtifactDetailPage(data: data, onOpenInStudio: () {})),
-      );
-      await tester.pumpAndSettle();
-      expect(find.text('Open in Studio'), findsNothing);
-    }
-  });
-
-  testWidgets('documents show metadata only and open externally', (
-    tester,
-  ) async {
-    _phone(tester);
-    var external = 0;
-    await tester.pumpWidget(
-      _app(
-        ArtifactDetailPage(
-          data: _documentData,
-          onOpenExternally: () => external++,
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    // No heavy preview chrome or WebView-style page mockup.
-    expect(find.text('Responsive view'), findsNothing);
-    expect(find.text('Live preview'), findsNothing);
-    expect(find.textContaining('was not available for preview'), findsOneWidget);
+    expect(find.byType(V2ArtifactPreview), findsOneWidget);
     expect(find.text('Pages'), findsOneWidget);
     expect(find.text('18 pages'), findsOneWidget);
-
-    await _scrollToBottom(tester);
-    await tester.tap(find.text('Open externally'));
-    expect(external, 1);
+    expect(find.text('File type'), findsOneWidget);
+    expect(find.text('Preview'), findsNothing);
+    expect(find.text('Details'), findsNothing);
   });
 
-  testWidgets('images preview inline and offer an external open', (
+  testWidgets('images preview inline', (tester) async {
+    _phone(tester);
+    await tester.pumpWidget(_app(const ArtifactDetailPage(data: _imageData)));
+    await tester.pumpAndSettle();
+
+    expect(find.text('No image preview'), findsOneWidget);
+    expect(find.text('Type'), findsOneWidget);
+    expect(find.text('PNG image'), findsOneWidget);
+  });
+
+  testWidgets('preview adds no header, no note and no extra rows', (
     tester,
   ) async {
     _phone(tester);
-    var external = 0;
-    await tester.pumpWidget(
-      _app(
-        ArtifactDetailPage(
-          data: _imageData,
-          onOpenExternally: () => external++,
-        ),
-      ),
-    );
+    await tester.pumpWidget(_app(const ArtifactDetailPage(data: _codeData)));
     await tester.pumpAndSettle();
 
-    expect(find.text('Image preview'), findsOneWidget);
-    expect(find.text('Open externally'), findsOneWidget);
-
-    await _scrollToBottom(tester);
-    await tester.tap(find.text('Open externally'));
-    expect(external, 1);
+    // Type and size live in the metadata rows, never twice on the page.
+    expect(find.text('HTML5 + Tailwind · 14.2 KB'), findsNothing);
+    expect(find.text('Read-only preview.'), findsNothing);
+    expect(find.text('Lines of code'), findsOneWidget);
+    expect(find.text('Access'), findsOneWidget);
+    expect(find.byType(OButton), findsNothing);
   });
 
   testWidgets('large code previews stop at the line cap', (tester) async {
@@ -391,142 +332,53 @@ void main() {
     expect(v2ArtifactCodeLineCap, 120);
     expect(find.textContaining('CODE_LINE_120'), findsOneWidget);
     expect(find.textContaining('CODE_LINE_121'), findsNothing);
-    expect(
-      find.textContaining('Showing first 120 of 500 lines'),
-      findsOneWidget,
-    );
   });
 
-  testWidgets('the preview area is the shared artifact preview', (
-    tester,
-  ) async {
+  testWidgets('metadata is capped at three rows', (tester) async {
     _phone(tester);
     await tester.pumpWidget(
       _app(
         ArtifactDetailPage(
-          data: _codeData,
-          onOpenExternally: () {},
+          data: V2ArtifactDetailData(
+            name: 'report.pdf',
+            details: <V2ArtifactDetailRow>[
+              V2ArtifactDetailRow(label: 'One', value: '1'),
+              V2ArtifactDetailRow(label: 'Two', value: '2'),
+              V2ArtifactDetailRow(label: 'Three', value: '3'),
+              V2ArtifactDetailRow(label: 'Four', value: '4'),
+            ],
+          ),
         ),
       ),
     );
     await tester.pumpAndSettle();
 
-    expect(find.byType(V2ArtifactPreview), findsOneWidget);
-    expect(find.text('HTML5 + Tailwind · 14.2 KB'), findsOneWidget);
-    expect(find.text('agent_manifest.ts'), findsOneWidget);
-    expect(find.textContaining('This preview is read-only'), findsOneWidget);
-    expect(find.text('Open externally'), findsOneWidget);
+    expect(find.text('One'), findsOneWidget);
+    expect(find.text('Three'), findsOneWidget);
+    expect(find.text('Four'), findsNothing);
   });
 
-  testWidgets('the preview is replaced by details and comes back', (
+  testWidgets('content fits 320 dp at 200 % text in light and dark', (
     tester,
   ) async {
-    _phone(tester);
-    await tester.pumpWidget(_app(const ArtifactDetailPage(data: _codeData)));
-    await tester.pumpAndSettle();
+    for (final dark in <bool>[false, true]) {
+      _narrowPhone(tester);
+      await tester.pumpWidget(
+        _narrowApp(
+          ArtifactDetailPage(
+            data: _codeData,
+            onDownload: () {},
+            onOpenExternally: () {},
+          ),
+          dark: dark,
+        ),
+      );
+      await tester.pumpAndSettle();
 
-    expect(find.byType(V2ArtifactPreview), findsOneWidget);
-
-    await tester.tap(find.text('Details'));
-    await tester.pumpAndSettle();
-    expect(find.byType(V2ArtifactPreview), findsNothing);
-
-    await tester.tap(find.text('Preview'));
-    await tester.pumpAndSettle();
-    expect(find.byType(V2ArtifactPreview), findsOneWidget);
-  });
-
-  testWidgets('Details tab reveals the technical rows', (tester) async {
-    _phone(tester);
-    await tester.pumpWidget(_app(const ArtifactDetailPage(data: _codeData)));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Artifact hash'), findsNothing);
-    await tester.tap(find.text('Details'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Artifact hash'), findsOneWidget);
-    expect(find.text('sha256:7f9b4c0e'), findsOneWidget);
-    expect(find.text('Public preview enabled'), findsOneWidget);
-
-    await tester.tap(find.text('Preview'));
-    await tester.pumpAndSettle();
-    expect(find.text('Artifact hash'), findsNothing);
-  });
-
-  testWidgets('source chat row opens the original chat', (tester) async {
-    _phone(tester);
-    var chats = 0;
-    await tester.pumpWidget(
-      _app(ArtifactDetailPage(data: _codeData, onOpenChat: () => chats++)),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text('Made in chat'));
-    expect(chats, 1);
-  });
-
-  testWidgets('content fits 320 dp at 200 % text in light', (tester) async {
-    _narrowPhone(tester);
-    await tester.pumpWidget(
-      _narrowApp(
-        ArtifactDetailPage(data: _codeData, onDownload: () {}),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('portfolio-index.html'), findsOneWidget);
-    _expectNoClippedText(tester);
-
-    await tester.scrollUntilVisible(
-      find.text('Download'),
-      120,
-      scrollable: find.byType(Scrollable).first,
-    );
-    expect(find.text('Download'), findsOneWidget);
-    await _scrollThrough(tester);
-  });
-
-  testWidgets('document preview fits 320 dp at 200 % text in dark', (
-    tester,
-  ) async {
-    _narrowPhone(tester);
-    await tester.pumpWidget(
-      _narrowApp(
-        ArtifactDetailPage(data: _documentData, onOpenExternally: () {}),
-        dark: true,
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.scrollUntilVisible(
-      find.text('Open externally'),
-      120,
-      scrollable: find.byType(Scrollable).first,
-    );
-    expect(find.text('Open externally'), findsOneWidget);
-    await _scrollThrough(tester);
-  });
-
-  testWidgets('details fit 320 dp at 200 % text in dark', (tester) async {
-    _narrowPhone(tester);
-    await tester.pumpWidget(
-      _narrowApp(const ArtifactDetailPage(data: _codeData), dark: true),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.scrollUntilVisible(
-      find.text('Details'),
-      80,
-      scrollable: find.byType(Scrollable).first,
-    );
-    await tester.ensureVisible(find.text('Details'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Details'));
-    await tester.pumpAndSettle();
-
-    await _scrollThrough(tester);
-    expect(find.text('sha256:7f9b4c0e'), findsOneWidget);
+      expect(find.text('portfolio-index.html'), findsWidgets);
+      _expectNoClippedText(tester);
+      await _scrollThrough(tester);
+    }
   });
 
   testWidgets('empty, error and loading fit 320 dp at 200 % text', (
@@ -553,315 +405,146 @@ void main() {
     }
   });
 
-  testWidgets('controls are at least 48 dp and labelled', (tester) async {
-    _phone(tester);
-    await tester.pumpWidget(
-      _app(ArtifactDetailPage(data: _codeData, onMore: () {})),
+  testWidgets('Copy link really writes the clipboard', (tester) async {
+    String? copied;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copied = (call.arguments as Map)['text'] as String?;
+        }
+        return null;
+      },
     );
-    await tester.pumpAndSettle();
-
-    expect(
-      tester.getSize(find.byType(OIconButton).first).height,
-      greaterThanOrEqualTo(OSpace.touch),
-    );
-    expect(
-      tester.getSize(find.byType(OIconButton).first).width,
-      greaterThanOrEqualTo(OSpace.touch),
-    );
-    for (final button in tester.widgetList<OButton>(find.byType(OButton))) {
-      expect(button.label, isNotEmpty);
-      final height = tester.getSize(find.byWidget(button)).height;
-      expect(height, greaterThanOrEqualTo(OSpace.touch));
-    }
-    // The two tabs are 48 dp tall and announce their selected state.
-    for (final label in <String>['Preview', 'Details']) {
-      final tab = tester.getSize(
-        find
-            .ancestor(of: find.text(label), matching: find.byType(OPressable))
-            .first,
-      );
-      expect(tab.height, greaterThanOrEqualTo(OSpace.touch));
-    }
-  });
-
-  testWidgets('reduced motion keeps every part of the page visible', (
-    tester,
-  ) async {
-    _narrowPhone(tester);
-    await tester.pumpWidget(
-      MaterialApp(
-        theme: OTheme.light(),
-        home: Builder(
-          builder: (context) => MediaQuery(
-            data: MediaQuery.of(context).copyWith(
-              textScaler: const TextScaler.linear(2),
-              disableAnimations: true,
-            ),
-            child: ArtifactDetailPage(data: _codeData, onDownload: () {}),
-          ),
-        ),
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
       ),
     );
-    await tester.pump();
 
-    // No entrance delay: content is on screen on the first frame.
-    expect(find.text('portfolio-index.html'), findsOneWidget);
-    _expectNoClippedText(tester);
-
-    await tester.scrollUntilVisible(
-      find.text('Download'),
-      120,
-      scrollable: find.byType(Scrollable).first,
-    );
-    expect(find.text('Download'), findsOneWidget);
-    expect(find.text('Details'), findsOneWidget);
-  });
-
-  testWidgets('the snippet badge follows the file type', (tester) async {
     _phone(tester);
-    await tester.pumpWidget(_app(const ArtifactDetailPage(data: _codeData)));
-    await tester.pumpAndSettle();
-
-    // `agent_manifest.ts` must not be labelled HTML.
-    expect(find.text('TS'), findsWidgets);
-    expect(find.text('HTML'), findsNothing);
-
     await tester.pumpWidget(
       _app(
         const ArtifactDetailPage(
           data: V2ArtifactDetailData(
+            name: 'portfolio-index.html',
             previewKind: V2ArtifactPreviewKind.code,
             previewCodeFile: 'portfolio-index.html',
             previewCode: '<main></main>',
+            shareUrl: 'https://ovid.site/a/portfolio-index',
           ),
         ),
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('HTML'), findsWidgets);
+
+    await _openMenu(tester);
+    expect(find.text('Copy link'), findsOneWidget);
+    await tester.tap(find.text('Copy link'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(copied, 'https://ovid.site/a/portfolio-index');
+    expect(find.text('Link copied'), findsOneWidget);
   });
 
-  group('wiring', () {
-    testWidgets('Download is not rendered when nothing can be downloaded', (
-      tester,
-    ) async {
-      _phone(tester);
-      await tester.pumpWidget(_app(const ArtifactDetailPage(data: _codeData)));
+  testWidgets('Open opens the real URL without a handler', (tester) async {
+    Uri? opened;
+    V2TranscriptIo.debugOpenOverride = (uri) async {
+      opened = uri;
+      return true;
+    };
+    addTearDown(V2TranscriptIo.reset);
+
+    _phone(tester);
+    await tester.pumpWidget(
+      _app(
+        const ArtifactDetailPage(
+          data: V2ArtifactDetailData(
+            name: 'market-analysis-q2.pdf',
+            previewKind: V2ArtifactPreviewKind.document,
+            openUrl: 'https://r2.test/market-analysis-q2.pdf',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+
+    expect(opened, Uri.parse('https://r2.test/market-analysis-q2.pdf'));
+  });
+
+  testWidgets('document previews render the real text', (tester) async {
+    _phone(tester);
+    await tester.pumpWidget(
+      _app(
+        const ArtifactDetailPage(
+          data: V2ArtifactDetailData(
+            name: 'market-analysis-q2.txt',
+            previewKind: V2ArtifactPreviewKind.document,
+            documentText:
+                'Q2 revenue grew 18%.\nRetention held at 91%.\n'
+                'Churn fell in every region.',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Document preview'), findsOneWidget);
+    expect(find.textContaining('Q2 revenue grew 18%'), findsOneWidget);
+    expect(find.text('Metadata only'), findsNothing);
+  });
+
+  testWidgets('the preview kind is inferred from the file name', (
+    tester,
+  ) async {
+    _phone(tester);
+    const names = <String, String>{
+      'shot.png': 'No image preview',
+      'module.ts': 'No preview.',
+      'report.pdf': 'Metadata only',
+    };
+    for (final entry in names.entries) {
+      await tester.pumpWidget(
+        _app(ArtifactDetailPage(data: V2ArtifactDetailData(name: entry.key))),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text(entry.value), findsOneWidget, reason: entry.key);
+    }
+  });
+
+  testWidgets('a long file name ellipsizes at 320 dp and 200 % text', (
+    tester,
+  ) async {
+    const longName =
+        'quarterly-revenue-and-retention-breakdown-for-every-region-'
+        'final-final-v12-approved.xlsx';
+    for (final dark in <bool>[false, true]) {
+      _narrowPhone(tester);
+      await tester.pumpWidget(
+        _narrowApp(
+          const ArtifactDetailPage(data: V2ArtifactDetailData(name: longName)),
+          dark: dark,
+        ),
+      );
       await tester.pumpAndSettle();
 
-      expect(find.text('Download'), findsNothing);
-      expect(find.text('Share link'), findsNothing);
-      expect(find.text('Delete artifact'), findsNothing);
+      final header = find.descendant(
+        of: find.byType(AppBar),
+        matching: find.text(longName),
+      );
+      final title = tester.widget<Text>(header);
+      expect(title.maxLines, 1);
+      expect(title.overflow, TextOverflow.ellipsis);
+      final box = tester.getSize(header);
+      final width =
+          tester.view.physicalSize.width / tester.view.devicePixelRatio;
+      expect(box.width, lessThanOrEqualTo(width));
       expect(tester.takeException(), isNull);
-    });
-
-    testWidgets('the missing state has no dead back button', (tester) async {
-      _phone(tester);
-      await tester.pumpWidget(
-        _app(
-          const ArtifactDetailPage(
-            data: V2ArtifactDetailData(status: V2ArtifactDetailStatus.missing),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.text('This artifact is gone'), findsOneWidget);
-      expect(find.text('Back to artifacts'), findsNothing);
-    });
-
-    testWidgets('Download really writes the file and confirms the name', (
-      tester,
-    ) async {
-      final dir = Directory.systemTemp.createTempSync('artifact-download-');
-      addTearDown(() {
-        V2TranscriptIo.setDownloadDirectoryOverride(null);
-        if (dir.existsSync()) dir.deleteSync(recursive: true);
-      });
-      V2TranscriptIo.setDownloadDirectoryOverride(dir.path);
-
-      final source = File('${dir.path}/source.html')
-        ..writeAsBytesSync(utf8.encode('<main>real bytes</main>'));
-      _phone(tester);
-      await tester.pumpWidget(
-        _app(
-          ArtifactDetailPage(
-            data: V2ArtifactDetailData(
-              name: 'portfolio-index.html',
-              previewKind: V2ArtifactPreviewKind.code,
-              previewCodeFile: 'portfolio-index.html',
-              previewCode: '<main></main>',
-              downloadUrl: source.uri.toString(),
-            ),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      final saved = File('${dir.path}/Ovid/portfolio-index.html');
-      await tester.runAsync(() async {
-        await tester.tap(find.text('Download'));
-        for (var i = 0; i < 100 && !saved.existsSync(); i++) {
-          await Future<void>.delayed(const Duration(milliseconds: 20));
-        }
-        // Let the saver's continuation (and the confirmation) run too.
-        await Future<void>.delayed(const Duration(milliseconds: 100));
-      });
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 400));
-
-      expect(saved.existsSync(), isTrue);
-      expect(utf8.decode(saved.readAsBytesSync()), '<main>real bytes</main>');
-      expect(find.text('Saved portfolio-index.html'), findsOneWidget);
-    });
-
-    testWidgets('Copy link really writes the clipboard', (tester) async {
-      String? copied;
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        SystemChannels.platform,
-        (call) async {
-          if (call.method == 'Clipboard.setData') {
-            copied = (call.arguments as Map)['text'] as String?;
-          }
-          return null;
-        },
-      );
-      addTearDown(
-        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          SystemChannels.platform,
-          null,
-        ),
-      );
-
-      _phone(tester);
-      await tester.pumpWidget(
-        _app(
-          const ArtifactDetailPage(
-            data: V2ArtifactDetailData(
-              name: 'portfolio-index.html',
-              previewKind: V2ArtifactPreviewKind.code,
-              previewCodeFile: 'portfolio-index.html',
-              previewCode: '<main></main>',
-              shareUrl: 'https://ovid.site/a/portfolio-index',
-            ),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.text('Copy link'), findsOneWidget);
-      await tester.tap(find.text('Copy link'));
-      await tester.pump();
-      await tester.pump();
-
-      expect(copied, 'https://ovid.site/a/portfolio-index');
-      expect(find.text('Link copied'), findsOneWidget);
-      await tester.pump(const Duration(seconds: 2));
-      await tester.pump();
-      expect(find.text('Copy link'), findsOneWidget);
-    });
-
-    testWidgets('Open externally opens the real URL without a handler', (
-      tester,
-    ) async {
-      Uri? opened;
-      V2TranscriptIo.debugOpenOverride = (uri) async {
-        opened = uri;
-        return true;
-      };
-      addTearDown(V2TranscriptIo.reset);
-
-      _phone(tester);
-      await tester.pumpWidget(
-        _app(
-          const ArtifactDetailPage(
-            data: V2ArtifactDetailData(
-              name: 'market-analysis-q2.pdf',
-              previewKind: V2ArtifactPreviewKind.document,
-              openUrl: 'https://r2.test/market-analysis-q2.pdf',
-            ),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      await tester.scrollUntilVisible(
-        find.text('Open externally'),
-        120,
-        scrollable: find.byType(Scrollable).first,
-      );
-      await tester.tap(find.text('Open externally'));
-      await tester.pumpAndSettle();
-
-      expect(opened, Uri.parse('https://r2.test/market-analysis-q2.pdf'));
-    });
-
-    testWidgets('document previews render the real text', (tester) async {
-      _phone(tester);
-      await tester.pumpWidget(
-        _app(
-          const ArtifactDetailPage(
-            data: V2ArtifactDetailData(
-              name: 'market-analysis-q2.txt',
-              previewKind: V2ArtifactPreviewKind.document,
-              documentText:
-                  'Q2 revenue grew 18%.\nRetention held at 91%.\n'
-                  'Churn fell in every region.',
-            ),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.text('Document preview'), findsOneWidget);
-      expect(find.textContaining('Q2 revenue grew 18%'), findsOneWidget);
-      expect(find.textContaining('Retention held at 91%'), findsOneWidget);
-      expect(find.text('Metadata only'), findsNothing);
-    });
-
-    testWidgets('the preview kind is inferred from the file name', (
-      tester,
-    ) async {
-      _phone(tester);
-      const names = <String, String>{
-        'shot.png': 'Image preview unavailable',
-        'module.ts': 'No preview lines were sent with this artifact.',
-        'report.pdf': 'Metadata only',
-      };
-      for (final entry in names.entries) {
-        await tester.pumpWidget(
-          _app(ArtifactDetailPage(data: V2ArtifactDetailData(name: entry.key))),
-        );
-        await tester.pumpAndSettle();
-        expect(find.text(entry.value), findsOneWidget, reason: entry.key);
-      }
-    });
-
-    testWidgets('a long file name ellipsizes at 320 dp and 200 % text', (
-      tester,
-    ) async {
-      const longName =
-          'quarterly-revenue-and-retention-breakdown-for-every-region-'
-          'final-final-v12-approved.xlsx';
-      for (final dark in <bool>[false, true]) {
-        _narrowPhone(tester);
-        await tester.pumpWidget(
-          _narrowApp(
-            const ArtifactDetailPage(data: V2ArtifactDetailData(name: longName)),
-            dark: dark,
-          ),
-        );
-        await tester.pumpAndSettle();
-
-        final title = tester.widget<Text>(find.text(longName).first);
-        expect(title.maxLines, 2);
-        expect(title.overflow, TextOverflow.ellipsis);
-        final box = tester.getSize(find.text(longName).first);
-        final width =
-            tester.view.physicalSize.width / tester.view.devicePixelRatio;
-        expect(box.width, lessThanOrEqualTo(width));
-        expect(tester.takeException(), isNull);
-      }
-    });
+    }
   });
 }

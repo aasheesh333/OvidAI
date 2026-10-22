@@ -1,39 +1,66 @@
 import 'package:flutter/material.dart';
 
+import 'browser/browser_page.dart';
 import 'browser/tab_strip.dart';
 import 'browser/viewport.dart';
 import 'chat/composer_plus_sheet.dart';
+import 'chat/live_chat_page.dart';
 import 'chat/permission_sheet.dart';
+import 'collab/collab_live_page.dart';
 import 'collab/collab_members_page.dart';
 import 'collab/turn_banner.dart';
+// Prefixed: the detail page declares its own permission enums, and importing
+// them unqualified would collide with connector_permissions.dart below.
+import 'connectors/connector_detail_page.dart' as connector_detail;
 import 'connectors/connector_permissions.dart';
+import 'library/artifact_detail_page.dart';
 import 'library/artifact_filters.dart';
 import 'library/artifact_preview.dart';
 import 'onboarding/phone_auth_sheet.dart';
 import 'onboarding/purchase_banner.dart';
 import 'onboarding/step_progress.dart';
+import 'runs/run_trajectory_page.dart';
+import 'runs/subagent_page.dart';
 import 'runs/subagent_summary.dart';
 import 'runs/timeline.dart';
 import 'schedules/cadence_picker.dart';
 import 'schedules/run_timeline.dart';
+import 'schedules/schedules_page.dart';
+import 'schedules/schedule_runs_page.dart';
+import 'settings/account_health_page.dart';
 import 'settings/confirm_typed_sheet.dart';
+import 'settings/credentials_page.dart';
 import 'settings/export_picker_sheet.dart';
+import 'settings/memory_page.dart';
+import 'settings/plan_billing_page.dart';
 import 'settings/plan_compare_table.dart';
 import 'chat/model_picker_sheet.dart';
 import 'settings/settings_hub.dart';
 import 'settings/settings_search.dart';
 import 'settings/storage_breakdown.dart';
+import 'settings/storage_page.dart';
 import 'settings/usage_charts.dart';
+import 'settings/usage_page.dart';
+import 'settings_extra/agent_presets_page.dart';
+import 'settings_extra/memory_files_page.dart';
+import 'settings_extra/permissions_page.dart';
 import 'settings_extra/shared_memory_page.dart';
 import 'settings_extra/legal_page.dart';
+import 'share/share_chat_sheet.dart';
 import 'share/share_link_card.dart';
 import 'share/share_sheet.dart';
 import 'sidebar/project_detail_page.dart';
 import 'sidebar/project_memory_editor.dart';
+import 'sidebar/projects_page.dart';
 import 'states/state_tiles.dart';
+import 'studio/branch_picker_sheet.dart';
+import 'studio/changes_page.dart';
 import 'studio/code_viewer.dart';
 import 'studio/commit_sheet.dart';
 import 'studio/file_tree.dart';
+import 'studio/live_preview_page.dart';
+import 'studio/repo_picker_page.dart';
+import 'studio/studio_workspace_page.dart';
 
 /// Sample data for the design gallery only.
 ///
@@ -918,7 +945,7 @@ List<V2TimelineItem> previewTrajectoryTimelineItems() {
   return const <V2TimelineItem>[
     V2TimelineItem(
       id: 'plan',
-      title: 'Read the brief and plan the change',
+      title: 'Plan the change',
       description:
           'Identified the auth refresh path and the two failing tests.',
       timeLabel: '10:41',
@@ -1130,3 +1157,1087 @@ List<V2ModelOption> previewModelOptions({required bool locked}) =>
         icon: Icons.key_rounded,
       ),
     ];
+
+// ── Minimised screens ───────────────────────────────────────────────────────
+// After the minimal-UI pass these screens render an empty state unless the
+// gallery supplies real content. Each builder below mirrors what production
+// adapters in `lib/ui/v2/app/` hand the screen, so a reviewer sees the layout
+// at its real density instead of a placeholder.
+
+/// An active run with a transcript, a tool, an artifact and a queued message.
+V2LiveChatData previewLiveChatData() {
+  return const V2LiveChatData(
+    sessionTitle: 'Auth refresh',
+    modelLabel: 'Ovid 2 Pro',
+    running: true,
+    statusLabel: 'Ovid is editing auth_service.dart',
+    queuedCount: 1,
+    queuedPreview: 'Then update the changelog.',
+    items: <V2LiveChatItem>[
+      V2LiveUserMessage(
+        id: 'u1',
+        text: 'Refresh the auth token before the session opens.',
+        timeLabel: '10:41',
+      ),
+      V2LiveThinking(
+        id: 't1',
+        label: 'Reading the auth guard',
+        details: <String>[
+          'Opened lib/core/auth_guard.dart',
+          'Found the refresh path used by sign-in',
+        ],
+      ),
+      V2LiveTool(
+        id: 'tool1',
+        title: 'Search the workspace',
+        status: 'Found 4 callers',
+        progress: 1,
+        details: <String>[
+          'lib/core/auth_service.dart',
+          'lib/ui/v2/chat/chat_page.dart',
+        ],
+      ),
+      V2LiveAssistantMessage(
+        id: 'a1',
+        markdown:
+            'I will refresh the token once and retry before failing, so a '
+            'cold start no longer signs you out.',
+      ),
+      V2LiveArtifact(
+        id: 'art1',
+        fileName: 'auth_service.dart',
+        meta: 'lib/core · +14 −6',
+        statusLabel: 'Updated',
+        previewLabel: 'Show diff',
+      ),
+      V2LiveTool(
+        id: 'tool2',
+        title: 'Run the auth tests',
+        status: 'Running',
+        progress: 0.4,
+        icon: Icons.play_arrow_rounded,
+      ),
+    ],
+  );
+}
+
+/// A finished run with five steps and one subagent.
+V2RunTrajectoryPageData previewRunTrajectoryData() {
+  return const V2RunTrajectoryPageData(
+    title: 'Auth refresh',
+    runLabel: 'Run 4 of 7',
+    prompt: 'Refresh the auth token before the session opens.',
+    model: 'Ovid 2 Pro',
+    tokensLabel: '38.4K tokens',
+    durationLabel: '3m 12s',
+    steps: <V2RunStep>[
+      V2RunStep(
+        id: 's1',
+        title: 'Plan the change',
+        detail: 'Two failing tests pointed at the refresh path.',
+        durationLabel: '12s',
+        kind: V2RunStepKind.plan,
+      ),
+      V2RunStep(
+        id: 's2',
+        title: 'Search the workspace',
+        detail: 'Found the guard in lib/core/auth_guard.dart.',
+        durationLabel: '4s',
+        kind: V2RunStepKind.search,
+        sources: <V2RunSource>[
+          V2RunSource(label: 'lib/core/auth_guard.dart'),
+        ],
+      ),
+      V2RunStep(
+        id: 's3',
+        title: 'Edit auth_service.dart',
+        detail: 'Refreshed the token once before retrying.',
+        durationLabel: '48s',
+        kind: V2RunStepKind.write,
+        fileName: 'auth_service.dart',
+        fileMeta: '+14 −6',
+      ),
+      V2RunStep(
+        id: 's4',
+        title: 'Run the auth tests',
+        detail: 'Both tests now pass.',
+        durationLabel: '1m 20s',
+        kind: V2RunStepKind.finish,
+      ),
+    ],
+    subagents: <V2SubagentLaunch>[
+      V2SubagentLaunch(
+        id: 'sub1',
+        agentName: 'Explorer',
+        taskSummary: 'Found every AuthService.signIn caller.',
+        timeLabel: '10:43',
+        durationLabel: '2m 10s',
+      ),
+    ],
+  );
+}
+
+/// A subagent mid-run with a log and a finished summary.
+V2SubagentPageData previewSubagentData() {
+  return V2SubagentPageData(
+    name: 'Explorer',
+    instanceLabel: 'Instance 2 of 3',
+    stepLabel: 'Reading chat_page.dart',
+    paceLabel: 'On pace',
+    goal: 'Find every caller of AuthService.signIn.',
+    startedLabel: 'Started 10:43',
+    elapsedLabel: '2m 10s elapsed',
+    timeLimitLabel: '8 h',
+    remainingLabel: '7h 57m left',
+    totalLogLines: 4,
+    progress: 0.62,
+    files: const <String>[
+      'lib/core/auth_service.dart',
+      'lib/ui/v2/chat/chat_page.dart',
+    ],
+    logLines: const <V2SubagentLogLine>[
+      V2SubagentLogLine(time: '10:43', text: 'Opened the workspace tree.'),
+      V2SubagentLogLine(time: '10:44', text: 'Searching for signIn callers.'),
+      V2SubagentLogLine(time: '10:45', text: 'Found 4 call sites.'),
+      V2SubagentLogLine(
+        time: '10:45',
+        text: 'Two widgets share a duplicate key.',
+        tone: V2SubagentLogTone.accent,
+      ),
+    ],
+    logPath: '~/.ovid/runs/explorer.log',
+    summary: previewSubagentSummaryData(),
+  );
+}
+
+/// Three schedules: two healthy, one that failed its last run.
+V2SchedulesData previewSchedulesData() {
+  return V2SchedulesData(
+    now: DateTime(2026, 10, 21, 8, 30),
+    schedules: <V2ScheduleItem>[
+      V2ScheduleItem(
+        id: 's-daily',
+        title: 'Daily brief',
+        description: 'Summarise overnight messages and pull requests.',
+        rule: 'Every day at 9:00 AM',
+        cadence: const V2CadenceDraft(frequency: V2CadenceFrequency.daily),
+      ),
+      V2ScheduleItem(
+        id: 's-weekly',
+        title: 'Weekly changelog',
+        description: 'Draft the changelog from merged pull requests.',
+        rule: 'Mondays at 6:00 PM',
+        cadence: const V2CadenceDraft(
+          hour: 18,
+          days: <int>{1},
+        ),
+        enabled: false,
+      ),
+      V2ScheduleItem(
+        id: 's-pr',
+        title: 'PR digest',
+        description: 'List new pull requests that need review.',
+        rule: 'Weekdays at 8:00 AM',
+        cadence: const V2CadenceDraft(hour: 8),
+        lastRunFailed: true,
+      ),
+    ],
+  );
+}
+
+/// Three runs for one schedule, one of them failed.
+V2ScheduleRunsData previewScheduleRunsData() {
+  return V2ScheduleRunsData(
+    scheduleTitle: 'Daily brief',
+    total: 3,
+    succeeded: 2,
+    failed: 1,
+    avgRuntimeLabel: '1m 21s',
+    now: DateTime(2026, 10, 21, 12, 0),
+    groups: <V2RunGroup>[
+      V2RunGroup(
+        label: 'Today · 21 Oct',
+        runs: <V2ScheduleRun>[
+          V2ScheduleRun(
+            id: 'r1',
+            timeLabel: '9:00 AM',
+            durationLabel: '1m 12s',
+            status: V2RunStatus.succeeded,
+            summary: 'Saved 12 items to daily.md',
+            startedAt: DateTime(2026, 10, 21, 9, 0),
+            finishedAt: DateTime(2026, 10, 21, 9, 1, 12),
+            artifactName: 'daily.md',
+          ),
+          V2ScheduleRun(
+            id: 'r2',
+            timeLabel: '8:00 AM',
+            durationLabel: '48s',
+            status: V2RunStatus.failed,
+            summary: 'The source page timed out before it could be read.',
+            startedAt: DateTime(2026, 10, 21, 8, 0),
+            finishedAt: DateTime(2026, 10, 21, 8, 0, 48),
+            error: 'news.example.com did not respond within 30 seconds.',
+            failureTitle: 'Run failed · timed out',
+            failureDetail: 'news.example.com did not respond in 30 seconds.',
+          ),
+        ],
+      ),
+      V2RunGroup(
+        label: 'Yesterday · 20 Oct',
+        runs: <V2ScheduleRun>[
+          V2ScheduleRun(
+            id: 'r3',
+            timeLabel: '9:00 AM',
+            durationLabel: '2m 04s',
+            status: V2RunStatus.succeeded,
+            summary: 'Summarised 8 new pull requests',
+            startedAt: DateTime(2026, 10, 20, 9, 0),
+            finishedAt: DateTime(2026, 10, 20, 9, 2, 4),
+            artifactName: 'pr-digest.md',
+          ),
+        ],
+      ),
+    ],
+  );
+}
+
+/// A working tree with three changed files.
+V2ChangesData previewChangesData() {
+  return const V2ChangesData(
+    branchLabel: 'feature/hero-revamp',
+    behindCount: 2,
+    commitMessage: 'Refresh the hero and tighten spacing',
+    files: <V2ChangedFile>[
+      V2ChangedFile(
+        path: 'lib/ui/home.dart',
+        directory: 'lib/ui',
+        additions: 42,
+        deletions: 8,
+        initiallyExpanded: true,
+      ),
+      V2ChangedFile(
+        path: 'lib/ui/theme.dart',
+        directory: 'lib/ui',
+        additions: 6,
+        deletions: 2,
+      ),
+      V2ChangedFile(
+        path: 'pubspec.yaml',
+        additions: 2,
+        deletions: 1,
+      ),
+    ],
+  );
+}
+
+/// Two GitHub repositories, the first with branches ready to pick.
+V2RepoPickerData previewRepoPickerData() {
+  return const V2RepoPickerData(
+    accountLabel: 'aarav',
+    repos: <V2Repo>[
+      V2Repo(
+        id: 'ovid-app',
+        name: 'ovid-app',
+        owner: 'aarav',
+        description: 'The Ovid Si client.',
+        language: 'Dart',
+        updatedLabel: 'Updated 2h ago',
+        isPrivate: true,
+        branches: <V2RepoBranch>[
+          V2RepoBranch(
+            name: 'main',
+            lastCommitLabel: 'Refresh the hero',
+            isDefault: true,
+          ),
+          V2RepoBranch(
+            name: 'feature/hero-revamp',
+            lastCommitLabel: 'Tighten spacing',
+          ),
+        ],
+      ),
+      V2Repo(
+        id: 'landing',
+        name: 'landing',
+        owner: 'aarav',
+        description: 'Marketing site.',
+        language: 'TypeScript',
+        updatedLabel: 'Updated yesterday',
+        branches: <V2RepoBranch>[
+          V2RepoBranch(name: 'main', isDefault: true),
+        ],
+      ),
+    ],
+  );
+}
+
+/// A branch switch with the current branch and two alternatives.
+V2BranchPickerData previewBranchPickerData() {
+  return const V2BranchPickerData(
+    current: V2Branch(
+      name: 'feature/hero-revamp',
+      lastCommitLabel: 'Tighten spacing · 2h ago',
+      isCurrent: true,
+    ),
+    branches: <V2Branch>[
+      V2Branch(
+        name: 'main',
+        lastCommitLabel: 'Refresh the hero · yesterday',
+        isDefault: true,
+      ),
+      V2Branch(
+        name: 'feature/hero-revamp',
+        lastCommitLabel: 'Tighten spacing · 2h ago',
+        isCurrent: true,
+      ),
+      V2Branch(
+        name: 'fix/auth-refresh',
+        lastCommitLabel: 'Retry once · 3 days ago',
+      ),
+    ],
+  );
+}
+
+/// A live Collab link with four of fifty seats used.
+V2ShareChatSheetData previewShareChatData() {
+  return const V2ShareChatSheetData(
+    link: 'ovidsi.com/c/79f9b4c0e',
+    mode: V2ShareMode.collab,
+    memberCount: 4,
+    creatorName: 'Aarav Sharma',
+    viewerCanFork: true,
+  );
+}
+
+/// A live Collab chat with a turn in progress and four messages.
+V2CollabLivePageData previewCollabLiveData() {
+  return const V2CollabLivePageData(
+    title: 'Auth refactor',
+    subtitle: '4 members · one sender at a time',
+    selfName: 'Aarav Sharma',
+    totalMembers: 4,
+    turnHolderName: 'Priya Nair',
+    turnTimeLeftLabel: '24s left',
+    queueLabel: '4 waiting',
+    creatorPaysStorage: true,
+    participants: <V2CollabParticipant>[
+      V2CollabParticipant(id: 'priya', name: 'Priya Nair', initials: 'PN'),
+      V2CollabParticipant(id: 'rohan', name: 'Rohan Mehta', initials: 'RM'),
+      V2CollabParticipant(id: 'meera', name: 'Meera Iyer', initials: 'MI'),
+    ],
+    messages: <V2CollabMessage>[
+      V2CollabMessage(
+        id: 'm1',
+        speakerName: 'Priya Nair',
+        timeLabel: '10:41',
+        text: 'Starting on the token refresh. Tell me if the retry is wrong.',
+        initials: 'PN',
+        isTurnHolder: true,
+      ),
+      V2CollabMessage(
+        id: 'm2',
+        speakerName: 'Rohan Mehta',
+        timeLabel: '10:42',
+        text: 'One retry is enough. Do not loop.',
+        initials: 'RM',
+      ),
+      V2CollabMessage(
+        id: 'm3',
+        speakerName: 'Ovid',
+        timeLabel: '10:43',
+        text: 'Refreshed the token once and re-ran the auth tests.',
+        kind: V2CollabMessageKind.agent,
+        agentStatus: 'Tests passed',
+        toolName: 'run_tests',
+        toolResult: '2 passed, 0 failed',
+      ),
+      V2CollabMessage(
+        id: 'm4',
+        speakerName: 'Meera Iyer',
+        timeLabel: '10:44',
+        text: 'Ship it.',
+        initials: 'MI',
+      ),
+    ],
+  );
+}
+
+/// A code artifact with its metadata and a download link.
+V2ArtifactDetailData previewArtifactDetailData() {
+  return const V2ArtifactDetailData(
+    name: 'auth_service.dart',
+    typeLabel: 'Dart',
+    sizeLabel: '6 KB',
+    createdLabel: 'Created 21 Oct, 10:44',
+    versionLabel: 'Version 3',
+    sourceChatTitle: 'Auth refresh',
+    previewHeadline: 'Auth token refresh',
+    previewCodeFile: 'lib/core/auth_service.dart',
+    previewCode:
+        'class AuthService {\n'
+        '  Future<void> signIn(String email) async {\n'
+        '    await _guard.requireRecentAuth();\n'
+        '    return _session.open(email);\n'
+        '  }\n'
+        '}',
+    previewTotalLines: 184,
+    downloadUrl: 'https://ovidsi.com/a/79f9b4c0e',
+    shareUrl: 'https://ovidsi.com/a/79f9b4c0e',
+    openUrl: 'https://ovidsi.com/a/79f9b4c0e',
+    details: <V2ArtifactDetailRow>[
+      V2ArtifactDetailRow(label: 'Type', value: 'Dart source'),
+      V2ArtifactDetailRow(label: 'Lines', value: '184'),
+      V2ArtifactDetailRow(label: 'Model', value: 'Ovid 2 Pro'),
+      V2ArtifactDetailRow(label: 'Chat', value: 'Auth refresh'),
+      V2ArtifactDetailRow(
+        label: 'Status',
+        value: 'Ready',
+        tone: V2ArtifactDetailTone.success,
+      ),
+    ],
+  );
+}
+
+/// Three projects, one shared with the team.
+V2ProjectsData previewProjectsData() {
+  return const V2ProjectsData(
+    projects: <V2Project>[
+      V2Project(
+        id: 'redesign',
+        name: 'Mobile App Redesign',
+        chatCount: 12,
+        storageLabel: '340 MB',
+        shared: true,
+        memberInitials: <String>['PN', 'RM', 'MI'],
+        updatedLabel: 'Updated 2h ago',
+      ),
+      V2Project(
+        id: 'auth',
+        name: 'Auth refactor',
+        chatCount: 5,
+        storageLabel: '48 MB',
+        updatedLabel: 'Updated yesterday',
+      ),
+      V2Project(
+        id: 'launch',
+        name: 'Launch checklist',
+        chatCount: 3,
+        storageLabel: '12 MB',
+        updatedLabel: 'Updated last week',
+        colorKey: 'teal',
+      ),
+    ],
+  );
+}
+
+/// Free, Go, Plus and Pro with one past purchase.
+V2PlanBillingData previewPlanBillingData() {
+  return V2PlanBillingData(
+    currentPlanId: 'plus',
+    plans: const <V2Plan>[
+      V2Plan(
+        id: 'free',
+        name: 'Free',
+        tagline: 'Try Ovid',
+        priceUsd: 0,
+        priceInr: 0,
+        autoOnly: true,
+        features: <String>['Auto model only', '2 GB storage'],
+      ),
+      V2Plan(
+        id: 'go',
+        name: 'Go',
+        tagline: 'Everyday chats',
+        priceUsd: 5,
+        priceInr: 399,
+        priceUsdYearly: 48,
+        priceInrYearly: 3999,
+        features: <String>['All models', '15 GB storage'],
+      ),
+      V2Plan(
+        id: 'plus',
+        name: 'Plus',
+        tagline: 'Longer runs',
+        priceUsd: 18,
+        priceInr: 1499,
+        priceUsdYearly: 180,
+        priceInrYearly: 14999,
+        features: <String>['More Studio time', '50 GB storage'],
+        popular: true,
+      ),
+      V2Plan(
+        id: 'pro',
+        name: 'Pro',
+        tagline: 'Heavy builds',
+        priceUsd: 99,
+        priceInr: 8299,
+        priceUsdYearly: 990,
+        priceInrYearly: 82999,
+        features: <String>['Priority runs', '200 GB storage'],
+      ),
+    ],
+    history: const <V2BillingHistoryEntry>[
+      V2BillingHistoryEntry(
+        id: 'h1',
+        title: 'Ovid Plus · monthly',
+        dateLabel: '12 Oct 2026',
+        amountLabel: '₹1,499',
+      ),
+      V2BillingHistoryEntry(
+        id: 'h2',
+        title: 'Ovid Go · monthly',
+        dateLabel: '12 Sep 2026',
+        amountLabel: '₹399',
+      ),
+    ],
+  );
+}
+
+/// Seven days of use on the Plus plan.
+V2UsageData previewUsageData() {
+  return V2UsageData(
+    planId: 'plus',
+    dailyUsedLabel: '8.2M',
+    dailyLimitLabel: '20M',
+    dailyFraction: 0.41,
+    dailyCapLabel: '20M tokens a day',
+    resetLabel: 'Resets in 6h',
+    monthlyUsedLabel: '44M',
+    monthlyLimitLabel: '200M',
+    monthlyFraction: 0.22,
+    monthlyPercentLabel: '22% of the month',
+    monthlyCapLabel: '200M tokens a month',
+    billingNote: 'Renews on 12 Nov',
+    requestsLabel: '128',
+    imagesLabel: '36',
+    storageUsedLabel: '6.2 GB',
+    storageLimitLabel: '15 GB',
+    storageFraction: 0.41,
+    showFreePlanNote: false,
+    days: const <V2UsageDay>[
+      V2UsageDay(id: 'mon', label: 'Mon', fraction: 0.42, valueLabel: '4.2M'),
+      V2UsageDay(id: 'tue', label: 'Tue', fraction: 0.68, valueLabel: '6.8M'),
+      V2UsageDay(id: 'wed', label: 'Wed', fraction: 0.21, valueLabel: '2.1M'),
+      V2UsageDay(id: 'thu', label: 'Thu', fraction: 0.94, valueLabel: '9.4M'),
+      V2UsageDay(id: 'fri', label: 'Fri', fraction: 0.77, valueLabel: '7.7M'),
+      V2UsageDay(id: 'sat', label: 'Sat', fraction: 0.52, valueLabel: '5.2M'),
+      V2UsageDay(id: 'sun', label: 'Sun', fraction: 0.89, valueLabel: '8.9M'),
+    ],
+    models: const <V2UsageModel>[
+      V2UsageModel(
+        id: 'auto',
+        name: 'Auto',
+        subtitle: 'Smart routing',
+        percent: 52,
+        tokensLabel: '22.8M tokens',
+      ),
+      V2UsageModel(
+        id: 'pro',
+        name: 'Ovid 2 Pro',
+        subtitle: 'Hard reasoning',
+        percent: 28,
+        tokensLabel: '12.3M tokens',
+        tone: V2UsageTone.success,
+      ),
+      V2UsageModel(
+        id: 'flash',
+        name: 'Ovid 2 Flash',
+        subtitle: 'Fast answers',
+        percent: 20,
+        tokensLabel: '8.8M tokens',
+        tone: V2UsageTone.warn,
+      ),
+    ],
+  );
+}
+
+/// Memory switched on, with global facts, two projects and a session file.
+V2MemoryPageData previewMemoryData() {
+  return const V2MemoryPageData(
+    memoryEnabled: true,
+    globalVersionLabel: 'Version 12 · updated 2h ago',
+    globalMemory: <String>[
+      'Prefers Dart and Flutter for app work.',
+      'Ships on Android first, then web.',
+      'Wants short commit messages.',
+    ],
+    projects: <V2MemoryProject>[
+      V2MemoryProject(
+        id: 'redesign',
+        name: 'Mobile App Redesign',
+        detail: '2 files · 14 facts',
+      ),
+      V2MemoryProject(
+        id: 'auth',
+        name: 'Auth refactor',
+        detail: '1 file · 6 facts',
+      ),
+    ],
+    sessionFiles: <V2MemoryFile>[
+      V2MemoryFile(
+        id: 'session',
+        name: 'This chat',
+        detail: '3 facts · saved 10:44',
+      ),
+    ],
+  );
+}
+
+/// 6.2 GB of 15 GB with the largest items listed.
+V2StoragePageData previewStorageData() {
+  return const V2StoragePageData(
+    usedGb: 6.2,
+    totalGb: 15,
+    planName: 'Plus',
+    quotaLabel: '6.2 GB of 15 GB',
+    artifactsGb: 1.8,
+    artifactsSizeLabel: '1.8 GB',
+    sessionsGb: 2.3,
+    sessionsSizeLabel: '2.3 GB',
+    cacheGb: 0.2,
+    cacheSizeLabel: '200 MB',
+    previewSizeLabel: '220 MB',
+    trashItems: 3,
+    trashSizeLabel: '48 MB',
+    slices: <V2StorageSlice>[
+      V2StorageSlice(label: 'Chats', sizeLabel: '2.3 GB', valueGb: 2.3),
+      V2StorageSlice(label: 'Artifacts', sizeLabel: '1.8 GB', valueGb: 1.8),
+      V2StorageSlice(label: 'Uploads', sizeLabel: '1.1 GB', valueGb: 1.1),
+      V2StorageSlice(label: 'Memory', sizeLabel: '600 MB', valueGb: 0.6),
+      V2StorageSlice(label: 'Cache', sizeLabel: '200 MB', valueGb: 0.2),
+    ],
+    largestItems: <V2StorageItem>[
+      V2StorageItem(
+        id: 'video',
+        name: 'demo-recording.mp4',
+        detail: 'Uploaded 12 Oct',
+        sizeLabel: '820 MB',
+        icon: Icons.videocam_outlined,
+      ),
+      V2StorageItem(
+        id: 'archive',
+        name: 'design-archive.zip',
+        detail: 'Artifact · 8 Oct',
+        sizeLabel: '540 MB',
+        icon: Icons.folder_zip_outlined,
+      ),
+      V2StorageItem(
+        id: 'chat',
+        name: 'Auth refactor',
+        detail: '180 messages',
+        sizeLabel: '310 MB',
+        icon: Icons.chat_bubble_outline_rounded,
+      ),
+    ],
+  );
+}
+
+/// Google connected, GitHub connected, one browser login saved.
+V2CredentialsPageData previewCredentialsData() {
+  return const V2CredentialsPageData(
+    google: V2Credential(
+      id: 'google',
+      kind: V2CredentialKind.google,
+      title: 'Google',
+      subtitle: 'aarav@gmail.com',
+    ),
+    github: V2Credential(
+      id: 'github',
+      kind: V2CredentialKind.github,
+      title: 'GitHub',
+      subtitle: 'aarav · 2 repositories',
+    ),
+    token: V2Credential(
+      id: 'token',
+      kind: V2CredentialKind.token,
+      title: 'Provider key',
+      subtitle: 'Anthropic · added 2 Oct',
+    ),
+    githubOAuthConnected: true,
+    browserCredentials: <V2BrowserCredential>[
+      V2BrowserCredential(
+        id: 'github-web',
+        site: 'github.com',
+        username: 'aarav',
+        password: '••••••••',
+      ),
+    ],
+  );
+}
+
+/// A healthy account with services, devices and recent sign-ins.
+V2AccountHealthPageData previewAccountHealthPageData() {
+  return V2AccountHealthPageData(
+    statusTitle: 'Everything looks healthy',
+    statusMessage: 'Account, devices and sign-ins all check out.',
+    healthy: true,
+    score: 96,
+    lastCheckLabel: 'Checked 10:20',
+    lastCheckDetail: 'Email, 2FA and 3 devices',
+    twoFactorEnabled: true,
+    emailLabel: 'aarav@gmail.com',
+    regionLabel: 'India · IST',
+    accountStatus: V2AccountStatus.active,
+    usage: const <V2AccountUsageMetric>[
+      V2AccountUsageMetric(
+        id: 'storage',
+        title: 'Storage left',
+        value: '8.8 GB',
+        detail: 'of 15 GB',
+      ),
+      V2AccountUsageMetric(
+        id: 'daily_usage',
+        title: 'Daily usage left',
+        value: '11.8M',
+        detail: 'of 20M tokens',
+      ),
+      V2AccountUsageMetric(
+        id: 'monthly_usage',
+        title: 'Monthly usage left',
+        value: '156M',
+        detail: 'of 200M tokens',
+      ),
+    ],
+    services: const <V2ServiceStatus>[
+      V2ServiceStatus(name: 'Sign-in', statusLabel: 'Working'),
+      V2ServiceStatus(name: 'Chat', statusLabel: 'Working'),
+      V2ServiceStatus(name: 'Studio', statusLabel: 'Working'),
+      V2ServiceStatus(name: 'Schedules', statusLabel: 'Degraded', healthy: false),
+    ],
+    devices: const <V2SignInDevice>[
+      V2SignInDevice(
+        id: 'pixel',
+        name: 'Pixel 8',
+        detail: 'Android 15 · Mumbai',
+        current: true,
+      ),
+      V2SignInDevice(
+        id: 'mac',
+        name: 'MacBook Air',
+        detail: 'Chrome · Mumbai',
+      ),
+    ],
+    recentSignIns: const <V2SignInEvent>[
+      V2SignInEvent(
+        id: 'e1',
+        device: 'Pixel 8',
+        location: 'Mumbai',
+        timeLabel: 'Now',
+        current: true,
+      ),
+      V2SignInEvent(
+        id: 'e2',
+        device: 'MacBook Air',
+        location: 'Mumbai',
+        timeLabel: '2h ago',
+      ),
+    ],
+  );
+}
+
+/// The four built-in presets plus one custom.
+V2AgentPresetsPageData previewPresetsData() {
+  return const V2AgentPresetsPageData(
+    selectedId: 'coder',
+    presets: <V2AgentPreset>[
+      V2AgentPreset(
+        id: 'general',
+        name: 'General',
+        description: 'Balanced help for everyday questions.',
+        modelLabel: 'Auto',
+        builtIn: true,
+      ),
+      V2AgentPreset(
+        id: 'coder',
+        name: 'Coder',
+        description: 'Reads the repo before it writes anything.',
+        modelLabel: 'Ovid 2 Pro',
+        builtIn: true,
+        icon: Icons.code_rounded,
+      ),
+      V2AgentPreset(
+        id: 'researcher',
+        name: 'Researcher',
+        description: 'Cites sources and separates fact from guess.',
+        modelLabel: 'Auto',
+        builtIn: true,
+        icon: Icons.travel_explore_rounded,
+      ),
+      V2AgentPreset(
+        id: 'writer',
+        name: 'Writer',
+        description: 'Short sentences, one idea per paragraph.',
+        modelLabel: 'Ovid 2 Flash',
+        builtIn: true,
+        icon: Icons.edit_note_rounded,
+      ),
+      V2AgentPreset(
+        id: 'custom-release',
+        name: 'Release notes',
+        description: 'Turns merged pull requests into a changelog.',
+        modelLabel: 'Ovid 2 Pro',
+      ),
+    ],
+  );
+}
+
+/// Two granted, one blocked, two not asked yet.
+V2PermissionsPageData previewPermissionsData() {
+  return const V2PermissionsPageData(
+    permissions: <V2PermissionItem>[
+      V2PermissionItem(
+        id: 'camera',
+        name: 'Camera',
+        reason: 'Scan a document or take a photo to send.',
+        status: V2PermissionAccess.granted,
+        icon: Icons.photo_camera_outlined,
+      ),
+      V2PermissionItem(
+        id: 'photos',
+        name: 'Photos',
+        reason: 'Attach an image from your library.',
+        status: V2PermissionAccess.granted,
+        icon: Icons.photo_library_outlined,
+      ),
+      V2PermissionItem(
+        id: 'notifications',
+        name: 'Notifications',
+        reason: 'Tell you when a scheduled run finishes.',
+        status: V2PermissionAccess.blocked,
+        icon: Icons.notifications_outlined,
+      ),
+      V2PermissionItem(
+        id: 'microphone',
+        name: 'Microphone',
+        reason: 'Ask a question by voice.',
+        status: V2PermissionAccess.notAsked,
+        icon: Icons.mic_none_rounded,
+      ),
+      V2PermissionItem(
+        id: 'files',
+        name: 'Files',
+        reason: 'Open a workspace folder in Studio.',
+        status: V2PermissionAccess.notAsked,
+        icon: Icons.folder_open_rounded,
+      ),
+    ],
+  );
+}
+
+/// Four memory files across the three scopes.
+V2MemoryFilesPageData previewMemoryFilesData() {
+  return const V2MemoryFilesPageData(
+    totalSizeLabel: '18 KB',
+    files: <V2MemoryFileEntry>[
+      V2MemoryFileEntry(
+        id: 'global',
+        name: 'global.md',
+        group: V2MemoryFileGroup.global,
+        sizeLabel: '6 KB',
+        updatedLabel: 'Updated 2h ago',
+        preview: 'Prefers Dart and Flutter. Ships Android first.',
+        content: 'Prefers Dart and Flutter. Ships Android first.',
+      ),
+      V2MemoryFileEntry(
+        id: 'brand',
+        name: 'brand.md',
+        group: V2MemoryFileGroup.project,
+        sizeLabel: '12 KB',
+        updatedLabel: 'Updated 2h ago',
+        preview: 'Primary colour is violet. Headings use Inter.',
+        content: 'Primary colour is violet. Headings use Inter.',
+      ),
+      V2MemoryFileEntry(
+        id: 'decisions',
+        name: 'decisions.md',
+        group: V2MemoryFileGroup.project,
+        sizeLabel: '4 KB',
+        updatedLabel: 'Updated yesterday',
+        preview: 'Use the Go plan for the first team rollout.',
+        content: 'Use the Go plan for the first team rollout.',
+      ),
+      V2MemoryFileEntry(
+        id: 'session',
+        name: 'auth-refresh.md',
+        group: V2MemoryFileGroup.session,
+        sizeLabel: '2 KB',
+        updatedLabel: 'Saved 10:44',
+        preview: 'Retry the token refresh once before failing.',
+        content: 'Retry the token refresh once before failing.',
+      ),
+    ],
+  );
+}
+
+/// A published sandbox preview with real site copy and an expiry.
+V2LivePreviewData previewLivePreviewData() {
+  return V2LivePreviewData(
+    siteName: 'Ovid Studio',
+    url: 'preview.ovidsi.com/79f9b4c0e',
+    version: 'Version 4',
+    eyebrow: 'Sandbox preview',
+    headline: 'Ship a landing page before lunch.',
+    description:
+        'Ovid built this page from your brief. Every change lands here first.',
+    primaryCta: 'Open the app',
+    secondaryCta: 'Read the docs',
+    metrics: const <V2PreviewMetric>[
+      V2PreviewMetric(value: '12', label: 'sections', caption: 'One page'),
+      V2PreviewMetric(value: '48 KB', label: 'weight', caption: 'No images'),
+      V2PreviewMetric(value: '100', label: 'speed', caption: 'Fast'),
+    ],
+    featureTitle: 'One calm surface',
+    featureBody: 'One header, one action and room to breathe.',
+    featureBadge: 'New',
+    expiresLabel: 'Expires in 6 days',
+    expiresAt: DateTime(2026, 10, 28),
+  );
+}
+
+/// Three agent-owned tabs with a live address.
+V2BrowserData previewBrowserData() {
+  return V2BrowserData(
+    tabs: const <V2BrowserTab>[
+      V2BrowserTab(id: 'docs', title: 'Ovid docs', host: 'docs.ovidsi.com'),
+      V2BrowserTab(
+        id: 'github',
+        title: 'PR #214 · GitHub',
+        host: 'github.com',
+      ),
+      V2BrowserTab(
+        id: 'news',
+        title: 'Hacker News',
+        host: 'news.ycombinator.com',
+        headless: true,
+      ),
+    ],
+    activeTabId: 'github',
+    address: 'github.com/aarav/ovid-app/pull/214',
+    cursor: previewViewportCursor(),
+    canGoBack: true,
+  );
+}
+
+/// A connected GitHub connector with permissions, tools and activity.
+connector_detail.V2ConnectorDetailData previewConnectorDetailData() {
+  return const connector_detail.V2ConnectorDetailData(
+    id: 'github',
+    name: 'GitHub',
+    description: 'Repositories, issues and pull requests.',
+    icon: Icons.hub_outlined,
+    connected: true,
+    endpoint: 'https://api.github.com',
+    accountLabel: 'aarav@gmail.com',
+    syncedLabel: 'Synced 2m ago',
+    accessLabel: '2 of 3 permissions granted',
+    authLabel: 'OAuth',
+    permissions: <connector_detail.V2ConnectorPermission>[
+      connector_detail.V2ConnectorPermission(
+        id: 'repo-read',
+        name: 'Read repositories',
+        description: 'Clone a repo and read its files and branches.',
+      ),
+      connector_detail.V2ConnectorPermission(
+        id: 'pr-write',
+        name: 'Write pull requests',
+        description: 'Open, comment on and merge pull requests.',
+        scope: connector_detail.V2ConnectorPermissionScope.write,
+        risk: connector_detail.V2ConnectorPermissionRisk.medium,
+      ),
+      connector_detail.V2ConnectorPermission(
+        id: 'admin',
+        name: 'Manage the organisation',
+        description: 'Change repository settings, secrets and access.',
+        granted: false,
+        scope: connector_detail.V2ConnectorPermissionScope.admin,
+        risk: connector_detail.V2ConnectorPermissionRisk.high,
+      ),
+    ],
+    tools: <connector_detail.V2ConnectorTool>[
+      connector_detail.V2ConnectorTool(id: 'repo_clone', name: 'Clone repository'),
+      connector_detail.V2ConnectorTool(
+        id: 'pr_open',
+        name: 'Open pull request',
+        description: 'Create a pull request with the agent changes.',
+        write: true,
+      ),
+    ],
+    agents: <connector_detail.V2ConnectorAgent>[
+      connector_detail.V2ConnectorAgent(
+        id: 'coder',
+        name: 'Coder',
+        description: 'Uses GitHub to read the repo it edits.',
+        accessLabel: 'Read only',
+      ),
+    ],
+    activity: <connector_detail.V2ConnectorActivity>[
+      connector_detail.V2ConnectorActivity(
+        id: 'a1',
+        title: 'Opened PR #214',
+        detail: 'Refresh the hero and tighten spacing',
+        timeLabel: '2h ago',
+      ),
+      connector_detail.V2ConnectorActivity(
+        id: 'a2',
+        title: 'Cloned ovid-app',
+        timeLabel: 'Yesterday',
+      ),
+      connector_detail.V2ConnectorActivity(
+        id: 'a3',
+        title: 'Token refresh failed',
+        detail: 'Retried automatically and succeeded.',
+        timeLabel: '2 days ago',
+        ok: false,
+      ),
+    ],
+    safetyNote: 'Revoking a permission stops its tools immediately.',
+    disconnectNote: 'Disconnecting removes the token from this device.',
+  );
+}
+
+/// The workspace tree for the Studio preview.
+List<V2FileNode> previewStudioFileNodes() {
+  return const <V2FileNode>[
+    V2FileNode(
+      name: 'lib',
+      children: <V2FileNode>[
+        V2FileNode(
+          name: 'core',
+          children: <V2FileNode>[
+            V2FileNode(
+              name: 'auth_service.dart',
+              path: 'lib/core/auth_service.dart',
+              changed: true,
+            ),
+            V2FileNode(
+              name: 'auth_guard.dart',
+              path: 'lib/core/auth_guard.dart',
+            ),
+          ],
+        ),
+        V2FileNode(
+          name: 'ui',
+          children: <V2FileNode>[
+            V2FileNode(
+              name: 'theme.dart',
+              path: 'lib/ui/theme.dart',
+              changed: true,
+            ),
+          ],
+        ),
+      ],
+    ),
+    V2FileNode(name: 'pubspec.yaml', path: 'pubspec.yaml', changed: true),
+  ];
+}
+
+/// The open file in the Studio preview.
+List<V2CodeLine> previewStudioCodeLines() {
+  return const <V2CodeLine>[
+    V2CodeLine(number: 12, text: 'class AuthService {'),
+    V2CodeLine(number: 13, text: '  Future<void> signIn(String email) async {'),
+    V2CodeLine(number: 14, text: '    await _guard.requireRecentAuth();'),
+    V2CodeLine(number: 15, text: '    return _session.open(email);'),
+    V2CodeLine(number: 16, text: '  }'),
+    V2CodeLine(number: 17, text: '}'),
+  ];
+}

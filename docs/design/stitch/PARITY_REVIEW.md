@@ -11,6 +11,24 @@ implementation in `lib/ui/v2/`. No Flutter source was edited for this review.
 - Code authority: the 47 screen files under `lib/ui/v2/` listed in the last
   column.
 
+## Status after the 2026-10-22 minimal-UI pass
+
+The review below was written against the pre-refactor tree. A reduction pass
+then rewrote every screen to `docs/design/MINIMAL_UI_CONTRACT.md` — one header,
+smaller copy, one action per zone, no decorative chrome — and wired the
+components that had been sitting unimported. Two things changed for this
+document:
+
+- **Parity is no longer the goal.** Where the PNG and the contract disagree, the
+  contract now wins by decision: the PNG's second title row, its version pill,
+  its gradients, its 39 pill variants and its card-inside-card previews are gone
+  on purpose. A row marked `close` because the implementation is *quieter* than
+  the PNG is not a defect.
+- **Several rows closed for a different reason than the one written.** They were
+  re-judged on 2026-10-22; see
+  [Rows re-judged in this pass](#rows-re-judged-in-this-pass) and
+  [Defect status after the minimal-UI pass](#defect-status-after-the-minimal-ui-pass).
+
 ## Rubric
 
 | Status | Meaning |
@@ -23,8 +41,10 @@ A persistent bottom navigation bar is drawn in **11 of the 47** reference
 PNGs — `Chat · Projects · Artifacts · Settings` on the two home chats, live
 chat, model picker and drawer; `Chat · Studio · Browser · Connectors ·
 Artifacts` on Studio, Browser, Connectors and the Artifacts Library; and
-`Session · Trajectory · Share · Compute` in the collaboration room. None of
-them exist in v2. The bar is counted once under
+`Session · Trajectory · Share · Compute` in the collaboration room. v2 now draws
+a bar of its own below 600 dp (`Chat · Studio · Browser · Library`, with
+Settings reached from the drawer) and a rail above it, so the *structure* exists
+even where the tab set differs. The bar is counted once under
 [System-wide gaps](#system-wide-gaps) instead of being repeated in every row,
 so the table below judges the screen body itself.
 
@@ -32,14 +52,34 @@ This is a structural/text comparison, not a pixel diff. Spacing, weight and
 exact colour values were not measured; where the PNG and the spec disagree the
 row names both.
 
-Snapshot note: this worktree is shared with other P3 agents. Several
-`lib/ui/v2/**` files were being edited while this review ran; findings reflect
-the tree at **2026-10-21 12:26 UTC**. Re-check a row before acting on it.
+Snapshot note: the parity table and the design-defect audit were first written
+against the tree at **2026-10-21 12:26 UTC**. Everything marked as re-judged or
+as fixed was re-checked against the code on **2026-10-22**. Rows not touched by
+that pass still describe 2026-10-21 and should be re-checked before acting.
 
 ## Results
 
 Totals over 48 rows covering 47 screens (the credentials PNG is one file that
-the spec splits into two screens): **30 match · 18 close · 0 missing**.
+the spec splits into two screens). After the 2026-10-22 re-judge: **30 match ·
+17 close · 0 missing**, judged over 47 rows — was 30 · 18 · 0 over 48. Rows 23
+and 28 moved to `match` because the components they were missing are now
+imported; row 20 moved to `close` because the minimal-UI pass deliberately
+dropped its ring and period tabs; row 13 dropped out because its screen no
+longer exists (search is inline in the drawer).
+
+### Rows re-judged in this pass
+
+| # | Screen | Was | Now | Evidence |
+|---|---|---|---|---|
+| 13 | `ovid_si_search` | match | **removed** | `sidebar/search_page.dart` is gone. Search is a field at the top of the drawer that filters the session and project index in place; the contract's one-screen-one-job rule made a second navigation surface for the same data the wrong shape. |
+| 16 | `ovid_si_artifact_detail` | close | close | `artifact_preview.dart` is now imported, so the stage renders a real thumbnail/code/document instead of a drawn mock. Still no device frame, no `Responsive View` header and no `Expand Frame`. |
+| 20 | `ovid_si_usage` | match | **close** | The minimal-UI pass replaced the ring, the monthly quota bar and the Today/7/30 tabs with one hero number plus one chart. Deliberate reduction, not a regression. |
+| 23 | `ovid_si_storage` | close | **match** | `storage_breakdown.dart` is imported; the legend now has Chats, Artifacts, Uploads, Memory, Cache and Previews — the PNG's four categories plus two. |
+| 28 | `ovid_si_studio_workspace` | close | **match** | `file_tree.dart` (searchable tree) and `code_viewer.dart` (line-number gutter, diff kinds) are imported. The PNG's `Find / File / Folder` toolbar is now the tree's search field. |
+| 31 | `ovid_si_live_preview` | close | close | `V2LivePreviewData` now has a `frame` field and the page renders a real image when one arrives, but no caller supplies one: `livePreviewDataFor` still returns `V2PreviewStatus.empty`. The screen can show real pixels; nothing produces them yet. |
+| 32 | `ovid_si_autonomous_browser` | close | close | `viewport.dart` and `tab_strip.dart` are imported and `BrowserLivePage` feeds real tabs, url and frames, so the "No page open" dead end is gone. Still no fps label, no action log and no "Ovid is driving" card. |
+| 39 | `ovid_si_schedule_runs` | close | close | `run_timeline.dart` is imported (outcome, Retry run, Open artifact). Still no large stat tiles and no upcoming-queue card. |
+| 42 | `ovid_si_collaboration_live` | close | close | `turn_banner.dart` is imported and `Request turn` exists. Still no `Raise priority` and no Session/Trajectory/Share/Compute tabs. |
 
 ### Onboarding
 
@@ -49,7 +89,7 @@ the spec splits into two screens): **30 match · 18 close · 0 missing**.
 | 2 | `ovid_si_sign_in` | match | — (implementation adds "Continue with phone"; the brief allows Google or phone only, so the Apple button in the PNG is kept *and* phone is added — see concerns) | `lib/ui/v2/onboarding/sign_in_page.dart` |
 | 3 | `ovid_si_onboarding_welcome` | close | "Continue with Google" CTA between "Get started" and "I already have an account"; PNG's nested-ring orb with the small green dot. Implementation has the orb, engine pill, headline, subtitle, both spec CTAs, version + language pills and the terms line. | `lib/ui/v2/onboarding/onboarding_welcome.dart` |
 | 4 | `ovid_si_language_goal` | match | — (goal cards are chips in both; PNG's per-card check marks are the selected state) | `lib/ui/v2/onboarding/language_goal_page.dart` |
-| 5 | `ovid_si_paywall_upgrade` | match | Plan bullets follow the product truth ("Ovid Flash unlimited", "All Pro models") instead of the PNG's "Ovid Flash 2.5 unlimited" / "Pro 1.5 + the model Sonnet". INR prices and the USD/INR toggle are present. `Compare all plans` renders disabled: no caller passes `onComparePlans` and `settings/plan_compare_table.dart` is not wired. | `lib/ui/v2/onboarding/paywall_page.dart` |
+| 5 | `ovid_si_paywall_upgrade` | match | Plan bullets follow the product truth ("Ovid Flash unlimited", "All Pro models") instead of the PNG's "Ovid Flash 2.5 unlimited" / "Pro 1.5 + the model Sonnet". INR prices and the USD/INR toggle are present, and the choice now persists. The `Compare all plans` button is **gone** rather than disabled: the paywall has no comparison surface, and `plan_compare_table.dart` lives on Plan & billing (row 19) where the comparison actually belongs. | `lib/ui/v2/onboarding/paywall_page.dart` |
 
 ### Chat
 
@@ -67,19 +107,19 @@ the spec splits into two screens): **30 match · 18 close · 0 missing**.
 |---|---|---|---|---|
 | 11 | `ovid_si_navigation_drawer` | match | `⌘K` hint on the search row and the numeric badges (`Artifacts 12`) are not drawn; "New session" replaces "New chat" to obey the copy rule that "Chat" is the only product noun. Pinned/Projects/Today/Yesterday and the Schedule · Artifacts · Settings footer are all present (`Earlier` is added). | `lib/ui/v2/sidebar/sidebar.dart`, `lib/ui/v2/sidebar/sidebar_footer.dart` |
 | 12 | `ovid_si_projects` | close | No "Sort by recent" control, and the "Active Workspaces · 3" header is replaced by a "Projects" section header with a count pill. Project cards omit the PNG's per-card status chips (`Active schedule`, `Cron: 00:00 UTC daily`, `v2.4 sync`, "Only you"/"Yesterday"); the new-project sheet has no `Step 1 of 2` header and no "Sync Vector Store" toggle. Present: explainer, filter + New, cards with shared/personal pill, chats/storage, member stack with `+N` and "Updated …", empty state, name + colour sheet. | `lib/ui/v2/sidebar/projects_page.dart` |
-| 13 | `ovid_si_search` | match | "Best matches" label, grouped Chats/Projects/Artifacts, highlighted matches, recent searches with Clear all, no-results copy and suggestion chips all present. The PNG's `Simulate "No Results" Variant` block is a design artefact, not UI. | `lib/ui/v2/sidebar/search_page.dart` |
+| 13 | `ovid_si_search` | n/a | Screen removed. Search is now a field at the top of the drawer that filters the session and project index in place; there is no separate results page. The contract's "one screen, one job" rule made a second navigation surface for the same data the wrong shape. | `lib/ui/v2/sidebar/sidebar.dart` |
 | 14 | `ovid_si_session_actions_sheet` | match | The PNG shows the transcript behind the sheet; the v2 sheet shows title/time/message count/model in its own header. All actions, the Branch pill and the deletion footnote are present. | `lib/ui/v2/sidebar/session_actions_sheet.dart` |
 | 15 | `ovid_si_artifacts_library` | match | Adds source chips (All/Generated/Uploaded) on top of the spec's kind chips, a library summary card and a per-card overflow menu. `See what Ovid can make` callout and the `New artifact` FAB are present. | `lib/ui/v2/library/artifacts_page.dart` |
-| 16 | `ovid_si_artifact_detail` | close | No device-framed live HTML render, no `Responsive View` / `Live Preview · 100% Retina` header and no `Expand Frame`. The page draws its own compact stage (image/code/document); `library/artifact_preview.dart` would close most of this (it accepts a `pageThumbnail`) but is **not imported by any page**. Details grid, tabs, Download, Share link, Open in Studio and source-chat row are present. | `lib/ui/v2/library/artifact_detail_page.dart`, unwired `lib/ui/v2/library/artifact_preview.dart` |
+| 16 | `ovid_si_artifact_detail` | close | The page now renders through the shared `library/artifact_preview.dart` with the artifact's real thumbnail (image), code or document stage. Still missing: a device frame, the `Responsive View` / `Live Preview · 100% Retina` header and `Expand Frame`. Details grid, tabs, Download, Share link, Open in Studio and source-chat row are present. | `lib/ui/v2/library/artifact_detail_page.dart` |
 
 ### Settings
 
 | # | Screen | Status | Missing vs PNG | Owning file |
 |---|---|---|---|---|
 | 17 | `ovid_si_settings_hub` | match | Exact section order and row ids enforced by `_canonicalOrder`; profile card with plan pill, "Add" on Connectors, "Show reasoning" switch, and "Log out of …" present. PNG's "Display & Graphics" app-bar title is a Stitch leftover. | `lib/ui/v2/settings/settings_hub.dart` |
-| 18 | `ovid_si_account` | match | Fields are injected (`V2AccountField`) rather than hard-coded labels, so name/email/phone/language/region come from wiring; avatar + change photo, linked Google/Apple/GitHub with "N of M linked", Credentials row, Sign out and the 24 h delete flow are present. | `lib/ui/v2/settings/account_page.dart` |
+| 18 | `ovid_si_account` | match | Fields are injected (`V2AccountField`) and currently wired to display name + email; avatar, connected Google/GitHub rows (Apple is not a provider, so it is not drawn), Credentials row, Sign out and the delete flow are present. Phone, language and region fields the PNG lists are not wired, so they do not render. | `lib/ui/v2/settings/account_page.dart` |
 | 19 | `ovid_si_plan_billing` | match | Current plan card, upgrade cards, USD/INR + monthly/yearly, "Most popular", Restore purchases, legal line. Adds a plan-limits table and payment history. | `lib/ui/v2/settings/plan_billing_page.dart` |
-| 20 | `ovid_si_usage` | match | Ring `12.4M of 50M`, reset countdown, monthly quota bar, Today/7/30 tabs, bar chart, per-model split and the "Free plan uses Auto only" note are all present. PNG model names (`GPT-4o / Mini`, `the model Sonnet`) are caller data, not copy in the screen. | `lib/ui/v2/settings/usage_page.dart` |
+| 20 | `ovid_si_usage` | close | The ring, the Today/7/30 tabs and the monthly quota bar are gone by decision: the screen is now one hero number ("Tokens today", its cap and the reset) plus one activity chart and the per-model split. Everything it says is real; it is quieter than the PNG. PNG model names (`GPT-4o / Mini`, `the model Sonnet`) were always caller data. | `lib/ui/v2/settings/usage_page.dart` |
 | 21 | `ovid_si_memory` | close | "Context Accuracy Rating 88%" ring card is absent; the PNG's dismissible (×) notice has no close affordance. Toggle, global memory with Edit, project rows, session files with download, Export memory and Reset all memory are present (plus Share session memory). | `lib/ui/v2/settings/memory_page.dart` |
 | 22 | `ovid_si_data_control` | match | Intro + last-backup line, export/import with size limits, Permissions, Crash reports toggle, Storage row with percentage, Delete your data, Reset memory, confirm dialog. | `lib/ui/v2/settings/data_control_page.dart` |
 | 23 | `ovid_si_storage` | close | Legend differs: PNG is Chats / Artifacts / Memory / Previews, the page shows Artifacts / Sessions / Cache (previews appear only as a "Clear previews" row). `settings/storage_breakdown.dart` already implements the four PNG categories but is **not imported by any page**. Adds "Items by size" and "Trash" rows. Donut, used/free line, Clear previews, Delete old chats and the Go/Plus upgrade block are present. | `lib/ui/v2/settings/storage_page.dart`, unwired `lib/ui/v2/settings/storage_breakdown.dart` |
@@ -146,34 +186,39 @@ the spec splits into two screens): **30 match · 18 close · 0 missing**.
 
 ## System-wide gaps
 
-1. **No bottom navigation anywhere.** 11 of 47 PNGs draw a persistent bar
-   (4-tab `Chat · Projects · Artifacts · Settings`; 5-tab
-   `Chat · Studio · Browser · Connectors · Artifacts` on Studio, Browser,
-   Connectors, Artifacts Library; and `Session · Trajectory · Share · Compute`
-   in the collaboration room). `lib/ui/design/` has no nav component and
-   `lib/ui/v2/app/v2_app_shell.dart` only provides a drawer plus app-bar
-   actions. This is the single largest structural difference between the
-   references and v2.
+> Re-checked 2026-10-22 after the minimal-UI pass. Items 1, 3 and 6 are closed;
+> the original finding is kept where it still explains the reference.
+
+1. ~~**No bottom navigation anywhere.**~~ **Closed.** `lib/ui/v2/app/bottom_nav.dart`
+   draws the persistent bar below 600 dp and `v2_app_shell.dart` swaps it for a
+   fixed 280 dp rail (600–899 dp) or 300 dp rail (900 dp+) above that — one
+   navigation per band, never two. `v2ChatNavItems` and `v2WorkNavItems` cover
+   both reference tab sets. The collaboration room's
+   `Session · Trajectory · Share · Compute` bar is still not reproduced.
 2. **No notification or avatar entry point in the v2 top bars.** The PNGs show
    a bell and an avatar on Chat, Studio, Browser, Connectors and Artifacts;
    v2 routes those through the drawer profile row only.
-3. **Browser is routed empty.** `lib/ui/v2/app/v2_work_routes.dart:89` pushes
-   `BrowserPage(data: V2BrowserData())` with no session source, so screen 32
-   can never reach its content state in the app, and the viewport is a
-   placeholder slot even when it does.
-4. **Preview surfaces are synthesised, not rendered.** Live preview
-   (screen 31) composes injected marketing fields and its data model has no
-   frame field, and the artifact stage (screen 16) draws its own compact mock
-   instead of the unwired `artifact_preview.dart` that accepts a page
-   thumbnail. Neither screen can show a real page image today.
+3. ~~**Browser is routed empty.**~~ **Closed.** `v2_work_routes.dart` pushes
+   `BrowserLivePage`, which subscribes to the browser client and feeds
+   `BrowserPage` the real tab list, url, frame and take-control state. With no
+   session it lands on the honest "No page open" state instead of a placeholder
+   slot.
+4. **Preview surfaces.** Live preview (screen 31) can now render a real frame —
+   `V2LivePreviewData.frame` exists and the page draws it — but no producer
+   supplies one, so in the app it stays in its waiting state. The artifact stage
+   (screen 16) now uses the shared `artifact_preview.dart` with the artifact's
+   real thumbnail when there is one. Neither has a device frame or
+   `Responsive View` chrome, which is now a deliberate choice.
 5. **Copy that must not be copied from the PNGs.** The references contain
    `Claude 3.7 Sonnet`, `GPT-4o / Mini`, `$20/mo`, `10 GB` Go storage and
    `SSH keys`; the brief fixes these to plan-defined values and forbids
    third-party model names. Rows marked `match` follow the brief, not the PNG.
-6. **Parity components exist that no page imports.** As of
-   **2026-10-21 12:26 UTC**, 33 untracked component files under `lib/ui/v2/`
-   have no `import` anywhere. The tree is being edited by other P3 agents while
-   this review runs, so re-check before acting. The ones that map to a table row:
+6. ~~**Parity components exist that no page imports.**~~ **Closed.** Every
+   component listed below is now imported by a screen or a route; a scan of all
+   132 files under `lib/ui/v2/` leaves only the entry points (`v2_app_shell`,
+   `v2_onboarding_gate`, `app_lock_gate`, the gallery) and two `_io.dart` saver
+   helpers without a screen import, which is correct. The table is kept as the
+   record of what each one closed:
 
    | Unwired component | Would close |
    |---|---|
@@ -201,29 +246,33 @@ the spec splits into two screens): **30 match · 18 close · 0 missing**.
    | `settings_extra/legal_page.dart` | legal document page (not in the PNG set) |
    | `connectors/connector_permissions.dart`, `connectors/catalog_data.dart` | permission editor and catalog seed (rows 34–36) |
 
-   Only `chat/message_blocks.dart` and `chat/queue_dock.dart` from that wave are
-   imported by a page. Adopt these before writing more UI, otherwise the same
-   gaps get implemented twice.
+   `sidebar/search_filters.dart` was deleted together with the standalone
+   search screen; filtering now lives in the drawer's search field.
+
+   As of 2026-10-22 every other row in this table is imported, including
+   `chat/message_blocks.dart` and `chat/queue_dock.dart`.
 
 ## Concerns
 
-1. **Bottom nav needs a decision, not a screen fix.** It is owned by the shell
-   and `lib/ui/design/`, both outside the per-screen files. Until it exists,
-   every top-level screen is one drawer gesture away from the reference
-   behaviour.
-2. **The wiring pass is the highest-leverage next step.** 33 component files are
-   unimported (gap 6); several `close` rows would move to `match` with no
-   new UI. The remaining `close` gaps are genuinely absent UI: projects sort
-   control, memory accuracy card, connectors tabs + popular grid, schedules
-   total/CTA, run stat tiles + upcoming-queue card, explorer toolbar, collab
-   raise-priority, and the live-chat artifact thumbnail/Preview.
-3. **Artifact card in live chat is the weakest content screen.** The PNG's
-   thumbnail + Preview + Copy is what makes generated output feel real; v2
-   offers Download only.
-4. **Sign-in offers Google, phone and Apple.** The brief says Google or phone
-   only; the PNG shows Apple. Both are shipped in
-   `sign_in_page.dart`, which is a product-truth question for whoever owns
-   onboarding, not a visual-parity one.
+1. ~~**Bottom nav needs a decision, not a screen fix.**~~ **Settled.** The shell
+   owns it: a bottom bar below 600 dp, a 280 dp rail from 600 dp and a 300 dp
+   rail from 900 dp, with the drawer removed above 600 dp so there is never a
+   second navigation.
+2. **The wiring pass is done; what is left is genuinely missing service
+   surface.** The remaining `close` gaps need a producer, not more UI: projects
+   sort/status chips, the memory accuracy card, connectors' installed/available
+   tabs, schedules' total and CTA, run stat tiles and the upcoming-queue card,
+   the collab raise-priority action, and a real live-chat artifact thumbnail.
+3. **Artifact card in live chat.** The PNG's thumbnail + Preview + Copy is what
+   makes generated output feel real; v2 opens the artifact detail (chevron) and
+   offers Download, with no inline thumbnail and no Copy.
+4. **Sign-in: Apple is gone, the email form is not.** `onApple` is never passed
+   by `v2_onboarding_gate.dart`, so the Apple button does not render — the brief's
+   "Google or phone" is what ships. But the email/password field, "Forgot
+   password" and "Create account" still render, and all three just set the inline
+   error "Use Google or phone to sign in." That is exactly the pattern the
+   contract bans (a control with no service behind it); it survives because it
+   fails *honestly* rather than pretending. It should be removed with the field.
 5. **Splash parity is spec-driven.** It has a progress line and no version
    pill / sandbox badge, which is correct per the spec row even though it does
    not resemble the PNG. Do not "fix" it toward the PNG without amending the
@@ -262,6 +311,37 @@ the raw hex pair.
 | 6 | Contrast failures | 4 pairs | yes (token) |
 | 7 | Duplicate components | 39 pills, 5 sheet headers, 3 section headers, 10 cards, 1 merged action | yes (OPill) |
 | 8 | Stitch-specific mistakes | 7 | 1 (popup shadow) |
+
+## Defect status after the minimal-UI pass
+
+The table above is the audit as it was run. The pass that followed rewrote every
+screen, so this is the state of each finding on 2026-10-22 (re-checked against
+the code, not assumed):
+
+| # | Class | State | Evidence |
+|---|---|---|---|
+| 1 | Spacing off the `OSpace` scale | **mostly fixed** | Design layer uses the new tokens. Screen-side literals fell from 168 to **18** `EdgeInsets` sites; 6 of those are `OSpace` values written as numbers (16/8/4) and 12 are 1–5 dp optical nudges. |
+| 2 | Colours outside `OColors` | **1 remains** | `app/v2_settings_actions.dart:629` still has `TextStyle(color: Colors.red)` on a destructive dialog button. |
+| 3 | Type sizes bypassing `OType` | **fixed** | Only two `fontSize:` overrides survive: `fontSize: 1` on the deliberately invisible OTP field, and `fontSize: 13` on one artifact filter chip. `TextScaler.noScaling` is gone. `OType.bodySm.copyWith(fontWeight: w600)` → 0 sites (`bodySmStrong`). |
+| 4 | Radius bypassing `ORadius` | **12 remain** | Down from 20. All `BorderRadius.circular(2)` / `(3)` on bars, swatches and thumbnails; `ORadius.xs` exists for exactly this case. |
+| 5 | Touch targets under 48 dp | **fixed** | `OButton.compact` keeps a 48 dp height in the design layer and `_MemoryChip` was deleted with the drawer rewrite. |
+| 6 | Contrast failures | **fixed** | `OContrast.audit` now measures 34 pairs per theme and all pass; `test/design` is green (64 tests). |
+| 7 | Duplicate components | **fixed** | Zero screen-local `_Tag/_Pill/_Badge/_Card/_Section/_Header/_Chip/_Row` classes remain; `test/design/no_local_primitives_test.dart` enforces it with an **empty** allowlist. 41 `OPill`, 65 `OCard`, 13 `OSheetHeader` call sites. |
+| 8 | Stitch-specific mistakes | **1 remains** | Connector hero, paywall radial glow, splash halo, `OShadow.glow` and the popup drop shadow are all gone. `settings/usage_page.dart:337` still sets the daily token count in `OType.display`. |
+
+### Screen-level list, item by item
+
+| Was | State |
+|---|---|
+| Connector detail centred `h1` hero | **fixed** — name is the header title, body leads with a status row |
+| `_MemoryChip` 22 dp hit area | **fixed** — widget deleted |
+| `model_chip` `fontSize: 10` + `noScaling` | **fixed** — badge uses `OType.caption` |
+| `Colors.red` in the destructive confirm | **remains** |
+| 39 local pill classes + 4 chips + 5 sheet headers + hand-rolled cards | **fixed** — shared primitives, ratcheted |
+| Paywall radial glow | **fixed** — no gradient anywhere in `lib/ui/v2` |
+| Usage hero at `OType.display` | **remains** |
+| 20 radius literals, 9 one-off spacings | **partly** — 12 radius, 18 `EdgeInsets` |
+| 68 `bodySm` + w600 overrides, 168 literal spacings | **fixed** for the type half, mostly fixed for spacing |
 
 ## 1. Spacing that is not on the `OSpace` scale
 
@@ -483,61 +563,63 @@ collab message bubble (`collab_live_page.dart:540`), both intentional.
 
 ## Verification
 
+Re-run 2026-10-22 after the minimal-UI pass:
+
 ```
-flutter analyze lib/ui/design          → No issues found!
-flutter test test/design               → 57 tests, All tests passed!
-flutter test test/v2/navigation        → 98 tests, All tests passed!
+flutter analyze                        → No issues found! (27.3 s)
+flutter test                           → 4,599 passed, 2 skipped, 0 failed
+flutter test test/design               → 64 tests, All tests passed!
+flutter test test/v2/navigation        → 102 tests, All tests passed!
 flutter test test/v2/a11y_ratchet_test.dart
                                        → 100 tests, All tests passed!
-                                         (every registered screen at 320 dp /
-                                         200 % text, light and dark)
+                                         (50 screens × light/dark at 320 dp /
+                                          200 % text)
+flutter test test/v2/semantics_audit_test.dart
+                                       → 113 tests, All tests passed!
+                                         (empty known-gaps map)
+flutter test test/v2/header_consistency_test.dart
+test/v2/responsive_audit_test.dart
+test/design/no_local_primitives_test.dart
+                                       → green
 ```
+
+`flutter test` is green end to end (4,599 passed, 2 skipped, 0 failed). Earlier
+in the same pass the text-budget word ceiling and one Language & goal semantics
+assertion were red; both were fixed before this run.
 
 `test/design` was updated alongside the tokens because it pinned the old
 palette: `o_theme_test.dart` asserted `dark.accentFill == 0xFF7C5CFF` and a
 4.3 floor, and `o_contrast_test.dart` carried a `knownGaps` entry for
-`dark/accentFill/onAccent` with its comment "delete this entry once the palette
-is adjusted". Both now assert the new values (4.62:1, ≥ 4.5) and the gap map is
-empty. Three tests were added: `OPill` icon/dot/semantics, the compact button's
-48 dp floor, and the new spacing/type tokens.
-
-`test/v2/semantics_audit_test.dart` still reports 14 failures across other
-agents' screens (reading order in chat/settings hub, repeated labels in
-account_health, sidebar, session actions, studio workspace, connectors,
-collab members). They are not caused by this change: removing the
-`container: true` fix below *increases* that count from 14 to 20, i.e. the
-design-layer fix closes six of them and opens none.
+`dark/accentFill/onAccent`. Both now assert the new values (4.62:1, ≥ 4.5) and
+the gap map is empty.
 
 ### Concurrency note
 
-`lib/ui/design/**` was being edited by another agent while this audit ran (it
-added `Semantics(sortKey:)` ordering to `OAppBar`/`OScaffold` and changed
-`OMove.reduced` to `maybeDisableAnimationsOf`). That work is kept; this audit
-only repaired its build break (`OrdinalSortKey` is not `const` and
-`package:flutter/semantics.dart` was not imported) so the tree could be
-verified. Re-check `git diff lib/ui/design` before landing either change.
+The original audit ran while `lib/ui/design/**` was being edited by another
+agent. That is no longer the case: the design layer is now stable and the
+minimal-UI pass is the last writer to every file under `lib/ui/v2/`. The one
+piece of that concurrent work still worth knowing about is that `OAppBar` and
+`OScaffold` carry explicit `Semantics(sortKey:)` ordering — the reading-order
+tests depend on it.
 
 ## Screen-level work still open
 
-Ordered by user-visible impact. Every item is outside `lib/ui/design/**`.
+Ordered by user-visible impact. Every item is outside `lib/ui/design/**`, and
+each one is a *defect*, not a missing feature.
 
-1. `lib/ui/v2/connectors/connector_detail_page.dart:751-770` — replace the
-   centred `h1` hero with a left-aligned `h2` + icon tile.
-2. `lib/ui/v2/sidebar/sidebar.dart:760-813` — give `_MemoryChip` a 48 dp hit
-   area.
-3. `lib/ui/v2/chat/model_chip.dart:154-187` — drop `TextScaler.noScaling` and
-   `fontSize: 10`; use `OType.caption`.
-4. `lib/ui/v2/app/v2_settings_actions.dart:570` — `Colors.red` → `c.danger`.
-5. Delete the 39 local pill classes and use `OPill(icon:)`; delete
-   `_CategoryChip`/`_GoalChip`/`_AttachmentChip`/`_ToolChip` in favour of
-   `OChip`; delete `_Section` in `subagent_summary.dart:317` and the five
-   `_Header`s in favour of `showOSheet(title:)`; delete the hand-rolled
-   `*Card` classes in favour of `OCard`.
-6. `lib/ui/v2/onboarding/paywall_page.dart:283` — remove the radial glow.
-7. `lib/ui/v2/settings/usage_page.dart:405-420` — step the hero stat down from
-   `OType.display`.
-8. The 20 radius literals in [4](#4-radius-values-that-bypass-oradius) and the
-   nine one-off spacings in [1](#1-spacing-that-is-not-on-the-ospace-scale).
-9. Replace the 68 `OType.bodySm.copyWith(fontWeight: FontWeight.w600)` with
-   `OType.bodySmStrong`, and the 168 literal spacings with the new tokens.
+1. `lib/ui/v2/app/v2_settings_actions.dart:629` — `Colors.red` → `c.danger`.
+   It is the last raw colour in `lib/ui/v2` and ignores both themes.
+2. `lib/ui/v2/settings/usage_page.dart:337` — step the daily token count down
+   from `OType.display`; it is the largest type in the app used for a number.
+3. The 12 remaining radius literals (`BorderRadius.circular(2)`/`(3)` on bars,
+   swatches and thumbnails) — `ORadius.xs` is the token for exactly this.
+4. The 12 one-off spacing literals (1–5 dp optical nudges in
+   `appearance`-style rows, `code_viewer`, `commit_sheet`, `cadence_picker`,
+   `artifact_filters`, `tab_strip`) and the 6 `OSpace` values written as numbers
+   in the route builders.
+5. `lib/ui/v2/library/artifact_filters.dart:615` — `fontSize: 13` → `OType.label`.
 
+Fixed by the pass, kept here so the list is not re-opened: the connector hero,
+`_MemoryChip`, the model-chip badge, all 39 local pill classes and the other
+duplicate primitives, the paywall glow, the splash halo, `OShadow.glow`, the
+popup drop shadow, and the 68 `bodySm`+w600 overrides.

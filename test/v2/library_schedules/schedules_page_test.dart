@@ -11,10 +11,6 @@ const _schedules = <V2ScheduleItem>[
     description: 'Browses 5 top tech sites and writes a short summary.',
     rule: 'Every weekday at 9:00 AM',
     nextRun: 'Tomorrow, 9:00 AM',
-    sessionTitle: 'AI news research',
-    createdLabel: 'May 12, 2026',
-    completedRuns: 12,
-    totalRuns: 30,
   ),
   V2ScheduleItem(
     id: 's2',
@@ -29,7 +25,6 @@ const _schedules = <V2ScheduleItem>[
     description: 'Packages a daily snapshot.',
     rule: 'Every 6 hours',
     lastRunFailed: true,
-    failureMessage: 'Last run failed · Connector disconnected',
   ),
 ];
 
@@ -65,35 +60,40 @@ void _phone(WidgetTester tester) {
 }
 
 void main() {
-  testWidgets('renders schedules in light mode', (tester) async {
+  testWidgets('renders one header and minimal schedule cards', (tester) async {
     _phone(tester);
     await tester.pumpWidget(
-      _app(const SchedulesPage(data: V2SchedulesData(schedules: _schedules))),
+      _app(
+        const SchedulesPage(
+          data: V2SchedulesData(schedules: _schedules),
+          onCreate: _ignoreVoid,
+        ),
+      ),
     );
     await tester.pumpAndSettle();
 
     expect(find.text('Schedules'), findsOneWidget);
-    expect(find.text('Ovid can work while you sleep'), findsOneWidget);
-    expect(find.text('ACTIVE SCHEDULES (2)'), findsOneWidget);
-    expect(find.text('Morning AI news briefing'), findsOneWidget);
-    expect(find.text('Every weekday at 9:00 AM'), findsOneWidget);
-    expect(find.text('Next: Tomorrow, 9:00 AM'), findsOneWidget);
-    expect(find.text('12 of 30 runs'), findsOneWidget);
-    expect(find.text('From AI news research'), findsOneWidget);
-    expect(find.text('Created May 12, 2026'), findsOneWidget);
-    expect(find.text('Action needed'), findsOneWidget);
+    expect(find.bySemanticsLabel('New schedule'), findsOneWidget);
 
-    await tester.scrollUntilVisible(
-      find.text('Paused'),
-      200,
-      scrollable: find.byType(Scrollable).first,
+    expect(
+      find.text('Browses 5 top tech sites and writes a short summary.'),
+      findsOneWidget,
     );
-    await tester.pumpAndSettle();
-    expect(find.text('PAUSED (1)'), findsOneWidget);
-    expect(find.text('Paused'), findsOneWidget);
+    expect(find.text('Every weekday at 9:00 AM'), findsOneWidget);
+    expect(find.text('Next Tomorrow, 9:00 AM'), findsOneWidget);
+
+    // Removed copy: explainer, section headers, run counts and status lines.
+    expect(find.text('Ovid can work while you sleep'), findsNothing);
+    expect(find.text('ACTIVE SCHEDULES (2)'), findsNothing);
+    expect(find.text('PAUSED (1)'), findsNothing);
+    expect(find.text('12 of 30 runs'), findsNothing);
+    expect(find.text('From AI news research'), findsNothing);
+    expect(find.text('Created May 12, 2026'), findsNothing);
+    expect(find.text('Action needed'), findsNothing);
+    expect(find.text('Retry'), findsNothing);
   });
 
-  testWidgets('renders schedules in dark mode', (tester) async {
+  testWidgets('renders in dark mode', (tester) async {
     _phone(tester);
     await tester.pumpWidget(
       _app(
@@ -103,9 +103,29 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Ovid can work while you sleep'), findsOneWidget);
-    expect(find.text('Morning AI news briefing'), findsOneWidget);
-    expect(find.text('Retry'), findsOneWidget);
+    expect(find.text('Schedules'), findsOneWidget);
+    expect(
+      find.text('Browses 5 top tech sites and writes a short summary.'),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('the header add action creates a schedule', (tester) async {
+    _phone(tester);
+    var created = 0;
+    await tester.pumpWidget(
+      _app(
+        SchedulesPage(
+          data: const V2SchedulesData(schedules: _schedules),
+          onCreate: () => created++,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.bySemanticsLabel('New schedule'));
+    expect(created, 1);
   });
 
   testWidgets('empty state creates a schedule', (tester) async {
@@ -122,7 +142,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('No schedules yet'), findsOneWidget);
-    await tester.tap(find.text('Create a schedule'));
+    expect(find.text('Set a task to run on its own.'), findsOneWidget);
+    await tester.tap(find.text('New schedule').last);
     expect(created, 1);
   });
 
@@ -139,7 +160,9 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Morning AI news briefing'));
+    await tester.tap(
+      find.text('Browses 5 top tech sites and writes a short summary.'),
+    );
     expect(opened?.id, 's1');
   });
 
@@ -191,7 +214,6 @@ void main() {
       await tester.pump(const Duration(milliseconds: 600));
 
       expect(find.text('Schedules'), findsOneWidget);
-      expect(find.text('Ovid can work while you sleep'), findsOneWidget);
       _expectNoTextPastEdges(tester, 320);
 
       // Walk the whole list: a lazy ListView only lays out what is visible, so
@@ -209,14 +231,45 @@ void main() {
 
       state.position.jumpTo(0);
       await tester.pump();
-      await tester.scrollUntilVisible(
-        find.text('Morning AI news briefing'),
-        200,
-        scrollable: find.byType(Scrollable).first,
+      expect(
+        find.text('Browses 5 top tech sites and writes a short summary.'),
+        findsOneWidget,
       );
-      expect(find.text('Morning AI news briefing'), findsOneWidget);
     });
   }
+
+  testWidgets('the list stays single column and caps at 720', (tester) async {
+    tester.view.physicalSize = const Size(1200, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      _app(const SchedulesPage(data: V2SchedulesData(schedules: _schedules))),
+    );
+    await tester.pumpAndSettle();
+
+    final first = tester.getTopLeft(
+      find.text('Browses 5 top tech sites and writes a short summary.'),
+    );
+    final second = tester.getTopLeft(
+      find.text('Captures scores and saves a report.'),
+    );
+    expect(second.dx, closeTo(first.dx, 1));
+    expect(second.dy, greaterThan(first.dy));
+
+    final card = tester.getSize(
+      find
+          .ancestor(
+            of: find.text(
+              'Browses 5 top tech sites and writes a short summary.',
+            ),
+            matching: find.byType(OCard),
+          )
+          .first,
+    );
+    expect(card.width, lessThanOrEqualTo(720));
+  });
 
   testWidgets('shows the skeleton while loading', (tester) async {
     _phone(tester);
@@ -313,29 +366,6 @@ void main() {
       ),
     );
     handle.dispose();
-  });
-
-  testWidgets('failed schedule retry fires its callback', (tester) async {
-    _phone(tester);
-    V2ScheduleItem? retried;
-    await tester.pumpWidget(
-      _app(
-        SchedulesPage(
-          data: const V2SchedulesData(schedules: _schedules),
-          onRetryRun: (schedule) => retried = schedule,
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.scrollUntilVisible(
-      find.widgetWithText(OButton, 'Retry'),
-      200,
-      scrollable: find.byType(Scrollable).first,
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(OButton, 'Retry'));
-    expect(retried?.id, 's3');
   });
 
   testWidgets('card menu pauses a running schedule', (tester) async {
@@ -465,30 +495,6 @@ void main() {
     expect(value, isTrue);
   });
 
-  testWidgets('shows a completed count when no total is known', (tester) async {
-    _phone(tester);
-    await tester.pumpWidget(
-      _app(
-        const SchedulesPage(
-          data: V2SchedulesData(
-            schedules: [
-              V2ScheduleItem(
-                id: 'only',
-                title: 'Weekly report',
-                description: 'Writes a short report.',
-                rule: 'Every Monday at 8:00 AM',
-                completedRuns: 7,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('7 runs completed'), findsOneWidget);
-  });
-
   for (final dark in [false, true]) {
     testWidgets(
       'menu survives 320 dp and 200% text (${dark ? 'dark' : 'light'})',
@@ -536,6 +542,8 @@ void main() {
     );
   }
 }
+
+void _ignoreVoid() {}
 
 void _ignore(V2ScheduleItem item) {}
 

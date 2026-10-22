@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'share_sheet.dart' show V2ShareMode, v2ShareMemberLimit;
 
@@ -9,8 +10,8 @@ import 'share_sheet.dart' show V2ShareMode, v2ShareMemberLimit;
 /// Immutable state for [V2ShareLinkCard].
 ///
 /// The card is presentational: the host owns copying, revoking and forking.
-/// Dates are formatted locally so the card never asks for a clock beyond the
-/// optional [V2ShareLinkCard.now] used to detect an expired link.
+/// Dates and member counts stay on the data object for hosts that need them;
+/// the minimal card shows only the link and its one action.
 @immutable
 class V2ShareLinkCardData {
   const V2ShareLinkCardData({
@@ -31,13 +32,13 @@ class V2ShareLinkCardData {
   /// Collab rooms are live and capped; read-only links can be forked.
   final V2ShareMode mode;
 
-  /// When the link was created, shown as a quiet meta row.
+  /// When the link was created. Retained for hosts; not rendered.
   final DateTime? createdAt;
 
   /// When the link stops working. Null means it does not expire.
   final DateTime? expiresAt;
 
-  /// People in a Collab room, including the creator. Ignored in read-only.
+  /// People in a Collab room, including the creator.
   final int memberCount;
 
   /// Hard room cap. Defaults to [v2ShareMemberLimit].
@@ -88,12 +89,12 @@ String formatShareLinkDate(DateTime value) {
   return '${local.day} ${months[local.month - 1]} ${local.year}';
 }
 
-/// A share-link preview card: URL, copy, mode, member count, dates and the one
-/// action that matters to the person reading it.
+/// The link row: the URL, one copy control, and the one action the person
+/// reading it can take (fork for a viewer, revoke for a creator).
 ///
-/// Deliberately QR-less: the product explicitly does not render a QR code, so
-/// this card stays a readable link with one copy target. All state and
-/// callbacks are injected.
+/// Deliberately QR-less and meta-less: the sheet already states the mode and
+/// the room size, so repeating them here would be a second copy of the same
+/// fact.
 class V2ShareLinkCard extends StatelessWidget {
   const V2ShareLinkCard({
     super.key,
@@ -123,351 +124,96 @@ class V2ShareLinkCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     final expired = data.isExpiredAt(now ?? DateTime.now());
+    final hasLink = data.url.trim().isNotEmpty;
+    final copied = data.copied && hasLink;
+    final canCopy = hasLink && !expired && !data.revoked && onCopy != null;
+
+    final fork = data.canFork && onFork != null && !expired
+        ? OButton(
+            label: 'Fork',
+            icon: Icons.account_tree_rounded,
+            variant: OButtonVariant.secondary,
+            expand: true,
+            onPressed: onFork,
+          )
+        : null;
+    final revoke = !data.viewer && onRevoke != null
+        ? OTextAction(
+            label: 'Revoke',
+            icon: Icons.link_off_rounded,
+            onPressed: onRevoke,
+          )
+        : null;
 
     return Align(
       alignment: Alignment.topCenter,
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 560),
         child: Container(
-          clipBehavior: Clip.antiAlias,
+          padding: const EdgeInsets.all(OSpace.s),
           decoration: BoxDecoration(
             color: c.surface,
-            borderRadius: BorderRadius.circular(ORadius.l),
+            borderRadius: BorderRadius.circular(ORadius.m),
             border: Border.all(color: c.hairline),
           ),
-          padding: const EdgeInsets.all(OSpace.l),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             mainAxisSize: MainAxisSize.min,
             children: [
-              _header(c),
-              const SizedBox(height: OSpace.m),
+              Row(
+                children: [
+                  Icon(Icons.link_rounded, size: 20, color: c.accent),
+                  const SizedBox(width: OSpace.s),
+                  Expanded(
+                    child: Semantics(
+                      label: hasLink ? 'Share link, ${data.url}' : 'No link yet',
+                      child: ExcludeSemantics(
+                        child: Text(
+                          hasLink ? data.url : 'No link yet',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: OType.mono.copyWith(
+                            color: hasLink ? c.text : c.textFaint,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: OSpace.xs),
+                  OIconButton(
+                    icon: copied
+                        ? Icons.check_rounded
+                        : Icons.copy_rounded,
+                    semanticLabel: copied ? 'Copied' : 'Copy link',
+                    tooltip: copied ? 'Copied' : 'Copy link',
+                    active: copied,
+                    onPressed: canCopy ? onCopy : null,
+                  ),
+                ],
+              ),
               if (data.revoked) ...[
-                _revokedNotice(c),
-                const SizedBox(height: OSpace.m),
+                const SizedBox(height: OSpace.xs),
+                Text(
+                  'Link revoked.',
+                  style: OType.caption.copyWith(color: c.danger),
+                ),
+              ] else if (expired) ...[
+                const SizedBox(height: OSpace.xs),
+                Text(
+                  'Link expired.',
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
               ],
-              _linkRow(context, c, expired: expired),
-              const SizedBox(height: OSpace.m),
-              _meta(c, expired: expired),
-              if (data.isCollab) ...[
-                const SizedBox(height: OSpace.m),
-                _members(c),
+              if (fork != null) ...[
+                const SizedBox(height: OSpace.s),
+                fork,
               ],
-              _actions(c, expired: expired),
+              if (revoke != null)
+                Align(alignment: Alignment.centerLeft, child: revoke),
             ],
           ),
         ),
       ),
-    );
-  }
-
-  Widget _header(OColors c) {
-    final badge = data.isCollab
-        ? const OPill(label: 'Collab', tone: OPillTone.accent, dot: true)
-        : const OPill(label: 'Read only', tone: OPillTone.neutral);
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        // At 200 % text the badge is wide enough to starve the title, so it
-        // drops under the subtitle instead of sitting in the corner.
-        final tight =
-            constraints.maxWidth < 360 ||
-            MediaQuery.textScalerOf(context).scale(1) > 1.3;
-        return Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                color: c.accentSoft,
-                borderRadius: BorderRadius.circular(ORadius.s),
-              ),
-              child: Icon(Icons.link_rounded, size: 20, color: c.accent),
-            ),
-            const SizedBox(width: OSpace.m),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    data.viewer ? 'Shared with you' : 'Share link',
-                    style: OType.h3.copyWith(color: c.text),
-                  ),
-                  const SizedBox(height: OSpace.xs),
-                  Text(
-                    data.isCollab
-                        ? 'Anyone with the link can join the room.'
-                        : 'Anyone with the link can read this chat.',
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                  if (tight) ...[const SizedBox(height: OSpace.s), badge],
-                ],
-              ),
-            ),
-            if (!tight) ...[const SizedBox(width: OSpace.s), badge],
-          ],
-        );
-      },
-    );
-  }
-
-  Widget _linkRow(BuildContext context, OColors c, {required bool expired}) {
-    final hasLink = data.url.trim().isNotEmpty;
-    final copied = data.copied && hasLink;
-    final label = copied ? 'Copied' : 'Copy link';
-    final enabled = hasLink && !expired && !data.revoked && onCopy != null;
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final inline = constraints.maxWidth >= _inlineLinkWidth(context, label);
-        final link = Semantics(
-          label: hasLink ? 'Share link, ${data.url}' : 'No share link yet',
-          child: ExcludeSemantics(
-            child: Row(
-              children: [
-                Container(
-                  width: 32,
-                  height: 32,
-                  decoration: BoxDecoration(
-                    color: c.surfaceRaised,
-                    borderRadius: BorderRadius.circular(ORadius.s),
-                  ),
-                  child: Icon(
-                    Icons.alternate_email_rounded,
-                    size: 17,
-                    color: c.textMuted,
-                  ),
-                ),
-                const SizedBox(width: OSpace.s),
-                Expanded(
-                  child: Text(
-                    hasLink ? data.url : 'No link yet',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.mono.copyWith(
-                      color: hasLink ? c.textMuted : c.textFaint,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-        final button = OButton(
-          label: label,
-          icon: copied ? Icons.check_rounded : Icons.copy_rounded,
-          variant: copied
-              ? OButtonVariant.secondary
-              : OButtonVariant.primary,
-          expand: !inline,
-          onPressed: enabled ? onCopy : null,
-          semanticLabel: copied ? 'Share link copied' : 'Copy share link',
-        );
-        return Container(
-          padding: const EdgeInsets.all(OSpace.s),
-          decoration: BoxDecoration(
-            color: c.surfaceAlt,
-            borderRadius: BorderRadius.circular(ORadius.m),
-            border: Border.all(color: c.hairline),
-          ),
-          child: inline
-              ? Row(
-                  children: [
-                    Expanded(child: link),
-                    const SizedBox(width: OSpace.s),
-                    button,
-                  ],
-                )
-              : Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    link,
-                    const SizedBox(height: OSpace.s),
-                    button,
-                  ],
-                ),
-        );
-      },
-    );
-  }
-
-  /// Width the inline link row needs before the copy button can sit beside the
-  /// URL without squeezing it. Mirrors the share sheet's measurement so both
-  /// cards behave the same at 200 % text.
-  double _inlineLinkWidth(BuildContext context, String label) {
-    final painter = TextPainter(
-      text: TextSpan(text: label, style: OType.label),
-      textDirection: Directionality.of(context),
-      textScaler: MediaQuery.textScalerOf(context),
-      maxLines: 1,
-    )..layout();
-    final buttonWidth = painter.width + 19 + OSpace.s + 40;
-    painter.dispose();
-    // 32 icon + gap + a readable URL minimum + gap + button.
-    return 32 + OSpace.s + 96 + OSpace.s + buttonWidth;
-  }
-
-  Widget _meta(OColors c, {required bool expired}) {
-    final items = <Widget>[
-      if (data.createdAt != null)
-        _MetaItem(
-          icon: Icons.calendar_today_rounded,
-          label: 'Created ${formatShareLinkDate(data.createdAt!)}',
-        ),
-      if (data.expiresAt != null)
-        _MetaItem(
-          icon: expired ? Icons.event_busy_rounded : Icons.schedule_rounded,
-          label:
-              '${expired ? 'Expired' : 'Expires'} '
-              '${formatShareLinkDate(data.expiresAt!)}',
-          color: expired ? c.danger : null,
-        ),
-    ];
-    if (items.isEmpty) return const SizedBox.shrink();
-    return Wrap(spacing: OSpace.l, runSpacing: OSpace.s, children: items);
-  }
-
-  Widget _members(OColors c) {
-    return Container(
-      padding: const EdgeInsets.all(OSpace.s),
-      decoration: BoxDecoration(
-        color: c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.m),
-        border: Border.all(color: c.hairline),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.only(top: 2),
-            child: Icon(Icons.groups_rounded, size: 18, color: c.textMuted),
-          ),
-          const SizedBox(width: OSpace.s),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  data.memberLabel,
-                  style: OType.bodySm.copyWith(
-                    color: c.text,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: OSpace.xs),
-                Text(
-                  data.roomFull
-                      ? 'The room is full. New people need a free seat.'
-                      : 'One person sends at a time.',
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-                if (data.roomFull) ...[
-                  const SizedBox(height: OSpace.xs),
-                  const OPill(
-                    label: 'Room full',
-                    tone: OPillTone.warn,
-                    dot: true,
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _revokedNotice(OColors c) {
-    return Container(
-      padding: const EdgeInsets.all(OSpace.m),
-      decoration: BoxDecoration(
-        color: c.danger.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(ORadius.m),
-        border: Border.all(color: c.danger.withValues(alpha: 0.3)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.link_off_rounded, size: 18, color: c.danger),
-          const SizedBox(width: OSpace.s),
-          Expanded(
-            child: Text(
-              'This link was revoked. Nobody can open it now.',
-              style: OType.caption.copyWith(color: c.danger),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _actions(OColors c, {required bool expired}) {
-    final Widget? action;
-    if (data.revoked || (data.viewer && !data.canFork)) {
-      action = null;
-    } else if (data.viewer) {
-      action = onFork == null
-          ? null
-          : OButton(
-              label: 'Fork into my account',
-              icon: Icons.account_tree_rounded,
-              variant: OButtonVariant.secondary,
-              expand: true,
-              onPressed: expired ? null : onFork,
-            );
-    } else {
-      action = onRevoke == null
-          ? null
-          : OButton(
-              label: 'Revoke link',
-              icon: Icons.link_off_rounded,
-              variant: OButtonVariant.danger,
-              expand: true,
-              onPressed: onRevoke,
-            );
-    }
-    if (action == null) return const SizedBox.shrink();
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const SizedBox(height: OSpace.l),
-        Divider(height: 1, color: c.hairline),
-        const SizedBox(height: OSpace.m),
-        if (data.viewer)
-          Padding(
-            padding: const EdgeInsets.only(bottom: OSpace.s),
-            child: Text(
-              'Forking makes a copy in your account. The original stays with '
-              'its creator.',
-              style: OType.caption.copyWith(color: c.textMuted),
-            ),
-          ),
-        action,
-      ],
-    );
-  }
-}
-
-class _MetaItem extends StatelessWidget {
-  const _MetaItem({required this.icon, required this.label, this.color});
-
-  final IconData icon;
-  final String label;
-  final Color? color;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final tint = color ?? c.textMuted;
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(icon, size: 15, color: tint),
-        const SizedBox(width: OSpace.xs),
-        Flexible(
-          child: Text(label, style: OType.caption.copyWith(color: tint)),
-        ),
-      ],
     );
   }
 }

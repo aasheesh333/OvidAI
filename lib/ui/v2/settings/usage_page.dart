@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../../../core/format.dart';
 import '../../design/o_components.dart';
-import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'plan_billing_page.dart';
 import 'usage_charts.dart';
@@ -142,8 +142,9 @@ class V2UsageData {
 
   /// The exact 24 h cap from the authoritative plan table when the caller did
   /// not supply one.
-  String get limitText =>
-      dailyLimitLabel.trim().isEmpty ? planLimits.dailyCapLabel : dailyLimitLabel;
+  String get limitText => dailyLimitLabel.trim().isEmpty
+      ? planLimits.dailyCapLabel
+      : dailyLimitLabel;
 
   String get monthlyUsedText =>
       monthlyUsedLabel.trim().isEmpty ? unknownLabel : monthlyUsedLabel;
@@ -152,9 +153,8 @@ class V2UsageData {
       ? planLimits.monthlyCapLabel
       : monthlyLimitLabel;
 
-  String get monthlyPercentText => monthlyPercentLabel.trim().isEmpty
-      ? unknownLabel
-      : monthlyPercentLabel;
+  String get monthlyPercentText =>
+      monthlyPercentLabel.trim().isEmpty ? unknownLabel : monthlyPercentLabel;
   final double dailyFraction;
 
   /// Overrides for the exact 24 h cap; empty derives it from [planId].
@@ -237,20 +237,30 @@ class UsagePage extends StatelessWidget {
       case V2UsageStatus.error:
         body = OErrorState(message: data.errorMessage, onRetry: data.onRetry);
       case V2UsageStatus.empty:
-        body = _emptyState(context);
+        body = _emptyState();
       case V2UsageStatus.ready:
         // A ready page with no real numbers would render zeros that look like
         // usage. Show the honest empty state instead.
-        body = data.hasData ? _content(context) : _emptyState(context);
+        body = data.hasData ? _content(context) : _emptyState();
     }
 
-    return OScaffold(
-      appBar: const OAppBar(title: 'Usage'),
-      body: OFadeSlide(child: body),
+    return OScreen(
+      title: 'Usage',
+      actions: [
+        if (data.onUpgrade != null)
+          OIconButton(
+            key: const ValueKey<String>('usage-upgrade'),
+            icon: Icons.workspace_premium_outlined,
+            semanticLabel: 'Upgrade plan',
+            tooltip: 'Upgrade plan',
+            onPressed: data.onUpgrade,
+          ),
+      ],
+      child: body,
     );
   }
 
-  Widget _emptyState(BuildContext context) {
+  Widget _emptyState() {
     // Only offer the action that is actually wired: a "Start a chat" button
     // that silently retries the fetch is a fake control.
     final Widget? action;
@@ -272,87 +282,30 @@ class UsagePage extends StatelessWidget {
     return OEmptyState(
       icon: Icons.insights_rounded,
       title: 'No usage yet',
-      message: 'Chat with Ovid to see your token use here.',
+      message: 'Chat to see token use.',
       action: action,
     );
   }
 
   Widget _content(BuildContext context) {
-    final c = OColors.of(context);
     return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.screen,
-        OSpace.s,
-        OSpace.screen,
-        OSpace.xxl,
-      ),
+      padding: const EdgeInsets.only(top: OSpace.l, bottom: OSpace.xxl),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _DailyRingCard(data: data),
-          const SizedBox(height: OSpace.m),
-          _MonthlyCard(data: data),
-          const SizedBox(height: OSpace.m),
-          _GlanceCard(data: data),
-          const SizedBox(height: OSpace.m),
+          _UsageHero(data: data),
+          const SizedBox(height: OSpace.l),
           _DailyTokensSection(data: data),
-          const SizedBox(height: OSpace.m),
-          _ModelShareSection(data: data),
-          const SizedBox(height: OSpace.m),
-          _ImageUsageSection(data: data),
-          if (data.showFreePlanNote) ...[
-            const SizedBox(height: OSpace.m),
-            OCard(
-              padding: const EdgeInsets.all(OSpace.l),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    width: 28,
-                    height: 28,
-                    decoration: BoxDecoration(
-                      color: c.accentSoft,
-                      shape: BoxShape.circle,
-                    ),
-                    child: Icon(
-                      Icons.info_outline_rounded,
-                      size: 16,
-                      color: c.accent,
-                    ),
-                  ),
-                  const SizedBox(width: OSpace.m),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Free and Go use Auto mode only.',
-                          style: OType.caption.copyWith(color: c.textMuted),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          'Manual models unlock with Plus or Pro.',
-                          style: OType.caption.copyWith(color: c.textFaint),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-          if (data.onUpgrade != null) ...[
-            const SizedBox(height: OSpace.m),
-            _UpgradeCard(data: data),
-          ],
         ],
       ),
     );
   }
 }
 
-class _DailyRingCard extends StatelessWidget {
-  const _DailyRingCard({required this.data});
+/// One hero number: today's tokens, the cap and the live reset. Everything
+/// else on the screen is the single activity chart.
+class _UsageHero extends StatelessWidget {
+  const _UsageHero({required this.data});
 
   final V2UsageData data;
 
@@ -360,143 +313,51 @@ class _DailyRingCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     final fraction = data.dailyFraction.clamp(0.0, 1.0).toDouble();
-    return OCard(
-      padding: const EdgeInsets.symmetric(
-        horizontal: OSpace.l,
-        vertical: OSpace.xl,
-      ),
-      child: Column(
-        children: [
-          Semantics(
-            label: data.dailyUsedLabel.trim().isEmpty
-                ? 'Today\'s token usage is not available. '
-                      'The limit is ${data.limitText} tokens.'
-                : '${data.usedText} of ${data.limitText} tokens used today',
-            child: ConstrainedBox(
-              // The ring keeps its 208 dp look but grows with the text scale
-              // instead of clipping the labels inside it.
-              constraints: const BoxConstraints(minWidth: 208, minHeight: 208),
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  Positioned.fill(
-                    child: TweenAnimationBuilder<double>(
-                      tween: Tween<double>(begin: 0, end: fraction),
-                      duration: OMove.duration(context, OMotion.slow),
-                      curve: OMotion.emphasized,
-                      builder: (context, value, _) => Center(
-                        child: AspectRatio(
-                          aspectRatio: 1,
-                          child: CircularProgressIndicator(
-                            value: value,
-                            strokeWidth: 14,
-                            strokeCap: StrokeCap.round,
-                            backgroundColor: c.surfaceRaised,
-                            color: c.accentFill,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.all(OSpace.xl),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          'TOKENS TODAY',
-                          textAlign: TextAlign.center,
-                          style: OType.overline.copyWith(color: c.success),
-                        ),
-                        const SizedBox(height: OSpace.xs),
-                        Text(
-                          data.usedText,
-                          textAlign: TextAlign.center,
-                          style: OType.display.copyWith(
-                            color: c.text,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const SizedBox(height: OSpace.xs),
-                        Text(
-                          'of ${data.limitText} tokens used',
-                          textAlign: TextAlign.center,
-                          style: OType.caption.copyWith(color: c.textMuted),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
+    final limit = data.dailyLimitLabel.trim().isNotEmpty
+        ? data.dailyLimitLabel
+        : _compactCap(data.planLimits.dailyTokenCap);
+    final fallback = data.resetLabel.isNotEmpty
+        ? data.resetLabel
+        : (data.resetsAtLabel.isEmpty ? '' : 'Resets at ${data.resetsAtLabel}');
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('Tokens today', style: OType.caption.copyWith(color: c.textMuted)),
+        const SizedBox(height: OSpace.xs),
+        Semantics(
+          label: data.dailyUsedLabel.trim().isEmpty
+              ? 'Today\'s token usage is not available. '
+                    'The limit is $limit tokens.'
+              : '${data.usedText} of $limit tokens used today',
+          child: ExcludeSemantics(
+            child: Text(
+              data.usedText,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: OType.display.copyWith(
+                color: c.text,
+                fontWeight: FontWeight.w700,
               ),
             ),
           ),
-          const SizedBox(height: OSpace.l),
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  '${data.usedText} used',
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ),
-              const SizedBox(width: OSpace.s),
-              Flexible(
-                child: Text(
-                  '${data.limitText} limit',
-                  textAlign: TextAlign.right,
-                  style: OType.caption.copyWith(
-                    color: c.text,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ],
-          ),
+        ),
+        Text(
+          'of $limit tokens',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: OType.bodySm.copyWith(color: c.textMuted),
+        ),
+        const SizedBox(height: OSpace.m),
+        OProgressBar(value: fraction, height: 8),
+        if (fallback.isNotEmpty || data.resetsAt != null) ...[
           const SizedBox(height: OSpace.s),
-          OProgressBar(value: fraction, height: 8),
-          const SizedBox(height: OSpace.s),
-          Text(
-            'Daily cap ${data.effectiveDailyCapLabel} tokens / 24 h',
-            textAlign: TextAlign.center,
+          _ResetCountdown(
+            resetsAt: data.resetsAt,
+            fallback: fallback,
             style: OType.caption.copyWith(color: c.textMuted),
           ),
-          if (data.resetsAtLabel.isNotEmpty) ...[
-            const SizedBox(height: 2),
-            Text(
-              'Resets at ${data.resetsAtLabel}',
-              textAlign: TextAlign.center,
-              style: OType.caption.copyWith(color: c.textFaint),
-            ),
-          ],
-          if (data.resetsAt != null || data.resetLabel.isNotEmpty) ...[
-            const SizedBox(height: OSpace.l),
-            Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: OSpace.m,
-                vertical: OSpace.s,
-              ),
-              decoration: BoxDecoration(
-                color: c.surfaceAlt,
-                borderRadius: BorderRadius.circular(ORadius.pill),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.schedule_rounded, size: 16, color: c.accent),
-                  const SizedBox(width: 6),
-                  Flexible(
-                    child: _ResetCountdown(
-                      resetsAt: data.resetsAt,
-                      fallback: data.resetLabel,
-                      style: OType.caption.copyWith(color: c.textMuted),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
         ],
-      ),
+      ],
     );
   }
 }
@@ -568,260 +429,6 @@ class _ResetCountdownState extends State<_ResetCountdown> {
   }
 }
 
-class _MonthlyCard extends StatelessWidget {
-  const _MonthlyCard({required this.data});
-
-  final V2UsageData data;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return OCard(
-      padding: const EdgeInsets.all(OSpace.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: c.surfaceAlt,
-                  borderRadius: BorderRadius.circular(ORadius.m),
-                ),
-                child: Icon(
-                  Icons.calendar_month_rounded,
-                  size: 19,
-                  color: c.accent,
-                ),
-              ),
-              const SizedBox(width: OSpace.m),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Monthly quota',
-                      style: OType.bodySm.copyWith(
-                        color: c.text,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    Text(
-                      data.billingNote,
-                      style: OType.caption.copyWith(color: c.textMuted),
-                    ),
-                  ],
-                ),
-              ),
-              OPill(label: data.monthlyPercentText, tone: OPillTone.accent),
-            ],
-          ),
-          const SizedBox(height: OSpace.m),
-          OProgressBar(value: data.monthlyFraction, height: 8),
-          const SizedBox(height: OSpace.s),
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  '${data.monthlyUsedText} used',
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ),
-              const SizedBox(width: OSpace.s),
-              Flexible(
-                child: Text(
-                  '${data.monthlyLimitText} limit',
-                  textAlign: TextAlign.right,
-                  style: OType.caption.copyWith(
-                    color: c.text,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: OSpace.s),
-          Text(
-            'Monthly cap ${data.effectiveMonthlyCapLabel} tokens / 30 days',
-            style: OType.caption.copyWith(color: c.textMuted),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            '${data.planLimits.autoAllowanceLabel} · '
-            '${data.planLimits.modelAccessLabel}',
-            style: OType.caption.copyWith(color: c.textFaint),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _GlanceCard extends StatelessWidget {
-  const _GlanceCard({required this.data});
-
-  final V2UsageData data;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return OCard(
-      padding: const EdgeInsets.all(OSpace.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          OSectionHeader(
-            label: 'This month at a glance',
-            padding: EdgeInsets.zero,
-          ),
-          const SizedBox(height: OSpace.m),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: _GlanceStat(
-                  label: 'Requests',
-                  value: data.requestsLabel.trim().isEmpty
-                      ? V2UsageData.unknownLabel
-                      : data.requestsLabel,
-                ),
-              ),
-              Container(
-                width: 1,
-                height: 40,
-                margin: const EdgeInsets.symmetric(horizontal: OSpace.m),
-                color: c.hairline,
-              ),
-              Expanded(
-                child: _GlanceStat(
-                  label: 'Images',
-                  value: data.imagesLabel.trim().isEmpty
-                      ? V2UsageData.unknownLabel
-                      : data.imagesLabel,
-                  detail: data.imagesDetail,
-                ),
-              ),
-              Container(
-                width: 1,
-                height: 40,
-                margin: const EdgeInsets.symmetric(horizontal: OSpace.m),
-                color: c.hairline,
-              ),
-              Expanded(
-                child: _GlanceStat(
-                  label: 'Storage',
-                  value: data.storageUsedLabel.trim().isEmpty
-                      ? V2UsageData.unknownLabel
-                      : data.storageUsedLabel,
-                  detail: data.storageUsedLabel.trim().isEmpty
-                      ? 'Not tracked yet'
-                      : 'of ${data.storageLimitLabel}',
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: OSpace.m),
-          OProgressBar(value: data.storageFraction, height: 6),
-        ],
-      ),
-    );
-  }
-}
-
-class _GlanceStat extends StatelessWidget {
-  const _GlanceStat({required this.label, required this.value, this.detail});
-
-  final String label;
-  final String value;
-  final String? detail;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(label, style: OType.caption.copyWith(color: c.textMuted)),
-        const SizedBox(height: OSpace.xs),
-        Text(
-          value,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: OType.h3.copyWith(color: c.text),
-        ),
-        if (detail != null) ...[
-          const SizedBox(height: 2),
-          Text(detail!, style: OType.caption.copyWith(color: c.textFaint)),
-        ],
-      ],
-    );
-  }
-}
-
-class _UpgradeCard extends StatelessWidget {
-  const _UpgradeCard({required this.data});
-
-  final V2UsageData data;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return OCard(
-      accent: true,
-      padding: const EdgeInsets.all(OSpace.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: c.accentSoft,
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(
-                  Icons.arrow_upward_rounded,
-                  size: 19,
-                  color: c.accent,
-                ),
-              ),
-              const SizedBox(width: OSpace.m),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      data.upgradeTitle,
-                      style: OType.h3.copyWith(color: c.text),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      data.upgradeMessage,
-                      style: OType.bodySm.copyWith(color: c.textMuted),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: OSpace.m),
-          OButton(
-            label: data.upgradeLabel,
-            icon: Icons.workspace_premium_outlined,
-            expand: true,
-            onPressed: data.onUpgrade,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 /// Daily token bars. The page's [V2UsageDay] list is the single source of
 /// truth; the chart only renders it and reports a range change.
 class _DailyTokensSection extends StatelessWidget {
@@ -856,94 +463,21 @@ class _DailyTokensSection extends StatelessWidget {
   }
 }
 
-/// Model share. Custom-provider models keep their explanatory line above the
-/// chart, while the chart owns the split bar and the legend.
-class _ModelShareSection extends StatelessWidget {
-  const _ModelShareSection({required this.data});
-
-  final V2UsageData data;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (data.customProviderCount > 0) ...[
-          Text(
-            data.customProviderCount == 1
-                ? 'Includes 1 custom provider model.'
-                : 'Includes ${data.customProviderCount} custom provider models.',
-            style: OType.caption.copyWith(color: c.textMuted),
-          ),
-          const SizedBox(height: OSpace.s),
-        ],
-        V2ModelShareChart(
-          key: const ValueKey('usage-model-share-chart'),
-          title: 'Usage by model',
-          status: data.historyLoading
-              ? V2UsageChartStatus.loading
-              : V2UsageChartStatus.ready,
-          slices: [
-            for (final model in data.models)
-              V2ModelShareSlice(
-                id: model.id,
-                label: model.name,
-                percent: model.percent.toDouble(),
-                valueLabel: model.tokensLabel.isNotEmpty
-                    ? model.tokensLabel
-                    : model.subtitle,
-              ),
-          ],
-          onStartChat: data.onStartChat,
-          onRetry: data.onRetry,
-        ),
-      ],
-    );
+/// `50000000` → `50M`, `1000000000` → `1B`.
+String _compactCap(int value) {
+  if (value >= 1000000000) {
+    final billions = value / 1000000000;
+    return billions == billions.roundToDouble()
+        ? '${billions.round()}B'
+        : '${billions.toStringAsFixed(1)}B';
   }
-}
-
-/// Daily image generations, mapped from the same day list.
-class _ImageUsageSection extends StatelessWidget {
-  const _ImageUsageSection({required this.data});
-
-  final V2UsageData data;
-
-  @override
-  Widget build(BuildContext context) {
-    // `/usage/history` has no per-day image counts. When today's counter is
-    // known but the series is not, say so instead of claiming "No images yet".
-    final hasDailySeries = data.days.any((day) => day.imageCount > 0);
-    final imagesToday = int.tryParse(data.imagesLabel.trim()) ?? 0;
-    final missingSeries = imagesToday > 0 && !hasDailySeries;
-    return V2ImageUsageChart(
-      key: const ValueKey('usage-image-chart'),
-      title: 'Images generated',
-      status: data.historyLoading
-          ? V2UsageChartStatus.loading
-          : V2UsageChartStatus.ready,
-      emptyTitle: missingSeries
-          ? 'Daily image history is not available'
-          : 'No images yet',
-      emptyMessage: missingSeries
-          ? 'Today\'s image count is shown above; the per-day series is not '
-                'reported yet.'
-          : 'Images you generate will show up here.',
-      points: [
-        for (final day in data.days)
-          V2ImageUsagePoint(
-            id: day.id,
-            label: day.label,
-            count: day.imageCount,
-            valueLabel:
-                '${day.imageCount} '
-                '${day.imageCount == 1 ? 'image' : 'images'}',
-          ),
-      ],
-      onStartChat: data.onStartChat,
-      onRetry: data.onRetry,
-    );
+  if (value >= 1000000) {
+    final millions = value / 1000000;
+    return millions == millions.roundToDouble()
+        ? '${millions.round()}M'
+        : '${millions.toStringAsFixed(1)}M';
   }
+  return '$value';
 }
 
 V2TokenChartPoint _tokenPoint(V2UsageDay day) {

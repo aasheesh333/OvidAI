@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/chat/composer_attachments.dart';
+import 'package:ovid_ai/ui/v2/chat/composer_row.dart';
 import 'package:ovid_ai/ui/v2/chat/live_chat_page.dart';
 import 'package:ovid_ai/ui/v2/chat/model_chip.dart';
 import 'package:ovid_ai/ui/v2/chat/queue_dock.dart';
@@ -88,14 +89,29 @@ const _data = V2LiveChatData(
   items: _items,
 );
 
+/// The chat page as the shell mounts it. The header drops any control whose
+/// handler is null, so a bare page has no menu, Studio or Browser glyph.
+Widget _wired({V2LiveChatData data = _data}) => V2LiveChatPage(
+  data: data,
+  onMenu: _noop,
+  onModelChipTap: _noop,
+  onStudio: _noop,
+  onBrowser: _noop,
+  onMore: _noop,
+  onAttach: _noop,
+  onPlus: _noop,
+  onMic: _noop,
+  onSend: (_) {},
+);
+
 void main() {
   testWidgets('renders the transcript in light', (tester) async {
     await tester.pumpWidget(_app(const V2LiveChatPage(data: _data)));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
 
-    expect(find.text('Ovid Si'), findsOneWidget);
     expect(find.text('Personal Portfolio Page'), findsOneWidget);
+    expect(find.text('Ovid Si'), findsNothing);
     expect(
       find.textContaining('clean personal portfolio', findRichText: true),
       findsOneWidget,
@@ -106,15 +122,18 @@ void main() {
       find.textContaining('Vortex Studio', findRichText: true),
       findsOneWidget,
     );
-    expect(find.text('portfolio-index.html'), findsOneWidget);
-    expect(find.text('Download'), findsOneWidget);
-
-    // The transcript is lazy, so the last row mounts once it scrolls in.
+    // The transcript is lazy: the artifact and the voice reply are the last
+    // two rows, so they mount once the list scrolls to them.
     await tester.drag(
       find.byKey(const ValueKey<String>('v2-live-transcript')),
       const Offset(0, -3000),
     );
     await tester.pump();
+    expect(find.text('portfolio-index.html'), findsOneWidget);
+    expect(
+      find.bySemanticsLabel('Download portfolio-index.html'),
+      findsOneWidget,
+    );
     expect(find.text('Your portfolio is ready'), findsOneWidget);
   });
 
@@ -126,6 +145,12 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500));
 
     expect(find.text('Thinking process (3.2s)'), findsOneWidget);
+
+    await tester.drag(
+      find.byKey(const ValueKey<String>('v2-live-transcript')),
+      const Offset(0, -3000),
+    );
+    await tester.pump();
     expect(find.text('portfolio-index.html'), findsOneWidget);
   });
 
@@ -141,7 +166,7 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 400));
 
-    expect(find.text('No messages yet'), findsOneWidget);
+    expect(find.text('Ask Ovid anything'), findsOneWidget);
     await tester.tap(find.text('Start a chat'));
     expect(started, 1);
   });
@@ -229,9 +254,12 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
 
-    await tester.ensureVisible(find.text('Download'));
+    await tester.drag(
+      find.byKey(const ValueKey<String>('v2-live-transcript')),
+      const Offset(0, -3000),
+    );
     await tester.pump();
-    await tester.tap(find.text('Download'));
+    await tester.tap(find.bySemanticsLabel('Download portfolio-index.html'));
     expect(downloaded, 'art1');
   });
 
@@ -325,8 +353,128 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500));
 
     expect(find.text('Ovid is generating code...'), findsOneWidget);
+    // The header subtitle is state-only: it exists while a run is active.
+    expect(find.text('Working'), findsOneWidget);
     await tester.tap(find.byIcon(Icons.stop_rounded));
     expect(stops, 1);
+  });
+
+  testWidgets('idle header has no subtitle line', (tester) async {
+    await tester.pumpWidget(_app(const V2LiveChatPage(data: _data)));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.text('Personal Portfolio Page'), findsOneWidget);
+    expect(find.text('Working'), findsNothing);
+    expect(find.text('Ovid Si'), findsNothing);
+  });
+
+  testWidgets('top bar reads menu, model, title, then actions', (tester) async {
+    await tester.pumpWidget(_app(_wired()));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    double x(Finder finder) => tester.getCenter(finder).dx;
+    final title = find.text('Personal Portfolio Page');
+    expect(
+      x(find.bySemanticsLabel('Open menu')),
+      lessThan(x(find.byType(V2ModelChip))),
+    );
+    expect(x(find.byType(V2ModelChip)), lessThan(x(title)));
+    expect(x(title), lessThan(x(find.bySemanticsLabel('Open Studio'))));
+    expect(
+      x(find.bySemanticsLabel('Open Studio')),
+      lessThan(x(find.bySemanticsLabel('Open Browser'))),
+    );
+    expect(
+      x(find.bySemanticsLabel('Open Browser')),
+      lessThan(x(find.bySemanticsLabel('More options'))),
+    );
+  });
+
+  testWidgets('tablet composer stays inside the 720 dp column', (tester) async {
+    tester.view.physicalSize = const Size(1000, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(_app(const V2LiveChatPage(data: _data)));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final column = find.byKey(const ValueKey('v2-live-composer-column'));
+    expect(tester.getSize(column).width, lessThanOrEqualTo(720));
+    expect(tester.getTopLeft(column).dx, closeTo((1000 - 720) / 2, 1));
+  });
+
+  testWidgets('tablet transcript centres at 720 and bubbles cap at 560', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1000, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(
+      _app(
+        const V2LiveChatPage(
+          data: V2LiveChatData(
+            items: [
+              V2LiveUserMessage(id: 'u', text: 'hello'),
+              V2LiveAssistantMessage(id: 'a', markdown: 'A reply'),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final list = find.byKey(const ValueKey<String>('v2-live-transcript'));
+    expect(tester.getSize(list).width, lessThanOrEqualTo(720));
+    expect(tester.getTopLeft(list).dx, closeTo((1000 - 720) / 2, 1));
+
+    final userBubble = tester.getSize(
+      find
+          .ancestor(of: find.text('hello'), matching: find.byType(Container))
+          .first,
+    );
+    expect(userBubble.width, lessThanOrEqualTo(560));
+    expect(userBubble.width, lessThanOrEqualTo(720 * 0.78));
+
+    final assistantBubble = tester.getSize(
+      find
+          .ancestor(
+            of: find.textContaining('A reply', findRichText: true),
+            matching: find.byType(Container),
+          )
+          .first,
+    );
+    expect(assistantBubble.width, lessThanOrEqualTo(560));
+  });
+
+  testWidgets('long unbroken user text wraps at 320 dp and 200 % text', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(
+      _app(
+        V2LiveChatPage(
+          data: V2LiveChatData(
+            items: [
+              V2LiveUserMessage(id: 'u', text: 'a' * 240),
+              V2LiveAssistantMessage(id: 'a', markdown: 'b' * 240),
+            ],
+          ),
+        ),
+        textScale: 2,
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
+
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('lays out at 320 dp with 200 % text in every state', (
@@ -363,7 +511,7 @@ void main() {
 
   testWidgets('primary controls expose semantic labels', (tester) async {
     await tester.pumpWidget(
-      _app(const V2LiveChatPage(data: _data, onModelChipTap: _noop)),
+      _app(_wired()),
     );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
@@ -376,9 +524,65 @@ void main() {
     expect(find.bySemanticsLabel('Voice input'), findsOneWidget);
     expect(find.bySemanticsLabel('Add attachment or action'), findsOneWidget);
 
-    await tester.ensureVisible(find.text('Download'));
-    await tester.pump(const Duration(milliseconds: 300));
+    await tester.drag(
+      find.byKey(const ValueKey<String>('v2-live-transcript')),
+      const Offset(0, -3000),
+    );
+    await tester.pump();
     expect(find.bySemanticsLabel(RegExp('Download')), findsWidgets);
+  });
+
+  testWidgets('composer is exactly one row in the contract order', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        V2LiveChatPage(
+          data: const V2LiveChatData(items: _items),
+          onAttach: _noop,
+          onPlus: _noop,
+          onMic: _noop,
+          onSend: (_) {},
+          onPermissionTap: _noop,
+          permissionLabel: 'Studio',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    final stack = tester.widget<Column>(
+      find.byKey(const ValueKey('v2-live-composer-stack')),
+    );
+    expect(stack.children.whereType<V2ComposerRow>(), hasLength(1));
+    expect(stack.children.whereType<Row>(), isEmpty);
+
+    final permission = find.byWidgetPredicate(
+      (widget) =>
+          widget is Semantics &&
+          widget.properties.label == 'Permission: Studio. Change',
+    );
+    final plus = find.bySemanticsLabel('Add attachment or action');
+    final field = find.byType(TextField);
+    final mic = find.bySemanticsLabel('Voice input');
+    final send = find.bySemanticsLabel('Send');
+    final centres = [plus, permission, field, mic, send]
+        .map(tester.getCenter)
+        .toList();
+    for (var i = 1; i < centres.length; i++) {
+      expect(
+        centres[i].dx,
+        greaterThan(centres[i - 1].dx),
+        reason: 'control $i must sit right of control ${i - 1}',
+      );
+      expect(
+        centres[i].dy,
+        closeTo(centres.first.dy, 1),
+        reason: 'control $i must share the composer row',
+      );
+    }
+    expect(tester.widget<TextField>(field).minLines, 1);
+    expect(tester.widget<TextField>(field).maxLines, 3);
   });
 
   testWidgets('reduced motion still shows the whole transcript', (
@@ -388,11 +592,12 @@ void main() {
       _app(const V2LiveChatPage(data: _data), reducedMotion: true),
     );
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
 
-    // No entrance animation to wait for: rows are on screen at first paint.
+    // No entrance animation to wait for: the first rows are on screen at
+    // first paint. The list is still lazy, so the last rows need a scroll.
     expect(find.text('Thinking process (3.2s)'), findsOneWidget);
     expect(find.text('Browsing modern portfolio trends'), findsOneWidget);
-    expect(find.text('portfolio-index.html'), findsOneWidget);
 
     await tester.tap(find.text('Thinking process (3.2s)'));
     await tester.pump();
@@ -400,12 +605,23 @@ void main() {
       find.text('Use semantic HTML5 layout with a mobile-first hero.'),
       findsOneWidget,
     );
+
+    await tester.drag(
+      find.byKey(const ValueKey<String>('v2-live-transcript')),
+      const Offset(0, -3000),
+    );
+    await tester.pump();
+    expect(find.text('portfolio-index.html'), findsOneWidget);
   });
 
   testWidgets('send is announced as disabled until text is typed', (
     tester,
   ) async {
-    await tester.pumpWidget(_app(const V2LiveChatPage(data: _data)));
+    // A composer with a real send handler: with none, Send stays disabled by
+    // design (no control may announce a send that goes nowhere).
+    await tester.pumpWidget(
+      _app(V2LiveChatPage(data: _data, onSend: (_) {})),
+    );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
 
@@ -547,8 +763,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500));
 
     expect(find.byType(V2QueueDock), findsOneWidget);
-    expect(find.text('1 queued message'), findsOneWidget);
-    expect(find.text('Then add testimonials'), findsOneWidget);
+    expect(find.text('1 queued'), findsOneWidget);
     expect(
       tester.getTopLeft(find.byType(V2QueueDock)).dy,
       lessThan(tester.getTopLeft(find.byType(TextField)).dy),
@@ -579,7 +794,9 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500));
 
     expect(find.text('GitHub · list repos'), findsOneWidget);
-    expect(find.text('Done'), findsOneWidget);
+    // Collapsed rows are one line: the state is the glyph, not a label.
+    expect(find.text('Done'), findsNothing);
+    expect(find.byIcon(Icons.check_rounded), findsOneWidget);
     expect(
       find.byType(LinearProgressIndicator),
       findsNothing,
@@ -591,7 +808,8 @@ void main() {
     await tester.pump();
 
     expect(find.text('Found 12 repositories.'), findsOneWidget);
-    expect(find.text('Status: Done'), findsOneWidget);
+    // The check glyph already said "Done"; expanding must not repeat it.
+    expect(find.text('Status: Done'), findsNothing);
 
     await tester.tap(find.text('GitHub · list repos'));
     await tester.pump();
@@ -618,7 +836,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
 
-    expect(find.text('Running'), findsOneWidget);
+    expect(find.byType(LinearProgressIndicator), findsOneWidget);
     final bar = tester.widget<LinearProgressIndicator>(
       find.byType(LinearProgressIndicator),
     );

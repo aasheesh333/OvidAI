@@ -9,6 +9,7 @@ import '../../../core/format.dart';
 import '../../../core/play_billing.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'confirm_typed_sheet.dart';
 
@@ -97,8 +98,6 @@ class V2AccountData {
     this.deletionDeadline,
     this.deletionLoading = false,
     this.errorMessage = 'We could not load your account.',
-    this.syncLabel = 'All synced',
-    this.syncOk = true,
   });
 
   final V2AccountStatus status;
@@ -148,13 +147,6 @@ class V2AccountData {
   final DateTime? deletionDeadline;
   final bool deletionLoading;
   final String errorMessage;
-
-  /// Sync status shown beside "Profile details". The adapter should pass the
-  /// real state; pass an empty string to hide the label.
-  final String syncLabel;
-
-  /// False shows the status in the warning tone instead of success.
-  final bool syncOk;
 }
 
 class AccountPage extends StatefulWidget {
@@ -200,9 +192,9 @@ class _AccountPageState extends State<AccountPage> {
             : _content(context, data.profile!);
     }
 
-    return OScaffold(
-      appBar: const OAppBar(title: 'Account'),
-      body: OFadeSlide(child: body),
+    return OScreen(
+      title: 'Account',
+      child: OFadeSlide(child: body),
     );
   }
 
@@ -210,7 +202,7 @@ class _AccountPageState extends State<AccountPage> {
     return OEmptyState(
       icon: Icons.person_off_outlined,
       title: 'No account found',
-      message: 'Sign in to see your profile, plan and linked accounts.',
+      message: 'Sign in to see your account.',
       action: OButton(
         label: 'Sign in',
         icon: Icons.login_rounded,
@@ -221,184 +213,35 @@ class _AccountPageState extends State<AccountPage> {
 
   Widget _content(BuildContext context, V2AccountProfile profile) {
     final c = OColors.of(context);
-    final linked = data.connectedAccounts.where((a) => a.connected).length;
+    final rows = _rows(context);
     return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.screen,
-        OSpace.s,
-        OSpace.screen,
-        OSpace.xxl,
-      ),
+      padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xxl),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Center(
-            child: Column(
-              children: [
-                Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    OAvatar(
-                      initials: profile.initials ?? profile.name,
-                      image: profile.image,
-                      size: 96,
-                      semanticLabel: '${profile.name} profile photo',
-                    ),
-                    Positioned(
-                      right: -8,
-                      bottom: -8,
-                      child: data.onChangePhoto == null
-                          ? const SizedBox.shrink()
-                          : OIconButton(
-                              icon: Icons.photo_camera_rounded,
-                              semanticLabel: 'Change photo',
-                              tooltip: 'Change photo',
-                              active: true,
-                              onPressed: data.onChangePhoto,
-                            ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: OSpace.m),
-                Text(
-                  profile.name,
-                  textAlign: TextAlign.center,
-                  style: OType.h2.copyWith(color: c.text),
-                ),
-                if (_planLabel(profile).isNotEmpty) ...[
-                  const SizedBox(height: OSpace.s),
-                  OPill(label: _planLabel(profile), tone: OPillTone.accent),
-                ],
-                if (profile.planName.isNotEmpty &&
-                    profile.role.isNotEmpty &&
-                    profile.role != profile.planName) ...[
-                  const SizedBox(height: 2),
-                  Text(
-                    profile.role,
-                    textAlign: TextAlign.center,
-                    style: OType.bodySm.copyWith(color: c.textMuted),
-                  ),
-                ],
-                const SizedBox(height: OSpace.m),
-                if (data.onChangePhoto != null)
-                  OButton(
-                    label: 'Change photo',
-                    icon: Icons.edit_rounded,
-                    variant: OButtonVariant.secondary,
-                    onPressed: data.onChangePhoto,
-                  ),
-              ],
-            ),
+          _ProfileHeader(
+            profile: profile,
+            onChangePhoto: data.onChangePhoto,
           ),
           const SizedBox(height: OSpace.xl),
-          OSectionHeader(
-            label: 'Profile details',
-            padding: const EdgeInsets.fromLTRB(
-              OSpace.xs,
-              OSpace.s,
-              OSpace.xs,
-              OSpace.s,
-            ),
-            trailing: Align(
-              alignment: Alignment.centerRight,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
+          if (rows.isNotEmpty)
+            OCard(
+              padding: EdgeInsets.zero,
+              child: Column(
                 children: [
-                  if (data.syncLabel.isNotEmpty)
-                    Flexible(
-                      child: _SyncLabel(label: data.syncLabel, ok: data.syncOk),
-                    ),
-                  if (data.onEditProfile != null) ...[
-                    const SizedBox(width: OSpace.xs),
-                    OIconButton(
-                      icon: Icons.edit_rounded,
-                      semanticLabel: 'Edit profile',
-                      tooltip: 'Edit profile',
-                      onPressed: data.onEditProfile,
-                    ),
+                  for (var index = 0; index < rows.length; index++) ...[
+                    if (index > 0)
+                      Divider(
+                        height: 1,
+                        thickness: 1,
+                        indent: 64,
+                        color: c.hairline,
+                      ),
+                    rows[index],
                   ],
                 ],
               ),
             ),
-          ),
-          if (data.fields.isEmpty)
-            OEmptyState(
-              compact: true,
-              icon: Icons.badge_outlined,
-              title: 'No profile details',
-              message: 'Add your name, phone and region so Ovid can help you.',
-              action: (data.onEditProfile ?? data.onRetry) == null
-                  ? null
-                  : OButton(
-                      label: 'Add details',
-                      icon: Icons.add_rounded,
-                      onPressed: data.onEditProfile ?? data.onRetry,
-                    ),
-            )
-          else
-            _DetailsCard(data: data),
-          const SizedBox(height: OSpace.xl),
-          OSectionHeader(
-            label: 'Sign-in methods',
-            padding: const EdgeInsets.fromLTRB(
-              OSpace.xs,
-              OSpace.s,
-              OSpace.xs,
-              OSpace.s,
-            ),
-            trailing: Align(
-              alignment: Alignment.centerRight,
-              child: Text(
-                linked == 0
-                    ? 'None linked'
-                    : '$linked of ${data.connectedAccounts.length} linked',
-                textAlign: TextAlign.right,
-                style: OType.caption.copyWith(color: c.accent),
-              ),
-            ),
-          ),
-          if (data.connectedAccounts.isEmpty)
-            OEmptyState(
-              compact: true,
-              icon: Icons.link_off_rounded,
-              title: 'No linked accounts',
-              message:
-                  'Link Google or Apple to sign in faster and keep your account safe.',
-              action: data.onLinkAccount == null
-                  ? null
-                  : OButton(
-                      label: 'Link account',
-                      icon: Icons.add_link_rounded,
-                      onPressed: data.onLinkAccount,
-                    ),
-            )
-          else
-            _ConnectedCard(data: data),
-          const SizedBox(height: OSpace.xl),
-          OCard(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                OListRow(
-                  icon: Icons.password_rounded,
-                  title: 'Credentials',
-                  subtitle: 'Browser logins, GitHub and personal tokens',
-                  enabled: data.onOpenCredentials != null,
-                  showChevron: data.onOpenCredentials != null,
-                  onTap: data.onOpenCredentials,
-                ),
-                Divider(height: 1, thickness: 1, color: c.hairline),
-                OListRow(
-                  icon: Icons.groups_outlined,
-                  title: 'Team & support',
-                  subtitle: 'Shared sessions, help and contact',
-                  enabled: data.onTeamSupport != null,
-                  showChevron: data.onTeamSupport != null,
-                  onTap: data.onTeamSupport,
-                ),
-              ],
-            ),
-          ),
           if (_deletionError != null) ...[
             const SizedBox(height: OSpace.l),
             _DeletionError(message: _deletionError!),
@@ -408,21 +251,24 @@ class _AccountPageState extends State<AccountPage> {
             _DeletionBanner(
               deadline: _deletionDeadline,
               loading: _deletionLoading,
-              onRestore: data.onRestoreAccount == null && data.restoreDeletion == null
+              onRestore:
+                  data.onRestoreAccount == null && data.restoreDeletion == null
                   ? null
                   : _restoreAccount,
             ),
           ],
-          const SizedBox(height: OSpace.xl),
-          OButton(
-            label: 'Sign out',
-            icon: Icons.logout_rounded,
-            variant: OButtonVariant.secondary,
-            expand: true,
-            loading: data.signOutLoading,
-            onPressed: data.onSignOut,
-          ),
-          if (!_deletionPending) ...[
+          if (data.onSignOut != null) ...[
+            const SizedBox(height: OSpace.xl),
+            OButton(
+              label: 'Sign out',
+              icon: Icons.logout_rounded,
+              variant: OButtonVariant.secondary,
+              expand: true,
+              loading: data.signOutLoading,
+              onPressed: data.onSignOut,
+            ),
+          ],
+          if (!_deletionPending && _canDelete) ...[
             const SizedBox(height: OSpace.l),
             OButton(
               label: 'Delete account',
@@ -430,18 +276,169 @@ class _AccountPageState extends State<AccountPage> {
               variant: OButtonVariant.danger,
               expand: true,
               loading: _deleting,
-              onPressed: _canDelete ? () => _confirmDelete(context) : null,
+              onPressed: () => _confirmDelete(context),
             ),
             const SizedBox(height: OSpace.s),
             Text(
-              'Deletion starts a 24-hour grace period. Sign in again and choose '
-              'Restore account before the deadline to keep your account.',
+              'Deletes after 24 hours. You can restore until then.',
               textAlign: TextAlign.center,
               style: OType.caption.copyWith(color: c.textMuted),
             ),
           ],
         ],
       ),
+    );
+  }
+
+  /// At most five destinations. The profile-detail grid is gone: editable
+  /// fields live behind the one "Edit profile" action.
+  List<Widget> _rows(BuildContext context) {
+    final rows = <Widget>[];
+    final edit = _editProfileAction();
+    if (edit != null) {
+      rows.add(
+        OListRow(
+          icon: Icons.edit_outlined,
+          title: 'Edit profile',
+          onTap: edit,
+        ),
+      );
+    }
+    final canManageSignIn =
+        data.onLinkAccount != null || data.onAccountTap != null;
+    // Only a row that either shows real linked accounts or opens the sheet.
+    // A dead "None linked" row is noise.
+    if (canManageSignIn || data.connectedAccounts.isNotEmpty) {
+      rows.add(
+        OListRow(
+          icon: Icons.login_rounded,
+          title: 'Sign-in methods',
+          subtitle: _linkedLabel(),
+          showChevron: canManageSignIn,
+          onTap: canManageSignIn ? () => _openSignInSheet(context) : null,
+        ),
+      );
+    }
+    if (data.onOpenCredentials != null) {
+      rows.add(
+        OListRow(
+          icon: Icons.key_rounded,
+          title: 'Credentials',
+          onTap: data.onOpenCredentials,
+        ),
+      );
+    }
+    if (data.onTeamSupport != null) {
+      rows.add(
+        OListRow(
+          icon: Icons.groups_outlined,
+          title: 'Team & support',
+          onTap: data.onTeamSupport,
+        ),
+      );
+    }
+    return rows;
+  }
+
+  VoidCallback? _editProfileAction() {
+    final edit = data.onEditProfile;
+    if (edit != null) return edit;
+    final tap = data.onFieldTap;
+    if (tap == null) return null;
+    for (final field in data.fields) {
+      if (field.editable) return () => tap(field);
+    }
+    return null;
+  }
+
+  String _linkedLabel() {
+    final linked = <String>[
+      for (final account in data.connectedAccounts)
+        if (account.connected) account.name,
+    ];
+    return linked.isEmpty ? 'None linked' : linked.join(', ');
+  }
+
+  Future<void> _openSignInSheet(BuildContext context) {
+    return showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        final c = OColors.of(sheetContext);
+        return SafeArea(
+          child: OContent(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.only(bottom: OSpace.xl),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const OSectionTitle(title: 'Sign-in methods'),
+                  OCard(
+                    padding: EdgeInsets.zero,
+                    child: Column(
+                      children: [
+                        for (
+                          var index = 0;
+                          index < data.connectedAccounts.length;
+                          index++
+                        ) ...[
+                          if (index > 0)
+                            Divider(
+                              height: 1,
+                              thickness: 1,
+                              color: c.hairline,
+                            ),
+                          _signInRow(
+                            sheetContext,
+                            data.connectedAccounts[index],
+                          ),
+                        ],
+                        if (data.onLinkAccount != null) ...[
+                          if (data.connectedAccounts.isNotEmpty)
+                            Divider(
+                              height: 1,
+                              thickness: 1,
+                              color: c.hairline,
+                            ),
+                          OListRow(
+                            icon: Icons.add_link_rounded,
+                            title: 'Link account',
+                            onTap: () {
+                              Navigator.of(sheetContext).pop();
+                              data.onLinkAccount?.call();
+                            },
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _signInRow(BuildContext context, V2ConnectedAccount account) {
+    final tap = data.onAccountTap;
+    return OListRow(
+      leading: OAvatar(
+        initials: account.name,
+        size: 36,
+        semanticLabel: account.name,
+      ),
+      title: account.name,
+      subtitle: account.detail,
+      trailing: OPill(
+        label: account.connected ? 'Connected' : 'Not linked',
+        tone: account.connected ? OPillTone.success : OPillTone.neutral,
+      ),
+      showChevron: false,
+      onTap: tap == null ? null : () => tap(account),
     );
   }
 
@@ -472,12 +469,7 @@ class _AccountPageState extends State<AccountPage> {
   Future<void> _confirmDelete(BuildContext context) async {
     final confirmed = await showConfirmTypedSheet(
       context,
-      data: V2ConfirmTypedSheetData(
-        contact: _confirmationContact,
-        graceNote:
-            'Signing in during the 24-hour grace period lets you choose '
-            'Restore account. Nothing is deleted before the deadline.',
-      ),
+      data: V2ConfirmTypedSheetData(contact: _confirmationContact),
       onManageSubscription: data.onManageSubscription ?? _openPlaySubscriptions,
     );
     if (!confirmed || !mounted) return;
@@ -695,244 +687,57 @@ class _DeletionError extends StatelessWidget {
   }
 }
 
-class _SyncLabel extends StatelessWidget {
-  const _SyncLabel({required this.label, required this.ok});
+/// Avatar, name and plan pill. Everything else about the profile lives behind
+/// the one "Edit profile" action.
+class _ProfileHeader extends StatelessWidget {
+  const _ProfileHeader({required this.profile, required this.onChangePhoto});
 
-  final String label;
-  final bool ok;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final colour = ok ? c.success : c.warn;
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 6,
-          height: 6,
-          decoration: BoxDecoration(color: colour, shape: BoxShape.circle),
-        ),
-        const SizedBox(width: 6),
-        Flexible(
-          child: Text(
-            label,
-            textAlign: TextAlign.right,
-            style: OType.caption.copyWith(color: colour),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _DetailsCard extends StatelessWidget {
-  const _DetailsCard({required this.data});
-
-  final V2AccountData data;
+  final V2AccountProfile profile;
+  final VoidCallback? onChangePhoto;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final rows = <Widget>[];
-    for (var index = 0; index < data.fields.length; index++) {
-      final field = data.fields[index];
-      rows.add(
-        Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _DetailRow(field: field, onTap: data.onFieldTap),
-            if (index != data.fields.length - 1)
-              Divider(height: 1, thickness: 1, color: c.hairline),
-          ],
-        ),
-      );
-    }
-    return OCard(
-      padding: EdgeInsets.zero,
-      child: OStagger(children: rows),
-    );
-  }
-}
-
-class _DetailRow extends StatelessWidget {
-  const _DetailRow({required this.field, required this.onTap});
-
-  final V2AccountField field;
-  final ValueChanged<V2AccountField>? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final canTap = field.editable && onTap != null;
-    final row = ConstrainedBox(
-      constraints: const BoxConstraints(minHeight: 56),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: OSpace.l,
-          vertical: OSpace.m,
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    field.label,
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    field.value,
-                    style: OType.bodySm.copyWith(
-                      color: c.text,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: OSpace.s),
-            if (field.verified)
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 140),
-                child: const OPill(label: 'Verified', tone: OPillTone.success),
-              )
-            else if (canTap)
-              Icon(Icons.edit_rounded, size: 18, color: c.textMuted),
-          ],
-        ),
-      ),
-    );
-    if (!canTap) {
-      return Semantics(label: '${field.label}, ${field.value}', child: row);
-    }
-    return OPressable(
-      onTap: () => onTap!(field),
-      semanticLabel: '${field.label}, ${field.value}',
-      child: row,
-    );
-  }
-}
-
-class _ConnectedCard extends StatelessWidget {
-  const _ConnectedCard({required this.data});
-
-  final V2AccountData data;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final rows = <Widget>[];
-    for (var index = 0; index < data.connectedAccounts.length; index++) {
-      final account = data.connectedAccounts[index];
-      rows.add(
-        Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _ConnectedRow(account: account, onTap: data.onAccountTap),
-            if (index != data.connectedAccounts.length - 1)
-              Divider(height: 1, thickness: 1, indent: 64, color: c.hairline),
-          ],
-        ),
-      );
-    }
-    return OCard(
-      padding: EdgeInsets.zero,
-      child: OStagger(children: rows),
-    );
-  }
-}
-
-/// One linked account. Mirrors `OListRow`, but at large text the status badge
-/// moves under the address instead of squeezing the name into a narrow column.
-class _ConnectedRow extends StatelessWidget {
-  const _ConnectedRow({required this.account, required this.onTap});
-
-  final V2ConnectedAccount account;
-  final ValueChanged<V2ConnectedAccount>? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final pill = OPill(
-      label: account.connected ? 'Connected' : 'Not linked',
-      tone: account.connected ? OPillTone.success : OPillTone.neutral,
-      dot: account.connected,
-    );
-    final avatar = OAvatar(
-      initials: account.name,
-      size: 40,
-      semanticLabel: account.name,
-    );
-    final stacked = MediaQuery.textScalerOf(context).scale(1) > 1.4;
-    if (!stacked) {
-      return OListRow(
-        leading: avatar,
-        title: account.name,
-        subtitle: account.detail,
-        showChevron: false,
-        trailing: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 140),
-          child: pill,
-        ),
-        onTap: onTap == null ? null : () => onTap!(account),
-      );
-    }
-
-    final label = [
-      account.name,
-      account.detail,
-      account.connected ? 'Connected' : 'Not linked',
-    ].join(', ');
-    final row = Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: OSpace.l,
-        vertical: OSpace.m,
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+    final plan = _planLabel(profile);
+    return Center(
+      child: Column(
         children: [
-          avatar,
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  account.name,
-                  style: OType.body.copyWith(
-                    color: c.text,
-                    fontWeight: FontWeight.w500,
+          Stack(
+            clipBehavior: Clip.none,
+            children: [
+              OAvatar(
+                initials: profile.initials ?? profile.name,
+                image: profile.image,
+                size: 80,
+                semanticLabel: '${profile.name} profile photo',
+              ),
+              if (onChangePhoto != null)
+                Positioned(
+                  right: -OSpace.s,
+                  bottom: -OSpace.s,
+                  child: OIconButton(
+                    icon: Icons.photo_camera_rounded,
+                    semanticLabel: 'Change photo',
+                    tooltip: 'Change photo',
+                    onPressed: onChangePhoto,
                   ),
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  account.detail,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-                const SizedBox(height: OSpace.s),
-                pill,
-              ],
-            ),
+            ],
           ),
+          const SizedBox(height: OSpace.m),
+          Text(
+            profile.name,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: OType.h2.copyWith(color: c.text),
+          ),
+          if (plan.isNotEmpty) ...[
+            const SizedBox(height: OSpace.s),
+            OPill(label: plan, tone: OPillTone.accent),
+          ],
         ],
       ),
-    );
-    return ConstrainedBox(
-      constraints: const BoxConstraints(minHeight: OSpace.listRow),
-      child: onTap == null
-          ? Semantics(label: label, child: row)
-          : Material(
-              type: MaterialType.transparency,
-              child: InkWell(
-                onTap: () => onTap!(account),
-                borderRadius: BorderRadius.circular(ORadius.m),
-                child: Semantics(label: label, button: true, child: row),
-              ),
-            ),
     );
   }
 }

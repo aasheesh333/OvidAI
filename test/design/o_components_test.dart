@@ -4,7 +4,9 @@ import 'package:flutter/semantics.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_motion.dart';
+import 'package:ovid_ai/ui/design/o_screen.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
+import 'package:ovid_ai/ui/design/o_tokens.dart';
 
 Widget _app(Widget child, {ThemeData? theme}) => MaterialApp(
   theme: theme ?? OTheme.light(),
@@ -310,5 +312,96 @@ void main() {
     final node = tester.getSemantics(find.byType(OPressable));
     expect(node.getSemanticsData().hasAction(SemanticsAction.tap), isFalse);
     handle.dispose();
+  });
+
+  testWidgets('OPill keeps one inset for every tone', (tester) async {
+    for (final tone in OPillTone.values) {
+      await tester.pumpWidget(
+        _app(
+          Center(child: OPill(label: 'Plan', tone: tone)),
+        ),
+      );
+      final inset =
+          tester.getTopLeft(find.text('Plan')).dx -
+          tester.getTopLeft(find.byType(OPill)).dx;
+      expect(inset, OSpace.pillPad, reason: 'tone $tone drifted its inset');
+    }
+  });
+
+  testWidgets('OSheetHeader renders title, context and a 48dp close', (
+    tester,
+  ) async {
+    var closed = false;
+    await tester.pumpWidget(
+      _app(
+        OSheetHeader(
+          title: 'Share this chat',
+          subtitle: 'Read-only link',
+          onClose: () => closed = true,
+          closeLabel: 'Close share',
+        ),
+      ),
+    );
+    expect(find.text('Share this chat'), findsOneWidget);
+    expect(find.text('Read-only link'), findsOneWidget);
+    expect(
+      tester.getSize(find.byType(OIconButton)).height,
+      greaterThanOrEqualTo(OSpace.touch),
+    );
+    await tester.tap(find.byType(OIconButton));
+    expect(closed, isTrue);
+  });
+
+  testWidgets('OSheetHeader can carry an icon, a status glyph and intro copy', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        OSheetHeader(
+          icon: Icons.inventory_2_outlined,
+          title: 'Choose chats to export',
+          titleTrailing: const SizedBox(width: 8, height: 8),
+          body: 'Your chats are 90 MB, over the 64 MB limit.',
+        ),
+      ),
+    );
+    expect(find.text('Choose chats to export'), findsOneWidget);
+    expect(
+      find.text('Your chats are 90 MB, over the 64 MB limit.'),
+      findsOneWidget,
+    );
+    expect(find.byType(OIconButton), findsNothing);
+  });
+
+  testWidgets('showOSheet title uses the shared header', (tester) async {
+    await tester.pumpWidget(
+      _app(
+        Builder(
+          builder: (context) => Center(
+            child: OButton(
+              label: 'Open',
+              onPressed: () => showOSheet<void>(
+                context,
+                title: 'Share this chat',
+                builder: (_) => const SizedBox.shrink(),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+    expect(find.byType(OSheetHeader), findsOneWidget);
+  });
+
+  testWidgets('OSectionTitle carries a meta count beside its label', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(const OSectionTitle(title: 'Files modified', meta: '3 files')),
+    );
+    expect(find.text('FILES MODIFIED'), findsOneWidget);
+    expect(find.text('3 files'), findsOneWidget);
   });
 }

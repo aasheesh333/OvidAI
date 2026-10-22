@@ -217,15 +217,10 @@ void main() {
   ) async {
     await _pump(
       tester,
-      data: const V2SignInData(
-        error: 'Email sign-in is not available yet. Use Google or phone.',
-      ),
+      data: const V2SignInData(error: 'Use Google or phone to sign in.'),
     );
 
-    expect(
-      find.text('Email sign-in is not available yet. Use Google or phone.'),
-      findsOneWidget,
-    );
+    expect(find.text('Use Google or phone to sign in.'), findsOneWidget);
     expect(find.text('Try again'), findsNothing);
   });
 
@@ -234,11 +229,7 @@ void main() {
   ) async {
     var terms = 0;
     var privacy = 0;
-    await _pump(
-      tester,
-      onTerms: () => terms++,
-      onPrivacy: () => privacy++,
-    );
+    await _pump(tester, onTerms: () => terms++, onPrivacy: () => privacy++);
 
     await tester.ensureVisible(find.text('Terms'));
     await tester.tap(find.text('Terms'));
@@ -303,7 +294,7 @@ void main() {
     expect(
       tester.getSemantics(find.byKey(const Key('sign-in-submit'))),
       matchesSemantics(
-        label: 'Sign in',
+        label: 'Continue, loading',
         isButton: true,
         hasEnabledState: true,
         isEnabled: false,

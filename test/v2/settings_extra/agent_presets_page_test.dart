@@ -86,25 +86,34 @@ Future<void> _pump(
 }
 
 void main() {
-  testWidgets('renders built-in and custom presets in light', (tester) async {
-    await _pump(tester, _data());
+  testWidgets('renders one list of presets in light', (tester) async {
+    await _pump(tester, _data(onCreate: () {}));
 
     expect(find.text('Agent presets'), findsOneWidget);
+    expect(find.text('General'), findsOneWidget);
+    expect(find.text('Coder'), findsOneWidget);
+    expect(find.text('Code reviewer'), findsOneWidget);
+    // The descriptive paragraph and the built-in/custom split are gone.
     expect(
       find.text('Presets change how Ovid approaches a task.'),
+      findsNothing,
+    );
+    expect(find.text('YOUR PRESETS'), findsNothing);
+    expect(find.text('Built-in'), findsNothing);
+    expect(
+      find.byKey(const ValueKey<String>('presets-new')),
       findsOneWidget,
     );
-    expect(find.text('General'), findsOneWidget);
-    expect(find.text('Built-in'), findsNWidgets(2));
-    expect(find.text('YOUR PRESETS'), findsOneWidget);
-    expect(find.text('Code reviewer'), findsOneWidget);
   });
 
   testWidgets('renders in dark', (tester) async {
-    await _pump(tester, _data(), dark: true);
+    await _pump(tester, _data(onCreate: () {}), dark: true);
 
     expect(find.text('Coder'), findsOneWidget);
-    expect(find.text('New preset'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('presets-new')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('selects a preset', (tester) async {
@@ -205,7 +214,6 @@ void main() {
     await _pump(tester, _data(), size: const Size(320, 1400), textScale: 2);
 
     expect(find.text('General'), findsOneWidget);
-    expect(find.text('New preset'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -236,13 +244,20 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('centres the list at 600 dp', (tester) async {
+    await _pump(tester, _data(), size: const Size(600, 1000));
+
+    final card = find.byType(OCard).first;
+    expect(tester.getSize(card).width, lessThanOrEqualTo(640));
+    expect(tester.getCenter(card).dx, closeTo(300, 0.5));
+  });
+
   testWidgets('reduced motion still shows every preset', (tester) async {
     await _pump(tester, _data(), reduceMotion: true);
 
     expect(find.text('General'), findsOneWidget);
     expect(find.text('Coder'), findsOneWidget);
     expect(find.text('Code reviewer'), findsOneWidget);
-    expect(find.text('New preset'), findsOneWidget);
   });
 
   testWidgets('the preset menu is a 48 dp labelled control', (tester) async {
@@ -314,7 +329,6 @@ void main() {
 
     expect(deleted, 1);
     expect(find.text('Code reviewer'), findsNothing);
-    expect(find.text('YOUR PRESETS'), findsNothing);
     expect(find.text('General'), findsOneWidget);
   });
 

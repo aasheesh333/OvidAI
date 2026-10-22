@@ -5,10 +5,10 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
 import '../../../core/cloud/artifact_vault.dart';
-import '../../../core/cloud/schedule_client.dart';
 import '../../../core/chat_integration_ports.dart';
 import '../../../core/firebase_service.dart';
 import '../../../core/github_service.dart';
+import '../../../core/revenuecat_billing.dart';
 import '../../../core/state.dart';
 import '../../../core/session_artifacts.dart';
 import '../../github_login_sheet.dart';
@@ -16,8 +16,7 @@ import '../browser/browser_live_page.dart';
 import '../connectors/connectors_page.dart';
 import '../library/artifact_detail_page.dart';
 import '../library/artifacts_page.dart';
-import '../schedules/schedule_runs_page.dart';
-import '../schedules/schedules_page.dart';
+import '../schedules/schedules_flow.dart';
 import '../studio/repo_picker_page.dart';
 import 'v2_settings_actions.dart';
 import 'v2_settings_routes.dart';
@@ -31,7 +30,18 @@ class V2WorkRoutes {
   static Future<void> openStudio(
     BuildContext context,
     V2SettingsActions actions,
-  ) async {
+  ) {
+    return openRepoPicker(context, actions: actions);
+  }
+
+  /// Opens the repository picker. [actions] is optional so a screen that only
+  /// needs the repo/branch gate (the workspace's "Pick a repository") can
+  /// open the picker without owning the Settings surface; the token shortcut
+  /// is hidden in that case.
+  static Future<void> openRepoPicker(
+    BuildContext context, {
+    V2SettingsActions? actions,
+  }) async {
     // Install the GitHub-backed port once, unless another workstream already
     // installed one (its implementation wins).
     StudioBindingPort.instance ??= GitHubStudioBindingPort();
@@ -46,11 +56,9 @@ class V2WorkRoutes {
     BuildContext context,
     V2SettingsActions actions,
   ) async {
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => const BrowserLivePage(),
-      ),
-    );
+    await Navigator.of(
+      context,
+    ).push(MaterialPageRoute<void>(builder: (_) => const BrowserLivePage()));
   }
 
   static Future<void> openArtifacts(
@@ -77,55 +85,16 @@ class V2WorkRoutes {
                 ? V2ArtifactsStatus.empty
                 : V2ArtifactsStatus.content,
             artifacts: [
-              for (final artifact in items)
-                V2ArtifactItem(
-                  id: artifact.id,
-                  name: artifact.name,
-                  kind: _kindOf(artifact.kind),
-                  createdAt: artifact.time,
-                  sizeLabel: _bytes(artifact.size ?? 0),
-                ),
+              for (final artifact in items) artifactItemFor(artifact),
             ],
           ),
           onArtifactTap: (item) async {
             final artifact = items.where((a) => a.id == item.id).firstOrNull;
             if (artifact == null) return;
-            // Minting happens only on this explicit tap, never for list rows.
-            String downloadUrl = '';
-            try {
-              final minted = await client.mintPreferredUrl(
-                artifact,
-                download: true,
-              );
-              downloadUrl = minted.url;
-            } catch (_) {
-              // The detail still opens; Download stays hidden without a URL.
-            }
-            if (!context.mounted) return;
             await Navigator.of(context).push(
               MaterialPageRoute<void>(
-                builder: (_) => ArtifactDetailPage(
-                  data: V2ArtifactDetailData(
-                    name: artifact.name,
-                    typeLabel: artifact.kind.name,
-                    sizeLabel: _bytes(artifact.size ?? 0),
-                    createdLabel: _timeLabel(artifact.time),
-                    sourceChatTitle: artifact.sessionTitle,
-                    downloadUrl: downloadUrl,
-                    openUrl: downloadUrl,
-                    details: [
-                      V2ArtifactDetailRow(
-                        label: 'Source',
-                        value: artifact.origin.name,
-                      ),
-                      if (artifact.path != null)
-                        V2ArtifactDetailRow(
-                          label: 'Path',
-                          value: artifact.path!,
-                        ),
-                    ],
-                  ),
-                ),
+                builder: (_) =>
+                    _ArtifactDetailHost(client: client, artifact: artifact),
               ),
             );
           },
@@ -135,56 +104,36 @@ class V2WorkRoutes {
     controller.dispose();
   }
 
+  /// Maps one vault row onto the library card.
+  ///
+  /// The cloud row carries no saved URL (a signed capability is minted only
+  /// when a row is opened), so [V2ArtifactItem.url] stays null here. Source,
+  /// size and the originating chat title are authoritative fields and are
+  /// always passed, which is what gives the library its session and source
+  /// filters real options.
+  @visibleForTesting
+  static V2ArtifactItem artifactItemFor(SessionArtifact artifact) =>
+      V2ArtifactItem(
+        id: artifact.id,
+        name: artifact.name,
+        kind: _kindOf(artifact.kind),
+        createdAt: artifact.time,
+        sizeLabel: _bytes(artifact.size ?? 0),
+        sizeBytes: artifact.size ?? 0,
+        source: artifact.origin == ArtifactOrigin.uploaded
+            ? V2ArtifactSource.uploaded
+            : V2ArtifactSource.generated,
+        sessionTitle: artifact.sessionTitle,
+        url: artifact.url,
+      );
+
   static Future<void> openSchedules(
     BuildContext context,
     V2SettingsActions actions,
-  ) async {
-    final client = ScheduleClient.I;
-    List<ScheduleDto> schedules = const [];
-    try {
-      schedules = await client.list();
-    } catch (_) {
-      // Empty state below.
-    }
-    if (!context.mounted) return;
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => SchedulesPage(
-          data: V2SchedulesData(
-            status: schedules.isEmpty
-                ? V2SchedulesStatus.empty
-                : V2SchedulesStatus.content,
-            schedules: [
-              for (final schedule in schedules)
-                V2ScheduleItem(
-                  id: schedule.id,
-                  title: schedule.title,
-                  description: schedule.description,
-                  rule: schedule.trigger.describe(),
-                  nextRun: schedule.nextRunAt == null
-                      ? null
-                      : _timeLabel(schedule.nextRunAt!),
-                  enabled: schedule.status == 'active',
-                  lastRunFailed: schedule.lastResult?.status == 'failed',
-                ),
-            ],
-          ),
-          // No schedule authoring screen is wired yet; the list stays
-          // read-only instead of offering controls that cannot run.
-          onCreate: null,
-          onScheduleTap: (item) => Navigator.of(context).push(
-            MaterialPageRoute<void>(
-              builder: (_) => const ScheduleRunsPage(
-                data: V2ScheduleRunsData(),
-              ),
-            ),
-          ),
-          onToggle: null,
-          onRetryRun: null,
-        ),
-      ),
-    );
-  }
+  ) => V2SchedulesFlow.openSchedules(
+    context,
+    sessionId: AppState.I.activeSessionId,
+  );
 
   static Future<void> openConnectors(
     BuildContext context,
@@ -192,15 +141,27 @@ class V2WorkRoutes {
   ) async {
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => const ConnectorsPage(
-          data: V2ConnectorsData(
+        builder: (_) => ConnectorsPage(
+          data: const V2ConnectorsData(
             status: V2ConnectorsStatus.content,
             connectors: [],
+          ),
+          // The cap follows the server-confirmed plan, not the display cache.
+          plan: V2ConnectorPlan.forTier(
+            confirmedPlanTier ?? AppState.I.ovidCloudTier,
           ),
         ),
       ),
     );
   }
+
+  static String _typeLabel(ArtifactKind kind) => switch (kind) {
+    ArtifactKind.image => 'Image',
+    ArtifactKind.html => 'Page',
+    ArtifactKind.code => 'Code',
+    ArtifactKind.document => 'Document',
+    ArtifactKind.other => 'File',
+  };
 
   static V2ArtifactKind _kindOf(ArtifactKind kind) => switch (kind) {
     ArtifactKind.image => V2ArtifactKind.image,
@@ -227,6 +188,175 @@ class V2WorkRoutes {
       return '$h:$m';
     }
     return '${local.day}/${local.month}';
+  }
+}
+
+/// Opens one vault artifact with the real minted capability and, for text
+/// files, the head of the file itself.
+///
+/// Minting and the preview fetch happen only after the explicit row tap. The
+/// metadata still renders when either fails; Download, Copy link and Open
+/// externally stay hidden until a URL really exists.
+class _ArtifactDetailHost extends StatefulWidget {
+  const _ArtifactDetailHost({required this.client, required this.artifact});
+
+  final ArtifactVaultClient client;
+  final SessionArtifact artifact;
+
+  @override
+  State<_ArtifactDetailHost> createState() => _ArtifactDetailHostState();
+}
+
+class _ArtifactDetailHostState extends State<_ArtifactDetailHost> {
+  /// Preview text is bounded so a huge file never stalls the sheet.
+  static const int _maxPreviewBytes = 1024 * 1024;
+  static const int _maxPreviewLines = 200;
+
+  static const Set<String> _textExtensions = {
+    'txt',
+    'md',
+    'markdown',
+    'csv',
+    'tsv',
+    'json',
+    'yaml',
+    'yml',
+    'xml',
+    'log',
+    'ini',
+    'toml',
+    'sql',
+    'dart',
+    'js',
+    'ts',
+    'py',
+    'css',
+    'html',
+    'htm',
+  };
+
+  V2ArtifactDetailStatus _status = V2ArtifactDetailStatus.loading;
+  String _url = '';
+  String _text = '';
+  int? _totalLines;
+
+  SessionArtifact get _artifact => widget.artifact;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_load());
+  }
+
+  bool get _isTextual => switch (_artifact.kind) {
+    ArtifactKind.code || ArtifactKind.html => true,
+    ArtifactKind.image => false,
+    ArtifactKind.document ||
+    ArtifactKind.other => _textExtensions.contains(_extension),
+  };
+
+  String get _extension {
+    final dot = _artifact.name.lastIndexOf('.');
+    if (dot < 0 || dot == _artifact.name.length - 1) return '';
+    return _artifact.name.substring(dot + 1).toLowerCase();
+  }
+
+  V2ArtifactPreviewKind get _previewKind => switch (_artifact.kind) {
+    ArtifactKind.image => V2ArtifactPreviewKind.image,
+    ArtifactKind.code || ArtifactKind.html => V2ArtifactPreviewKind.code,
+    ArtifactKind.document => V2ArtifactPreviewKind.document,
+    ArtifactKind.other => V2ArtifactPreviewKind.data,
+  };
+
+  Future<void> _load() async {
+    if (mounted) {
+      setState(() => _status = V2ArtifactDetailStatus.loading);
+    }
+    var url = '';
+    var text = '';
+    int? totalLines;
+    try {
+      url = (await widget.client.mintPreferredUrl(
+        _artifact,
+        download: true,
+      )).url;
+    } catch (_) {
+      // No capability: the detail still shows its real metadata.
+    }
+    final size = _artifact.size ?? 0;
+    if (url.isNotEmpty &&
+        _isTextual &&
+        (size == 0 || size <= _maxPreviewBytes)) {
+      try {
+        final response = await http
+            .get(Uri.parse(url))
+            .timeout(const Duration(seconds: 20));
+        if (response.statusCode >= 200 &&
+            response.statusCode < 300 &&
+            response.bodyBytes.length <= _maxPreviewBytes) {
+          final decoded = utf8.decode(response.bodyBytes, allowMalformed: true);
+          final lines = decoded.split('\n');
+          totalLines = lines.length;
+          text = lines.take(_maxPreviewLines).join('\n');
+        }
+      } catch (_) {
+        // The preview stays empty; the file can still be opened externally.
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _url = url;
+      _text = text;
+      _totalLines = totalLines;
+      _status = V2ArtifactDetailStatus.content;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final code = _previewKind == V2ArtifactPreviewKind.code;
+    final document =
+        _previewKind == V2ArtifactPreviewKind.document ||
+        _previewKind == V2ArtifactPreviewKind.data;
+    return ArtifactDetailPage(
+      data: V2ArtifactDetailData(
+        status: _status,
+        name: _artifact.name,
+        typeLabel: V2WorkRoutes._typeLabel(_artifact.kind),
+        sizeLabel: V2WorkRoutes._bytes(_artifact.size ?? 0),
+        createdLabel: V2WorkRoutes._timeLabel(_artifact.time),
+        sourceChatTitle: _artifact.sessionTitle,
+        previewKind: _previewKind,
+        previewCodeFile: _artifact.name,
+        previewCode: code ? _text : '',
+        previewTotalLines: code ? _totalLines : null,
+        documentText: document ? _text : '',
+        thumbnail:
+            _previewKind == V2ArtifactPreviewKind.image && _url.isNotEmpty
+            ? NetworkImage(_url)
+            : null,
+        downloadUrl: _url,
+        // The same signed capability is what a recipient can open.
+        shareUrl: _url,
+        openUrl: _url,
+        details: [
+          V2ArtifactDetailRow(
+            label: 'Type',
+            value: V2WorkRoutes._typeLabel(_artifact.kind),
+          ),
+          V2ArtifactDetailRow(label: 'Source', value: _artifact.origin.name),
+          if ((_artifact.size ?? 0) > 0)
+            V2ArtifactDetailRow(
+              label: 'Size',
+              value: V2WorkRoutes._bytes(_artifact.size ?? 0),
+            ),
+          if (_artifact.path != null)
+            V2ArtifactDetailRow(label: 'Path', value: _artifact.path!),
+        ],
+      ),
+      onRetry: () => unawaited(_load()),
+      onBackToArtifacts: () => Navigator.of(context).maybePop(),
+    );
   }
 }
 
@@ -263,7 +393,8 @@ class GitHubStudioBindingPort extends StudioBindingPort {
     if (body is! List) return const [];
     return [
       for (final row in body)
-        if (row is Map && row['full_name'] is String) row['full_name'] as String,
+        if (row is Map && row['full_name'] is String)
+          row['full_name'] as String,
     ];
   }
 
@@ -356,9 +487,11 @@ class StudioAccessException implements Exception {
 /// without one the page says so instead of showing an empty "connected"
 /// screen. GitHub sign-in is the real RFC 8628 device flow.
 class _RepoPickerHost extends StatefulWidget {
-  const _RepoPickerHost({required this.actions});
+  const _RepoPickerHost({this.actions});
 
-  final V2SettingsActions actions;
+  /// Null when the picker was opened from the workspace's empty state, which
+  /// has no Settings actions to lend. The token shortcut is then hidden.
+  final V2SettingsActions? actions;
 
   @override
   State<_RepoPickerHost> createState() => _RepoPickerHostState();
@@ -420,10 +553,7 @@ class _RepoPickerHostState extends State<_RepoPickerHost> {
   }
 
   Future<void> _connectGithub() async {
-    showGithubLoginSheet(
-      context,
-      onConnected: () => unawaited(_load()),
-    );
+    showGithubLoginSheet(context, onConnected: () => unawaited(_load()));
   }
 
   Future<void> _confirm(V2Repo repo, String branch) async {
@@ -447,6 +577,12 @@ class _RepoPickerHostState extends State<_RepoPickerHost> {
       }
       return;
     }
+    // The chat's STUDIO send gate reads the session's repo/branch. A port is
+    // expected to write them, but the route records the user's confirmed
+    // choice too so the gate and the workspace can never disagree.
+    AppState.I
+      ..setRepoForSession(sessionId, repo.id)
+      ..setBranchForSession(sessionId, branch);
     if (!mounted) return;
     await V2StudioRoutes.openWorkspace(
       context,
@@ -471,10 +607,14 @@ class _RepoPickerHostState extends State<_RepoPickerHost> {
       onConnectGithub: () => unawaited(_connectGithub()),
       // Token entry lives on the Credentials screen, where the real secure
       // store and validation already exist.
-      onOpenToken: () =>
-          V2SettingsRoutes.open(context, 'credentials', widget.actions),
+      onOpenToken: widget.actions == null
+          ? null
+          : () =>
+                V2SettingsRoutes.open(context, 'credentials', widget.actions!),
       onLoadBranches: _loadBranches,
-      onConfirm: _portReady ? (repo, branch) => unawaited(_confirm(repo, branch)) : null,
+      onConfirm: _portReady
+          ? (repo, branch) => unawaited(_confirm(repo, branch))
+          : null,
     );
   }
 }

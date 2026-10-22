@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
-import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'phone_auth_sheet.dart';
+import 'step_progress.dart';
 
 // TODO(l10n): move sign-in copy to the ARB files.
 
@@ -26,6 +27,9 @@ class V2SignInData {
   final String? error;
 }
 
+/// Third step of the tour. Same shell as every other step: one header, the
+/// step indicator, a scrolling form and the primary action pinned at the
+/// bottom.
 class SignInPage extends StatefulWidget {
   const SignInPage({
     super.key,
@@ -50,6 +54,11 @@ class SignInPage extends StatefulWidget {
     this.onPrivacy,
     this.onRetry,
     this.onBack,
+    this.step = const V2OnboardingStepData(
+      step: V2OnboardingTour.signIn,
+      totalSteps: V2OnboardingTour.totalSteps,
+      trailingLabel: '',
+    ),
   });
 
   final V2SignInData data;
@@ -100,9 +109,11 @@ class SignInPage extends StatefulWidget {
   /// retry: a generic message with no recovery path shows no "Try again".
   final VoidCallback? onRetry;
 
-  /// When supplied, the app bar's back action returns to the previous
+  /// When supplied, the header's back action returns to the previous
   /// onboarding step instead of popping a route that may not exist.
   final VoidCallback? onBack;
+
+  final V2OnboardingStepData step;
 
   @override
   State<SignInPage> createState() => _SignInPageState();
@@ -215,251 +226,155 @@ class _SignInPageState extends State<SignInPage> {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     final data = widget.data;
-    return OScaffold(
-      appBar: OAppBar(
-        title: 'Sign in',
-        // The tour supplies its own back handler. Without one the default
-        // arrow would pop the gate's route, which is never what we want.
-        showBack: false,
-        leading: widget.onBack == null
-            ? null
-            : OIconButton(
-                key: const Key('sign-in-back'),
-                icon: Icons.arrow_back_rounded,
-                semanticLabel: 'Back',
-                onPressed: widget.onBack,
-              ),
-      ),
-      body: ODismissKeyboard(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(
-            OSpace.screen,
-            OSpace.s,
-            OSpace.screen,
-            OSpace.xxl,
-          ),
-          child: OFadeSlide(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Wrap(
-                  alignment: WrapAlignment.spaceBetween,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  spacing: OSpace.s,
-                  runSpacing: OSpace.s,
-                  children: [
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          width: 40,
-                          height: 40,
-                          decoration: BoxDecoration(
-                            color: c.surfaceAlt,
-                            borderRadius: BorderRadius.circular(ORadius.m),
-                            border: Border.all(color: c.hairline),
-                          ),
-                          child: Icon(
-                            Icons.auto_awesome_rounded,
-                            size: 20,
-                            color: c.accent,
-                          ),
-                        ),
-                        const SizedBox(width: OSpace.s),
-                        Flexible(
-                          child: Text(
-                            'Ovid Si',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: OType.h3.copyWith(color: c.text),
-                          ),
-                        ),
-                      ],
-                    ),
-                    _LanguagePill(
-                      key: const Key('sign-in-language'),
-                      label: data.language,
-                      onTap: data.loading ? null : widget.onLanguageTap,
-                    ),
-                  ],
-                ),
-                const SizedBox(height: OSpace.xl),
-                Semantics(
-                  container: true,
-                  header: true,
-                  child: Text(
-                    'Welcome back',
-                    style: OType.h1.copyWith(color: c.text),
-                  ),
-                ),
-                const SizedBox(height: OSpace.s),
-                Text(
-                  'Sign in to continue where you left off.',
-                  style: OType.bodySm.copyWith(color: c.textMuted),
-                ),
-                const SizedBox(height: OSpace.xl),
-                OButton(
-                  label: 'Continue with Google',
-                  variant: OButtonVariant.secondary,
-                  icon: Icons.g_mobiledata_rounded,
-                  expand: true,
-                  onPressed: data.loading ? null : widget.onGoogle,
-                ),
-                const SizedBox(height: OSpace.m),
-                OButton(
-                  key: const Key('sign-in-phone'),
-                  label: 'Continue with phone',
-                  variant: OButtonVariant.secondary,
-                  icon: Icons.phone_iphone_rounded,
-                  expand: true,
-                  onPressed: data.loading || widget.onPhone == null
-                      ? null
-                      : _openPhoneSheet,
-                ),
-                const SizedBox(height: OSpace.m),
-                // Apple is only rendered when a real handler exists. A
-                // provider this build cannot complete is not offered at all.
-                if (widget.onApple != null) ...[
-                  OButton(
-                    label: 'Continue with Apple',
-                    variant: OButtonVariant.secondary,
-                    icon: Icons.apple_rounded,
-                    expand: true,
-                    onPressed: data.loading ? null : widget.onApple,
-                  ),
-                  const SizedBox(height: OSpace.m),
-                ],
-                const SizedBox(height: OSpace.l),
-                const _OrDivider(),
-                const SizedBox(height: OSpace.l),
-                _FieldLabel(label: 'Email address', color: c.textMuted),
-                const SizedBox(height: OSpace.s),
-                Semantics(
-                  label: 'Email address',
-                  textField: true,
-                  child: TextField(
-                    key: const Key('sign-in-email'),
-                    controller: _email,
-                    enabled: !data.loading,
-                    keyboardType: TextInputType.emailAddress,
-                    textInputAction: TextInputAction.next,
-                    autofillHints: const [AutofillHints.email],
-                    onChanged: widget.onEmailChanged,
-                    style: OType.body.copyWith(color: c.text),
-                    decoration: const InputDecoration(
-                      hintText: 'you@domain.com',
-                    ),
-                  ),
-                ),
-                const SizedBox(height: OSpace.l),
-                Wrap(
-                  alignment: WrapAlignment.spaceBetween,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  spacing: OSpace.s,
-                  runSpacing: OSpace.xs,
-                  children: [
-                    _FieldLabel(label: 'Password', color: c.textMuted),
-                    OButton(
-                      label: 'Forgot password?',
-                      variant: OButtonVariant.ghost,
-                      onPressed: data.loading ? null : widget.onForgotPassword,
-                    ),
-                  ],
-                ),
-                const SizedBox(height: OSpace.s),
-                Semantics(
-                  label: 'Password',
-                  textField: true,
-                  child: TextField(
-                    key: const Key('sign-in-password'),
-                    controller: _password,
-                    enabled: !data.loading,
-                    obscureText: _obscure,
-                    textInputAction: TextInputAction.done,
-                    autofillHints: const [AutofillHints.password],
-                    onChanged: widget.onPasswordChanged,
-                    onSubmitted: (_) => _submit(),
-                    style: OType.body.copyWith(color: c.text),
-                    decoration: InputDecoration(
-                      hintText: 'Your password',
-                      suffixIcon: OIconButton(
-                        key: const Key('sign-in-password-toggle'),
-                        icon: _obscure
-                            ? Icons.visibility_rounded
-                            : Icons.visibility_off_rounded,
-                        semanticLabel: _obscure
-                            ? 'Show password'
-                            : 'Hide password',
-                        tooltip: _obscure ? 'Show password' : 'Hide password',
-                        onPressed: data.loading
-                            ? null
-                            : () => setState(() => _obscure = !_obscure),
-                      ),
-                    ),
-                  ),
-                ),
-                if (data.error != null) ...[
-                  const SizedBox(height: OSpace.l),
-                  _InlineError(
-                    message: data.error!,
-                    onRetry: widget.onRetry,
-                  ),
-                ],
-                const SizedBox(height: OSpace.xl),
-                OButton(
-                  key: const Key('sign-in-submit'),
-                  label: 'Sign in',
-                  icon: Icons.arrow_forward_rounded,
-                  expand: true,
-                  loading: data.loading,
-                  onPressed: data.loading ? null : _submit,
-                ),
-                const SizedBox(height: OSpace.l),
-                Wrap(
-                  alignment: WrapAlignment.center,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    Text(
-                      'New here?',
-                      style: OType.bodySm.copyWith(color: c.textMuted),
-                    ),
-                    OButton(
-                      label: 'Create an account',
-                      variant: OButtonVariant.ghost,
-                      onPressed: data.loading ? null : widget.onCreateAccount,
-                    ),
-                  ],
-                ),
-                const SizedBox(height: OSpace.l),
-                // Underlining is a promise of a tap. Without a handler the
-                // sentence stays plain text instead of faking a link.
-                Wrap(
-                  alignment: WrapAlignment.center,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    Text(
-                      'By signing in, you agree to our ',
-                      style: OType.caption.copyWith(color: c.textMuted),
-                    ),
-                    _LegalLink(label: 'Terms', onTap: widget.onTerms),
-                    Text(
-                      ' and ',
-                      style: OType.caption.copyWith(color: c.textMuted),
-                    ),
-                    _LegalLink(
-                      label: 'Privacy Policy',
-                      onTap: widget.onPrivacy,
-                    ),
-                    Text(
-                      '.',
-                      style: OType.caption.copyWith(color: c.textMuted),
-                    ),
-                  ],
-                ),
-              ],
+    return OnboardingStepScaffold(
+      step: widget.step,
+      title: 'Sign in',
+      subtitle: 'Welcome back',
+      onBack: widget.onBack,
+      backKey: const Key('sign-in-back'),
+      dismissKeyboard: true,
+      primaryKey: const Key('sign-in-submit'),
+      // The header already says "Sign in"; repeating it on the button would
+      // be the same string twice on one screen.
+      primaryLabel: 'Continue',
+      onPrimary: data.loading || widget.onSubmit == null ? null : _submit,
+      primaryLoading: data.loading,
+      secondaryActions: [
+        OTextAction(
+          label: 'Create an account',
+          onPressed: data.loading ? null : widget.onCreateAccount,
+        ),
+      ],
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OnboardingLanguagePill(
+              key: const Key('sign-in-language'),
+              label: data.language,
+              onTap: data.loading ? null : widget.onLanguageTap,
             ),
           ),
-        ),
+          const SizedBox(height: OSpace.l),
+          OButton(
+            label: 'Continue with Google',
+            variant: OButtonVariant.secondary,
+            icon: Icons.g_mobiledata_rounded,
+            expand: true,
+            onPressed: data.loading ? null : widget.onGoogle,
+          ),
+          const SizedBox(height: OSpace.m),
+          OButton(
+            key: const Key('sign-in-phone'),
+            label: 'Continue with phone',
+            variant: OButtonVariant.secondary,
+            icon: Icons.phone_iphone_rounded,
+            expand: true,
+            onPressed: data.loading || widget.onPhone == null
+                ? null
+                : _openPhoneSheet,
+          ),
+          const SizedBox(height: OSpace.m),
+          // Apple is only rendered when a real handler exists. A provider this
+          // build cannot complete is not offered at all.
+          if (widget.onApple != null) ...[
+            OButton(
+              label: 'Continue with Apple',
+              variant: OButtonVariant.secondary,
+              icon: Icons.apple_rounded,
+              expand: true,
+              onPressed: data.loading ? null : widget.onApple,
+            ),
+            const SizedBox(height: OSpace.m),
+          ],
+          const SizedBox(height: OSpace.l),
+          const ODivider(label: 'OR'),
+          const SizedBox(height: OSpace.l),
+          _FieldLabel(label: 'Email address', color: c.textMuted),
+          const SizedBox(height: OSpace.s),
+          Semantics(
+            label: 'Email address',
+            textField: true,
+            child: TextField(
+              key: const Key('sign-in-email'),
+              controller: _email,
+              enabled: !data.loading,
+              keyboardType: TextInputType.emailAddress,
+              textInputAction: TextInputAction.next,
+              autofillHints: const [AutofillHints.email],
+              onChanged: widget.onEmailChanged,
+              style: OType.body.copyWith(color: c.text),
+              decoration: const InputDecoration(hintText: 'you@domain.com'),
+            ),
+          ),
+          const SizedBox(height: OSpace.l),
+          Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: OSpace.s,
+            runSpacing: OSpace.xs,
+            children: [
+              _FieldLabel(label: 'Password', color: c.textMuted),
+              OButton(
+                label: 'Forgot password?',
+                variant: OButtonVariant.ghost,
+                onPressed: data.loading ? null : widget.onForgotPassword,
+              ),
+            ],
+          ),
+          const SizedBox(height: OSpace.s),
+          Semantics(
+            label: 'Password',
+            textField: true,
+            child: TextField(
+              key: const Key('sign-in-password'),
+              controller: _password,
+              enabled: !data.loading,
+              obscureText: _obscure,
+              textInputAction: TextInputAction.done,
+              autofillHints: const [AutofillHints.password],
+              onChanged: widget.onPasswordChanged,
+              onSubmitted: (_) => _submit(),
+              style: OType.body.copyWith(color: c.text),
+              decoration: InputDecoration(
+                hintText: 'Your password',
+                suffixIcon: OIconButton(
+                  key: const Key('sign-in-password-toggle'),
+                  icon: _obscure
+                      ? Icons.visibility_rounded
+                      : Icons.visibility_off_rounded,
+                  semanticLabel: _obscure ? 'Show password' : 'Hide password',
+                  tooltip: _obscure ? 'Show password' : 'Hide password',
+                  onPressed: data.loading
+                      ? null
+                      : () => setState(() => _obscure = !_obscure),
+                ),
+              ),
+            ),
+          ),
+          if (data.error != null) ...[
+            const SizedBox(height: OSpace.l),
+            _InlineError(message: data.error!, onRetry: widget.onRetry),
+          ],
+          const SizedBox(height: OSpace.l),
+          // Underlining is a promise of a tap. Without a handler the sentence
+          // stays plain text instead of faking a link.
+          Wrap(
+            alignment: WrapAlignment.center,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Text(
+                'By signing in, you agree to our ',
+                style: OType.caption.copyWith(color: c.textMuted),
+              ),
+              _LegalLink(label: 'Terms', onTap: widget.onTerms),
+              Text(' and ', style: OType.caption.copyWith(color: c.textMuted)),
+              _LegalLink(label: 'Privacy Policy', onTap: widget.onPrivacy),
+              Text('.', style: OType.caption.copyWith(color: c.textMuted)),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -499,81 +414,6 @@ class _FieldLabel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Text(label, style: OType.label.copyWith(color: color));
-  }
-}
-
-class _OrDivider extends StatelessWidget {
-  const _OrDivider();
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Row(
-      children: [
-        Expanded(child: Divider(color: c.hairline)),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: OSpace.m),
-          child: Text('OR', style: OType.overline.copyWith(color: c.textFaint)),
-        ),
-        Expanded(child: Divider(color: c.hairline)),
-      ],
-    );
-  }
-}
-
-class _LanguagePill extends StatelessWidget {
-  const _LanguagePill({super.key, required this.label, this.onTap});
-
-  final String label;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final enabled = onTap != null;
-    final content = Container(
-      constraints: const BoxConstraints(minHeight: OSpace.touch),
-      padding: const EdgeInsets.symmetric(horizontal: OSpace.m),
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-        border: Border.all(color: c.hairline),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.language_rounded, size: 18, color: c.textMuted),
-          const SizedBox(width: 6),
-          Flexible(
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: OType.caption.copyWith(color: c.text),
-            ),
-          ),
-          if (enabled) ...[
-            const SizedBox(width: 4),
-            Icon(Icons.expand_more_rounded, size: 16, color: c.textFaint),
-          ],
-        ],
-      ),
-    );
-    // The label is announced once, from the pill itself; the inner text is
-    // excluded so screen readers do not repeat the language name.
-    if (enabled) {
-      return OPressable(
-        onTap: onTap,
-        semanticLabel: 'Language, $label',
-        child: ExcludeSemantics(child: content),
-      );
-    }
-    return Semantics(
-      label: 'Language, $label',
-      button: true,
-      enabled: false,
-      child: ExcludeSemantics(child: content),
-    );
   }
 }
 

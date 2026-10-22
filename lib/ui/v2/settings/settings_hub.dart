@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'settings_search.dart';
 
@@ -34,6 +35,7 @@ class V2SettingsItem {
     required this.id,
     required this.label,
     required this.icon,
+    this.value,
     this.subtitle,
     this.onTap,
     this.danger = false,
@@ -42,8 +44,17 @@ class V2SettingsItem {
 
   final String id;
   final String label;
-  final String? subtitle;
   final IconData icon;
+
+  /// A real value shown at the end of the row ("Free plan", "3 GB", "On").
+  ///
+  /// Only values belong here. Explanations ("Theme, text size and motion")
+  /// are not values: the minimal UI deletes them.
+  final String? value;
+
+  /// Legacy descriptive copy. Kept so older wiring layers still compile; the
+  /// hub does not render it.
+  final String? subtitle;
   final VoidCallback? onTap;
   final bool danger;
   final bool enabled;
@@ -85,6 +96,9 @@ class V2SettingsHubData {
   final V2SettingsSection advanced;
   final bool showReasoning;
   final ValueChanged<bool>? onReasoningChanged;
+
+  /// Retained for hosts that still pass it. Adding a connector belongs to the
+  /// Connectors page, so the hub row keeps a single action: open connectors.
   final VoidCallback? onAddConnector;
   final VoidCallback? onProfileTap;
   final VoidCallback? onSignOut;
@@ -92,10 +106,12 @@ class V2SettingsHubData {
   final String errorMessage;
 }
 
-/// Settings home. Rows only call the callbacks carried by [data]; the hub
-/// itself never pushes another settings page. It does own two pieces of view
-/// state: which row search should reveal, and the transient highlight that
-/// shows the person where that row landed.
+/// Settings home: one header, one search action, at most five sections of
+/// one-line rows. Rows only call the callbacks carried by [data]; the hub never
+/// pushes another settings page.
+///
+/// It owns two pieces of view state: which row search should reveal, and the
+/// transient highlight that shows the person where that row landed.
 class SettingsHubPage extends StatefulWidget {
   const SettingsHubPage({super.key, required this.data});
 
@@ -156,8 +172,7 @@ class _SettingsHubPageState extends State<SettingsHubPage> {
     });
   }
 
-  /// The one order every settings list uses. The Models card sits between Chat
-  /// and Data control and always starts with Connectors.
+  /// The one order every settings list uses.
   static const _canonicalOrder = <String, List<String>>{
     'account': ['account', 'plan_billing', 'usage', 'credentials'],
     'chat': [
@@ -189,15 +204,17 @@ class _SettingsHubPageState extends State<SettingsHubPage> {
     'delete': 'delete_data',
   };
 
+  /// Memory, shared memory and memory files are one destination: the memory
+  /// hub owns the switch, the shared flag and the files.
+  static const _memoryRowIds = <String>{
+    'memory',
+    'shared_memory',
+    'memory_files',
+  };
+
   @override
   Widget build(BuildContext context) {
-    final sections = <V2SettingsSection>[
-      _ordered('account', data.account),
-      _ordered('chat', data.chat),
-      _ordered('models', data.models),
-      _ordered('data_control', data.dataControl),
-      _ordered('advanced', data.advanced),
-    ];
+    final sections = _visibleSections();
     final hasContent =
         data.profile != null ||
         sections.any((section) => section.items.isNotEmpty);
@@ -214,20 +231,18 @@ class _SettingsHubPageState extends State<SettingsHubPage> {
         body = hasContent ? _content(sections) : _emptyState();
     }
 
-    return OScaffold(
-      appBar: OAppBar(
-        title: 'Settings',
-        actions: [
-          OIconButton(
-            key: const ValueKey('settings-search'),
-            icon: Icons.search_rounded,
-            semanticLabel: 'Search settings',
-            tooltip: 'Search settings',
-            onPressed: () => _openSearch(context, sections),
-          ),
-        ],
-      ),
-      body: OFadeSlide(child: body),
+    return OScreen(
+      title: 'Settings',
+      actions: [
+        OIconButton(
+          key: const ValueKey('settings-search'),
+          icon: Icons.search_rounded,
+          semanticLabel: 'Search settings',
+          tooltip: 'Search settings',
+          onPressed: () => _openSearch(context, sections),
+        ),
+      ],
+      child: OFadeSlide(child: body),
     );
   }
 
@@ -270,6 +285,63 @@ class _SettingsHubPageState extends State<SettingsHubPage> {
     );
   }
 
+  List<V2SettingsSection> _visibleSections() {
+    final sections = <V2SettingsSection>[
+      _ordered('account', data.account),
+      _ordered('chat', data.chat),
+      _ordered('models', data.models),
+      _ordered('data_control', data.dataControl),
+      _ordered('advanced', data.advanced),
+    ];
+    return <V2SettingsSection>[
+      for (final section in sections)
+        V2SettingsSection(
+          title: section.title,
+          items: _mergeMemoryRows(section.items),
+        ),
+    ];
+  }
+
+  /// Collapses memory, shared memory and memory files into one "Memory" row.
+  ///
+  /// The kept row is the memory hub when it exists; otherwise the first memory
+  /// row is kept under its own label so a wiring layer that only exposes the
+  /// files page still reaches it.
+  List<V2SettingsItem> _mergeMemoryRows(List<V2SettingsItem> items) {
+    final memory = <V2SettingsItem>[
+      for (final item in items)
+        if (_memoryRowIds.contains(item.id)) item,
+    ];
+    if (memory.length < 2) return items;
+
+    final keep = memory.firstWhere(
+      (item) => item.id == 'memory',
+      orElse: () => memory.first,
+    );
+    VoidCallback? tap = keep.onTap;
+    for (final item in memory) {
+      tap ??= item.onTap;
+    }
+    final merged = V2SettingsItem(
+      id: keep.id,
+      label: keep.id == 'memory' ? 'Memory' : keep.label,
+      icon: Icons.psychology_outlined,
+      onTap: tap,
+      enabled: keep.enabled,
+    );
+    final result = <V2SettingsItem>[];
+    var emitted = false;
+    for (final item in items) {
+      if (!_memoryRowIds.contains(item.id)) {
+        result.add(item);
+      } else if (!emitted) {
+        result.add(merged);
+        emitted = true;
+      }
+    }
+    return result;
+  }
+
   V2SettingsSection _ordered(String key, V2SettingsSection section) {
     final order = _canonicalOrder[key] ?? const <String>[];
     int rank(String id) {
@@ -296,13 +368,13 @@ class _SettingsHubPageState extends State<SettingsHubPage> {
     return OEmptyState(
       icon: Icons.tune_rounded,
       title: 'No settings yet',
-      message: 'Your settings will appear here when your account is ready.',
+      message: 'Settings appear when your account is ready.',
       // No retry callback means there is nothing to retry: do not offer a
       // button that cannot do anything.
       action: data.onRetry == null
           ? null
           : OButton(
-              label: 'Refresh settings',
+              label: 'Refresh',
               icon: Icons.refresh_rounded,
               onPressed: data.onRetry,
             ),
@@ -310,154 +382,65 @@ class _SettingsHubPageState extends State<SettingsHubPage> {
   }
 
   Widget _content(List<V2SettingsSection> sections) {
-    final profile = data.profile;
+    final groups = <Widget>[
+      for (final section in sections)
+        if (section.items.isNotEmpty ||
+            (data.profile != null && section.title == data.account.title))
+          _SectionGroup(
+            section: section,
+            profile: section.title == data.account.title ? data.profile : null,
+            onProfileTap: data.onProfileTap,
+            showReasoning: data.showReasoning,
+            onReasoningChanged: data.onReasoningChanged,
+            tapFor: _rowTapFor,
+            keyFor: _keyFor,
+            highlightedId: _highlightedId,
+          ),
+    ];
+
     return SingleChildScrollView(
       controller: _scroll,
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.screen,
-        OSpace.s,
-        OSpace.screen,
-        OSpace.xxl,
-      ),
+      padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xxl),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (profile != null)
-            OCard(
-              onTap: data.onProfileTap,
-              semanticLabel:
-                  '${profile.name}, ${profile.email}, ${profile.planLabel}',
-              padding: const EdgeInsets.all(OSpace.m),
-              child: _ProfileHeader(
-                profile: profile,
-                showChevron: data.onProfileTap != null,
+          ...groups,
+          if (data.onSignOut != null)
+            Padding(
+              padding: const EdgeInsets.only(top: OSpace.xl),
+              child: OButton(
+                label: 'Sign out',
+                icon: Icons.logout_rounded,
+                variant: OButtonVariant.secondary,
+                expand: true,
+                onPressed: data.onSignOut,
               ),
             ),
-          for (final section in sections)
-            if (section.items.isNotEmpty) ...[
-              OSectionHeader(
-                label: section.title,
-                padding: const EdgeInsets.fromLTRB(
-                  OSpace.xs,
-                  OSpace.xl,
-                  OSpace.xs,
-                  OSpace.s,
-                ),
-              ),
-              _SectionCard(
-                section: section,
-                showReasoning: data.showReasoning,
-                onReasoningChanged: data.onReasoningChanged,
-                onAddConnector: data.onAddConnector,
-                tapFor: _rowTapFor,
-                keyFor: _keyFor,
-                highlightedId: _highlightedId,
-              ),
-            ],
-          if (data.onSignOut != null) ...[
-            const SizedBox(height: OSpace.xl),
-            OButton(
-              label: profile == null ? 'Log out' : 'Log out of ${profile.name}',
-              icon: Icons.logout_rounded,
-              variant: OButtonVariant.secondary,
-              expand: true,
-              onPressed: data.onSignOut,
-            ),
-          ],
-          const SizedBox(height: OSpace.s),
         ],
       ),
     );
   }
 }
 
-class _ProfileHeader extends StatelessWidget {
-  const _ProfileHeader({required this.profile, required this.showChevron});
-
-  final V2SettingsProfile profile;
-  final bool showChevron;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Row(
-      children: [
-        Stack(
-          clipBehavior: Clip.none,
-          children: [
-            OAvatar(
-              initials: profile.initials ?? profile.name,
-              image: profile.image,
-              size: 56,
-              semanticLabel: '${profile.name} profile photo',
-            ),
-            Positioned(
-              right: -2,
-              bottom: -2,
-              child: Container(
-                width: 18,
-                height: 18,
-                decoration: BoxDecoration(
-                  color: c.success,
-                  shape: BoxShape.circle,
-                  border: Border.all(color: c.surface, width: 2),
-                ),
-                child: Icon(Icons.check_rounded, size: 11, color: c.onAccent),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(width: OSpace.m),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Wrap(
-                spacing: OSpace.s,
-                runSpacing: OSpace.xs,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  Text(
-                    profile.name,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.h3.copyWith(color: c.text),
-                  ),
-                  OPill(label: profile.planLabel, tone: OPillTone.accent),
-                ],
-              ),
-              const SizedBox(height: 2),
-              Text(
-                profile.email,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: OType.bodySm.copyWith(color: c.textMuted),
-              ),
-            ],
-          ),
-        ),
-        if (showChevron)
-          Icon(Icons.chevron_right_rounded, size: 20, color: c.textFaint),
-      ],
-    );
-  }
-}
-
-class _SectionCard extends StatelessWidget {
-  const _SectionCard({
+/// One section: a short heading and a card of one-line rows. The account
+/// section leads with the profile row instead of repeating it as a destination.
+class _SectionGroup extends StatelessWidget {
+  const _SectionGroup({
     required this.section,
+    required this.profile,
+    required this.onProfileTap,
     required this.showReasoning,
     required this.onReasoningChanged,
-    required this.onAddConnector,
     required this.tapFor,
     required this.keyFor,
     required this.highlightedId,
   });
 
   final V2SettingsSection section;
+  final V2SettingsProfile? profile;
+  final VoidCallback? onProfileTap;
   final bool showReasoning;
   final ValueChanged<bool>? onReasoningChanged;
-  final VoidCallback? onAddConnector;
   final VoidCallback? Function(V2SettingsItem item) tapFor;
   final GlobalKey Function(String id) keyFor;
   final String? highlightedId;
@@ -465,58 +448,228 @@ class _SectionCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final rows = <Widget>[];
-    for (var index = 0; index < section.items.length; index++) {
-      final item = section.items[index];
-      final tap = tapFor(item);
-      rows.add(
-        Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            AnimatedContainer(
-              key: keyFor(item.id),
-              duration: OMove.reduced(context) ? Duration.zero : OMotion.base,
-              color: highlightedId == item.id ? c.accentSoft : null,
-              child: OListRow(
-                key: ValueKey<String>('settings-row-${item.id}'),
-                title: item.label,
-                subtitle: item.subtitle,
-                icon: item.icon,
-                danger: item.danger,
-                enabled: item.enabled && tap != null,
-                showChevron: tap != null,
-                onTap: tap,
-                trailing: _trailing(context, item),
-              ),
-            ),
-            if (index != section.items.length - 1)
-              Divider(height: 1, thickness: 1, indent: 64, color: c.hairline),
-          ],
+    final items = profile == null
+        ? section.items
+        : section.items.where((item) => item.id != 'account').toList();
+    final rows = <Widget>[
+      if (profile != null)
+        _ProfileRow(profile: profile!, onTap: onProfileTap),
+      for (final item in items)
+        _SettingsRow(
+          key: keyFor(item.id),
+          item: item,
+          tap: tapFor(item),
+          trailing: _trailing(item),
+          highlighted: highlightedId == item.id,
         ),
-      );
-    }
-    return OCard(
-      padding: EdgeInsets.zero,
-      child: OStagger(children: rows),
+    ];
+    if (rows.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        OSectionTitle(title: section.title),
+        OCard(
+          padding: EdgeInsets.zero,
+          child: Column(
+            children: [
+              for (var index = 0; index < rows.length; index++) ...[
+                if (index > 0)
+                  Divider(height: 1, thickness: 1, indent: 64, color: c.hairline),
+                rows[index],
+              ],
+            ],
+          ),
+        ),
+      ],
     );
   }
 
-  Widget? _trailing(BuildContext context, V2SettingsItem item) {
-    if (item.id == 'show_reasoning') {
-      return _ReasoningToggle(
-        value: showReasoning,
-        onChanged: item.enabled ? onReasoningChanged : null,
-      );
-    }
-    if (item.id == 'connectors') {
-      return OIconButton(
-        icon: Icons.add_rounded,
-        semanticLabel: 'Add connector',
-        tooltip: 'Add connector',
-        onPressed: item.enabled ? onAddConnector : null,
-      );
-    }
-    return null;
+  Widget? _trailing(V2SettingsItem item) {
+    if (item.id != 'show_reasoning') return null;
+    return _ReasoningToggle(
+      value: showReasoning,
+      onChanged: item.enabled ? onReasoningChanged : null,
+    );
+  }
+}
+
+/// Avatar + name + plan pill. One line on a phone; the pill drops under the
+/// name when the text scale would squeeze the name to nothing.
+class _ProfileRow extends StatelessWidget {
+  const _ProfileRow({required this.profile, required this.onTap});
+
+  final V2SettingsProfile profile;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final stacked = MediaQuery.textScalerOf(context).scale(14) > 20;
+    final pill = OPill(label: profile.planLabel, tone: OPillTone.accent);
+    final name = Text(
+      profile.name,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: OType.body.copyWith(
+        color: c.text,
+        fontWeight: FontWeight.w600,
+      ),
+    );
+    return OPressable(
+      onTap: onTap,
+      semanticLabel: '${profile.name}, ${profile.planLabel}',
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: OSpace.listRow),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: OSpace.l,
+            vertical: OSpace.m,
+          ),
+          child: Row(
+            children: [
+              OAvatar(
+                initials: profile.initials ?? profile.name,
+                image: profile.image,
+                size: 40,
+                semanticLabel: '${profile.name} profile photo',
+              ),
+              const SizedBox(width: OSpace.m),
+              Expanded(
+                child: stacked
+                    ? Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          name,
+                          const SizedBox(height: OSpace.xs),
+                          Align(alignment: Alignment.centerLeft, child: pill),
+                        ],
+                      )
+                    : name,
+              ),
+              if (!stacked) ...[
+                const SizedBox(width: OSpace.s),
+                pill,
+              ],
+              if (onTap != null) ...[
+                const SizedBox(width: OSpace.s),
+                Icon(
+                  Icons.chevron_right_rounded,
+                  size: 20,
+                  color: c.textFaint,
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One line: icon, title, optional value. Descriptive subtitles are gone.
+class _SettingsRow extends StatelessWidget {
+  const _SettingsRow({
+    super.key,
+    required this.item,
+    required this.tap,
+    required this.trailing,
+    required this.highlighted,
+  });
+
+  final V2SettingsItem item;
+  final VoidCallback? tap;
+  final Widget? trailing;
+  final bool highlighted;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final value = item.value;
+    final fg = item.danger ? c.danger : (tap == null ? c.textFaint : c.text);
+
+    return AnimatedContainer(
+      duration: OMove.reduced(context) ? Duration.zero : OMotion.base,
+      color: highlighted ? c.accentSoft : null,
+      child: OPressable(
+        key: ValueKey<String>('settings-row-${item.id}'),
+        onTap: tap,
+        semanticLabel: value == null ? item.label : '${item.label}, $value',
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: OSpace.listRow),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: OSpace.l,
+              vertical: OSpace.m,
+            ),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                // One line, always: the value gets a share of the row and
+                // ellipsizes before the title is squeezed to nothing.
+                final valueMax = (constraints.maxWidth * 0.38).clamp(
+                  72.0,
+                  160.0,
+                );
+                return Row(
+                  children: [
+                    Container(
+                      width: OSpace.iconTile,
+                      height: OSpace.iconTile,
+                      decoration: BoxDecoration(
+                        color: item.danger
+                            ? c.danger.withValues(alpha: 0.10)
+                            : c.surfaceAlt,
+                        borderRadius: BorderRadius.circular(ORadius.m),
+                      ),
+                      child: Icon(
+                        item.icon,
+                        size: 19,
+                        color: item.danger ? c.danger : c.textMuted,
+                      ),
+                    ),
+                    const SizedBox(width: OSpace.m),
+                    Expanded(
+                      child: Text(
+                        item.label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: OType.body.copyWith(
+                          color: fg,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                    if (value != null) ...[
+                      const SizedBox(width: OSpace.s),
+                      ConstrainedBox(
+                        constraints: BoxConstraints(maxWidth: valueMax),
+                        child: Text(
+                          value,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.right,
+                          style: OType.caption.copyWith(color: c.textMuted),
+                        ),
+                      ),
+                    ],
+                    if (trailing != null) ...[
+                      const SizedBox(width: OSpace.s),
+                      trailing!,
+                    ] else if (tap != null)
+                      Icon(
+                        Icons.chevron_right_rounded,
+                        size: 20,
+                        color: c.textFaint,
+                      ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

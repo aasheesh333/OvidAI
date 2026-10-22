@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
-import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 
 // TODO(l10n): move the English copy in this screen to the ARB files.
@@ -25,7 +25,7 @@ class V2NotificationSetting {
   final bool value;
 
   /// False when nothing in the product backs this row yet. The page then
-  /// renders a plain "Not available yet" row instead of a switch that would
+  /// renders the channel as plain information instead of a switch that would
   /// flip and silently forget the change.
   final bool available;
 
@@ -52,6 +52,9 @@ enum V2NotificationSound {
 }
 
 /// One channel's sound choice.
+///
+/// The page now shows a single sound for every channel, but the injected data
+/// stays per channel because that is how core stores it.
 @immutable
 class V2ChannelSoundSetting {
   const V2ChannelSoundSetting({
@@ -222,10 +225,10 @@ class V2NotificationsPageData {
 
   /// Legacy field: vibration is a property of the Android notification
   /// channel, not of the account, so there is no app-side value to toggle.
-  /// Kept so existing callers keep compiling.
+  /// Kept so existing callers keep compiling; the page no longer renders it.
   final bool vibration;
 
-  /// Legacy pre-formatted range, e.g. `22:00–08:00`. The page now derives the
+  /// Legacy pre-formatted range, e.g. `22:00–08:00`. The page derives the
   /// range from [quietHoursStart]/[quietHoursEnd] (and knows about the
   /// midnight wrap), so a stale label can never disagree with the picker.
   /// Kept so existing callers keep compiling.
@@ -234,7 +237,8 @@ class V2NotificationsPageData {
   final TimeOfDay quietHoursStart;
   final TimeOfDay quietHoursEnd;
 
-  /// Per-channel sounds for the channels that can be voiced.
+  /// Per-channel sounds. The page shows one choice and writes it to every
+  /// channel, because core stores sound per channel.
   final List<V2ChannelSoundSetting> sounds;
 
   /// Called with the row id and the requested value.
@@ -260,13 +264,13 @@ class V2NotificationsPageData {
   final String errorMessage;
 }
 
-/// Notification choices: activity, security, delivery and system permission.
+/// Notification choices: one master switch, four channels, quiet hours and a
+/// single sound for every channel.
 ///
 /// The screen owns a working copy of every switch. The caller still persists
-/// each change through the callbacks, but the widget no longer waits for a
+/// each change through the callbacks, but the widget does not wait for a
 /// parent rebuild: a page pushed once from Settings has no listener on
-/// `AppState`/`BackgroundNotifier`, so rendering straight from the injected
-/// snapshot made every tap snap back to the old value.
+/// `AppState`/`BackgroundNotifier`.
 class NotificationsPage extends StatefulWidget {
   const NotificationsPage({super.key, required this.data});
 
@@ -278,18 +282,12 @@ class NotificationsPage extends StatefulWidget {
 
 class _NotificationsPageState extends State<NotificationsPage> {
   late bool _master;
-  late bool _sound;
   late bool _quietEnabled;
   late TimeOfDay _quietStart;
   late TimeOfDay _quietEnd;
   late List<V2NotificationSetting> _activity;
-  late List<V2NotificationSetting> _security;
   late List<V2ChannelSoundSetting> _sounds;
-
-  /// The last audible choice per channel, so turning Sound back on restores
-  /// the user's pick instead of resetting every channel to the chime.
-  final Map<String, V2NotificationSound> _lastAudible =
-      <String, V2NotificationSound>{};
+  late V2NotificationSound _soundChoice;
 
   V2NotificationsPageData get _data => widget.data;
 
@@ -314,7 +312,6 @@ class _NotificationsPageState extends State<NotificationsPage> {
     if (prev == null || next.masterEnabled != prev.masterEnabled) {
       _master = next.masterEnabled;
     }
-    if (prev == null || next.sound != prev.sound) _sound = next.sound;
     if (prev == null || next.quietHoursEnabled != prev.quietHoursEnabled) {
       _quietEnabled = next.quietHoursEnabled;
     }
@@ -327,17 +324,21 @@ class _NotificationsPageState extends State<NotificationsPage> {
     if (prev == null || !identical(next.activity, prev.activity)) {
       _activity = List<V2NotificationSetting>.of(next.activity);
     }
-    if (prev == null || !identical(next.security, prev.security)) {
-      _security = List<V2NotificationSetting>.of(next.security);
-    }
     if (prev == null || !identical(next.sounds, prev.sounds)) {
       _sounds = List<V2ChannelSoundSetting>.of(next.sounds);
-      for (final channel in _sounds) {
-        if (channel.value != V2NotificationSound.silent) {
-          _lastAudible[channel.id] = channel.value;
-        }
-      }
     }
+    if (prev == null || next.sound != prev.sound) {
+      _soundChoice = _initialSound(next);
+    }
+  }
+
+  /// One value for every channel: the common value when they agree, the
+  /// chime when they do not, and Silent when sound is off.
+  V2NotificationSound _initialSound(V2NotificationsPageData data) {
+    if (!data.sound) return V2NotificationSound.silent;
+    final values = data.sounds.map((channel) => channel.value).toSet();
+    if (values.length == 1) return values.first;
+    return V2NotificationSound.chime;
   }
 
   V2QuietHoursWindow get _window =>
@@ -345,243 +346,166 @@ class _NotificationsPageState extends State<NotificationsPage> {
 
   @override
   Widget build(BuildContext context) {
-    return OScaffold(
-      appBar: const OAppBar(title: 'Notifications'),
-      body: _body(context),
-    );
+    return OScreen(title: 'Notifications', child: _body(context));
   }
 
   Widget _body(BuildContext context) {
-    switch (_data.status) {
-      case V2NotificationsStatus.loading:
-        return const OFadeSlide(child: OSkeletonList(rows: 8));
-      case V2NotificationsStatus.error:
-        return OErrorState(message: _data.errorMessage, onRetry: _data.onRetry);
-      case V2NotificationsStatus.empty:
-        return OEmptyState(
-          icon: Icons.notifications_off_outlined,
-          title: 'No notification settings',
-          message:
-              'Notification choices will appear here when your account is ready.',
-          action: OButton(
-            label: 'Refresh',
-            icon: Icons.refresh_rounded,
-            onPressed: _data.onRetry,
-          ),
-        );
-      case V2NotificationsStatus.ready:
-        return OFadeSlide(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(
-              OSpace.screen,
-              OSpace.l,
-              OSpace.screen,
-              OSpace.xxl,
-            ),
-            child: OStagger(
-              children: [
-                if (_data.showPermissionPrompt && !_data.notificationsBlocked)
-                  _permissionPrompt(context),
-                if (_data.notificationsBlocked) _blockedBanner(context),
-                _masterSection(context),
-                _activitySection(context),
-                _securitySection(context),
-                _deliverySection(context),
-                _channelSoundsSection(context),
-                _quietHoursSection(context),
-              ],
-            ),
-          ),
-        );
-    }
+    final status = switch (_data.status) {
+      V2NotificationsStatus.loading => OStatus.loading,
+      V2NotificationsStatus.error => OStatus.error,
+      V2NotificationsStatus.empty => OStatus.empty,
+      V2NotificationsStatus.ready => OStatus.content,
+    };
+    return OStateView(
+      status: status,
+      errorMessage: _data.errorMessage,
+      onRetry: _data.onRetry,
+      emptyTitle: 'No notification settings',
+      emptyBody: 'Choices appear when your account is ready.',
+      emptyActionLabel: 'Refresh',
+      onEmptyAction: _data.onRetry,
+      skeletonRows: 8,
+      child: _content(context),
+    );
+  }
+
+  Widget _content(BuildContext context) {
+    final sections = <Widget>[
+      if (_data.showPermissionPrompt && !_data.notificationsBlocked)
+        _permissionPrompt(context),
+      if (_data.notificationsBlocked) _blockedBanner(context),
+      _channelsCard(context),
+      _quietHoursCard(context),
+      _soundCard(context),
+    ];
+    return ListView.builder(
+      padding: const EdgeInsets.only(top: OSpace.l, bottom: OSpace.xxl),
+      itemCount: sections.length,
+      itemBuilder: (context, index) => Padding(
+        padding: const EdgeInsets.only(bottom: OSpace.l),
+        child: sections[index],
+      ),
+    );
   }
 
   Widget _blockedBanner(BuildContext context) {
     final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: Container(
-        key: const ValueKey<String>('notifications-blocked-banner'),
-        padding: const EdgeInsets.all(OSpace.l),
-        decoration: BoxDecoration(
-          color: c.warn.withValues(alpha: 0.10),
-          borderRadius: BorderRadius.circular(ORadius.l),
-          border: Border.all(color: c.warn.withValues(alpha: 0.35)),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(Icons.notifications_off_outlined, size: 20, color: c.warn),
-                const SizedBox(width: OSpace.s),
-                Expanded(
-                  child: Text(
-                    'Notifications are blocked',
-                    style: OType.h3.copyWith(color: c.text),
-                  ),
+    return OCard(
+      key: const ValueKey<String>('notifications-blocked-banner'),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Icons.notifications_off_outlined, size: 20, color: c.warn),
+              const SizedBox(width: OSpace.s),
+              Expanded(
+                child: Text(
+                  'Notifications are blocked',
+                  style: OType.bodyStrong.copyWith(color: c.text),
                 ),
-              ],
-            ),
-            const SizedBox(height: OSpace.s),
-            Text(
-              'Ovid cannot alert you when a run or schedule finishes. '
-              'Allow notifications in Android settings.',
-              style: OType.bodySm.copyWith(color: c.textMuted),
-            ),
-            const SizedBox(height: OSpace.m),
-            OButton(
-              label: 'Open Android settings',
-              icon: Icons.settings_outlined,
-              variant: OButtonVariant.secondary,
-              expand: true,
-              onPressed: _data.onOpenSystem,
-            ),
-          ],
-        ),
+              ),
+            ],
+          ),
+          const SizedBox(height: OSpace.xs),
+          Text(
+            'Allow notifications in Android settings.',
+            style: OType.bodySm.copyWith(color: c.textMuted),
+          ),
+          const SizedBox(height: OSpace.m),
+          OButton(
+            label: 'Open settings',
+            icon: Icons.settings_outlined,
+            variant: OButtonVariant.secondary,
+            onPressed: _data.onOpenSystem,
+          ),
+        ],
       ),
     );
   }
 
   /// First-run rationale. The onboarding step asks the same question with the
-  /// same copy; this card is the Settings-side version so a deferred prompt
-  /// still explains why the permission matters.
+  /// same copy; this card is the Settings-side version.
   Widget _permissionPrompt(BuildContext context) {
     final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: OCard(
-        key: const ValueKey<String>('notifications-permission-prompt'),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(
-                  Icons.notifications_active_outlined,
-                  size: 22,
-                  color: c.accent,
+    return OCard(
+      key: const ValueKey<String>('notifications-permission-prompt'),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(
+                Icons.notifications_active_outlined,
+                size: 22,
+                color: c.accent,
+              ),
+              const SizedBox(width: OSpace.m),
+              Expanded(
+                child: Text(
+                  'Get notified when a run finishes',
+                  style: OType.bodyStrong.copyWith(color: c.text),
                 ),
-                const SizedBox(width: OSpace.m),
-                Expanded(
-                  child: Text(
-                    'Get notified when Ovid Si finishes',
-                    style: OType.h3.copyWith(color: c.text),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: OSpace.s),
-            Text(
-              'Ovid Si works in the cloud, so long tasks keep running after '
-              'you leave the app. Turn on notifications to hear when a run '
-              'finishes or needs your approval. You can change this in '
-              'Settings.',
-              style: OType.bodySm.copyWith(color: c.textMuted),
-            ),
-            const SizedBox(height: OSpace.m),
-            OButton(
-              key: const ValueKey<String>('notifications-permission-allow'),
-              label: 'Turn on',
-              icon: Icons.notifications_active_outlined,
-              expand: true,
-              onPressed: _data.onAllowNotifications,
-            ),
-            const SizedBox(height: OSpace.s),
-            OButton(
-              key: const ValueKey<String>('notifications-permission-later'),
-              label: 'Not now',
-              variant: OButtonVariant.secondary,
-              expand: true,
-              onPressed: _data.onDismissPermissionPrompt,
-            ),
-          ],
-        ),
+              ),
+            ],
+          ),
+          const SizedBox(height: OSpace.xs),
+          Text(
+            'Ovid keeps working after you leave the app.',
+            style: OType.bodySm.copyWith(color: c.textMuted),
+          ),
+          const SizedBox(height: OSpace.m),
+          OButton(
+            key: const ValueKey<String>('notifications-permission-allow'),
+            label: 'Turn on',
+            onPressed: _data.onAllowNotifications,
+          ),
+          const SizedBox(height: OSpace.s),
+          OButton(
+            key: const ValueKey<String>('notifications-permission-later'),
+            label: 'Not now',
+            variant: OButtonVariant.secondary,
+            onPressed: _data.onDismissPermissionPrompt,
+          ),
+        ],
       ),
     );
   }
 
-  Widget _masterSection(BuildContext context) {
-    return _section(
-      context,
-      title: 'Push notifications',
-      rows: [
-        _toggleRow(
-          context,
-          id: 'master',
-          title: 'Push notifications',
-          description: _master
-              ? 'On: get notified when a cloud run finishes, fails or needs '
-                    'your approval.'
-              : 'Off: Ovid Cloud sends no notifications to your devices.',
-          value: _master,
-          onChanged: _data.onMasterChanged == null ? null : _setMaster,
-          switchKey: const ValueKey<String>('notifications-master-switch'),
-        ),
-      ],
-    );
+  Widget _channelsCard(BuildContext context) {
+    final rows = <Widget>[
+      _toggleRow(
+        context,
+        id: 'master',
+        title: 'Push notifications',
+        value: _master,
+        onChanged: _data.onMasterChanged == null ? null : _setMaster,
+        switchKey: const ValueKey<String>('notifications-master-switch'),
+      ),
+      for (final setting in _activity)
+        if (setting.available)
+          _toggleRow(
+            context,
+            id: setting.id,
+            title: setting.title,
+            description: setting.description,
+            value: setting.value,
+            onChanged: _data.onToggle == null
+                ? null
+                : (value) => _setSetting(setting.id, value),
+            enabled: _master,
+          )
+        else
+          _infoRow(context, setting),
+    ];
+    return _card(context, rows);
   }
 
-  void _setMaster(bool value) {
-    final handler = _data.onMasterChanged;
-    if (handler == null) return;
-    setState(() => _master = value);
-    handler(value);
-  }
-
-  Widget _activitySection(BuildContext context) {
-    return _section(
-      context,
-      title: 'Activity',
-      rows: [
-        for (final setting in _activity)
-          if (!setting.available)
-            _unavailableRow(context, setting)
-          else
-            _toggleRow(
-              context,
-              id: setting.id,
-              title: setting.title,
-              description: setting.description,
-              value: setting.value,
-              onChanged: _data.onToggle == null
-                  ? null
-                  : (value) => _setSetting(setting.id, value),
-              enabled: _master,
-            ),
-      ],
-    );
-  }
-
-  Widget _securitySection(BuildContext context) {
-    return _section(
-      context,
-      title: 'Security',
-      rows: [
-        for (final setting in _security)
-          if (!setting.available)
-            _unavailableRow(context, setting)
-          else
-            _toggleRow(
-              context,
-              id: setting.id,
-              title: setting.title,
-              description: setting.description,
-              value: setting.value,
-              onChanged: _data.onToggle == null
-                  ? null
-                  : (value) => _setSetting(setting.id, value),
-              enabled: _master,
-            ),
-      ],
-    );
-  }
-
-  /// A row the product cannot honour yet: readable, but with no switch that
-  /// would only pretend to store the change.
-  Widget _unavailableRow(BuildContext context, V2NotificationSetting setting) {
+  /// A channel the product cannot honour yet: readable, but with no switch
+  /// that would only pretend to store the change.
+  Widget _infoRow(BuildContext context, V2NotificationSetting setting) {
     final c = OColors.of(context);
     return ConstrainedBox(
       key: ValueKey<String>('notification-unavailable-${setting.id}'),
@@ -602,23 +526,24 @@ class _NotificationsPageState extends State<NotificationsPage> {
                 fontWeight: FontWeight.w500,
               ),
             ),
-            const SizedBox(height: 2),
+            const SizedBox(height: OSpace.xxs),
             Text(
               setting.description,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: OType.caption.copyWith(color: c.textMuted),
-            ),
-            const SizedBox(height: OSpace.xs),
-            Text(
-              'Not available yet',
-              style: OType.caption.copyWith(
-                color: c.textFaint,
-                fontWeight: FontWeight.w600,
-              ),
             ),
           ],
         ),
       ),
     );
+  }
+
+  void _setMaster(bool value) {
+    final handler = _data.onMasterChanged;
+    if (handler == null) return;
+    setState(() => _master = value);
+    handler(value);
   }
 
   void _setSetting(String id, bool value) {
@@ -629,316 +554,139 @@ class _NotificationsPageState extends State<NotificationsPage> {
         for (final row in _activity)
           row.id == id ? row.copyWith(value: value) : row,
       ];
-      _security = [
-        for (final row in _security)
-          row.id == id ? row.copyWith(value: value) : row,
-      ];
     });
     handler(id, value);
   }
 
-  Widget _deliverySection(BuildContext context) {
-    return _section(
-      context,
-      title: 'Delivery',
-      rows: [
-        _toggleRow(
-          context,
-          id: 'sound',
-          title: 'Sound',
-          description: 'Play a sound for new alerts.',
-          value: _sound,
-          // Core stores sound per channel (there is no global flag). Drive
-          // every voicable channel so the switch reaches the real setting
-          // instead of a no-op `onToggle('sound')`.
-          onChanged: _canSetSound ? _setSound : null,
-          enabled: _master,
-        ),
-        // Vibration is owned by the Android notification channel, not by the
-        // app: a switch here could never change the OS state, so the row
-        // opens the system page that can.
-        OListRow(
-          key: const ValueKey<String>('notifications-vibration-row'),
-          icon: Icons.vibration_rounded,
-          title: 'Vibration',
-          subtitle: 'Android controls vibration for Ovid notifications.',
-          enabled: _data.onOpenSystem != null,
-          onTap: _data.onOpenSystem,
-        ),
-      ],
-    );
-  }
-
-  bool get _canSetSound => _data.onSoundChanged != null && _sounds.isNotEmpty;
-
-  void _setSound(bool value) {
-    final handler = _data.onSoundChanged;
-    if (handler == null) return;
-    final targets = <String, V2NotificationSound>{};
-    for (final channel in _sounds) {
-      if (value) {
-        targets[channel.id] =
-            _lastAudible[channel.id] ?? V2NotificationSound.chime;
-      } else {
-        if (channel.value != V2NotificationSound.silent) {
-          _lastAudible[channel.id] = channel.value;
-        }
-        targets[channel.id] = V2NotificationSound.silent;
-      }
-    }
-    setState(() {
-      _sound = value;
-      _sounds = [
-        for (final channel in _sounds)
-          channel.copyWith(value: targets[channel.id]),
-      ];
-    });
-    targets.forEach(handler);
-  }
-
-  Widget _channelSoundsSection(BuildContext context) {
-    return _section(
-      context,
-      title: 'Channel sounds',
-      rows: [for (final setting in _sounds) _soundRow(context, setting)],
-    );
-  }
-
-  Widget _soundRow(BuildContext context, V2ChannelSoundSetting setting) {
-    final c = OColors.of(context);
-    final channelOn = _channelEnabled(setting.id);
-    final enabled =
-        _data.onSoundChanged != null && channelOn && _master && _sound;
-    return Padding(
-      key: ValueKey<String>('sound-row-${setting.id}'),
-      padding: const EdgeInsets.symmetric(
-        horizontal: OSpace.l,
-        vertical: OSpace.m,
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            setting.title,
-            style: OType.body.copyWith(
-              color: channelOn ? c.text : c.textMuted,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            enabled
-                ? setting.description
-                : !_master
-                ? '${setting.description} Turn push notifications on to pick a '
-                      'sound.'
-                : !channelOn
-                ? '${setting.description} Turn this channel on to pick a sound.'
-                : '${setting.description} Turn sound on to pick a channel '
-                      'sound.',
-            style: OType.caption.copyWith(color: c.textMuted),
-          ),
-          const SizedBox(height: OSpace.s),
-          Wrap(
-            spacing: OSpace.s,
-            runSpacing: OSpace.s,
-            children: [
-              for (final sound in V2NotificationSound.values)
-                _soundChip(
-                  context,
-                  channelTitle: setting.title,
-                  sound: sound,
-                  selected: setting.value == sound,
-                  enabled: enabled,
-                  onSelected: () => _setChannelSound(setting.id, sound),
-                ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _setChannelSound(String id, V2NotificationSound sound) {
-    final handler = _data.onSoundChanged;
-    if (handler == null) return;
-    setState(() {
-      _sounds = [
-        for (final channel in _sounds)
-          channel.id == id ? channel.copyWith(value: sound) : channel,
-      ];
-      if (sound == V2NotificationSound.silent) {
-        if (_sounds.every((c) => c.value == V2NotificationSound.silent)) {
-          _sound = false;
-        }
-      } else {
-        _lastAudible[id] = sound;
-        _sound = true;
-      }
-    });
-    handler(id, sound);
-  }
-
-  /// Choice chip with a 48 dp target. Built locally (rather than with [OChip])
-  /// so the disabled state is announced and the label can ellipsize inside a
-  /// narrow 200 % text layout.
-  Widget _soundChip(
-    BuildContext context, {
-    required String channelTitle,
-    required V2NotificationSound sound,
-    required bool selected,
-    required bool enabled,
-    required VoidCallback onSelected,
-  }) {
-    final c = OColors.of(context);
-    final fg = !enabled ? c.textFaint : (selected ? c.accent : c.textMuted);
-    return Semantics(
-      // Every channel renders the same three sounds; name the channel so two
-      // "Ovid chime" chips are not two indistinguishable actions.
-      label: '${sound.label} for $channelTitle',
-      selected: selected,
-      button: true,
-      enabled: enabled,
-      onTap: enabled ? onSelected : null,
-      child: ExcludeSemantics(
-        child: OPressable(
-          onTap: enabled ? onSelected : null,
-          child: SizedBox(
-            height: OSpace.touch,
-            child: Center(
-              widthFactor: 1,
-              heightFactor: 1,
-              child: Container(
-                constraints: const BoxConstraints(minHeight: 34),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 4,
-                ),
-                decoration: BoxDecoration(
-                  color: selected && enabled ? c.accentSoft : c.surface,
-                  borderRadius: BorderRadius.circular(ORadius.m),
-                  border: Border.all(
-                    color: selected && enabled
-                        ? c.accentFill.withValues(alpha: 0.5)
-                        : c.hairline,
-                  ),
-                ),
-                child: Text(
-                  sound.label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.label.copyWith(
-                    color: fg,
-                    fontSize: 13,
-                    fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _quietHoursSection(BuildContext context) {
+  Widget _quietHoursCard(BuildContext context) {
     final c = OColors.of(context);
     final window = _window;
-    // The row may only open a sheet (`onQuietHours`) or may flip the stored
-    // value (`onQuietHoursEnabledChanged`). Only the latter can move the
-    // switch, because only it tells the page what the new value is.
-    final canToggleRow =
+    final canToggle =
         _data.onQuietHoursEnabledChanged != null || _data.onQuietHours != null;
     final canToggleSwitch = _data.onQuietHoursEnabledChanged != null;
-    final canEditTimes = _quietEnabled;
-    final subtitle = !_quietEnabled
-        ? 'Off · Alerts can arrive at any time'
-        : window.isEmpty
-        ? 'Off · Start and end are the same time'
-        : '${window.label((t) => _formatTime(context, t))} · No alerts during this time';
+    final canEdit =
+        _data.onQuietHoursStartChanged != null ||
+        _data.onQuietHoursEndChanged != null;
+    final range = _quietEnabled && !window.isEmpty
+        ? window.label((time) => _formatTime(context, time))
+        : 'Off';
 
-    return _section(
-      context,
-      title: 'Quiet hours',
-      footer: _quietEnabled && !window.isEmpty
-          ? Text(
-              window.wrapsMidnight
-                  ? 'Runs overnight · ${window.durationLabel}'
-                  : '${window.durationLabel} window',
-              key: const ValueKey<String>('quiet-hours-span'),
-              style: OType.caption.copyWith(color: c.textMuted),
-            )
-          : null,
-      rows: [
-        OListRow(
-          key: const ValueKey<String>('notifications-quiet-hours-row'),
-          icon: Icons.dark_mode_outlined,
-          title: 'Quiet hours',
-          subtitle: subtitle,
-          enabled: canToggleRow,
-          showChevron: false,
-          onTap: canToggleRow ? _toggleQuietRow : null,
-          trailing: Semantics(
-            label: 'Quiet hours',
-            toggled: _quietEnabled,
-            button: true,
-            enabled: canToggleSwitch,
-            onTap: canToggleSwitch
-                ? () => _setQuietEnabled(!_quietEnabled)
-                : null,
-            child: ExcludeSemantics(
-              child: Switch(
-                key: const ValueKey<String>('quiet-hours-switch'),
-                value: _quietEnabled,
-                onChanged: canToggleSwitch ? _setQuietEnabled : null,
-                activeThumbColor: canToggleSwitch ? c.onAccent : c.textFaint,
-                activeTrackColor: canToggleSwitch
-                    ? c.accentFill
-                    : c.surfaceRaised,
-                inactiveThumbColor: c.textFaint,
-                inactiveTrackColor: c.surfaceRaised,
-                trackOutlineColor: WidgetStatePropertyAll(c.hairlineStrong),
-                materialTapTargetSize: MaterialTapTargetSize.padded,
-              ),
+    return _card(context, [
+      OListRow(
+        key: const ValueKey<String>('notifications-quiet-hours-row'),
+        icon: Icons.dark_mode_outlined,
+        title: 'Quiet hours',
+        subtitle: range,
+        enabled: canToggle || canEdit,
+        showChevron: false,
+        onTap: canToggle || canEdit
+            ? () => _onQuietRowTap(context)
+            : null,
+        trailing: Semantics(
+          label: 'Quiet hours',
+          toggled: _quietEnabled,
+          button: true,
+          enabled: canToggleSwitch,
+          onTap: canToggleSwitch
+              ? () => _setQuietEnabled(!_quietEnabled)
+              : null,
+          child: ExcludeSemantics(
+            child: Switch(
+              key: const ValueKey<String>('quiet-hours-switch'),
+              value: _quietEnabled,
+              onChanged: canToggleSwitch ? _setQuietEnabled : null,
+              activeThumbColor: canToggleSwitch ? c.onAccent : c.textFaint,
+              activeTrackColor: canToggleSwitch
+                  ? c.accentFill
+                  : c.surfaceRaised,
+              inactiveThumbColor: c.textFaint,
+              inactiveTrackColor: c.surfaceRaised,
+              trackOutlineColor: WidgetStatePropertyAll(c.hairlineStrong),
+              materialTapTargetSize: MaterialTapTargetSize.padded,
             ),
           ),
         ),
-        _timeRow(
-          context,
-          label: 'Start',
-          time: _quietStart,
-          enabled: canEditTimes,
-          onChanged: _data.onQuietHoursStartChanged == null
-              ? null
-              : _setQuietStart,
-        ),
-        _timeRow(
-          context,
-          label: 'End',
-          time: _quietEnd,
-          enabled: canEditTimes,
-          onChanged: _data.onQuietHoursEndChanged == null ? null : _setQuietEnd,
-        ),
-      ],
-    );
+      ),
+    ]);
   }
 
-  /// Row tap: flip the switch when the caller exposes the value; otherwise
-  /// let the caller open its own editor without guessing the new state.
-  void _toggleQuietRow() {
-    final enabledHandler = _data.onQuietHoursEnabledChanged;
-    if (enabledHandler != null) {
-      _setQuietEnabled(!_quietEnabled);
+  /// Row tap: turn quiet hours on when it is off, edit the range when the
+  /// caller exposes the two times, otherwise let the caller open its editor.
+  void _onQuietRowTap(BuildContext context) {
+    if (!_quietEnabled) {
+      if (_data.onQuietHoursEnabledChanged != null) {
+        _setQuietEnabled(true);
+        return;
+      }
+      if (_data.onQuietHours != null) {
+        _data.onQuietHours!.call();
+        return;
+      }
+    }
+    if (_data.onQuietHoursStartChanged != null ||
+        _data.onQuietHoursEndChanged != null) {
+      _editQuietHours(context);
       return;
     }
     _data.onQuietHours?.call();
   }
 
+  /// The range editor: one sheet, two rows, so the page keeps a single row.
+  Future<void> _editQuietHours(BuildContext context) async {
+    var start = _quietStart;
+    var end = _quietEnd;
+    await showOSheet<void>(
+      context,
+      title: 'Quiet hours',
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setSheetState) => Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            OListRow(
+              key: const ValueKey<String>('quiet-hours-start'),
+              icon: Icons.schedule_rounded,
+              title: 'Start',
+              subtitle: _formatTime(context, start),
+              showChevron: false,
+              onTap: () async {
+                final picked = await _pickTime(
+                  context,
+                  label: 'Start',
+                  initial: start,
+                );
+                if (picked == null) return;
+                setSheetState(() => start = picked);
+                _setQuietStart(picked);
+              },
+            ),
+            OListRow(
+              key: const ValueKey<String>('quiet-hours-end'),
+              icon: Icons.schedule_rounded,
+              title: 'End',
+              subtitle: _formatTime(context, end),
+              showChevron: false,
+              onTap: () async {
+                final picked = await _pickTime(
+                  context,
+                  label: 'End',
+                  initial: end,
+                );
+                if (picked == null) return;
+                setSheetState(() => end = picked);
+                _setQuietEnd(picked);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _setQuietEnabled(bool value) {
-    final enabledHandler = _data.onQuietHoursEnabledChanged;
-    if (enabledHandler == null) return;
+    final handler = _data.onQuietHoursEnabledChanged;
+    if (handler == null) return;
     setState(() => _quietEnabled = value);
-    enabledHandler(value);
+    handler(value);
   }
 
   void _setQuietStart(TimeOfDay value) {
@@ -951,108 +699,12 @@ class _NotificationsPageState extends State<NotificationsPage> {
     _data.onQuietHoursEndChanged?.call(value);
   }
 
-  Widget _timeRow(
-    BuildContext context, {
-    required String label,
-    required TimeOfDay time,
-    required bool enabled,
-    required ValueChanged<TimeOfDay>? onChanged,
-  }) {
-    final c = OColors.of(context);
-    final canPick = enabled && onChanged != null;
-    final value = _formatTime(context, time);
-    final largeText = MediaQuery.textScalerOf(context).scale(14) > 18;
-    final foreground = canPick ? c.text : c.textFaint;
-
-    final labelText = Text(
-      label,
-      style: OType.body.copyWith(
-        color: foreground,
-        fontWeight: FontWeight.w500,
-      ),
-    );
-    final valueText = Text(
-      value,
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      style: OType.bodySm.copyWith(color: canPick ? c.textMuted : c.textFaint),
-    );
-    final chevron = canPick
-        ? Icon(Icons.chevron_right_rounded, size: 18, color: c.textFaint)
-        : null;
-
-    // At large text the label and value stack: side by side they would each
-    // get a sliver of a 320 dp row and paint outside it.
-    final content = largeText
-        ? Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Icon(Icons.schedule_rounded, size: 18, color: foreground),
-                  const SizedBox(width: OSpace.m),
-                  Expanded(child: labelText),
-                  ?chevron,
-                ],
-              ),
-              const SizedBox(height: OSpace.xs),
-              Padding(
-                padding: const EdgeInsets.only(left: 18 + OSpace.m),
-                child: valueText,
-              ),
-            ],
-          )
-        : Row(
-            children: [
-              Icon(Icons.schedule_rounded, size: 18, color: foreground),
-              const SizedBox(width: OSpace.m),
-              Expanded(child: labelText),
-              const SizedBox(width: OSpace.s),
-              Flexible(child: valueText),
-              if (chevron != null) ...[
-                const SizedBox(width: OSpace.xs),
-                chevron,
-              ],
-            ],
-          );
-
-    return ConstrainedBox(
-      constraints: const BoxConstraints(minHeight: OSpace.listRow),
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: canPick
-              ? () => _pickTime(
-                  context,
-                  label: label,
-                  initial: time,
-                  onPicked: onChanged,
-                )
-              : null,
-          child: Semantics(
-            label: 'Quiet hours $label, $value',
-            button: true,
-            enabled: canPick,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: OSpace.l,
-                vertical: OSpace.m,
-              ),
-              child: content,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Future<void> _pickTime(
+  Future<TimeOfDay?> _pickTime(
     BuildContext context, {
     required String label,
     required TimeOfDay initial,
-    required ValueChanged<TimeOfDay> onPicked,
   }) async {
-    final picked = await showTimePicker(
+    return showTimePicker(
       context: context,
       initialTime: initial,
       helpText: 'Quiet hours $label',
@@ -1064,7 +716,6 @@ class _NotificationsPageState extends State<NotificationsPage> {
         child: child ?? const SizedBox.shrink(),
       ),
     );
-    if (picked != null) onPicked(picked);
   }
 
   String _formatTime(BuildContext context, TimeOfDay time) {
@@ -1074,45 +725,72 @@ class _NotificationsPageState extends State<NotificationsPage> {
     );
   }
 
-  bool _channelEnabled(String id) {
-    for (final setting in _activity) {
-      if (setting.id == id) return setting.value;
-    }
-    return true;
+  Widget _soundCard(BuildContext context) {
+    final canPick =
+        _master && _data.onSoundChanged != null && _sounds.isNotEmpty;
+    return _card(context, [
+      OListRow(
+        key: const ValueKey<String>('notifications-sound-row'),
+        icon: Icons.volume_up_outlined,
+        title: 'Sound',
+        subtitle: _soundChoice.label,
+        enabled: canPick,
+        onTap: canPick ? () => _pickSound(context) : null,
+      ),
+    ]);
   }
 
-  Widget _section(
-    BuildContext context, {
-    required String title,
-    required List<Widget> rows,
-    Widget? footer,
-  }) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.xl),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+  Future<void> _pickSound(BuildContext context) async {
+    final choice = await showOSheet<V2NotificationSound>(
+      context,
+      title: 'Sound',
+      builder: (sheetContext) => Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          OSectionHeader(
-            label: title,
-            padding: const EdgeInsets.only(bottom: OSpace.s),
-          ),
-          OCard(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                for (var i = 0; i < rows.length; i++) ...[
-                  if (i > 0) Divider(color: c.hairline, height: 1),
-                  rows[i],
-                ],
-              ],
+          for (final sound in V2NotificationSound.values)
+            OListRow(
+              key: ValueKey<String>('sound-choice-${sound.name}'),
+              title: sound.label,
+              showChevron: false,
+              onTap: () => Navigator.pop(sheetContext, sound),
+              trailing: sound == _soundChoice
+                  ? Icon(
+                      Icons.check_rounded,
+                      size: 20,
+                      color: OColors.of(sheetContext).accent,
+                    )
+                  : null,
             ),
-          ),
-          if (footer != null)
-            Padding(
-              padding: const EdgeInsets.only(top: OSpace.s),
-              child: footer,
-            ),
+        ],
+      ),
+    );
+    if (choice != null) _setSound(choice);
+  }
+
+  void _setSound(V2NotificationSound sound) {
+    final handler = _data.onSoundChanged;
+    if (handler == null) return;
+    setState(() {
+      _soundChoice = sound;
+      _sounds = [
+        for (final channel in _sounds) channel.copyWith(value: sound),
+      ];
+    });
+    for (final channel in _sounds) {
+      handler(channel.id, sound);
+    }
+  }
+
+  Widget _card(BuildContext context, List<Widget> rows) {
+    final c = OColors.of(context);
+    return OCard(
+      padding: EdgeInsets.zero,
+      child: Column(
+        children: [
+          for (var i = 0; i < rows.length; i++) ...[
+            if (i > 0) Divider(color: c.hairline, height: 1),
+            rows[i],
+          ],
         ],
       ),
     );
@@ -1122,7 +800,7 @@ class _NotificationsPageState extends State<NotificationsPage> {
     BuildContext context, {
     required String id,
     required String title,
-    required String description,
+    String? description,
     required bool value,
     ValueChanged<bool>? onChanged,
     bool enabled = true,
@@ -1152,11 +830,15 @@ class _NotificationsPageState extends State<NotificationsPage> {
                       fontWeight: FontWeight.w500,
                     ),
                   ),
-                  const SizedBox(height: 2),
-                  Text(
-                    description,
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
+                  if (description != null) ...[
+                    const SizedBox(height: OSpace.xxs),
+                    Text(
+                      description,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: OType.caption.copyWith(color: c.textMuted),
+                    ),
+                  ],
                 ],
               ),
             ),

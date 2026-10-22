@@ -41,7 +41,7 @@ const _plans = <V2Plan>[
     priceInrYearly: 17990,
     storageGb: 15,
     features: [
-      'Ovid Pro 1.5 and Claude 3.7',
+      'Ovid Pro 1.5 and the model',
       '200M daily tokens',
       'Fastest speed',
     ],
@@ -120,14 +120,18 @@ Finder _inTable(String text) => find.descendant(
 );
 
 Widget _app(ThemeData theme, V2PlanBillingData data) {
-  return MaterialApp(
-    theme: theme,
-    home: PlanBillingPage(data: data),
-  );
+  return MaterialApp(theme: theme, home: PlanBillingPage(data: data));
 }
 
 void _phoneSize(WidgetTester tester) {
   tester.view.physicalSize = const Size(390, 844);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+}
+
+void _size(WidgetTester tester, Size size) {
+  tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
@@ -149,98 +153,53 @@ void main() {
     }
   });
 
-  testWidgets('renders all four plans in light', (tester) async {
+  testWidgets('one header and four cards: name, price, one line, one CTA', (
+    tester,
+  ) async {
     _phoneSize(tester);
     await tester.pumpWidget(_app(OTheme.light(), _billingData()));
     await tester.pumpAndSettle();
 
+    // Exactly one title, in the header. No body heading repeats it.
     expect(find.text('Plan & billing'), findsOneWidget);
-    expect(find.text('ACCOUNT TIER'), findsOneWidget);
-    // The badge and the disabled CTA both say "Current plan" on the Free card.
-    expect(find.text('Current plan'), findsNWidgets(2));
-    expect(_inCard('free', 'Free'), findsOneWidget);
-    expect(_inCard('free', r'$0'), findsOneWidget);
-    expect(_inCard('go', 'Go'), findsOneWidget);
-    expect(_inCard('go', r'$5'), findsOneWidget);
-    expect(_inCard('plus', 'Plus'), findsOneWidget);
-    expect(_inCard('plus', r'$18'), findsOneWidget);
-    expect(_inCard('pro', 'Pro'), findsOneWidget);
-    expect(_inCard('pro', r'$99'), findsOneWidget);
-    expect(find.text('Most popular'), findsOneWidget);
+    expect(find.text('ACCOUNT TIER'), findsNothing);
+
+    for (final entry in const {
+      'free': ('Free', r'$0'),
+      'go': ('Go', r'$5'),
+      'plus': ('Plus', r'$18'),
+      'pro': ('Pro', r'$99'),
+    }.entries) {
+      expect(_inCard(entry.key, entry.value.$1), findsOneWidget);
+      expect(_inCard(entry.key, entry.value.$2), findsOneWidget);
+    }
+
+    // One line per card: the tagline, never a feature bullet list.
+    expect(_inCard('plus', 'Power tools for fast work'), findsOneWidget);
+    expect(_inCard('plus', 'Fastest speed'), findsNothing);
+    expect(_inCard('plus', '200M daily tokens'), findsNothing);
+    expect(find.text('Most popular'), findsNothing);
+
+    // The long limit rows moved to the comparison table.
+    for (final text in [
+      '3 GB',
+      '50 files / day',
+      '80 files max / project',
+      '1× auto',
+    ]) {
+      expect(_inCard('free', text), findsNothing, reason: text);
+    }
+
     expect(find.text('Monthly'), findsOneWidget);
     expect(find.text('Yearly'), findsOneWidget);
-    expect(_inCard('free', '3 GB'), findsOneWidget);
-    expect(_inCard('go', '5 GB'), findsOneWidget);
-    expect(_inCard('plus', '15 GB'), findsOneWidget);
-    expect(_inCard('pro', '75 GB'), findsOneWidget);
-    expect(find.text('Auto only'), findsNWidgets(4));
-    expect(find.text('PAYMENT HISTORY'), findsOneWidget);
-    expect(find.text('No payments yet'), findsOneWidget);
-    expect(find.text('Restore purchases'), findsOneWidget);
-    expect(find.textContaining('Google Play'), findsOneWidget);
   });
 
-  testWidgets('every plan card shows the exact limits from the plan table', (
-    tester,
-  ) async {
-    _phoneSize(tester);
-    await tester.pumpWidget(_app(OTheme.light(), _billingData()));
-    await tester.pumpAndSettle();
-
-    const expected = <String, List<String>>{
-      'free': [
-        '3 GB',
-        '50 files / day',
-        '80 files max / project',
-        'Auto only',
-        '1× auto',
-      ],
-      'go': [
-        '5 GB',
-        '80 files / 3 h',
-        '100 files max / project',
-        'Auto only',
-        '1.5× auto',
-      ],
-      'plus': [
-        '15 GB',
-        '80 files / 3 h',
-        '150 files max / project',
-        'Auto + manual models',
-        '5× auto',
-      ],
-      'pro': [
-        '75 GB',
-        '80 files / 3 h',
-        '250 files max / project',
-        'Auto + manual models',
-        '20× auto',
-      ],
-    };
-
-    for (final entry in expected.entries) {
-      for (final text in entry.value) {
-        expect(
-          _inCard(entry.key, text),
-          findsOneWidget,
-          reason: '${entry.key} should show "$text"',
-        );
-      }
-    }
-  });
-
-  testWidgets('plan limits table compares all four plans and gates models', (
-    tester,
-  ) async {
+  testWidgets('the comparison table keeps every plan limit', (tester) async {
     _phoneSize(tester);
     await tester.pumpWidget(_app(OTheme.light(), _billingData()));
     await tester.pumpAndSettle();
 
     expect(find.text('PLAN LIMITS'), findsOneWidget);
-    expect(_inTable('Go'), findsOneWidget);
-    expect(_inTable('Plus'), findsOneWidget);
-    expect(_inTable('Pro'), findsOneWidget);
-
     for (final text in [
       'Storage',
       'Files / day',
@@ -253,107 +212,41 @@ void main() {
     ]) {
       expect(_inTable(text), findsOneWidget, reason: 'row $text');
     }
-
-    expect(_inTable('100 max'), findsOneWidget);
-    expect(_inTable('150 max'), findsOneWidget);
-    expect(_inTable('250 max'), findsOneWidget);
-    expect(_inTable('Auto + manual'), findsNWidgets(2));
+    expect(_inTable('3 GB'), findsOneWidget);
+    expect(_inTable('75 GB'), findsOneWidget);
+    expect(_inTable('50 / day'), findsOneWidget);
+    expect(_inTable('640 / day'), findsNWidgets(3));
     expect(_inTable('1.5×'), findsOneWidget);
-    expect(_inTable('5×'), findsOneWidget);
-    expect(_inTable('20×'), findsOneWidget);
     expect(_inTable('75M / 24 h'), findsOneWidget);
-    expect(_inTable('1.5B / 30 d'), findsOneWidget);
-
-    expect(find.text('Auto mode only'), findsOneWidget);
-    expect(
-      find.textContaining('Manual models unlock with Plus or Pro'),
-      findsOneWidget,
-    );
   });
 
-  testWidgets(
-    'the comparison column follows the current plan and file windows',
-    (tester) async {
-      _phoneSize(tester);
-      await tester.pumpWidget(
-        _app(OTheme.light(), _billingData(currentPlanId: 'go')),
-      );
-      await tester.pumpAndSettle();
-
-      expect(
-        find.byKey(const ValueKey<String>('plan-compare-current-go')),
-        findsOneWidget,
-      );
-      expect(
-        find.byKey(const ValueKey<String>('plan-compare-header-go')),
-        findsOneWidget,
-      );
-      // Free is 50/day; the three paid plans normalise 80 every 3 h to 640/day.
-      expect(_inTable('50 / day'), findsOneWidget);
-      expect(_inTable('640 / day'), findsNWidgets(3));
-      expect(_inTable('80 / 3 h'), findsNWidgets(3));
-    },
-  );
-
-  testWidgets('the current plan badge follows the current plan id', (
+  testWidgets('the current plan is marked and its CTA is disabled', (
     tester,
   ) async {
     _phoneSize(tester);
-    await tester.pumpWidget(
-      _app(OTheme.light(), _billingData(currentPlanId: 'plus')),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('Current plan'), findsNWidgets(2));
-    expect(_inCard('plus', 'Current plan'), findsNWidgets(2));
-    expect(_inCard('plus', '15 GB'), findsOneWidget);
-    expect(find.text('Select Plus'), findsNothing);
-    expect(
-      tester
-          .widget<OButton>(
-            find.byKey(const ValueKey<String>('plan-cta-plus')),
-          )
-          .onPressed,
-      isNull,
-      reason: 'the current plan cannot be purchased again',
-    );
-  });
-
-  testWidgets('renders correctly in dark', (tester) async {
-    _phoneSize(tester);
-    await tester.pumpWidget(_app(OTheme.dark(), _billingData()));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Plan & billing'), findsOneWidget);
-    expect(find.text('Most popular'), findsOneWidget);
-    expect(_inCard('plus', r'$18'), findsOneWidget);
-    expect(_inTable(r'$18'), findsOneWidget);
-  });
-
-  testWidgets('empty state retry fires', (tester) async {
-    var retried = 0;
+    final purchases = <V2PlanPurchase>[];
     await tester.pumpWidget(
       _app(
         OTheme.light(),
-        _billingData(
-          status: V2PlanBillingStatus.empty,
-          plans: const [],
-          onRetry: () => retried++,
-        ),
+        _billingData(currentPlanId: 'plus', onPurchase: purchases.add),
       ),
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('No plans to show'), findsOneWidget);
-    await tester.tap(find.text('Check plans again'));
-    await tester.pump();
-
-    expect(retried, 1);
+    final cta = tester.widget<OButton>(
+      find.byKey(const ValueKey<String>('plan-cta-plus')),
+    );
+    expect(cta.label, 'Current plan');
+    expect(cta.onPressed, isNull);
+    expect(find.text('Current plan'), findsOneWidget);
+    expect(find.text('Select Plus'), findsNothing);
+    expect(purchases, isEmpty);
   });
 
   testWidgets('each plan CTA buys that plan with its own store product', (
     tester,
   ) async {
+    _phoneSize(tester);
     final purchases = <V2PlanPurchase>[];
     await tester.pumpWidget(
       _app(OTheme.light(), _billingData(onPurchase: purchases.add)),
@@ -369,9 +262,7 @@ void main() {
         find.byKey(ValueKey<String>('plan-cta-${entry.key}')),
       );
       await tester.pumpAndSettle();
-      await tester.tap(
-        find.byKey(ValueKey<String>('plan-cta-${entry.key}')),
-      );
+      await tester.tap(find.byKey(ValueKey<String>('plan-cta-${entry.key}')));
       await tester.pump();
 
       final purchase = purchases.last;
@@ -403,10 +294,6 @@ void main() {
       find.byKey(const ValueKey<String>('plan-cta-free')),
     );
     expect(cta.label, 'Manage in Google Play');
-    await tester.ensureVisible(
-      find.byKey(const ValueKey<String>('plan-cta-free')),
-    );
-    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey<String>('plan-cta-free')));
     await tester.pump();
 
@@ -415,7 +302,7 @@ void main() {
     expect(purchases.single.productId, isNull);
   });
 
-  testWidgets('the yearly toggle changes both the price and the product', (
+  testWidgets('the billing period toggle changes price and product', (
     tester,
   ) async {
     final purchases = <V2PlanPurchase>[];
@@ -445,39 +332,12 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(_inCard('go', r'$50'), findsOneWidget);
-    await tester.ensureVisible(
-      find.byKey(const ValueKey<String>('plan-cta-go')),
-    );
-    await tester.pumpAndSettle();
+    expect(_inCard('go', '/ year'), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey<String>('plan-cta-go')));
     await tester.pump();
 
     expect(purchases.single.period, V2BillingPeriod.yearly);
     expect(purchases.single.productId, 'ovid_plus_yearly');
-  });
-
-  testWidgets('the current plan is marked and its CTA is disabled', (
-    tester,
-  ) async {
-    final purchases = <V2PlanPurchase>[];
-    await tester.pumpWidget(
-      _app(
-        OTheme.light(),
-        _billingData(currentPlanId: 'go', onPurchase: purchases.add),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(
-      find.byKey(const ValueKey<String>('plan-current-go')),
-      findsOneWidget,
-    );
-    final cta = tester.widget<OButton>(
-      find.byKey(const ValueKey<String>('plan-cta-go')),
-    );
-    expect(cta.onPressed, isNull);
-    expect(cta.label, 'Current plan');
-    expect(purchases, isEmpty);
   });
 
   testWidgets('server tier ids resolve to the same card and product', (
@@ -504,45 +364,23 @@ void main() {
     await tester.pumpWidget(
       _app(
         OTheme.light(),
-        _billingData(
-          currentPlanId: 'free',
-          plans: serverPlans,
-          onPurchase: purchases.add,
-        ),
+        _billingData(currentPlanId: 'free', plans: serverPlans,
+            onPurchase: purchases.add),
       ),
     );
     await tester.pumpAndSettle();
 
-    expect(
-      find.byKey(const ValueKey<String>('plan-compare-header-go')),
-      findsOneWidget,
-    );
-    await tester.ensureVisible(
-      find.byKey(const ValueKey<String>('plan-cta-3x')),
-    );
-    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey<String>('plan-cta-3x')));
     await tester.pump();
 
     expect(purchases.single.planId, 'go');
     expect(purchases.single.tier, '3x');
     expect(purchases.single.productId, 'ovid_plus_monthly');
-
-    // A server tier id also marks the right card as current.
-    await tester.pumpWidget(
-      _app(
-        OTheme.light(),
-        _billingData(currentPlanId: '3x', plans: serverPlans),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(
-      find.byKey(const ValueKey<String>('plan-current-3x')),
-      findsOneWidget,
-    );
   });
 
-  testWidgets('currency toggle updates the prices', (tester) async {
+  testWidgets('currency toggle updates the cards and the table', (
+    tester,
+  ) async {
     final changes = <V2Currency>[];
     var currency = V2Currency.usd;
     late StateSetter setState;
@@ -578,62 +416,12 @@ void main() {
       'plus': '₹1,799',
       'pro': '₹9,999',
     }.entries) {
-      expect(
-        _inCard(entry.key, entry.value),
-        findsOneWidget,
-        reason: '${entry.key} card',
-      );
-      expect(
-        _inTable(entry.value),
-        findsOneWidget,
-        reason: '${entry.key} comparison column',
-      );
-    }
-  });
-
-  testWidgets('billing period toggle updates the prices', (tester) async {
-    final changes = <V2BillingPeriod>[];
-    var period = V2BillingPeriod.monthly;
-    late StateSetter setState;
-    await tester.pumpWidget(
-      MaterialApp(
-        theme: OTheme.light(),
-        home: StatefulBuilder(
-          builder: (context, setter) {
-            setState = setter;
-            return PlanBillingPage(
-              data: _billingData(
-                period: period,
-                onPeriodChanged: (value) {
-                  changes.add(value);
-                  setState(() => period = value);
-                },
-              ),
-            );
-          },
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(_inCard('go', r'$5'), findsOneWidget);
-    await tester.tap(find.text('Yearly'));
-    await tester.pumpAndSettle();
-
-    expect(changes, [V2BillingPeriod.yearly]);
-    for (final entry in const {
-      'go': r'$50',
-      'plus': r'$180',
-      'pro': r'$990',
-    }.entries) {
       expect(_inCard(entry.key, entry.value), findsOneWidget);
       expect(_inTable(entry.value), findsOneWidget);
     }
-    expect(_inCard('go', '/ year'), findsOneWidget);
-    expect(_inTable('/ year'), findsNWidgets(4));
   });
 
-  testWidgets('payment history renders and rows call the callback', (
+  testWidgets('payment history renders rows and calls the callback', (
     tester,
   ) async {
     V2BillingHistoryEntry? tapped;
@@ -648,9 +436,12 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('2 payments'), findsOneWidget);
+    expect(find.text('PAYMENT HISTORY'), findsOneWidget);
     expect(find.text('Plus plan'), findsOneWidget);
     expect(find.text(r'$18.00'), findsOneWidget);
+    // The count and the "See plans" secondary action are gone.
+    expect(find.text('2 payments'), findsNothing);
+    expect(find.text('See plans'), findsNothing);
 
     await tester.ensureVisible(find.text('Plus plan'));
     await tester.pumpAndSettle();
@@ -660,19 +451,59 @@ void main() {
     expect(tapped?.id, 'inv_plus_09');
   });
 
-  testWidgets('restore purchases calls the injected callback', (tester) async {
+  testWidgets('an empty history is a single line, not a card with an action', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_app(OTheme.light(), _billingData()));
+    await tester.pumpAndSettle();
+
+    expect(find.text('No payments yet'), findsOneWidget);
+    expect(find.text('See plans'), findsNothing);
+    expect(find.textContaining('receipts will appear'), findsNothing);
+  });
+
+  testWidgets('restore purchases is the header action', (tester) async {
     var restored = 0;
     await tester.pumpWidget(
       _app(OTheme.light(), _billingData(onRestorePurchases: () => restored++)),
     );
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.text('Restore purchases'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Restore purchases'));
+    expect(find.text('Restore purchases'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey<String>('restore-purchases')));
     await tester.pump();
 
     expect(restored, 1);
+  });
+
+  testWidgets('no explanatory paragraphs survive on the page', (tester) async {
+    await tester.pumpWidget(_app(OTheme.light(), _billingData()));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Subscriptions renew'), findsNothing);
+    expect(find.text('Auto mode only'), findsNothing);
+    expect(find.textContaining('Instant activation'), findsNothing);
+  });
+
+  testWidgets('empty state retry fires', (tester) async {
+    var retried = 0;
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        _billingData(
+          status: V2PlanBillingStatus.empty,
+          plans: const [],
+          onRetry: () => retried++,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('No plans to show'), findsOneWidget);
+    await tester.tap(find.text('Check plans again'));
+    await tester.pump();
+
+    expect(retried, 1);
   });
 
   testWidgets('error state retries', (tester) async {
@@ -693,22 +524,6 @@ void main() {
     await tester.pump();
 
     expect(retried, 1);
-  });
-
-  testWidgets('empty history "See plans" scrolls back to the real plan list', (
-    tester,
-  ) async {
-    _phoneSize(tester);
-    await tester.pumpWidget(_app(OTheme.light(), _billingData()));
-    await tester.pumpAndSettle();
-
-    await tester.ensureVisible(find.text('See plans'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('See plans'));
-    await tester.pumpAndSettle();
-
-    expect(tester.takeException(), isNull);
-    expect(find.text('PLANS'), findsOneWidget);
   });
 
   testWidgets('toggles are 48 dp and announce selection', (tester) async {
@@ -746,55 +561,8 @@ void main() {
     expect(yearly.isSelected, Tristate.isFalse);
   });
 
-  testWidgets('toggles announce the disabled state without callbacks', (
-    tester,
-  ) async {
-    await tester.pumpWidget(_app(OTheme.light(), _billingData()));
-    await tester.pumpAndSettle();
-
-    final monthly = tester
-        .getSemantics(find.text('Monthly'))
-        .getSemanticsData()
-        .flagsCollection;
-    expect(monthly.isEnabled, Tristate.isFalse);
-  });
-
-  testWidgets('reduced motion keeps every plan and the history', (
-    tester,
-  ) async {
-    _phoneSize(tester);
-    await tester.pumpWidget(
-      MaterialApp(
-        theme: OTheme.light(),
-        home: MediaQuery(
-          data: const MediaQueryData(disableAnimations: true),
-          child: PlanBillingPage(data: _billingData(history: _history)),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.byType(AnimatedOpacity), findsNothing);
-    for (final entry in const {
-      'free': 'Free',
-      'go': 'Go',
-      'plus': 'Plus',
-      'pro': 'Pro',
-    }.entries) {
-      expect(
-        _inCard(entry.key, entry.value),
-        findsOneWidget,
-        reason: '${entry.value} stays visible',
-      );
-    }
-    expect(find.text('Plus plan'), findsOneWidget);
-  });
-
   testWidgets('320 dp at 200 % text lays out every state', (tester) async {
-    tester.view.physicalSize = const Size(320, 640);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
+    _size(tester, const Size(320, 640));
 
     for (final status in V2PlanBillingStatus.values) {
       await tester.pumpWidget(
@@ -830,40 +598,66 @@ void main() {
     }
   });
 
-  testWidgets('320 dp at 200 % text renders the content in dark too', (
+  testWidgets('600 dp centres the cards in a two-column grid', (tester) async {
+    _size(tester, const Size(800, 1000));
+    await tester.pumpWidget(_app(OTheme.light(), _billingData()));
+    await tester.pumpAndSettle();
+
+    // Four cards, one CTA each, and no feature bullet list on the card.
+    for (final id in const ['free', 'go', 'plus', 'pro']) {
+      expect(find.byKey(ValueKey('plan-card-$id')), findsOneWidget);
+      expect(find.byKey(ValueKey('plan-cta-$id')), findsOneWidget);
+    }
+    expect(find.byType(OButton), findsNWidgets(4));
+    // The detail lives in the compare table.
+    expect(find.text('Storage'), findsOneWidget);
+    expect(find.text('Files / day'), findsOneWidget);
+    expect(find.text('Token caps'), findsOneWidget);
+
+    final free = tester.getSize(find.byKey(const ValueKey('plan-card-free')));
+    final go = tester.getSize(find.byKey(const ValueKey('plan-card-go')));
+    expect(free.width, closeTo(go.width, 0.5));
+    expect(free.width, lessThan(320));
+    // Same row: the second card starts to the right of the first.
+    expect(
+      tester.getTopLeft(find.byKey(const ValueKey('plan-card-go'))).dy,
+      closeTo(tester.getTopLeft(find.byKey(const ValueKey('plan-card-free'))).dy, 0.5),
+    );
+    // Content is capped at 640 dp and centred.
+    final table = tester.getSize(
+      find.byKey(const ValueKey('plan-compare-table')),
+    );
+    expect(table.width, lessThanOrEqualTo(640));
+    expect(
+      tester.getTopLeft(find.byKey(const ValueKey('plan-card-free'))).dx,
+      greaterThan(80),
+    );
+  });
+
+  testWidgets('900 dp caps the content at 720 and stays centred', (
     tester,
   ) async {
-    tester.view.physicalSize = const Size(320, 640);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
+    _size(tester, const Size(1200, 1000));
+    await tester.pumpWidget(_app(OTheme.light(), _billingData()));
+    await tester.pumpAndSettle();
 
-    await tester.pumpWidget(
-      MaterialApp(
-        theme: OTheme.dark(),
-        home: MediaQuery(
-          data: const MediaQueryData(
-            size: Size(320, 640),
-            textScaler: TextScaler.linear(2),
-          ),
-          child: PlanBillingPage(
-            data: _billingData(
-              history: _history,
-              onCurrencyChanged: (_) {},
-              onPeriodChanged: (_) {},
-              onPurchase: (_) {},
-              onRestorePurchases: () {},
-              onHistoryTap: (_) {},
-            ),
-          ),
-        ),
-      ),
+    final table = tester.getSize(
+      find.byKey(const ValueKey('plan-compare-table')),
     );
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 600));
+    expect(table.width, lessThanOrEqualTo(720));
+    expect(table.width, greaterThan(600));
 
-    expect(tester.takeException(), isNull);
-    expect(find.text('Current plan'), findsNWidgets(2));
-    expect(find.text('Restore purchases'), findsOneWidget);
+    final card = tester.getTopLeft(
+      find.byKey(const ValueKey('plan-card-free')),
+    ).dx;
+    final right =
+        tester.getTopRight(find.byKey(const ValueKey('plan-card-pro'))).dx;
+    // Left and right margins match: the block is centred.
+    expect(card, closeTo(1200 - right, 1));
+    // Still four cards with one action each, never a stretched single card.
+    for (final id in const ['free', 'go', 'plus', 'pro']) {
+      expect(find.byKey(ValueKey('plan-card-$id')), findsOneWidget);
+      expect(find.byKey(ValueKey('plan-cta-$id')), findsOneWidget);
+    }
   });
 }

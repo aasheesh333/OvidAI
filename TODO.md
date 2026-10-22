@@ -1,17 +1,46 @@
 # Ovid Si rebuild — living TODO
 
-**Updated:** 2026-10-21 (28-agent audit wave landed)
+**Updated:** 2026-10-22 (minimal-UI pass across every screen)
 **Branch:** `feat/ovid-si-rebuild`
-**Overall production readiness:** ~88 %
-**UI rebuild (design system + 51 screens + shell wiring):** ~99 %
+**Overall production readiness:** ~88 % (unchanged — the server/cloud tracks did
+not move in this pass)
+**UI rebuild (design system + 50 screens + shell wiring):** ~98 % — every screen
+follows `docs/design/MINIMAL_UI_CONTRACT.md` and every gate below is green
 
-Verified now:
-- `flutter analyze` → **No issues found**
-- `flutter test` → **4324 passed, 0 failed** (2 skipped)
-- Android host tests (`./gradlew :app:testDebugUnitTest`) → **41 passed**
-- `python3 -m pytest server -q` → **1156 passed, 138 skipped**
-- Cloud: gateway **450**, agent-core **767**, browser **320**, sandbox **372**, worker **216**, mint **296**
-- 320 dp / 200 % text ratchet → **102 passed** (51 screens × light/dark)
+Verified in this pass (2026-10-22, 05:14):
+
+| Gate | Result |
+|---|---|
+| `flutter analyze` | **No issues found!** (27.3 s) |
+| `flutter test` (full suite) | **4,599 passed, 0 failed, 2 skipped** (3:59) |
+| 320 dp / 200 % text ratchet (`test/v2/a11y_ratchet_test.dart`) | **100 passed** (50 screens × light/dark) |
+| `flutter test test/v2/navigation` | **102 passed** |
+| `flutter test test/design` | **64 passed** |
+| `flutter test test/v2/semantics_audit_test.dart` | **113 passed** (empty known-gaps map) |
+| `flutter test test/v2/chat/live_chat_golden_test.dart` | **3 passed** |
+
+Not run in this pass: `./gradlew :app:testDebugUnitTest`, `pytest server`, the
+cloud suites, and the RevenueCat/Play consoles. The numbers that used to be
+quoted here (4324 Flutter tests, 41 host tests, 1156 server tests) were from
+2026-10-21 and are **not** re-asserted.
+
+---
+
+## Test status (read this before claiming anything works)
+
+`flutter test` is **green**: 4,599 passed, 2 skipped, 0 failed, in 3 min 59 s.
+`flutter analyze` is clean.
+
+Two caveats, so nobody over-reads that:
+
+- The tree is shared. Earlier in this pass the text-budget word ceiling and the
+  Language & goal enabled-Continue semantics were both red; they were fixed
+  during the pass by the owning work, and both are green as of the run above.
+  Re-run before quoting these numbers in a release note.
+- The suite is not the product. `test/v2/no_dead_controls_test.dart` and the
+  header/responsive/semantics ratchets prove the *contract*, not that a service
+  behind a control exists. The P1 list below is where the missing services are
+  named.
 
 ---
 
@@ -19,59 +48,70 @@ Verified now:
 
 | Track | Covers | Done | State |
 |---|---|---:|---|
-| 0 | Tokens, theme, motion, components | 100 % | done |
-| 5 | 51 v2 screens + gallery + shell | 99 % | audited, wired, ratcheted; inline sidebar search replaces the search screen |
+| 0 | Tokens, theme, motion, components | 100 % | done; `OScreen`/`OContent`/`OBreakpoints` added |
+| 5 | 50 v2 screens + gallery + shell | 98 % | minimal contract applied; all gates green |
 | 1 | Isolation, memory, runtime | 88 % | engine + acceptance coverage; live multi-tenant soak pending |
-| 2 | Gateway, plans, free caps | 90 % | 50M/24h + 1.5B/30d + M1 alert delivery + admin kill switch landed |
-| 3 | Studio, browser, subagents | 92 % | credential helper, queue wiring, sandbox logs, fps/headless, 300-token JSON |
-| 4 | Collaboration | 86 % | 50 cap, turn lock, creator storage, PG migrations + deployment test |
-| 6 | Billing, usage, account | 88 % | Play Billing + RevenueCat (Test Store demo live) |
-| 7 | Security + launch | 80 % | IP-hop GeoIP/PG/fail-closed, M1 runbook, kill-switch drill documented |
-| 8 | Product completeness | 95 % | @mentions, attachments, voice + persisted language, app lock, permissions banner |
+| 2 | Gateway, plans, free caps | 90 % | unchanged this pass |
+| 3 | Studio, browser, subagents | 92 % | browser is now live-wired; Studio diff/commit still has no client |
+| 4 | Collaboration | 86 % | unchanged this pass |
+| 6 | Billing, usage, account | 88 % | unchanged this pass |
+| 7 | Security + launch | 80 % | unchanged this pass |
+| 8 | Product completeness | 95 % | unchanged this pass |
 
 ---
 
-## Landed in this wave
+## Landed in this pass (minimal UI)
 
-### App
-- [x] Onboarding gate: splash → welcome → language/goal → sign-in → paywall → app, mounted behind `OVID_UI_V2`
-- [x] Email sign-in tells the truth ("not available yet"); Google + phone wired
-- [x] Paywall purchase callback → Play Billing tier mapping (`go/plus/pro` → `3x/7x/15x`)
-- [x] App lock: hashed PIN (salted SHA-256, secure storage), 2 min timeout, 5-attempt cooldown, biometrics hook, settings page
-- [x] Composer: `@` session/project mentions, attachments (max 5, 8 MB), voice in Hindi/Hinglish/Punjabi/Tamil
-- [x] `onSubmit` carries text + attachments + session/project refs into `runTask`
-- [x] Chat menu: actions, run details, Studio, share
-- [x] Shared memory page with scopes, retention and "forget"
-- [x] Notification quiet hours (midnight wrap) + per-channel sound
-- [x] Project rename/delete with confirmation
-- [x] Share link revoke
-- [x] Gallery separated behind `OVID_UI_GALLERY`
-- [x] Route builders: trajectory, subagent, collab live/members, Studio workspace/branch/changes/preview
-- [x] Inline sidebar search over sessions + projects; the standalone search screen is gone
-- [x] Persistent bottom nav (`lib/ui/v2/app/bottom_nav.dart`)
-- [x] Gallery: interactive Auto/manual picker (Free/Go vs Plus/Pro) and a chat variant that names the answering model
-- [x] Sheet previews get a real height bound so list rows render instead of collapsing
+### Contract
+- [x] `docs/design/MINIMAL_UI_CONTRACT.md` written, with a "what changed in this
+      pass" section recording the concrete decisions
+- [x] One header per screen, one title line, ≤ 3 words, no repeated body heading
+- [x] Text budgets enforced by `test/v2/text_budget_test.dart` (0 over-budget
+      strings, banned-phrase ban, total-word ratchet)
+- [x] Three responsive bands in one place (`OBreakpoints`): drawer + bottom bar
+      below 600 dp, 280 dp rail 600–899, 300 dp rail 900+
+- [x] Content caps ∞ / 640 / 720, with Browser at 1100 dp from 900 dp
+- [x] Composer reduced to one row (`+` → permission → field → mic → send), shared
+      by the home and live composers; the run status moved into the field hint
+- [x] A control with no backing service is removed rather than disabled
 
-### Server
-- [x] Free caps: 50M tokens/24 h + 1.5B/30 d, hard ceilings, no pool, typed 429 with reset time
-- [x] M1: $0.50/user/day alert once, global kill switch (`OVID_PAID_MODELS_KILL_SWITCH`)
-- [x] Collab: 50-member cap (race-safe), single-sender turn lock, creator-paid storage ledger
-- [x] IP-hop: impossible-travel + country-burst detection, session block, one email per event, admin unblock
+### Screens and shell
+- [x] All 50 registry entries build; 7 are sheets
+- [x] Bottom navigation below 600 dp, fixed rail above it — one navigation per
+      band, never two (`test/v2/app/shell_responsive_test.dart`)
+- [x] Browser is live-wired: `BrowserLivePage` feeds real tabs, url, frame and
+      take-control state (was a routed-empty placeholder)
+- [x] Live preview can render a real frame (`V2LivePreviewData.frame`)
+- [x] Studio workspace uses the searchable file tree and the line-numbered code
+      viewer; Changes uses the commit sheet; Storage uses the five-way breakdown;
+      Schedules uses the run timeline; Collab uses the turn banner
+- [x] Every component under `lib/ui/v2/` that the parity review listed as
+      unimported is now imported by a screen or route
+- [x] The standalone search screen is gone; search is inline in the drawer
+- [x] Zero screen-local `_Tag/_Pill/_Badge/_Card/_Section/_Header/_Chip/_Row`
+      classes (`test/design/no_local_primitives_test.dart`, empty allowlist)
+- [x] Structural golden for live chat (`test/v2/chat/live_chat_golden_test.dart`):
+      one canonical fixture, regions asserted in visual order, composer asserted
+      as one row. The repo keeps no PNG goldens, so the composition is the
+      golden.
+- [x] No decorative gradient and no `OShadow.glow` anywhere in `lib/ui/v2`
+- [x] Paywall currency choice persists; the notification permission banner reads
+      the real Android state; account-health rows with no service are hidden
 
-### Cloud
-- [x] Subagent: 50/root cap, no nesting, append-only log, strict 300-token JSON, 8 h timeout
-- [x] Studio: ephemeral `GIT_ASKPASS` helper, token never in `.git/config`/argv/logs, sync + stash switch
-- [x] Browser: agent-only tabs, 3–5 fps newest-frame-wins, 45 s → headless, human-like input
+### Registry
+- [x] `docs/audit/SCREEN_INVENTORY.md` regenerated from the registry: 50 screens
+      in 10 groups, ids/titles/summaries verbatim; gallery noted as 87 entries
+      (49 of these + 38 component previews, `account` native-only)
 
 ---
 
 ## Remaining P0
 
-- [x] Release-signed AAB built and published to **internal testing** (`1 (1.0.0)`, minSdk 24)
-- [x] Testers added (4 emails in the "Ovid internal" list)
+Carried over from 2026-10-21 and **not re-verified in this pass** — do not quote
+these as done or not-done without running the corresponding check.
+
 - [ ] RevenueCat credentials validation — waiting on Google Play permission propagation
 - [ ] Play subscriptions — locked until Google reviews the first release
-- [x] RevenueCat Test Store: products, entitlements, default offering, demo paywall build
 - [ ] Live 50-user collaboration soak (unit + PG tests pass; no live soak yet)
 - [ ] Raise or remove the legacy free USD allowance (`free_daily_usd = 0.15`) so the 50M token cap is the real gate
 - [ ] Register the Studio git job in BullMQ/gateway and pass the sandbox `logDir`
@@ -83,29 +123,62 @@ Verified now:
 
 ## Remaining P1
 
-- [ ] Schedules screen: `v2_work_routes.dart` still passes null for create/toggle/run-now, so the list is read-only (`V2SchedulesFlow.openSchedules` exists and is unused there)
-- [ ] Collab live/members still have no entry point from the shell (`V2CollabRoutes.openLive`/`openMembers` exist)
-- [ ] Live preview has no app-side client: `livePreviewDataFor` supplies no frame, URL or expiry, so the screen stays in its honest waiting state
-- [ ] Studio changes/commit: no app-side diff or commit client, so "Commit & push" is disabled
-- [ ] `_responseWait` auto-extend / notify-at-limit have no persisted field in `AppState` and no watchdog consumer
-- [ ] Account health device/2FA actions are null (no device or 2FA service)
-- [ ] Connector catalog rows carry no tool manifest, so per-tool permissions stay empty until an MCP `tools/list` or provider scope map exists
-- [ ] Yearly billing: `kOvidPlayProducts` has monthly base plans only, so a yearly selection still charges monthly
-- [ ] `paywall_page` currency toggle is view-only (no persistence, no billing effect)
-- [ ] Notification permission banner wired to the Android state
+1. [ ] **Live preview has no producer.** `V2LivePreviewData.frame` exists and
+   the page renders it, but `V2StudioRoutes.livePreviewDataFor` always returns
+   `V2PreviewStatus.empty` with no url, frame or expiry, so the screen never
+   leaves its waiting state.
+2. [ ] **Studio Changes has no diff or commit client.** `changesDataFor`
+   always returns `V2ChangesStatus.empty` and `openChanges` passes no
+   `onCommit`, so the commit sheet can be opened but never commits.
+3. [ ] **Studio workspace counts are always zero.** `changedCount` and
+   `syncCount` stay 0 because the app has no git-status source; the dock is
+   therefore always empty even inside a live workspace.
+4. [ ] **Response wait**: the limit itself persists (`AppState.responseTimeoutSec`,
+   clamped 30–600 s, read by the cloud facade's stall window), but there is no
+   auto-extend and no notify-at-limit field or watchdog consumer.
+5. [ ] **Account health** has no device-review or 2FA service. The rows are now
+   *hidden* rather than disabled (contract-compliant), which means the feature is
+   absent from the product, not just from the UI.
+6. [ ] **Connector tool manifest.** `V2ConnectorDetailData.tools` is empty for
+   every catalog row (`v2ConnectorDetailForRow` passes none), so per-tool
+   permissions cannot be listed until an MCP `tools/list` or a provider scope map
+   exists.
+7. [ ] **Yearly billing charges monthly.** `V2PlanProducts.yearly` names
+   `ovid_*_yearly` products, but `buyPlan` sends only the tier and
+   `kOvidPlayProducts` maps tiers to the monthly ids — so the yearly toggle is a
+   price label, not a purchase.
+8. [ ] **Live chat artifact tile** has no inline thumbnail, no Preview button
+   and no Copy; it opens the artifact detail and offers Download.
+9. [ ] **Sign-in still shows a dead email form.** The email/password field,
+   "Forgot password" and "Create account" render, and each one only sets the
+   inline error "Use Google or phone to sign in."
+   (`v2_onboarding_gate.dart`: `_submitEmail` and `_showEmailUnavailable`).
+   Google and phone are the only real providers, so the field and its two links
+   should be removed under the no-control-without-a-service rule. Apple already
+   does not render (`onApple` is never passed).
 
 ## Remaining P2
 
-- [ ] ARB extraction (every screen has `TODO(l10n)`)
-- [ ] Full TalkBack walkthrough per screen
+- [ ] ARB extraction — 100 `TODO(l10n)` markers across `lib/ui/v2`
+- [ ] Manual TalkBack walkthrough per screen (the automated semantics audit is
+      green with an empty gap map; nobody has listened to it yet)
 - [ ] Cold-start + first-token traces; crash-free/ANR dashboards
-- [ ] `dart format lib/ui/v2`
-- [ ] Remove local `OPill`/`_Tag` workarounds now that the shared pill is fixed
-- [ ] `docs/play/DATA-SAFETY.md` still says a 7-day deletion grace (code is 24 h) and "Name: No"
+- [ ] `dart format lib/ui/v2` — 40 of 132 files differ from the formatter
+- [ ] `docs/play/DATA-SAFETY.md` still says a 7-day deletion grace (code is
+      `GRACE_SECONDS = 24 h`) and still claims `Personal info → Name: No`
+- [ ] Design-defect leftovers from `docs/design/stitch/PARITY_REVIEW.md`:
+      `Colors.red` in `v2_settings_actions.dart`, `OType.display` on the usage
+      hero, 12 radius literals, ~18 spacing literals, one `fontSize: 13`
+- [ ] Delete `test/v2/sw_probe_test.dart` — a debug probe that only `print`s
+      (the analyzer stays clean because it is `// ignore`d)
+- [ ] Parity gaps that need a product decision, not code: projects sort/status
+      chips, memory accuracy card, connectors' installed/available tabs,
+      schedules' total + CTA card, run stat tiles + upcoming queue, collab
+      raise-priority, notification/avatar entry point in the top bars
 
 ---
 
-## Play + RevenueCat setup state (2026-10-21)
+## Play + RevenueCat setup state (2026-10-21, unchanged)
 
 Done in the consoles:
 - Play Console signed in as `aasheeshkatheriya@gmail.com` (Dhanuk Softwares, account 4722370385057181718)

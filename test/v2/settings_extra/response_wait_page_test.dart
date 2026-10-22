@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
-import 'package:ovid_ai/ui/design/o_motion.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/settings_extra/response_wait_page.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -41,24 +40,26 @@ Future<void> _pump(
 }
 
 void main() {
-  testWidgets('renders the current wait and presets in light', (tester) async {
+  testWidgets('renders one slider with a value and three presets', (
+    tester,
+  ) async {
     await _pump(tester, const V2ResponseWaitPageData());
 
-    expect(find.text('Response wait limit'), findsOneWidget);
+    expect(find.text('Response wait'), findsOneWidget);
     expect(find.text('2 min'), findsNWidgets(2));
-    expect(
-      find.text('Ovid waits this long for a reply before it asks you.'),
-      findsOneWidget,
-    );
+    expect(find.byType(Slider), findsOneWidget);
+    expect(find.byType(OChip), findsNWidgets(3));
+    expect(find.text('30 s'), findsOneWidget);
     expect(find.text('5 min'), findsOneWidget);
-    expect(find.text('What happens at the limit'), findsOneWidget);
+    // The two switches without a persisted field are gone.
+    expect(find.byType(Switch), findsNothing);
   });
 
   testWidgets('renders in dark', (tester) async {
     await _pump(tester, const V2ResponseWaitPageData(), dark: true);
 
-    expect(find.text('Auto-extend'), findsOneWidget);
-    expect(find.text('Notify me'), findsOneWidget);
+    expect(find.byType(Slider), findsOneWidget);
+    expect(find.byType(OChip), findsNWidgets(3));
   });
 
   testWidgets('applies a preset wait', (tester) async {
@@ -84,36 +85,6 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(changes, isNotEmpty);
-  });
-
-  testWidgets('toggles auto-extend', (tester) async {
-    bool? autoExtend;
-    await _pump(
-      tester,
-      V2ResponseWaitPageData(onAutoExtend: (value) => autoExtend = value),
-    );
-
-    final toggle = find.byType(Switch).first;
-    await tester.ensureVisible(toggle);
-    await tester.tap(toggle);
-    await tester.pumpAndSettle();
-
-    expect(autoExtend, isTrue);
-  });
-
-  testWidgets('toggles notify me', (tester) async {
-    bool? notify;
-    await _pump(
-      tester,
-      V2ResponseWaitPageData(onNotify: (value) => notify = value),
-    );
-
-    final toggle = find.byType(Switch).last;
-    await tester.ensureVisible(toggle);
-    await tester.tap(toggle);
-    await tester.pumpAndSettle();
-
-    expect(notify, isFalse);
   });
 
   testWidgets('shows the skeleton while loading', (tester) async {
@@ -153,15 +124,8 @@ void main() {
     );
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Response wait limit'), findsOneWidget);
-
-    await tester.scrollUntilVisible(
-      find.text('This applies to every chat.'),
-      200,
-      scrollable: find.byType(Scrollable).first,
-    );
-    expect(tester.takeException(), isNull);
-    expect(find.text('This applies to every chat.'), findsOneWidget);
+    expect(find.text('Response wait'), findsOneWidget);
+    expect(find.byType(OChip), findsNWidgets(3));
   });
 
   testWidgets('fits 320 dp at 200 % text in dark', (tester) async {
@@ -174,12 +138,19 @@ void main() {
     );
 
     expect(tester.takeException(), isNull);
-    await tester.scrollUntilVisible(
-      find.text('This applies to every chat.'),
-      200,
-      scrollable: find.byType(Scrollable).first,
+    expect(find.text('10 min'), findsWidgets);
+  });
+
+  testWidgets('centres the card at 600 dp', (tester) async {
+    await _pump(
+      tester,
+      const V2ResponseWaitPageData(),
+      size: const Size(600, 1000),
     );
-    expect(tester.takeException(), isNull);
+
+    final card = find.byType(OCard).first;
+    expect(tester.getSize(card).width, lessThanOrEqualTo(640));
+    expect(tester.getCenter(card).dx, closeTo(300, 0.5));
   });
 
   testWidgets('reduced motion keeps every control on screen', (tester) async {
@@ -191,13 +162,13 @@ void main() {
 
     expect(find.byType(AnimatedSlide), findsNothing);
     expect(find.byType(Slider), findsOneWidget);
-    expect(find.byType(Switch), findsNWidgets(2));
-    expect(find.text('What happens at the limit'), findsOneWidget);
+    expect(find.byType(OChip), findsNWidgets(3));
   });
 
   testWidgets('disabled controls do not fire and are announced as disabled', (
     tester,
   ) async {
+    final handle = tester.ensureSemantics();
     await _pump(tester, const V2ResponseWaitPageData());
 
     final chip = find.text('5 min');
@@ -206,77 +177,40 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
 
-    final chipSemantics = tester.widget<Semantics>(
-      find
-          .descendant(
-            of: find
-                .ancestor(of: chip, matching: find.byType(OPressable))
-                .first,
-            matching: find.byType(Semantics),
-          )
-          .first,
+    expect(
+      tester.getSemantics(chip),
+      isSemantics(isEnabled: false, label: '5 min wait time'),
     );
-    expect(chipSemantics.properties.enabled, isFalse);
-    expect(chipSemantics.properties.label, '5 min wait time');
 
-    final sliderSemantics = tester.widget<Semantics>(
-      find
-          .ancestor(of: find.byType(Slider), matching: find.byType(Semantics))
-          .first,
+    expect(
+      tester.widget<Slider>(find.byType(Slider)).onChanged,
+      isNull,
     );
-    expect(sliderSemantics.properties.enabled, isFalse);
+    expect(
+      tester.getSemantics(find.byType(Slider)),
+      isSemantics(isEnabled: false),
+    );
 
-    final toggleSemantics = tester.widget<Semantics>(
-      find
-          .ancestor(
-            of: find.byType(Switch).first,
-            matching: find.byType(Semantics),
-          )
-          .first,
-    );
-    expect(toggleSemantics.properties.enabled, isFalse);
-    expect(toggleSemantics.properties.toggled, isFalse);
+    handle.dispose();
   });
 
   testWidgets('enabled controls report enabled', (tester) async {
+    final handle = tester.ensureSemantics();
     await _pump(
       tester,
-      V2ResponseWaitPageData(
-        onPreset: (_) {},
-        onChanged: (_) {},
-        onAutoExtend: (_) {},
-      ),
+      V2ResponseWaitPageData(onPreset: (_) {}, onChanged: (_) {}),
     );
 
-    final chip = find.text('5 min');
-    final chipSemantics = tester.widget<Semantics>(
-      find
-          .descendant(
-            of: find
-                .ancestor(of: chip, matching: find.byType(OPressable))
-                .first,
-            matching: find.byType(Semantics),
-          )
-          .first,
+    expect(
+      tester.getSemantics(find.text('5 min')),
+      isSemantics(isButton: true, isEnabled: true),
     );
-    expect(chipSemantics.properties.enabled, isTrue);
+    expect(
+      tester.getSemantics(find.byType(Slider)),
+      isSemantics(isEnabled: true),
+    );
 
-    final sliderSemantics = tester.widget<Semantics>(
-      find
-          .ancestor(of: find.byType(Slider), matching: find.byType(Semantics))
-          .first,
-    );
-    expect(sliderSemantics.properties.enabled, isTrue);
-
-    final toggleSemantics = tester.widget<Semantics>(
-      find
-          .ancestor(
-            of: find.byType(Switch).first,
-            matching: find.byType(Semantics),
-          )
-          .first,
-    );
-    expect(toggleSemantics.properties.enabled, isTrue);
+    handle.dispose();
   });
 
   testWidgets('the slider keeps its new value (no silent revert)', (
@@ -310,8 +244,8 @@ void main() {
 
     expect(find.text('2 min'), findsNWidgets(2));
 
-    await tester.ensureVisible(find.text('5 min').last);
-    await tester.tap(find.text('5 min').last);
+    await tester.ensureVisible(find.text('5 min'));
+    await tester.tap(find.text('5 min'));
     await tester.pumpAndSettle();
 
     expect(find.text('5 min'), findsNWidgets(2));
@@ -323,26 +257,6 @@ void main() {
           .data,
       '5 min',
     );
-  });
-
-  testWidgets('the option switches keep their new value', (tester) async {
-    await _pump(
-      tester,
-      V2ResponseWaitPageData(onAutoExtend: (_) {}, onNotify: (_) {}),
-    );
-
-    final autoExtend = find.byType(Switch).first;
-    await tester.ensureVisible(autoExtend);
-    expect(tester.widget<Switch>(autoExtend).value, isFalse);
-    await tester.tap(autoExtend);
-    await tester.pumpAndSettle();
-    expect(tester.widget<Switch>(autoExtend).value, isTrue);
-
-    final notify = find.byType(Switch).last;
-    expect(tester.widget<Switch>(notify).value, isTrue);
-    await tester.tap(notify);
-    await tester.pumpAndSettle();
-    expect(tester.widget<Switch>(notify).value, isFalse);
   });
 
   testWidgets('the chosen wait persists where the chat reads it', (

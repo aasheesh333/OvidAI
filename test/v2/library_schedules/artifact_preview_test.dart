@@ -161,7 +161,8 @@ void main() {
 
     expect(find.text('token-usage-breakdown.png'), findsOneWidget);
     expect(find.text('PNG image · 480 KB'), findsOneWidget);
-    expect(find.text('Image preview'), findsOneWidget);
+    // The caption that repeated what the image already says is gone.
+    expect(find.text('Image preview'), findsNothing);
     expect(find.byType(Image), findsOneWidget);
     expect(find.text('Open externally'), findsOneWidget);
 
@@ -176,7 +177,7 @@ void main() {
     await tester.pumpWidget(_app(const V2ArtifactPreview(data: _imageData)));
     await tester.pumpAndSettle();
 
-    expect(find.text('Image preview unavailable'), findsOneWidget);
+    expect(find.text('No image preview'), findsOneWidget);
     expect(find.byType(Image), findsNothing);
     expect(tester.takeException(), isNull);
   });
@@ -206,10 +207,7 @@ void main() {
     expect(v2ArtifactPreviewCodeLineCap, 120);
     expect(find.textContaining('CODE_LINE_120'), findsOneWidget);
     expect(find.textContaining('CODE_LINE_121'), findsNothing);
-    expect(
-      find.textContaining('Showing first 120 of 500 lines'),
-      findsOneWidget,
-    );
+    expect(find.textContaining('120 of 500 lines'), findsOneWidget);
     expect(find.text('TS'), findsOneWidget);
 
     await tester.ensureVisible(find.text('Open externally'));
@@ -238,7 +236,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Python'), findsOneWidget);
-    expect(find.textContaining('Showing first 5 of 900 lines'), findsOneWidget);
+    expect(find.textContaining('5 of 900 lines'), findsOneWidget);
   });
 
   testWidgets('empty code sends no lines but still offers the file', (
@@ -259,11 +257,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(
-      find.text('No preview lines were sent with this artifact.'),
-      findsOneWidget,
-    );
-    expect(find.textContaining('Showing first'), findsNothing);
+    expect(find.text('No preview.'), findsOneWidget);
+    expect(find.textContaining(' of '), findsNothing);
     expect(find.text('Open externally'), findsOneWidget);
   });
 
@@ -281,10 +276,6 @@ void main() {
 
     expect(find.text('market-analysis-q2.pdf'), findsOneWidget);
     expect(find.text('Metadata only'), findsOneWidget);
-    expect(
-      find.textContaining('was not available for preview'),
-      findsOneWidget,
-    );
     expect(find.text('Pages'), findsOneWidget);
     expect(find.text('18 pages'), findsOneWidget);
     expect(find.text('Finance team'), findsOneWidget);
@@ -308,7 +299,6 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.bySemanticsLabel('Page thumbnail placeholder'), findsOneWidget);
-    expect(find.text('Page thumbnail'), findsOneWidget);
     expect(find.textContaining('ovid.site/preview'), findsOneWidget);
     expect(find.byType(Image), findsNothing);
     expect(find.byType(AndroidView), findsNothing);
@@ -375,10 +365,6 @@ void main() {
 
     expect(find.text('Large file'), findsOneWidget);
     expect(find.text('Too large to preview'), findsOneWidget);
-    expect(
-      find.textContaining('Nothing is rendered in the app'),
-      findsOneWidget,
-    );
     expect(find.textContaining('CODE_LINE'), findsNothing);
 
     await tester.tap(find.text('Open externally'));
@@ -396,6 +382,30 @@ void main() {
     expect(find.text('Open externally'), findsNothing);
     expect(find.byType(OButton), findsNothing);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('the host can hide the header and footer chrome', (tester) async {
+    _phone(tester);
+    await tester.pumpWidget(
+      _app(
+        const V2ArtifactPreview(
+          data: V2ArtifactPreviewData(
+            name: 'report.pdf',
+            typeLabel: 'PDF',
+            sizeLabel: '1 MB',
+          ),
+          showHeader: false,
+          showFooter: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The stage is all a detail page needs: it owns the name and the facts.
+    expect(find.text('report.pdf'), findsNothing);
+    expect(find.text('PDF · 1 MB'), findsNothing);
+    expect(find.text('Read-only preview.'), findsNothing);
+    expect(find.text('Metadata only'), findsOneWidget);
   });
 
   testWidgets('the external action opens the real URL without a handler', (
@@ -480,10 +490,7 @@ void main() {
 
   testWidgets('long document text stops at the line cap', (tester) async {
     _phone(tester);
-    final body = List.generate(
-      400,
-      (i) => 'DOC_LINE_${i + 1}',
-    ).join('\n');
+    final body = List.generate(400, (i) => 'DOC_LINE_${i + 1}').join('\n');
     await tester.pumpWidget(
       _app(
         V2ArtifactPreview(
@@ -499,7 +506,7 @@ void main() {
 
     expect(find.textContaining('DOC_LINE_120'), findsOneWidget);
     expect(find.textContaining('DOC_LINE_121'), findsNothing);
-    expect(find.textContaining('Showing first 120 of 400 lines'), findsOneWidget);
+    expect(find.textContaining('120 of 400 lines'), findsOneWidget);
   });
 
   testWidgets('all preview types fit 320 dp at 200 % text in both themes', (
@@ -525,10 +532,7 @@ void main() {
         _narrowPhone(tester);
         await tester.pumpWidget(
           _app(
-            V2ArtifactPreview(
-              data: data,
-              onOpenExternally: () {},
-            ),
+            V2ArtifactPreview(data: data, onOpenExternally: () {}),
             dark: dark,
             textScale: 2,
           ),

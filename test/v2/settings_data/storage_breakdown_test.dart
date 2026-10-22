@@ -110,14 +110,6 @@ Future<void> _pump(
   await tester.pump(const Duration(milliseconds: 600));
 }
 
-double _barValue(WidgetTester tester, V2StorageCategory category) {
-  final finder = find.descendant(
-    of: find.byKey(ValueKey('storage-breakdown-bar-${category.name}')),
-    matching: find.byType(LinearProgressIndicator),
-  );
-  return tester.widget<LinearProgressIndicator>(finder).value!;
-}
-
 /// Pumps on a 320 dp phone at 200 % text with reduced motion.
 Future<void> _pumpNarrow(
   WidgetTester tester,
@@ -180,7 +172,7 @@ void main() {
     });
   });
 
-  testWidgets('renders the donut, total and four-category legend', (
+  testWidgets('renders the bar, total and four-category legend', (
     tester,
   ) async {
     await _pump(tester, StorageBreakdown(data: _data()));
@@ -251,7 +243,7 @@ void main() {
     expect(tapped, V2StorageCategory.memory);
   });
 
-  testWidgets('the selected category moves its share into the centre', (
+  testWidgets('the selected category highlights its legend row', (
     tester,
   ) async {
     final handle = tester.ensureSemantics();
@@ -260,13 +252,8 @@ void main() {
       StorageBreakdown(data: _data(selectedCategory: V2StorageCategory.chats)),
     );
 
-    expect(find.text('1.2 GB'), findsNWidgets(2));
-    expect(find.text('40% of used'), findsOneWidget);
-
-    final chart = tester.getSemantics(
-      find.byKey(const ValueKey('storage-breakdown-chart')),
-    );
-    expect(chart.label, contains('Selected Chats: 1.2 GB, 40% of used'));
+    // One bar and one legend: the selected row is marked, not duplicated.
+    expect(find.text('1.2 GB'), findsOneWidget);
     expect(
       find.bySemanticsLabel('Chats, 1.2 GB, 40%, selected'),
       findsOneWidget,
@@ -429,15 +416,6 @@ void main() {
     expect(find.text('25%'), findsOneWidget);
     expect(find.text('13%'), findsOneWidget);
     expect(find.text('6%'), findsNWidgets(2));
-
-    expect(_barValue(tester, V2StorageCategory.chats), closeTo(0.5, 0.001));
-    expect(
-      _barValue(tester, V2StorageCategory.artifacts),
-      closeTo(0.25, 0.001),
-    );
-    expect(_barValue(tester, V2StorageCategory.uploads), closeTo(0.125, 0.001));
-    expect(_barValue(tester, V2StorageCategory.memory), closeTo(0.0625, 0.001));
-    expect(_barValue(tester, V2StorageCategory.cache), closeTo(0.0625, 0.001));
   });
 
   testWidgets('uploads and cache get their own accessible slice labels', (

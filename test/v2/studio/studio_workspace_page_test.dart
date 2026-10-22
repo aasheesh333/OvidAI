@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ui' show Tristate;
 
 import 'package:flutter/material.dart';
@@ -64,6 +65,12 @@ const _data = V2StudioWorkspaceData(
   codeLines: _lines,
 );
 
+void _setSurface(WidgetTester tester, Size size) {
+  tester.view.physicalSize = size;
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
+}
+
 void main() {
   testWidgets('renders the workspace in light and dark', (tester) async {
     for (final dark in <bool>[false, true]) {
@@ -74,13 +81,36 @@ void main() {
 
       expect(find.text('acme/landing-page'), findsOneWidget);
       expect(find.text('main'), findsOneWidget);
-      expect(find.text('Bound to acme/landing-page @ main'), findsOneWidget);
-      expect(find.text('Change branch'), findsOneWidget);
-      expect(find.text('Remote has 3 new changes'), findsOneWidget);
-      expect(find.text('Saved'), findsOneWidget);
-      expect(find.text('3 files changed'), findsOneWidget);
+      expect(find.text('3 changes'), findsOneWidget);
+      expect(find.text('+42 −12'), findsOneWidget);
       expect(find.text('Hero.tsx'), findsWidgets);
+      expect(find.text("import React from 'react';"), findsOneWidget);
     }
+  });
+
+  testWidgets('a pushed workspace header shows back, branch and sync', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: OTheme.light(),
+        home: const Scaffold(body: SizedBox.shrink()),
+      ),
+    );
+    final navigator = tester.state<NavigatorState>(find.byType(Navigator));
+    unawaited(
+      navigator.push(
+        MaterialPageRoute<void>(
+          builder: (_) => const V2StudioWorkspacePage(data: _data),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byIcon(Icons.arrow_back_rounded), findsOneWidget);
+    expect(find.text('acme/landing-page'), findsOneWidget);
+    expect(find.byKey(const Key('studio-branch-chip')), findsOneWidget);
+    expect(find.byKey(const Key('studio-sync')), findsOneWidget);
   });
 
   testWidgets('empty state picks a repository', (tester) async {
@@ -104,7 +134,7 @@ void main() {
     expect(picked, 1);
   });
 
-  testWidgets('loading state shows a skeleton without the commit dock', (
+  testWidgets('loading state shows a skeleton without the status bar', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -121,7 +151,8 @@ void main() {
     await tester.pump();
 
     expect(find.byType(OSkeletonList), findsOneWidget);
-    expect(find.text('Commit'), findsNothing);
+    expect(find.text('Commit & push'), findsNothing);
+    expect(find.byKey(const Key('studio-open-changes')), findsNothing);
   });
 
   testWidgets('error state retries', (tester) async {
@@ -145,18 +176,28 @@ void main() {
     expect(retries, 1);
   });
 
-  testWidgets('Preview button reports the primary action', (tester) async {
+  testWidgets('the status bar opens changes and preview', (tester) async {
+    var changes = 0;
     var previews = 0;
     await tester.pumpWidget(
-      _app(V2StudioWorkspacePage(data: _data, onPreview: () => previews++)),
+      _app(
+        V2StudioWorkspacePage(
+          data: _data,
+          onCommit: () => changes++,
+          onPreview: () => previews++,
+        ),
+      ),
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Preview'));
+    await tester.tap(find.byKey(const Key('studio-open-changes')));
+    expect(changes, 1);
+
+    await tester.tap(find.byKey(const Key('studio-open-preview')));
     expect(previews, 1);
   });
 
-  testWidgets('sync chip and file taps report their callbacks', (tester) async {
+  testWidgets('sync and file taps report their callbacks', (tester) async {
     var syncs = 0;
     String? selected;
     await tester.pumpWidget(
@@ -170,25 +211,14 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const Key('studio-sync-chip')), findsOneWidget);
-    await tester.tap(find.text('Sync latest changes'));
+    await tester.tap(find.byKey(const Key('studio-sync')));
     expect(syncs, 1);
 
-    await tester.ensureVisible(find.text('index.html'));
-    await tester.pumpAndSettle();
     await tester.tap(find.text('index.html'));
     expect(selected, 'index.html');
   });
 
-  testWidgets('the binding chip names the repo and branch', (tester) async {
-    await tester.pumpWidget(_app(const V2StudioWorkspacePage(data: _data)));
-    await tester.pumpAndSettle();
-
-    expect(find.byKey(const Key('studio-binding-chip')), findsOneWidget);
-    expect(find.text('Bound to acme/landing-page @ main'), findsOneWidget);
-  });
-
-  testWidgets('change branch reports and the sync chip hides when up to date', (
+  testWidgets('the branch chip names the branch and opens the picker', (
     tester,
   ) async {
     var branchTaps = 0;
@@ -197,8 +227,22 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const Key('studio-change-branch')));
+    expect(find.byKey(const Key('studio-branch-chip')), findsOneWidget);
+    expect(find.text('main'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('studio-branch-chip')));
     expect(branchTaps, 1);
+  });
+
+  testWidgets('the sync badge only appears when the remote is ahead', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_app(const V2StudioWorkspacePage(data: _data)));
+    await tester.pumpAndSettle();
+
+    final synced = tester.widget<OIconButton>(
+      find.byKey(const Key('studio-sync')),
+    );
+    expect(synced.badge, isNotNull);
 
     await tester.pumpWidget(
       _app(
@@ -212,9 +256,10 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const Key('studio-sync-chip')), findsNothing);
-    expect(find.text('Sync latest changes'), findsNothing);
-    expect(find.text('Bound to acme/landing-page @ main'), findsOneWidget);
+    final upToDate = tester.widget<OIconButton>(
+      find.byKey(const Key('studio-sync')),
+    );
+    expect(upToDate.badge, isNull);
   });
 
   testWidgets('file tree collapses and expands folders', (tester) async {
@@ -232,7 +277,7 @@ void main() {
     expect(find.text('components'), findsOneWidget);
   });
 
-  testWidgets('a missing commit callback is announced as disabled', (
+  testWidgets('a missing changes callback is announced as disabled', (
     tester,
   ) async {
     final handle = tester.ensureSemantics();
@@ -240,18 +285,84 @@ void main() {
     await tester.pumpWidget(_app(const V2StudioWorkspacePage(data: _data)));
     await tester.pumpAndSettle();
 
-    final flags = tester.getSemantics(find.text('Commit')).flagsCollection;
+    final flags = tester
+        .getSemantics(find.byKey(const Key('studio-open-changes')))
+        .flagsCollection;
     expect(flags.isEnabled, Tristate.isFalse);
 
     handle.dispose();
   });
 
+  testWidgets('600 dp and 900 dp keep the tree beside the editor', (
+    tester,
+  ) async {
+    const widths = <MapEntry<double, double>>[
+      MapEntry(600, 280),
+      MapEntry(900, 320),
+    ];
+    for (final entry in widths) {
+      _setSurface(tester, Size(entry.key, 900));
+      await tester.pumpWidget(_app(const V2StudioWorkspacePage(data: _data)));
+      await tester.pumpAndSettle();
+
+      final tree = tester.getSize(
+        find.byKey(const Key('studio-tree-column')),
+      );
+      expect(tree.width, entry.value, reason: '${entry.key} dp tree width');
+
+      // The editor sits to the right of the fixed tree column; the code
+      // viewer is not pushed on a split layout.
+      final viewer = tester.getTopLeft(
+        find.byKey(const Key('studio-open-code-viewer')),
+      );
+      expect(viewer.dx, greaterThan(tree.width));
+      expect(find.text("import React from 'react';"), findsOneWidget);
+      expect(find.byType(V2CodeViewerPage), findsNothing);
+    }
+  });
+
+  testWidgets('599 dp keeps the tree full screen with no editor column', (
+    tester,
+  ) async {
+    _setSurface(tester, const Size(599, 900));
+    await tester.pumpWidget(_app(const V2StudioWorkspacePage(data: _data)));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('studio-tree-column')), findsNothing);
+    expect(find.byKey(const Key('studio-open-code-viewer')), findsNothing);
+  });
+
+  testWidgets('below 600 dp the tree fills the screen and opens the viewer', (
+    tester,
+  ) async {
+    _setSurface(tester, const Size(320, 720));
+    await tester.pumpWidget(_app(const V2StudioWorkspacePage(data: _data)));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('studio-tree-column')), findsNothing);
+    expect(find.byKey(const Key('studio-open-code-viewer')), findsNothing);
+
+    await tester.ensureVisible(
+      find.byKey(
+        const ValueKey<String>('v2-file-tree-row-src/components/Hero.tsx'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(
+        const ValueKey<String>('v2-file-tree-row-src/components/Hero.tsx'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(V2CodeViewerPage), findsOneWidget);
+    expect(find.text("import React from 'react';"), findsOneWidget);
+  });
+
   testWidgets('fits a 320 dp screen at 200 % text with long labels', (
     tester,
   ) async {
-    tester.view.physicalSize = const Size(320, 640);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.reset);
+    _setSurface(tester, const Size(320, 640));
 
     const longData = V2StudioWorkspaceData(
       repoName: 'acme/landing-page-with-a-very-long-repository-name',
@@ -300,9 +411,7 @@ void main() {
   testWidgets('fits a 320 dp screen at 200 % text with no file open', (
     tester,
   ) async {
-    tester.view.physicalSize = const Size(320, 640);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.reset);
+    _setSurface(tester, const Size(320, 640));
 
     for (final dark in <bool>[false, true]) {
       await tester.pumpWidget(
@@ -320,7 +429,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('No file open'), findsOneWidget);
+      expect(find.byKey(const Key('studio-file-tree')), findsOneWidget);
       expect(
         tester.takeException(),
         isNull,
@@ -331,9 +440,7 @@ void main() {
     }
   });
 
-  testWidgets('the explorer is the shared file tree with change badges', (
-    tester,
-  ) async {
+  testWidgets('the explorer is the shared file tree', (tester) async {
     await tester.pumpWidget(_app(const V2StudioWorkspacePage(data: _data)));
     await tester.pumpAndSettle();
 
@@ -344,67 +451,9 @@ void main() {
       ),
       findsOneWidget,
     );
-    // V2FileNode.changed maps to V2FileChange.modified.
-    expect(find.text('M'), findsOneWidget);
   });
 
-  testWidgets('tapping the open file opens the code viewer', (tester) async {
-    String? selected;
-    await tester.pumpWidget(
-      _app(
-        V2StudioWorkspacePage(
-          data: _data,
-          onSelectFile: (path) => selected = path,
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.ensureVisible(
-      find.byKey(
-        const ValueKey<String>('v2-file-tree-row-src/components/Hero.tsx'),
-      ),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(
-      find.byKey(
-        const ValueKey<String>('v2-file-tree-row-src/components/Hero.tsx'),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(selected, 'src/components/Hero.tsx');
-    expect(find.byType(V2CodeViewerPage), findsOneWidget);
-    expect(find.text('Read only'), findsOneWidget);
-    expect(find.text("import React from 'react';"), findsOneWidget);
-    expect(find.text('6 lines'), findsOneWidget);
-  });
-
-  testWidgets('a file selected by the host opens once its code arrives', (
-    tester,
-  ) async {
-    await tester.pumpWidget(_app(const _WorkspaceHarness()));
-    await tester.pumpAndSettle();
-
-    await tester.ensureVisible(
-      find.byKey(
-        const ValueKey<String>('v2-file-tree-row-src/components/Button.tsx'),
-      ),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(
-      find.byKey(
-        const ValueKey<String>('v2-file-tree-row-src/components/Button.tsx'),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.byType(V2CodeViewerPage), findsOneWidget);
-    expect(find.text('Button.tsx'), findsWidgets);
-    expect(find.text('export const Button = () => null;'), findsOneWidget);
-  });
-
-  testWidgets('the editor header opens the viewer and forwards copy', (
+  testWidgets('a wide editor header opens the viewer and forwards copy', (
     tester,
   ) async {
     var copies = 0;
@@ -413,10 +462,6 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(
-      find.byKey(const Key('studio-open-code-viewer')),
-    );
-    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('studio-open-code-viewer')));
     await tester.pumpAndSettle();
 
@@ -431,11 +476,7 @@ void main() {
 
     expect(find.byTooltip('Workspace options'), findsNothing);
     expect(find.byKey(const Key('studio-copy-file')), findsNothing);
-    expect(find.text('Cloud workspace connected'), findsOneWidget);
-    expect(
-      find.text('Edits save to your branch as you type.'),
-      findsNothing,
-    );
+    expect(find.text('Cloud workspace connected'), findsNothing);
   });
 
   testWidgets(
@@ -462,19 +503,14 @@ void main() {
       expect(find.byKey(const Key('studio-gate')), findsOneWidget);
       expect(find.text('Pick a folder to start coding'), findsOneWidget);
       expect(find.text('No file open'), findsNothing);
-      expect(find.text('Cloud workspace connected'), findsNothing);
 
-      await tester.ensureVisible(find.text('Pick a folder'));
-      await tester.pumpAndSettle();
       await tester.tap(find.text('Pick a folder'));
       expect(picked, 1);
     },
   );
 
   testWidgets('the studio gate fits 320 dp at 200 % text', (tester) async {
-    tester.view.physicalSize = const Size(320, 640);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.reset);
+    _setSurface(tester, const Size(320, 640));
 
     for (final dark in <bool>[false, true]) {
       await tester.pumpWidget(
@@ -500,6 +536,31 @@ void main() {
             '(${dark ? 'dark' : 'light'})',
       );
     }
+  });
+
+  testWidgets('a file selected by the host opens once its code arrives', (
+    tester,
+  ) async {
+    _setSurface(tester, const Size(320, 720));
+    await tester.pumpWidget(_app(const _WorkspaceHarness()));
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(
+      find.byKey(
+        const ValueKey<String>('v2-file-tree-row-src/components/Button.tsx'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(
+        const ValueKey<String>('v2-file-tree-row-src/components/Button.tsx'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(V2CodeViewerPage), findsOneWidget);
+    expect(find.text('Button.tsx'), findsWidgets);
+    expect(find.text('export const Button = () => null;'), findsOneWidget);
   });
 }
 

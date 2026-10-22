@@ -2,10 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../../core/app_lock.dart';
-import '../../../core/firebase_service.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'app_lock_sign_out.dart'
+    if (dart.library.io) 'app_lock_sign_out_io.dart';
 
 /// Settings surface for the app lock. The gate itself lives in
 /// `app_lock_gate.dart`; this page only edits [AppLock].
@@ -214,7 +215,7 @@ class _AppLockSettingsPageState extends State<AppLockSettingsPage> {
     if (hook != null) return hook();
     if (_lock.biometric != null) return _lock.unlockWithBiometrics();
     try {
-      await (widget.signOut?.call() ?? FirebaseService.I.signOut());
+      await (widget.signOut?.call() ?? defaultSignOut());
       return true;
     } catch (_) {
       return false;
@@ -398,7 +399,7 @@ class _AppLockSettingsPageState extends State<AppLockSettingsPage> {
           const SizedBox(height: OSpace.m),
           OButton(
             key: const ValueKey<String>('app-lock-reset-pin'),
-            label: recovery ? 'Reset PIN after re-auth' : 'Verify it’s me',
+            label: recovery ? 'Reset PIN' : 'Verify it’s me',
             icon: Icons.verified_user_outlined,
             variant: OButtonVariant.secondary,
             expand: true,

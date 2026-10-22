@@ -7,7 +7,6 @@ import 'package:ovid_ai/ui/v2/schedules/schedule_runs_page.dart';
 
 const _data = V2ScheduleRunsData(
   scheduleTitle: 'Morning AI news briefing',
-  sessionTitle: 'AI news research',
   total: 24,
   succeeded: 23,
   failed: 1,
@@ -89,9 +88,9 @@ void main() {
     await tester.pumpWidget(_app(const ScheduleRunsPage(data: _data)));
     await tester.pumpAndSettle();
 
-    expect(find.text('Schedule runs'), findsOneWidget);
+    // The header is the schedule itself, not a generic page name.
     expect(find.text('Morning AI news briefing'), findsOneWidget);
-    expect(find.text('Source session: AI news research'), findsOneWidget);
+    expect(find.text('Schedule runs'), findsNothing);
     expect(find.text('24 runs · 23 succeeded · 1 failed'), findsOneWidget);
     expect(find.text('95.8% success'), findsOneWidget);
     expect(find.text('TODAY — MAY 18'), findsOneWidget);
@@ -127,9 +126,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Schedule runs'), findsOneWidget);
+    expect(find.text('Morning AI news briefing'), findsOneWidget);
     expect(find.text('24 runs · 23 succeeded · 1 failed'), findsOneWidget);
-    expect(find.text('Source session: AI news research'), findsOneWidget);
     expect(find.text('Today — May 18'), findsNothing);
     expect(find.text('TODAY — MAY 18'), findsOneWidget);
   });
@@ -152,9 +150,7 @@ void main() {
     expect(back, 1);
   });
 
-  testWidgets('empty history keeps the source session for context', (
-    tester,
-  ) async {
+  testWidgets('empty history keeps the schedule in the header', (tester) async {
     _phone(tester);
     await tester.pumpWidget(
       _app(
@@ -162,7 +158,6 @@ void main() {
           data: V2ScheduleRunsData(
             status: V2ScheduleRunsStatus.empty,
             scheduleTitle: 'Morning AI news briefing',
-            sessionTitle: 'AI news research',
           ),
         ),
       ),
@@ -170,7 +165,6 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Morning AI news briefing'), findsOneWidget);
-    expect(find.text('Source session: AI news research'), findsOneWidget);
     expect(find.text('No runs yet'), findsOneWidget);
   });
 
@@ -289,7 +283,7 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.text('Schedule runs'), findsOneWidget);
+    expect(find.text('Morning AI news briefing'), findsOneWidget);
     expect(find.text('95.8% success'), findsOneWidget);
     expect(find.text('TODAY — MAY 18'), findsOneWidget);
     expect(find.text('daily-brief.md'), findsOneWidget);

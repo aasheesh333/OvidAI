@@ -109,11 +109,7 @@ void main() {
   ) async {
     await _pump(tester, ExportPickerSheet(data: _data()));
 
-    expect(find.text('Choose chats to export'), findsOneWidget);
-    expect(
-      find.textContaining('Your chats are 90 MB, over the 64 MB archive limit'),
-      findsOneWidget,
-    );
+    expect(find.text('Export chats'), findsOneWidget);
     expect(find.text('90 MB of 64 MB selected'), findsOneWidget);
     expect(find.text('3 of 1,000 chats'), findsOneWidget);
     expect(find.text('920 of 20,000 messages'), findsOneWidget);
@@ -130,7 +126,7 @@ void main() {
   testWidgets('picker renders in dark theme', (tester) async {
     await _pump(tester, ExportPickerSheet(data: _data()), theme: OTheme.dark());
 
-    expect(find.text('Choose chats to export'), findsOneWidget);
+    expect(find.text('Export chats'), findsOneWidget);
     expect(find.text('90 MB of 64 MB selected'), findsOneWidget);
   });
 
@@ -373,11 +369,6 @@ void main() {
       ),
     );
 
-    expect(
-      find.text('Some chats are too large to add to this archive.'),
-      findsOneWidget,
-    );
-
     await tester.tap(
       find.byKey(const ValueKey('export-picker-select-all-checkbox')),
     );
@@ -497,17 +488,13 @@ void main() {
     await _pump(tester, ExportPickerSheet(data: _data()));
 
     await tester.scrollUntilVisible(
-      find.byKey(const ValueKey('export-picker-heavy-note')),
+      find.text('Q3 launch plan'),
       200,
       scrollable: find.byType(Scrollable).first,
     );
     await tester.pump();
 
     expect(find.textContaining('must be re-uploaded'), findsWidgets);
-    expect(
-      find.textContaining('Heavy artifacts are not included'),
-      findsOneWidget,
-    );
   });
 
   testWidgets('loading state shows skeletons', (tester) async {
@@ -516,7 +503,7 @@ void main() {
       ExportPickerSheet(data: _data(status: V2ExportPickerStatus.loading)),
     );
 
-    expect(find.text('Choose chats to export'), findsOneWidget);
+    expect(find.text('Export chats'), findsOneWidget);
     expect(find.byType(OSkeletonList), findsOneWidget);
   });
 
@@ -534,7 +521,7 @@ void main() {
 
     expect(find.text('No chats to export'), findsOneWidget);
     expect(
-      find.text('Start a chat first. Then come back to back it up.'),
+      find.text('Start a chat, then come back.'),
       findsOneWidget,
     );
 
@@ -594,7 +581,7 @@ void main() {
     await tester.tap(find.text('Open picker'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Choose chats to export'), findsOneWidget);
+    expect(find.text('Export chats'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -602,13 +589,13 @@ void main() {
     await _pumpNarrow(tester, ExportPickerSheet(data: _data()));
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Choose chats to export'), findsOneWidget);
+    expect(find.text('Export chats'), findsOneWidget);
     expect(
       find.text('Deselect chats until the total is 64 MB or less.'),
       findsOneWidget,
     );
 
-    // Reach the summary and the heavy note at the bottom of the list.
+    // Reach the summary and the heavy chat at the bottom of the list.
     await tester.scrollUntilVisible(
       find.text('90 MB of 64 MB selected'),
       80,
@@ -616,14 +603,6 @@ void main() {
     );
     await tester.pump();
     expect(find.text('90 MB of 64 MB selected'), findsOneWidget);
-    expect(tester.takeException(), isNull);
-
-    await tester.scrollUntilVisible(
-      find.byKey(const ValueKey('export-picker-heavy-note')),
-      80,
-      scrollable: find.byType(Scrollable).first,
-    );
-    await tester.pump();
     expect(tester.takeException(), isNull);
   });
 

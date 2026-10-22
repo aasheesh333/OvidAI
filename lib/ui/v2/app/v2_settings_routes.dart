@@ -10,6 +10,8 @@ import '../../../core/app_info.dart';
 import '../../../core/background_notifications.dart';
 import '../../../core/cloud/account_settings_client.dart';
 import '../../../core/cloud/artifact_vault.dart';
+import '../../../core/cloud/cloud_rest.dart';
+import '../../../core/cloud/cloud_session_store.dart';
 import '../../../core/cloud/projects.dart';
 import '../../../core/cloud/usage_history.dart';
 import '../../../core/firebase_service.dart';
@@ -77,7 +79,6 @@ class V2SettingsRoutes {
     String id,
     V2SettingsActions actions,
   ) {
-    final app = AppState.I;
     switch (id) {
       case 'account':
         return AccountPage(data: _account(context, actions));
@@ -88,14 +89,7 @@ class V2SettingsRoutes {
       case 'memory':
         return _MemoryLoader(actions: actions);
       case 'shared_memory':
-        return SharedMemoryPage(
-          data: V2SharedMemoryPageData(
-            enabled: app.effectiveShareSessionMemory,
-            onEnabledChanged: (value) =>
-                unawaited(actions.setShareSessionMemory(value)),
-            onForget: () => unawaited(actions.resetMemory(context)),
-          ),
-        );
+        return _SharedMemoryLoader(actions: actions);
       case 'memory_files':
         return _MemoryFilesLoader(actions: actions);
       case 'appearance':
@@ -236,12 +230,6 @@ class V2SettingsRoutes {
       plans: plans,
       onCurrencyChanged: onCurrencyChanged,
       onPeriodChanged: onPeriodChanged,
-      legalNote: RevenueCatBilling.I.usingTestStore
-          ? 'Test mode: RevenueCat Test Store simulates purchases. No card is '
-                'charged and no real subscription is created.'
-          : 'Subscriptions renew automatically each ${period == V2BillingPeriod.yearly ? 'year' : 'month'} '
-                'until canceled. You can cancel anytime from Google Play Store '
-                'subscriptions.',
       // Every card names its own plan; the old screen hard-coded Plus here,
       // so a Go user's "Upgrade" bought Plus. The period travels with the
       // request so the yearly toggle cannot silently buy the monthly product.
@@ -249,10 +237,7 @@ class V2SettingsRoutes {
         if (purchase.planId == 'free') {
           // Downgrading or cancelling is a Play action, not a purchase.
           unawaited(
-            actions.openUrl(
-              context,
-              playSubscriptionCenterUri().toString(),
-            ),
+            actions.openUrl(context, playSubscriptionCenterUri().toString()),
           );
           return;
         }
@@ -290,7 +275,9 @@ class V2SettingsRoutes {
       );
     }
 
-    final tier = usage.tier.trim().isEmpty ? AppState.I.ovidCloudTier : usage.tier;
+    final tier = usage.tier.trim().isEmpty
+        ? AppState.I.ovidCloudTier
+        : usage.tier;
     final limits = V2PlanLimits.forIdOrFree(tier);
     final today = usage.today;
     final recorded = history.history;
@@ -325,8 +312,7 @@ class V2SettingsRoutes {
     final dailyFraction = dailyTokens == null || limits.dailyTokenCap == 0
         ? 0.0
         : (dailyTokens / limits.dailyTokenCap).clamp(0.0, 1.0);
-    final monthlyFraction =
-        monthlyTokens == null || limits.monthlyTokenCap == 0
+    final monthlyFraction = monthlyTokens == null || limits.monthlyTokenCap == 0
         ? 0.0
         : (monthlyTokens / limits.monthlyTokenCap).clamp(0.0, 1.0);
 
@@ -362,9 +348,8 @@ class V2SettingsRoutes {
       imagesLabel: images == null ? '' : '$images',
       storageLimitLabel: '${limits.storageGb} GB',
       showFreePlanNote: !limits.manualModels,
-      onRangeChanged: (range) => unawaited(
-        history.setDays(range == V2UsageRange.sevenDays ? 7 : 30),
-      ),
+      onRangeChanged: (range) =>
+          unawaited(history.setDays(range == V2UsageRange.sevenDays ? 7 : 30)),
       onUpgrade: upgrade,
       onRetry: () {
         actions.refreshUsage();
@@ -389,8 +374,7 @@ class V2SettingsRoutes {
   /// Oldest → newest window of real daily buckets, sized to the selected range.
   static List<V2UsageDay> _usageDays(UsageHistory? history, int window) {
     if (history == null || history.days.isEmpty) return const [];
-    final sorted = [...history.days]
-      ..sort((a, b) => a.date.compareTo(b.date));
+    final sorted = [...history.days]..sort((a, b) => a.date.compareTo(b.date));
     final shown = sorted.length > window
         ? sorted.sublist(sorted.length - window)
         : sorted;
@@ -410,15 +394,7 @@ class V2SettingsRoutes {
     ];
   }
 
-  static const _weekdays = [
-    'Mon',
-    'Tue',
-    'Wed',
-    'Thu',
-    'Fri',
-    'Sat',
-    'Sun',
-  ];
+  static const _weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
   static String _dayLabel(String date) {
     final parsed = DateTime.tryParse(date);
@@ -439,11 +415,17 @@ class V2SettingsRoutes {
       total += counts.inputTokens + counts.outputTokens;
     }
     if (total > 0) {
-      final rows = byModel.entries
-          .map((entry) => (entry.key, entry.value.inputTokens + entry.value.outputTokens))
-          .where((row) => row.$2 > 0)
-          .toList()
-        ..sort((a, b) => b.$2.compareTo(a.$2));
+      final rows =
+          byModel.entries
+              .map(
+                (entry) => (
+                  entry.key,
+                  entry.value.inputTokens + entry.value.outputTokens,
+                ),
+              )
+              .where((row) => row.$2 > 0)
+              .toList()
+            ..sort((a, b) => b.$2.compareTo(a.$2));
       return [
         for (final (id, tokens) in rows)
           V2UsageModel(
@@ -469,9 +451,10 @@ class V2SettingsRoutes {
           id: row.model,
           name: known[row.model]?.label ?? ovidModelLabel(row.model),
           subtitle: known[row.model]?.isImage == true ? 'Images' : 'Chat',
-          percent: (row.counts.totalTokens / ledgerTotal * 100)
-              .round()
-              .clamp(0, 100),
+          percent: (row.counts.totalTokens / ledgerTotal * 100).round().clamp(
+            0,
+            100,
+          ),
           tokensLabel: '${compactTokens(row.counts.totalTokens)} tokens',
         ),
     ];
@@ -480,15 +463,18 @@ class V2SettingsRoutes {
   static V2MemoryPageData _memory(
     BuildContext context,
     V2SettingsActions actions, {
+    List<V2MemoryEntry> globalEntries = const [],
     List<V2MemoryFile> files = const [],
     bool loading = false,
     String? errorMessage,
+    void Function(V2MemoryScope scope, String id)? onForgetMemory,
     VoidCallback? onRetry,
   }) {
     final app = AppState.I;
     return V2MemoryPageData(
       memoryEnabled: app.memoryEnabled,
       shareSessionMemory: app.effectiveShareSessionMemory,
+      globalEntries: globalEntries,
       globalVersionLabel: '',
       // Project memory files are the server's per-project count; the memory
       // page only lists projects that actually keep memory.
@@ -510,8 +496,9 @@ class V2SettingsRoutes {
       onShareSessionMemoryChanged: actions.setShareSessionMemory,
       onEditGlobal: () => open(context, 'memory_files', actions),
       onProjectTap: (_) => open(context, 'memory_files', actions),
-      onFileDownload: (_) => actions.exportData(context),
-      onExport: () => actions.exportData(context),
+      // One Forget per row: the source deletes the fact line, the chat file or
+      // the project's memory files for real.
+      onForgetMemory: onForgetMemory,
       onResetAll: () => actions.resetMemory(context),
       onRetry: onRetry,
     );
@@ -519,9 +506,8 @@ class V2SettingsRoutes {
 
   static V2AppearancePageData _appearance(
     BuildContext context,
-    V2SettingsActions actions, {
-    VoidCallback? onRefreshPreview,
-  }) {
+    V2SettingsActions actions,
+  ) {
     final app = AppState.I;
     return V2AppearancePageData(
       themeMode: themeModeOf(app.themeMode),
@@ -538,9 +524,6 @@ class V2SettingsRoutes {
       onShowReasoningChanged: (value) =>
           unawaited(AppState.I.setShowReasoning(value)),
       onMemoryFilesTap: () => open(context, 'memory_files', actions),
-      // Re-reading AppState rebuilds the preview; it must not push a second
-      // Appearance screen on top of this one.
-      onRefreshPreview: onRefreshPreview,
     );
   }
 
@@ -548,22 +531,42 @@ class V2SettingsRoutes {
     BuildContext context,
     V2SettingsActions actions, {
     int totalBytes = 0,
+    List<V2ExportSession> exportSessions = const [],
+    V2ExportSessionToggle? onExportSessionToggled,
   }) {
     final spec = _planSpec(AppState.I.ovidCloudTier);
     final quotaBytes = spec.storageGb * 1024 * 1024 * 1024;
+    final firebase = FirebaseService.I;
+    // The typed confirmation must name the real identifier on the account.
+    final contact = (firebase.email ?? firebase.phoneNumber ?? '').trim();
+    // A null id set means "every chat"; the picker's ticks narrow it. Only
+    // filter when something was actually unticked, so an unsynced local id
+    // can never silently drop the rest of the account's chats.
+    void export() {
+      final narrowed = exportSessions.any((session) => !session.selected);
+      final selected = !narrowed
+          ? null
+          : {
+              for (final session in exportSessions)
+                if (session.selected) session.id,
+            };
+      actions.exportData(context, sessionIds: selected);
+    }
+
     return V2DataControlPageData(
       totalDataSizeLabel: totalBytes > 0 ? _bytes(totalBytes) : '',
+      exportSessions: exportSessions,
       crashReports: FirebaseService.I.consentGiven,
       hasData: AppState.I.sessions.isNotEmpty,
+      accountContact: contact,
       storageUsedLabel: '${_bytes(totalBytes)} of ${spec.storageGb} GB',
       storageFraction: quotaBytes <= 0
           ? 0
           : (totalBytes / quotaBytes).clamp(0.0, 1.0),
-      storageFreeLabel: _bytes(
-        (quotaBytes - totalBytes).clamp(0, quotaBytes),
-      ),
-      onExportImport: () => actions.exportData(context),
-      onExport: () => actions.exportData(context),
+      storageFreeLabel: _bytes((quotaBytes - totalBytes).clamp(0, quotaBytes)),
+      onExportImport: export,
+      onExport: export,
+      onExportSessionToggled: onExportSessionToggled,
       onChooseImport: () => actions.importData(context),
       onPermissions: () => open(context, 'permissions', actions),
       onCrashReportsChanged: (value) =>
@@ -574,6 +577,36 @@ class V2SettingsRoutes {
     );
   }
 
+  /// The export picker's rows, measured from this device's transcripts.
+  ///
+  /// Ids are the server session ids the archive will actually carry, so a tick
+  /// survives the round trip to [V2SettingsActions.exportData].
+  static List<V2ExportSession> exportSessionsFor(
+    Iterable<ChatSession> sessions,
+    Map<String, bool> selected,
+  ) {
+    final ordered = [...sessions]
+      ..sort((a, b) => b.lastActivityAt.compareTo(a.lastActivityAt));
+    return [
+      for (final session in ordered)
+        if (session.messages.isNotEmpty)
+          V2ExportSession(
+            id: CloudSessionStore.I.resolveServerSessionId(session.id),
+            name: session.title,
+            sizeBytes: _sessionBytes(session),
+            sizeLabel: _bytes(_sessionBytes(session)),
+            detail:
+                '${session.messages.length} '
+                '${session.messages.length == 1 ? 'message' : 'messages'}',
+            selected:
+                selected[CloudSessionStore.I.resolveServerSessionId(
+                  session.id,
+                )] ??
+                true,
+          ),
+    ];
+  }
+
   static V2StoragePageData _storage(
     BuildContext context,
     V2SettingsActions actions, {
@@ -582,6 +615,7 @@ class V2SettingsRoutes {
     int cacheBytes = 0,
     bool loading = false,
     String? errorMessage,
+    Future<int> Function()? onClearCacheAndReport,
     VoidCallback? onRetry,
   }) {
     final spec = _planSpec(AppState.I.ovidCloudTier);
@@ -622,6 +656,8 @@ class V2SettingsRoutes {
       cacheSizeLabel: _bytes(cacheBytes),
       loading: loading,
       errorMessage: errorMessage,
+      onClearCacheAndReport: onClearCacheAndReport,
+      onDeleteOldChats: () => actions.deleteOldChats(context),
       onRetry: onRetry,
       onGoUpgrade: () => open(context, 'plan_billing', actions),
     );
@@ -631,13 +667,20 @@ class V2SettingsRoutes {
   static int _localTranscriptBytes() {
     var total = 0;
     for (final session in AppState.I.sessions) {
-      for (final message in session.messages) {
-        total += utf8.encode(message.content).length;
-        final detail = message.toolDetail;
-        if (detail != null) total += utf8.encode(detail).length;
-        for (final attachment in message.attachments) {
-          total += attachment.size;
-        }
+      total += _sessionBytes(session);
+    }
+    return total;
+  }
+
+  /// UTF-8 size of one chat's transcript, including attachment metadata.
+  static int _sessionBytes(ChatSession session) {
+    var total = 0;
+    for (final message in session.messages) {
+      total += utf8.encode(message.content).length;
+      final detail = message.toolDetail;
+      if (detail != null) total += utf8.encode(detail).length;
+      for (final attachment in message.attachments) {
+        total += attachment.size;
       }
     }
     return total;
@@ -673,7 +716,7 @@ class V2SettingsRoutes {
         title: 'GitHub',
         subtitle: github.isLoggedIn
             ? (github.login == null ? 'Connected' : '@${github.login}')
-            : 'Connect to clone and push from Studio',
+            : 'Connect for Studio clone and push',
         connected: github.isLoggedIn,
       ),
       token: const V2Credential(
@@ -795,7 +838,6 @@ class V2SettingsRoutes {
       sound: settings.sounds.values.any(
         (sound) => sound != NotificationSound.silent,
       ),
-      vibration: true,
       quietHoursEnabled: settings.quietHoursEnabled,
       quietHoursLabel: '${hhmm(start)}–${hhmm(end)}',
       quietHoursStart: TimeOfDay(hour: start ~/ 60, minute: start % 60),
@@ -889,7 +931,13 @@ class V2SettingsRoutes {
   static List<V2PermissionItem> _permissionItems(
     Map<String, PermissionStatus> statuses,
   ) {
-    const ids = <String>['camera', 'microphone', 'photos', 'notifications', 'files'];
+    const ids = <String>[
+      'camera',
+      'microphone',
+      'photos',
+      'notifications',
+      'files',
+    ];
     const meta = <String, ({String name, String reason, IconData icon})>{
       'camera': (
         name: 'Camera',
@@ -923,9 +971,7 @@ class V2SettingsRoutes {
           id: id,
           name: meta[id]!.name,
           reason: meta[id]!.reason,
-          status: _permissionAccess(
-            statuses[id] ?? PermissionStatus.denied,
-          ),
+          status: _permissionAccess(statuses[id] ?? PermissionStatus.denied),
           icon: meta[id]!.icon,
         ),
     ];
@@ -1008,9 +1054,171 @@ class V2SettingsRoutes {
   }
 }
 
-/// Keeps the Plan & billing screen live: owns the currency/period choice (so
-/// the toggles are real, not dead) and rebuilds when `/usage` changes the
-/// confirmed plan after a purchase.
+/// One fact parsed out of a shared memory file.
+///
+/// Memory is stored as Markdown files (`MEMORY.md` plus notes), so a fact is a
+/// non-empty line with its bullet/heading markers removed. The line index keeps
+/// the id stable long enough to delete exactly that line.
+@immutable
+class V2MemoryFact {
+  const V2MemoryFact({
+    required this.id,
+    required this.text,
+    required this.fileName,
+    required this.line,
+  });
+
+  final String id;
+  final String text;
+  final String fileName;
+  final int line;
+}
+
+/// Parses the facts in one memory file. Headings and code fences are not facts.
+List<V2MemoryFact> memoryFactsFrom(String fileName, String content) {
+  final facts = <V2MemoryFact>[];
+  final lines = content.split('\n');
+  var inFence = false;
+  for (var i = 0; i < lines.length; i++) {
+    final trimmed = lines[i].trim();
+    if (trimmed.startsWith('```')) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    if (trimmed.isEmpty) continue;
+    if (trimmed.startsWith('#')) continue;
+    final text = trimmed
+        .replaceFirst(RegExp(r'^(?:[-*+]|\d+[.)])\s+'), '')
+        .trim();
+    if (text.isEmpty) continue;
+    facts.add(
+      V2MemoryFact(id: '$fileName#$i', text: text, fileName: fileName, line: i),
+    );
+  }
+  return facts;
+}
+
+/// Removes [fact]'s line from [content], or null when the file no longer holds
+/// that exact fact (the caller then asks the person to refresh).
+String? removeMemoryFact(String content, V2MemoryFact fact) {
+  final lines = content.split('\n');
+  if (fact.line < 0 || fact.line >= lines.length) return null;
+  final current = memoryFactsFrom(
+    fact.fileName,
+    content,
+  ).where((entry) => entry.line == fact.line).firstOrNull;
+  if (current == null || current.text != fact.text) return null;
+  lines.removeAt(fact.line);
+  return lines.join('\n');
+}
+
+/// What the memory API returned for one chat.
+@immutable
+class V2MemorySnapshot {
+  const V2MemorySnapshot({
+    required this.shared,
+    required this.files,
+    this.facts = const [],
+  });
+
+  /// True when the account's "Share memory" preference opened the shared
+  /// scope, so [facts] are the cross-chat facts.
+  final bool shared;
+  final List<MemoryFileSummary> files;
+  final List<V2MemoryFact> facts;
+}
+
+/// The real memory source: `GET /memory`, `GET/PUT/DELETE /memory/:name` and
+/// the project memory routes.
+///
+/// Memory is isolated per chat by default. With sharing on the server returns
+/// the shared scope instead, and the facts inside those files are the global
+/// ones the Memory screen lists.
+class V2MemorySource {
+  V2MemorySource({AccountSettingsClient? client})
+    : _client = client ?? AccountSettingsClient.I;
+
+  final AccountSettingsClient _client;
+
+  Future<V2MemorySnapshot> load(String sessionId) async {
+    final listing = await _client.memoryFiles(sessionId);
+    if (!listing.shared) {
+      return V2MemorySnapshot(shared: false, files: listing.files);
+    }
+    final facts = <V2MemoryFact>[];
+    for (final file in listing.files) {
+      final doc = await _client.readMemory(sessionId, file.name);
+      facts.addAll(memoryFactsFrom(file.name, doc.content));
+    }
+    return V2MemorySnapshot(shared: true, files: listing.files, facts: facts);
+  }
+
+  /// Deletes one row for real. Global rows rewrite the fact out of its file,
+  /// session rows delete the file and project rows empty that project's memory.
+  Future<void> forget({
+    required String sessionId,
+    required V2MemoryScope scope,
+    required String id,
+    required V2MemorySnapshot snapshot,
+  }) async {
+    switch (scope) {
+      case V2MemoryScope.global:
+        final fact = snapshot.facts
+            .where((entry) => entry.id == id)
+            .firstOrNull;
+        if (fact == null) {
+          throw StateError('That memory is no longer in the list.');
+        }
+        final doc = await _client.readMemory(sessionId, fact.fileName);
+        final next = removeMemoryFact(doc.content, fact);
+        if (next == null) {
+          throw StateError('That memory changed. Refresh and try again.');
+        }
+        if (next.trim().isEmpty) {
+          await _client.deleteMemory(sessionId, fact.fileName);
+        } else {
+          await _client.writeMemory(
+            sessionId,
+            fact.fileName,
+            next,
+            ifRevision: doc.revision,
+          );
+        }
+      case V2MemoryScope.session:
+        await _client.deleteMemory(sessionId, id);
+      case V2MemoryScope.project:
+        await _forgetProject(id);
+      case V2MemoryScope.all:
+        break;
+    }
+  }
+
+  /// Removes every file in the shared scope (the screen already confirmed).
+  Future<void> forgetAllShared(String sessionId) async {
+    final listing = await _client.memoryFiles(sessionId);
+    for (final file in listing.files) {
+      await _client.deleteMemory(sessionId, file.name);
+    }
+  }
+
+  Future<void> _forgetProject(String projectId) async {
+    final rest = CloudRestClient.I;
+    final project = Uri.encodeComponent(projectId);
+    final json = await rest.getJson('/projects/$project/memory');
+    final items = json['items'];
+    if (items is! List) return;
+    for (final item in items) {
+      if (item is! Map || item['name'] is! String) continue;
+      final name = Uri.encodeComponent(item['name'] as String);
+      await rest.delete('/projects/$project/memory/$name');
+    }
+    // The sidebar's per-project memory count is server-derived; refresh it so
+    // the row does not keep claiming files that are gone.
+    await ProjectsController.I.refresh();
+  }
+}
+
 class _PlanLoader extends StatefulWidget {
   const _PlanLoader({required this.actions});
 
@@ -1308,16 +1516,14 @@ class _MemoryLoader extends StatefulWidget {
 }
 
 class _MemoryLoaderState extends State<_MemoryLoader> {
+  final V2MemorySource _source = V2MemorySource();
+  V2MemorySnapshot? _snapshot;
   late V2MemoryPageData _data;
 
   @override
   void initState() {
     super.initState();
-    _data = V2SettingsRoutes._memory(
-      context,
-      widget.actions,
-      loading: true,
-    );
+    _data = V2SettingsRoutes._memory(context, widget.actions, loading: true);
     unawaited(_load());
   }
 
@@ -1326,6 +1532,7 @@ class _MemoryLoaderState extends State<_MemoryLoader> {
     if (sessionId == null) {
       if (!mounted) return;
       setState(() {
+        _snapshot = null;
         _data = V2SettingsRoutes._memory(
           context,
           widget.actions,
@@ -1335,22 +1542,11 @@ class _MemoryLoaderState extends State<_MemoryLoader> {
       return;
     }
     try {
-      final listing = await AccountSettingsClient.I.memoryFiles(sessionId);
+      final snapshot = await _source.load(sessionId);
       if (!mounted) return;
       setState(() {
-        _data = V2SettingsRoutes._memory(
-          context,
-          widget.actions,
-          files: [
-            for (final file in listing.files)
-              V2MemoryFile(
-                id: file.name,
-                name: file.name,
-                detail: V2SettingsRoutes._bytes(file.sizeBytes),
-              ),
-          ],
-          onRetry: _load,
-        );
+        _snapshot = snapshot;
+        _data = _pageFor(snapshot);
       });
     } catch (_) {
       if (!mounted) return;
@@ -1367,8 +1563,184 @@ class _MemoryLoaderState extends State<_MemoryLoader> {
     }
   }
 
+  /// Maps the real files and facts onto the screen. The shared scope holds
+  /// cross-chat facts, so its files become [V2MemoryEntry] rows rather than
+  /// per-chat file rows.
+  V2MemoryPageData _pageFor(V2MemorySnapshot snapshot) {
+    return V2SettingsRoutes._memory(
+      context,
+      widget.actions,
+      globalEntries: [
+        for (final fact in snapshot.facts)
+          V2MemoryEntry(id: fact.id, text: fact.text),
+      ],
+      files: snapshot.shared
+          ? const []
+          : [
+              for (final file in snapshot.files)
+                V2MemoryFile(
+                  id: file.name,
+                  name: file.name,
+                  detail: V2SettingsRoutes._bytes(file.sizeBytes),
+                ),
+            ],
+      onForgetMemory: (scope, id) => unawaited(_forget(scope, id)),
+      onRetry: _load,
+    );
+  }
+
+  /// Deletes one row through the real memory API, then reloads so a failure
+  /// puts the row back instead of leaving the screen lying.
+  Future<void> _forget(V2MemoryScope scope, String id) async {
+    final sessionId = AppState.I.activeSessionId;
+    final snapshot = _snapshot;
+    if (sessionId == null || snapshot == null) return;
+    try {
+      await _source.forget(
+        sessionId: sessionId,
+        scope: scope,
+        id: id,
+        snapshot: snapshot,
+      );
+      await _load();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(
+              e is StateError ? e.message : 'Could not forget that memory.',
+            ),
+          ),
+        );
+      await _load();
+    }
+  }
+
   @override
   Widget build(BuildContext context) => MemoryPage(data: _data);
+}
+
+/// Shared memory: the account's real sharing preference and the shared scope's
+/// facts. The server has one shared namespace (not a switch per destination),
+/// so the screen exposes that one real scope instead of inventing three.
+class _SharedMemoryLoader extends StatefulWidget {
+  const _SharedMemoryLoader({required this.actions});
+
+  final V2SettingsActions actions;
+
+  @override
+  State<_SharedMemoryLoader> createState() => _SharedMemoryLoaderState();
+}
+
+class _SharedMemoryLoaderState extends State<_SharedMemoryLoader> {
+  final V2MemorySource _source = V2MemorySource();
+  bool _loading = true;
+  String? _error;
+  int _factCount = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_load());
+  }
+
+  Future<void> _load() async {
+    final app = AppState.I;
+    final sessionId = app.activeSessionId;
+    if (!app.memoryEnabled ||
+        !app.effectiveShareSessionMemory ||
+        sessionId == null) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = null;
+        _factCount = 0;
+      });
+      return;
+    }
+    try {
+      final snapshot = await _source.load(sessionId);
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = null;
+        _factCount = snapshot.shared ? snapshot.facts.length : 0;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = 'We could not load shared memory.';
+        _factCount = 0;
+      });
+    }
+  }
+
+  Future<void> _setShared(bool value) async {
+    // Sharing needs memory: turning sharing on must turn memory on too,
+    // otherwise the switch would flip back on the next rebuild.
+    if (value && !AppState.I.memoryEnabled) {
+      await widget.actions.setMemoryEnabled(true);
+    }
+    await widget.actions.setShareSessionMemory(value);
+    await _load();
+  }
+
+  Future<void> _forget() async {
+    final sessionId = AppState.I.activeSessionId;
+    if (sessionId != null) {
+      try {
+        await _source.forgetAllShared(sessionId);
+      } catch (_) {
+        if (mounted) {
+          ScaffoldMessenger.of(context)
+            ..hideCurrentSnackBar()
+            ..showSnackBar(
+              const SnackBar(content: Text('Could not forget shared facts.')),
+            );
+        }
+      }
+    }
+    await _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = AppState.I.effectiveShareSessionMemory;
+    final status = _loading
+        ? V2SharedMemoryStatus.loading
+        : _error != null
+        ? V2SharedMemoryStatus.error
+        : _factCount == 0
+        ? V2SharedMemoryStatus.empty
+        : V2SharedMemoryStatus.ready;
+    return SharedMemoryPage(
+      data: V2SharedMemoryPageData(
+        status: status,
+        enabled: enabled,
+        scopes: [
+          V2SharedMemoryScope(
+            id: 'global',
+            kind: V2SharedMemoryScopeKind.global,
+            title: 'All chats',
+            description: 'Facts reused in every chat you start.',
+            audience: 'Only you, everywhere',
+            shared: enabled,
+          ),
+        ],
+        factCount: _factCount,
+        onEnabledChanged: (value) => unawaited(_setShared(value)),
+        onScopeChanged: (id, value) {
+          if (id == 'global') unawaited(_setShared(value));
+        },
+        onForget: () => unawaited(_forget()),
+        onRetry: _load,
+        errorMessage: _error ?? 'We could not load shared memory.',
+      ),
+    );
+  }
 }
 
 /// Personalization screen: rebuilds from live [AppState] and refreshes the
@@ -1401,30 +1773,59 @@ class _AppearanceLoaderState extends State<_AppearanceLoader> {
 
   @override
   Widget build(BuildContext context) => AppearancePage(
-    data: V2SettingsRoutes._appearance(
-      context,
-      widget.actions,
-      onRefreshPreview: () {
-        if (mounted) setState(() {});
-      },
-    ),
+    data: V2SettingsRoutes._appearance(context, widget.actions),
   );
 }
 
-/// Data control screen with real measured sizes, consent state and content.
-class _DataControlLoader extends StatelessWidget {
+/// Data control screen with real measured sizes, consent state, the account's
+/// real contact and the export picker's per-chat selection.
+class _DataControlLoader extends StatefulWidget {
   const _DataControlLoader({required this.actions});
 
   final V2SettingsActions actions;
 
   @override
-  Widget build(BuildContext context) => DataControlPage(
-    data: V2SettingsRoutes._dataControl(
-      context,
-      actions,
-      totalBytes: V2SettingsRoutes._localTranscriptBytes(),
-    ),
-  );
+  State<_DataControlLoader> createState() => _DataControlLoaderState();
+}
+
+class _DataControlLoaderState extends State<_DataControlLoader> {
+  /// Export ids the person unticked. Absent means selected.
+  final Map<String, bool> _selected = {};
+
+  @override
+  void initState() {
+    super.initState();
+    AppState.I.addListener(_onSessionsChanged);
+  }
+
+  @override
+  void dispose() {
+    AppState.I.removeListener(_onSessionsChanged);
+    super.dispose();
+  }
+
+  void _onSessionsChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final sessions = V2SettingsRoutes.exportSessionsFor(
+      AppState.I.sessions,
+      _selected,
+    );
+    return DataControlPage(
+      data: V2SettingsRoutes._dataControl(
+        context,
+        widget.actions,
+        totalBytes: V2SettingsRoutes._localTranscriptBytes(),
+        exportSessions: sessions,
+        onExportSessionToggled: (id, selected) {
+          setState(() => _selected[id] = selected);
+        },
+      ),
+    );
+  }
 }
 
 /// Storage screen measured from the account's artifact inventory, this
@@ -1488,7 +1889,10 @@ class _StorageLoaderState extends State<_StorageLoader> {
       final dir = await getTemporaryDirectory();
       if (!await dir.exists()) return 0;
       var total = 0;
-      await for (final entity in dir.list(recursive: true, followLinks: false)) {
+      await for (final entity in dir.list(
+        recursive: true,
+        followLinks: false,
+      )) {
         if (entity is! File) continue;
         try {
           total += await entity.length();
@@ -1502,6 +1906,52 @@ class _StorageLoaderState extends State<_StorageLoader> {
     }
   }
 
+  /// Empties the temporary directory and returns the bytes actually freed, so
+  /// the "Clear cache" row reports a measured number and the page reloads.
+  Future<int> _clearCache() async {
+    try {
+      final dir = await getTemporaryDirectory();
+      if (!await dir.exists()) return 0;
+      final before = await _dirBytes(dir);
+      await for (final entity in dir.list(followLinks: false)) {
+        try {
+          await entity.delete(recursive: true);
+        } catch (_) {
+          // A file in use is skipped; the difference reports what went.
+        }
+      }
+      final after = await _dirBytes(dir);
+      if (mounted) await _load();
+      return (before - after).clamp(0, before);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<int> _dirBytes(Directory dir) async {
+    var bytes = 0;
+    final stack = <Directory>[dir];
+    while (stack.isNotEmpty) {
+      final current = stack.removeLast();
+      try {
+        await for (final entity in current.list(followLinks: false)) {
+          if (entity is File) {
+            try {
+              bytes += await entity.length();
+            } catch (_) {
+              // Unreadable entries are not part of the report.
+            }
+          } else if (entity is Directory) {
+            stack.add(entity);
+          }
+        }
+      } catch (_) {
+        // Unreadable directories are skipped.
+      }
+    }
+    return bytes;
+  }
+
   @override
   Widget build(BuildContext context) => StoragePage(
     data: V2SettingsRoutes._storage(
@@ -1511,6 +1961,7 @@ class _StorageLoaderState extends State<_StorageLoader> {
       sessionsBytes: _sessions,
       cacheBytes: _cache,
       loading: _loading,
+      onClearCacheAndReport: _clearCache,
       onRetry: () {
         setState(() => _loading = true);
         unawaited(_load());
@@ -1591,7 +2042,9 @@ class _PermissionsLoaderState extends State<_PermissionsLoader>
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not ask Android for permission.')),
+          const SnackBar(
+            content: Text('Could not ask Android for permission.'),
+          ),
         );
       }
       return;

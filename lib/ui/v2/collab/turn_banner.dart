@@ -61,7 +61,8 @@ class V2CollabTurnBannerData {
   /// Human label for the remaining time, for example "24s left in turn".
   final String timeLeftLabel;
 
-  /// Share of the turn still left, used by the progress bar. Null hides it.
+  /// Share of the turn still left. Retained for hosts; the one-line banner
+  /// shows the label, not a progress bar.
   final double? timeLeftFraction;
 
   /// True when this device holds the turn.
@@ -77,7 +78,8 @@ class V2CollabTurnBannerData {
   /// Optional wiring label such as "About 1m 12s until your turn".
   final String? queueLabel;
 
-  /// Queue rows rendered before collapsing into a "+N more" row.
+  /// Retained for callers that used to render the queue. The banner is one
+  /// line, so the queue lives on the members page.
   final int maxVisibleQueue;
 
   final String errorMessage;
@@ -110,11 +112,12 @@ class V2CollabTurnBannerData {
   }
 }
 
-/// Shows whose turn it is, the time left, the people waiting, the request-turn
-/// control and the one-message-at-a-time rule.
+/// One status line for the shared turn: who holds it, how long is left and the
+/// single action available (ask for the turn).
 ///
 /// Presentational only: the live adapter passes [V2CollabTurnBannerData] and
-/// owns the callbacks.
+/// owns the callbacks. The queue, countdown bar and rule paragraphs belong to
+/// the members page, not here.
 class CollabTurnBanner extends StatelessWidget {
   const CollabTurnBanner({
     super.key,
@@ -127,592 +130,196 @@ class CollabTurnBanner extends StatelessWidget {
   final V2CollabTurnBannerData data;
   final VoidCallback? onRequestTurn;
 
-  /// Opens the full member/queue list. Only offered when the queue is longer
-  /// than the visible rows.
+  /// Retained for hosts that open the full member list. The one-line banner
+  /// has no queue affordance.
   final VoidCallback? onViewQueue;
 
   final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
-    return OFadeSlide(
-      child: OCard(
-        accent: data.status == V2CollabTurnBannerStatus.ready && data.isMyTurn,
-        padding: const EdgeInsets.all(OSpace.l),
-        child: switch (data.status) {
-          V2CollabTurnBannerStatus.loading => _loading(context),
-          V2CollabTurnBannerStatus.error => _error(context),
-          V2CollabTurnBannerStatus.empty => _freeTurn(context),
-          V2CollabTurnBannerStatus.ready =>
-            data.hasTurn ? _ready(context) : _freeTurn(context),
-        },
+    return switch (data.status) {
+      V2CollabTurnBannerStatus.loading => const _Banner(
+        child: OSkeleton(width: 180, height: 16),
       ),
-    );
-  }
-
-  Widget _loading(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: const [
-        Row(
-          children: [
-            OSkeleton(width: 36, height: 36, radius: ORadius.m),
-            SizedBox(width: OSpace.m),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  OSkeleton(width: 76, height: 11),
-                  SizedBox(height: OSpace.s),
-                  OSkeleton(width: 132, height: 16),
-                ],
-              ),
-            ),
-          ],
-        ),
-        SizedBox(height: OSpace.l),
-        OSkeleton(width: double.infinity, height: 6, radius: ORadius.pill),
-        SizedBox(height: OSpace.l),
-        OSkeleton(width: 96, height: 11),
-        SizedBox(height: OSpace.s),
-        OSkeleton(width: double.infinity, height: 32, radius: ORadius.s),
-      ],
-    );
-  }
-
-  Widget _error(BuildContext context) {
-    final c = OColors.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(Icons.error_outline_rounded, size: 20, color: c.danger),
-            const SizedBox(width: OSpace.s),
-            Expanded(
-              child: Text(
-                data.errorMessage,
-                style: OType.bodySm.copyWith(color: c.text),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: OSpace.m),
-        OButton(
-          label: 'Try again',
-          icon: Icons.refresh_rounded,
-          variant: OButtonVariant.secondary,
-          onPressed: onRetry,
-        ),
-      ],
-    );
+      V2CollabTurnBannerStatus.error => _line(
+        context,
+        icon: Icons.error_outline_rounded,
+        text: data.errorMessage,
+        danger: true,
+        action: onRetry == null
+            ? null
+            : _ActionText(label: 'Retry', onPressed: onRetry),
+      ),
+      V2CollabTurnBannerStatus.empty => _freeTurn(context),
+      V2CollabTurnBannerStatus.ready =>
+        data.hasTurn ? _turn(context) : _freeTurn(context),
+    };
   }
 
   Widget _freeTurn(BuildContext context) {
-    final c = OColors.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _TurnGlyph(active: data.isMyTurn),
-            const SizedBox(width: OSpace.m),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    data.isMyTurn ? 'Your turn' : 'Turn is free',
-                    style: OType.overline.copyWith(color: c.textMuted),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    data.isMyTurn
-                        ? (data.queue.isEmpty
-                              ? 'Nobody is waiting after you.'
-                              : '${data.waitingCount} '
-                                    '${data.waitingCount == 1 ? 'person is' : 'people are'} '
-                                    'waiting next.')
-                        : 'Nobody is sending right now.',
-                    style: OType.bodySm.copyWith(
-                      color: c.text,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
-              ),
+    return _line(
+      context,
+      icon: Icons.hourglass_bottom_rounded,
+      text: 'Turn is free',
+      action: onRequestTurn == null
+          ? null
+          : _ActionText(
+              label: 'Request turn',
+              onPressed: onRequestTurn,
             ),
-          ],
-        ),
-        const SizedBox(height: OSpace.m),
-        Text(
-          data.isMyTurn
-              ? 'Send one message. The turn then moves to the next person.'
-              : 'Take the turn to send the next message. One person sends at a time.',
-          style: OType.caption.copyWith(color: c.textMuted),
-        ),
-        const SizedBox(height: OSpace.m),
-        if (data.isMyTurn)
-          _HeldTurnNotice()
-        else if (onRequestTurn != null)
-          OButton(
-            label: 'Take the turn',
-            icon: Icons.pan_tool_alt_rounded,
-            variant: OButtonVariant.primary,
-            onPressed: onRequestTurn,
-            semanticLabel: 'Take the turn to send the next message',
-            expand: true,
-          )
-        else
-          Text(
-            'Nobody is sending. Your composer is ready for the next message.',
-            style: OType.caption.copyWith(color: c.textMuted),
-          ),
-        if (data.queue.isNotEmpty) ...[
-          const SizedBox(height: OSpace.m),
-          Divider(color: c.hairline, height: 1),
-          const SizedBox(height: OSpace.m),
-          _queue(context),
-        ],
-        const SizedBox(height: OSpace.m),
-        const _OneAtATimeNote(),
-      ],
     );
   }
 
-  Widget _ready(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        _header(context),
-        if (data.timeLeftFraction != null) ...[
-          const SizedBox(height: OSpace.m),
-          Semantics(
-            label: data.timeLeftLabel,
-            excludeSemantics: true,
-            child: OProgressBar(value: data.timeLeftFraction!),
-          ),
-        ],
-        const SizedBox(height: OSpace.m),
-        _requestControl(context),
-        const SizedBox(height: OSpace.m),
-        Divider(color: OColors.of(context).hairline, height: 1),
-        const SizedBox(height: OSpace.m),
-        _queue(context),
-        const SizedBox(height: OSpace.m),
-        const _OneAtATimeNote(),
-      ],
-    );
-  }
-
-  Widget _header(BuildContext context) {
-    final c = OColors.of(context);
-    // The countdown changes every second, so only the holder is a stable
-    // announcement. Marking the whole header as a live region would make a
-    // screen reader repeat the banner on every tick.
-    final identity = Semantics(
-      container: true,
-      label: data.isMyTurn
-          ? 'Your turn, ${data.holderName}'
-          : '${data.holderName} has the turn',
-      excludeSemantics: true,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _TurnGlyph(active: data.isMyTurn),
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  data.isMyTurn ? 'Your turn' : 'Current turn',
-                  style: OType.overline.copyWith(
-                    color: data.isMyTurn ? c.accent : c.textMuted,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  data.isMyTurn ? '${data.holderName} (you)' : data.holderName,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.h3.copyWith(color: c.text),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-
-    final time = data.timeLeftLabel.trim().isEmpty
-        ? null
-        : _TimeLeftPill(
-            label: data.timeLeftLabel,
-            urgent:
-                data.timeLeftFraction != null && data.timeLeftFraction! <= 0.2,
-          );
-
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        // The countdown cannot sit beside the name on a 320 dp phone at
-        // 200 % text without squeezing the name to nothing.
-        final stacked =
-            constraints.maxWidth < 280 ||
-            MediaQuery.textScalerOf(context).scale(1) > 1.3;
-        if (stacked) {
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              identity,
-              if (time != null) ...[
-                const SizedBox(height: OSpace.s),
-                time,
-              ],
-            ],
-          );
-        }
-        return Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(child: identity),
-            if (time != null) ...[
-              const SizedBox(width: OSpace.s),
-              time,
-            ],
-          ],
-        );
-      },
-    );
-  }
-
-  Widget _requestControl(BuildContext context) {
-    final c = OColors.of(context);
-    final held = data.isMyTurn;
-    final waiting = !held && data.turnRequested;
-    final position = held ? null : data.myPositionLabel;
-
-    final Widget control;
-    if (held) {
-      control = _HeldTurnNotice();
-    } else if (waiting) {
-      control = OButton(
-        label: 'In queue',
-        icon: Icons.check_rounded,
-        variant: OButtonVariant.secondary,
-        onPressed: null,
-        semanticLabel: 'In queue. You asked to send next.',
-        expand: true,
+  Widget _turn(BuildContext context) {
+    final time = data.timeLeftLabel.trim();
+    final text = data.isMyTurn
+        ? (time.isEmpty ? 'Your turn' : 'Your turn · $time')
+        : (time.isEmpty
+              ? '${data.holderName} has the turn'
+              : '${data.holderName} · $time');
+    final Widget? action;
+    if (data.isMyTurn) {
+      action = null;
+    } else if (data.turnRequested) {
+      action = Text(
+        'In queue',
+        style: OType.caption.copyWith(color: OColors.of(context).textMuted),
       );
     } else if (onRequestTurn != null) {
-      control = OButton(
-        label: 'Request turn',
-        icon: Icons.pan_tool_alt_rounded,
-        variant: OButtonVariant.primary,
-        onPressed: onRequestTurn,
-        semanticLabel: 'Request the turn to send a message',
-        expand: true,
-      );
+      action = _ActionText(label: 'Request turn', onPressed: onRequestTurn);
     } else {
-      // This room does not expose a queue, so there is nothing honest to
-      // request. State the rule instead of showing a dead button.
-      control = Text(
-        'Wait for ${data.holderName} to finish. The turn passes automatically.',
-        style: OType.caption.copyWith(color: c.textMuted),
-      );
+      action = null;
     }
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        control,
-        if (position != null) ...[
-          const SizedBox(height: OSpace.s),
-          Text(position, style: OType.caption.copyWith(color: c.textMuted)),
-        ],
-      ],
+    return _line(
+      context,
+      icon: data.isMyTurn
+          ? Icons.pan_tool_alt_rounded
+          : Icons.hourglass_bottom_rounded,
+      text: text,
+      accent: data.isMyTurn,
+      action: action,
+      semanticLabel: [
+        text,
+        if (data.myPositionLabel != null) data.myPositionLabel!,
+      ].join('. '),
     );
   }
 
-  Widget _queue(BuildContext context) {
+  Widget _line(
+    BuildContext context, {
+    required IconData icon,
+    required String text,
+    Widget? action,
+    bool accent = false,
+    bool danger = false,
+    String? semanticLabel,
+  }) {
     final c = OColors.of(context);
-    final visible = data.visibleQueue;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Wrap(
-          spacing: OSpace.s,
-          runSpacing: OSpace.xs,
-          crossAxisAlignment: WrapCrossAlignment.center,
+    final color = danger
+        ? c.danger
+        : (accent ? c.accent : c.textMuted);
+    return _Banner(
+      child: Semantics(
+        container: true,
+        explicitChildNodes: true,
+        label: semanticLabel ?? text,
+        child: Row(
           children: [
-            Text('Waiting', style: OType.overline.copyWith(color: c.textMuted)),
-            if (data.waitingCount > 0)
-              OPill(
-                label:
-                    '${data.waitingCount} ${data.waitingCount == 1 ? 'person' : 'people'}',
+            ExcludeSemantics(
+              child: Icon(icon, size: 18, color: color),
+            ),
+            const SizedBox(width: OSpace.s),
+            Expanded(
+              child: ExcludeSemantics(
+                child: Text(
+                  text,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.bodySm.copyWith(
+                    color: danger ? c.danger : c.text,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
               ),
+            ),
+            if (action != null) ...[
+              const SizedBox(width: OSpace.xs),
+              action,
+            ],
           ],
         ),
-        const SizedBox(height: OSpace.s),
-        if (visible.isEmpty)
-          Text(
-            'Nobody else is waiting. Request the turn to go next.',
-            style: OType.caption.copyWith(color: c.textFaint),
-          )
-        else ...[
-          for (var i = 0; i < visible.length; i++) ...[
-            _QueueRow(position: i + 1, waiter: visible[i]),
-            if (i < visible.length - 1) const SizedBox(height: OSpace.xs),
-          ],
-          if (data.hiddenQueueCount > 0) ...[
-            const SizedBox(height: OSpace.s),
-            Wrap(
-              spacing: OSpace.s,
-              runSpacing: OSpace.xs,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                Text(
-                  '+${data.hiddenQueueCount} more waiting',
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-                if (onViewQueue != null)
-                  OButton(
-                    label: 'View all',
-                    variant: OButtonVariant.ghost,
-                    onPressed: onViewQueue,
-                    semanticLabel:
-                        'View all ${data.waitingCount} people waiting for the turn',
-                  ),
-              ],
-            ),
-          ],
-        ],
-      ],
-    );
-  }
-}
-
-class _TurnGlyph extends StatelessWidget {
-  const _TurnGlyph({required this.active});
-
-  final bool active;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      width: 36,
-      height: 36,
-      decoration: BoxDecoration(
-        color: active ? c.accentFill : c.accentSoft,
-        borderRadius: BorderRadius.circular(ORadius.m),
-      ),
-      child: Icon(
-        active ? Icons.pan_tool_alt_rounded : Icons.hourglass_bottom_rounded,
-        size: 19,
-        color: active ? c.onAccent : c.accent,
       ),
     );
   }
 }
 
-class _TimeLeftPill extends StatelessWidget {
-  const _TimeLeftPill({required this.label, required this.urgent});
+/// Text action that can shrink: the label ellipsizes instead of pushing the
+/// status line past the screen edge at 200 % text.
+class _ActionText extends StatelessWidget {
+  const _ActionText({required this.label, required this.onPressed});
 
   final String label;
-  final bool urgent;
+  final VoidCallback? onPressed;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final fg = urgent ? c.warn : c.textMuted;
+    return Semantics(
+      button: true,
+      enabled: onPressed != null,
+      label: label,
+      onTap: onPressed,
+      excludeSemantics: true,
+      child: OPressable(
+        onTap: onPressed,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(
+            minHeight: OSpace.touch,
+            maxWidth: 120,
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: OSpace.s),
+            child: Center(
+              widthFactor: 1,
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: OType.label.copyWith(color: c.accent),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _Banner extends StatelessWidget {
+  const _Banner({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
     return Container(
-      constraints: const BoxConstraints(minHeight: 24),
+      constraints: const BoxConstraints(minHeight: OSpace.touch),
       padding: const EdgeInsets.symmetric(
-        horizontal: OSpace.s,
+        horizontal: OSpace.m,
         vertical: OSpace.xs,
       ),
       decoration: BoxDecoration(
-        color: urgent ? c.warn.withValues(alpha: 0.12) : c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.pill),
+        color: c.surface,
+        borderRadius: BorderRadius.circular(ORadius.m),
         border: Border.all(color: c.hairline),
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.timer_outlined, size: 14, color: fg),
-          const SizedBox(width: OSpace.xs),
-          Flexible(
-            child: Text(
-              label,
-              style: OType.caption.copyWith(
-                color: fg,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ],
+      child: Align(
+        alignment: Alignment.centerLeft,
+        heightFactor: 1,
+        child: child,
       ),
-    );
-  }
-}
-
-class _QueueRow extends StatelessWidget {
-  const _QueueRow({required this.position, required this.waiter});
-
-  final int position;
-  final V2CollabTurnWaiter waiter;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final name = Text(
-      waiter.name,
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      style: OType.bodySm.copyWith(
-        color: waiter.isYou ? c.accent : c.text,
-        fontWeight: waiter.isYou ? FontWeight.w600 : FontWeight.w400,
-      ),
-    );
-    return Semantics(
-      label: [
-        'Number $position in line: ${waiter.name}',
-        if (waiter.isYou) 'you',
-        if (waiter.waitLabel != null) waiter.waitLabel!,
-      ].join(', '),
-      excludeSemantics: true,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 2),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            Container(
-              constraints: const BoxConstraints(minWidth: 22, minHeight: 22),
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: waiter.isYou ? c.accentSoft : c.surfaceAlt,
-                borderRadius: BorderRadius.circular(ORadius.pill),
-              ),
-              child: Text(
-                '$position',
-                style: OType.caption.copyWith(
-                  color: waiter.isYou ? c.accent : c.textMuted,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-            const SizedBox(width: OSpace.s),
-            OAvatar(
-              initials: waiter.initials ?? waiter.name,
-              size: 28,
-              semanticLabel: waiter.name,
-            ),
-            const SizedBox(width: OSpace.s),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Wrap(
-                    spacing: OSpace.xs,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      name,
-                      if (waiter.isYou)
-                        Text(
-                          '(you)',
-                          style: OType.caption.copyWith(color: c.accent),
-                        ),
-                    ],
-                  ),
-                  if (waiter.waitLabel != null)
-                    Text(
-                      waiter.waitLabel!,
-                      style: OType.caption.copyWith(color: c.textFaint),
-                    ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Passive "you hold the turn" state. A disabled primary button reads as an
-/// unavailable action; this states the fact instead.
-class _HeldTurnNotice extends StatelessWidget {
-  const _HeldTurnNotice();
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Semantics(
-      label: 'Your turn. Send your message.',
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(
-          horizontal: OSpace.m,
-          vertical: OSpace.s,
-        ),
-        decoration: BoxDecoration(
-          color: c.accentSoft,
-          borderRadius: BorderRadius.circular(ORadius.m),
-          border: Border.all(color: c.accentFill.withValues(alpha: 0.35)),
-        ),
-        child: Row(
-          children: [
-            Icon(Icons.check_circle_rounded, size: 18, color: c.accent),
-            const SizedBox(width: OSpace.s),
-            Expanded(
-              child: Text(
-                'You have the turn',
-                style: OType.bodySm.copyWith(
-                  color: c.accent,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _OneAtATimeNote extends StatelessWidget {
-  const _OneAtATimeNote();
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Icon(Icons.lock_clock_rounded, size: 16, color: c.accent),
-        const SizedBox(width: OSpace.s),
-        Expanded(
-          child: Text(
-            'One message at a time. When a message sends, the turn passes to '
-            'the next person in line.',
-            style: OType.caption.copyWith(color: c.textMuted),
-          ),
-        ),
-      ],
     );
   }
 }

@@ -36,7 +36,7 @@ Material _roundStopMaterial(WidgetTester tester) => tester.widget<Material>(
 );
 
 void main() {
-  testWidgets('dock shows the count, the queued preview and its actions', (
+  testWidgets('dock shows one line: count, send now and dismiss', (
     tester,
   ) async {
     var sentNow = 0;
@@ -53,10 +53,11 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 400));
 
-    expect(find.text('2 queued messages'), findsOneWidget);
+    expect(find.text('2 queued'), findsOneWidget);
     expect(
       find.text('Add a pricing page with a yearly toggle'),
-      findsOneWidget,
+      findsNothing,
+      reason: 'the dock never draws a preview paragraph',
     );
     expect(find.text('Send now'), findsOneWidget);
 
@@ -77,18 +78,27 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 400));
 
-    expect(find.text('1 queued message'), findsOneWidget);
-    expect(find.text('2 queued messages'), findsNothing);
+    expect(find.text('1 queued'), findsOneWidget);
+    expect(find.text('2 queued'), findsNothing);
   });
 
-  testWidgets('dock omits the preview when the host has no text yet', (
+  testWidgets('dock stays one line when the host has no preview text', (
     tester,
   ) async {
-    await tester.pumpWidget(_app(const V2QueueDock(count: 1, preview: '')));
+    await tester.pumpWidget(
+      _app(
+        V2QueueDock(count: 1, preview: '', onSendNow: () {}, onDismiss: () {}),
+      ),
+    );
     await tester.pump(const Duration(milliseconds: 400));
 
-    expect(find.text('1 queued message'), findsOneWidget);
+    expect(find.text('1 queued'), findsOneWidget);
     expect(find.text('Send now'), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.text('Send now')).dy,
+      closeTo(tester.getTopLeft(find.text('1 queued')).dy, 8),
+      reason: 'count and action share one line',
+    );
   });
 
   testWidgets('chat page shows the dock above the composer and wires Stop', (
@@ -111,7 +121,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.byType(V2QueueDock), findsOneWidget);
-    expect(find.text('Use a warmer accent'), findsOneWidget);
+    expect(find.text('Use a warmer accent'), findsNothing);
     expect(
       tester.getTopLeft(find.byType(V2QueueDock)).dy,
       lessThan(tester.getTopLeft(find.byType(TextField)).dy),
@@ -172,8 +182,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500));
 
     expect(find.byType(V2QueueDock), findsOneWidget);
-    expect(find.text('2 queued messages'), findsOneWidget);
-    expect(find.text('Then add testimonials'), findsOneWidget);
+    expect(find.text('2 queued'), findsOneWidget);
+    expect(find.text('Then add testimonials'), findsNothing);
     expect(
       tester.getTopLeft(find.byType(V2QueueDock)).dy,
       lessThan(tester.getTopLeft(find.byType(TextField)).dy),

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'step_progress.dart';
 
@@ -55,6 +56,12 @@ class V2LanguageGoalData {
         scriptLabel: 'Devanagari',
       ),
       V2LanguageOption(
+        id: 'hinglish',
+        nativeLabel: 'Hinglish',
+        englishLabel: 'Hindi + English',
+        scriptLabel: 'Latin',
+      ),
+      V2LanguageOption(
         id: 'pa',
         nativeLabel: 'ਪੰਜਾਬੀ',
         englishLabel: 'Punjabi',
@@ -87,13 +94,13 @@ class V2LanguageGoalData {
       ),
       V2GoalOption(
         id: 'explore',
-        title: 'Just explore',
+        title: 'Explore',
         icon: Icons.explore_rounded,
       ),
     ],
     this.selectedGoalIds = const {'build'},
-    this.step = 1,
-    this.totalSteps = 3,
+    this.step = V2OnboardingTour.language,
+    this.totalSteps = V2OnboardingTour.totalSteps,
     this.loading = false,
     this.error,
   });
@@ -111,6 +118,7 @@ class V2LanguageGoalData {
 typedef V2LanguageGoalContinue =
     void Function(String languageId, Set<String> goalIds);
 
+/// Second step of the tour: two quick choices, then the shared footer action.
 class LanguageGoalPage extends StatefulWidget {
   const LanguageGoalPage({
     super.key,
@@ -119,7 +127,6 @@ class LanguageGoalPage extends StatefulWidget {
     this.onGoalToggled,
     this.onContinue,
     this.onRetry,
-    this.onSeeAllLanguages,
     this.onClose,
     this.onBack,
   });
@@ -129,7 +136,6 @@ class LanguageGoalPage extends StatefulWidget {
   final void Function(String goalId, bool selected)? onGoalToggled;
   final V2LanguageGoalContinue? onContinue;
   final VoidCallback? onRetry;
-  final VoidCallback? onSeeAllLanguages;
   final VoidCallback? onClose;
 
   /// Returns to the step the language screen was opened from. Null hides the
@@ -187,19 +193,21 @@ class _LanguageGoalPageState extends State<LanguageGoalPage> {
   /// at least one is selected. The footer action stays visible but disabled so
   /// the layout does not jump and the reason is announced.
   bool get _canContinue =>
+      widget.onContinue != null &&
       _languageId != null &&
       (widget.data.goals.isEmpty || _goalIds.isNotEmpty);
 
   @override
   Widget build(BuildContext context) {
-    final c = OColors.of(context);
     final data = widget.data;
+    final hasChoices =
+        !data.loading && data.error == null && data.languages.isNotEmpty;
     final Widget body;
     if (data.loading) {
       body = const OSkeletonList(rows: 7);
     } else if (data.error != null) {
       body = OErrorState(
-        title: 'We could not load your choices',
+        title: 'Choices did not load',
         message: data.error!,
         onRetry: widget.onRetry,
       );
@@ -213,207 +221,81 @@ class _LanguageGoalPageState extends State<LanguageGoalPage> {
             : OButton(label: 'Try again', onPressed: widget.onRetry),
       );
     } else {
-      body = _content(context, c, data);
+      body = _content(context, data);
     }
 
-    return OScaffold(
-      appBar: OAppBar(
-        title: 'Language & goal',
-        // The tour owns the back path explicitly; the default arrow would pop
-        // whatever route happens to be below the gate.
-        showBack: false,
-        leading: widget.onBack == null
-            ? null
-            : OIconButton(
-                key: const Key('language-goal-back'),
-                icon: Icons.arrow_back_rounded,
-                semanticLabel: 'Back',
-                onPressed: widget.onBack,
-              ),
-        actions: [
-          if (widget.onClose != null)
-            OIconButton(
-              icon: Icons.close_rounded,
-              semanticLabel: 'Close',
-              onPressed: widget.onClose,
-            ),
-        ],
+    final valid = _canContinue;
+    return OnboardingStepScaffold(
+      step: V2OnboardingStepData(
+        step: data.step,
+        totalSteps: data.totalSteps,
+        trailingLabel: '',
       ),
-      body: body,
-      bottomNavigationBar:
-          !data.loading && data.error == null && data.languages.isNotEmpty
-          ? _continueBar(c, data)
-          : null,
+      title: 'Language & goal',
+      onBack: widget.onBack,
+      backKey: const Key('language-goal-back'),
+      onClose: widget.onClose,
+      primaryKey: const Key('language-goal-continue'),
+      primaryLabel: 'Continue',
+      onPrimary: valid ? _continue : null,
+      primaryEnabled: valid,
+      primaryVisible: hasChoices,
+      scrollable: !data.loading,
+      footerNote: valid || !hasChoices
+          ? null
+          : _languageId == null
+          ? 'Choose a language to continue.'
+          : 'Pick at least one goal to continue.',
+      child: body,
     );
   }
 
-  Widget _content(BuildContext context, OColors c, V2LanguageGoalData data) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.screen,
-        OSpace.s,
-        OSpace.screen,
-        OSpace.xl,
-      ),
-      child: OFadeSlide(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+  Widget _content(BuildContext context, V2LanguageGoalData data) {
+    final c = OColors.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const OSectionTitle(
+          title: 'Spoken language',
+          padding: EdgeInsets.only(bottom: OSpace.s),
+        ),
+        _LanguageGrid(
+          languages: data.languages,
+          selectedId: _languageId,
+          onSelected: _selectLanguage,
+        ),
+        const OSectionTitle(
+          title: 'First goal',
+          padding: EdgeInsets.only(top: OSpace.xl, bottom: OSpace.s),
+        ),
+        Wrap(
+          spacing: OSpace.s,
+          runSpacing: OSpace.s,
           children: [
-            OnboardingStepProgress(
-              data: V2OnboardingStepData(
-                step: data.step,
-                totalSteps: data.totalSteps,
+            for (final goal in data.goals)
+              OChip(
+                label: goal.title,
+                icon: goal.icon,
+                selected: _goalIds.contains(goal.id),
+                onTap: () => _toggleGoal(goal.id),
               ),
-            ),
-            const SizedBox(height: OSpace.l),
-            _SetupBanner(c: c),
-            const SizedBox(height: OSpace.xl),
-            Text(
-              'Which language do you think in?',
-              style: OType.h2.copyWith(color: c.text),
-            ),
-            const SizedBox(height: OSpace.xs),
-            Text(
-              'Ovid speaks and codes fluently in 40+ languages.',
-              style: OType.bodySm.copyWith(color: c.textMuted),
-            ),
-            const SizedBox(height: OSpace.m),
-            _LanguageGrid(
-              languages: data.languages,
-              selectedId: _languageId,
-              onSelected: _selectLanguage,
-            ),
-            if (widget.onSeeAllLanguages != null) ...[
-              const SizedBox(height: OSpace.s),
-              OButton(
-                label: 'See all 40+ languages',
-                variant: OButtonVariant.ghost,
-                icon: Icons.translate_rounded,
-                onPressed: widget.onSeeAllLanguages,
-              ),
-            ],
-            const SizedBox(height: OSpace.xl),
-            Text(
-              'What do you want Ovid to help with first?',
-              style: OType.h2.copyWith(color: c.text),
-            ),
-            const SizedBox(height: OSpace.xs),
-            Text(
-              'You can change this anytime. Pick one or more.',
-              style: OType.bodySm.copyWith(color: c.textMuted),
-            ),
-            const SizedBox(height: OSpace.m),
-            Wrap(
-              spacing: OSpace.s,
-              runSpacing: OSpace.s,
-              children: [
-                for (final goal in data.goals)
-                  _GoalChip(
-                    goal: goal,
-                    selected: _goalIds.contains(goal.id),
-                    onTap: () => _toggleGoal(goal.id),
-                  ),
-              ],
-            ),
-            if (data.goals.isEmpty) ...[
-              const SizedBox(height: OSpace.m),
-              Text(
-                'No goals to pick yet. You can continue and change this later.',
-                style: OType.bodySm.copyWith(color: c.textMuted),
-              ),
-            ],
-            const SizedBox(height: OSpace.xl),
           ],
         ),
-      ),
-    );
-  }
-
-  Widget _continueBar(OColors c, V2LanguageGoalData data) {
-    final steps = data.totalSteps < 1 ? 1 : data.totalSteps;
-    final active = data.step.clamp(1, steps);
-    final valid = _canContinue;
-    final hint = _languageId == null
-        ? 'Choose a language to continue.'
-        : 'Pick at least one goal to continue.';
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: c.bg,
-        border: Border(top: BorderSide(color: c.hairline)),
-      ),
-      child: SafeArea(
-        top: false,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(
-            OSpace.screen,
-            OSpace.m,
-            OSpace.screen,
-            OSpace.m,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              OButton(
-                key: const Key('language-goal-continue'),
-                label: 'Continue',
-                icon: Icons.arrow_forward_rounded,
-                expand: true,
-                onPressed: valid ? _continue : null,
-              ),
-              const SizedBox(height: OSpace.s),
-              Semantics(
-                liveRegion: !valid,
-                child: Text(
-                  valid
-                      ? 'Step $active of $steps · '
-                            'You can fine-tune this in settings.'
-                      : hint,
-                  textAlign: TextAlign.center,
-                  style: OType.caption.copyWith(
-                    color: valid ? c.textFaint : c.danger,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _SetupBanner extends StatelessWidget {
-  const _SetupBanner({required this.c});
-
-  final OColors c;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(OSpace.m),
-      decoration: BoxDecoration(
-        color: c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.l),
-        border: Border.all(color: c.hairline),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.auto_awesome_rounded, size: 20, color: c.accent),
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Text(
-              "We'll set things up in seconds.",
-              style: OType.bodySm.copyWith(color: c.textMuted),
-            ),
+        if (data.goals.isEmpty) ...[
+          const SizedBox(height: OSpace.m),
+          Text(
+            'No goals to pick yet. You can continue and change this later.',
+            style: OType.bodySm.copyWith(color: c.textMuted),
           ),
         ],
-      ),
+      ],
     );
   }
 }
 
-/// Two-column language grid. Each row is as tall as its tallest card, so large
-/// text grows the card instead of clipping the native or script label.
+/// Language cards: one per row on a narrow phone, two per row from 360 dp.
+/// Each row is as tall as its tallest card, so large text grows the card
+/// instead of clipping the native or script label.
 class _LanguageGrid extends StatelessWidget {
   const _LanguageGrid({
     required this.languages,
@@ -427,32 +309,40 @@ class _LanguageGrid extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final rows = <Widget>[];
-    for (var i = 0; i < languages.length; i += 2) {
-      final second = i + 1 < languages.length ? languages[i + 1] : null;
-      rows.add(
-        Padding(
-          padding: EdgeInsets.only(top: i == 0 ? 0 : OSpace.s),
-          child: IntrinsicHeight(
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Expanded(child: _card(languages[i])),
-                const SizedBox(width: OSpace.s),
-                Expanded(
-                  child: second == null
-                      ? const SizedBox.shrink()
-                      : _card(second),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final columns = constraints.maxWidth < OBreakpoints.compact ? 1 : 2;
+        final rows = <Widget>[];
+        for (var i = 0; i < languages.length; i += columns) {
+          final end = i + columns < languages.length
+              ? i + columns
+              : languages.length;
+          rows.add(
+            Padding(
+              padding: EdgeInsets.only(top: i == 0 ? 0 : OSpace.s),
+              child: IntrinsicHeight(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (var j = 0; j < columns; j++) ...[
+                      if (j > 0) const SizedBox(width: OSpace.s),
+                      Expanded(
+                        child: j < end - i
+                            ? _card(languages[i + j])
+                            : const SizedBox.shrink(),
+                      ),
+                    ],
+                  ],
                 ),
-              ],
+              ),
             ),
-          ),
-        ),
-      );
-    }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: rows,
+          );
+        }
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: rows,
+        );
+      },
     );
   }
 
@@ -571,79 +461,4 @@ bool _sameGoals(Set<String> a, Set<String> b) {
     if (!b.contains(id)) return false;
   }
   return true;
-}
-
-class _GoalChip extends StatelessWidget {
-  const _GoalChip({
-    required this.goal,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final V2GoalOption goal;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return MergeSemantics(
-      child: Semantics(
-        label: goal.title,
-        selected: selected,
-        button: true,
-        child: OPressable(
-          onTap: onTap,
-          child: ExcludeSemantics(
-            child: AnimatedContainer(
-              duration: OMotion.fast,
-              curve: OMotion.standard,
-              constraints: const BoxConstraints(minHeight: OSpace.touch),
-              padding: const EdgeInsets.symmetric(
-                horizontal: OSpace.l,
-                vertical: OSpace.m,
-              ),
-              decoration: BoxDecoration(
-                color: selected ? c.accentSoft : c.surface,
-                borderRadius: BorderRadius.circular(ORadius.m),
-                border: Border.all(
-                  color: selected
-                      ? c.accentFill.withValues(alpha: 0.50)
-                      : c.hairline,
-                ),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    goal.icon,
-                    size: 18,
-                    color: selected ? c.accent : c.textMuted,
-                  ),
-                  const SizedBox(width: OSpace.s),
-                  Flexible(
-                    child: Text(
-                      goal.title,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: OType.label.copyWith(
-                        color: selected ? c.accent : c.text,
-                        fontWeight: selected
-                            ? FontWeight.w600
-                            : FontWeight.w500,
-                      ),
-                    ),
-                  ),
-                  if (selected) ...[
-                    const SizedBox(width: OSpace.s),
-                    Icon(Icons.check_rounded, size: 16, color: c.accent),
-                  ],
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
 }

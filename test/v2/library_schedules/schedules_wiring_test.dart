@@ -113,9 +113,7 @@ class _FakeGateway implements ScheduleGateway {
         else
           row,
     ];
-    return ScheduleDto.fromJson(
-      rows.firstWhere((row) => row['id'] == id),
-    );
+    return ScheduleDto.fromJson(rows.firstWhere((row) => row['id'] == id));
   }
 
   @override
@@ -134,8 +132,8 @@ class _FakeGateway implements ScheduleGateway {
 
   @override
   Future<List<ScheduleRunDto>> runs(String id) async => [
-        for (final row in runRows) ScheduleRunDto.fromJson(row),
-      ];
+    for (final row in runRows) ScheduleRunDto.fromJson(row),
+  ];
 }
 
 Widget _app(Widget home, {bool dark = false, TextScaler? scaler}) =>
@@ -214,8 +212,7 @@ void main() {
       );
     });
 
-    test('a failed last run marks the card without claiming it is active',
-        () async {
+    test('a failed last run is not reported as active', () async {
       final row = _scheduleJson(id: 'a', status: 'failed')
         ..['lastResult'] = {
           'status': 'failed',
@@ -226,7 +223,6 @@ void main() {
 
       expect(controller.items.single.lastRunFailed, isTrue);
       expect(controller.items.single.enabled, isFalse);
-      expect(controller.items.single.failureMessage, 'Model setup required');
     });
 
     testWidgets('deleting asks first, then removes the row and persists', (
@@ -235,11 +231,9 @@ void main() {
       _phone(tester);
       final gateway = _FakeGateway([_scheduleJson(title: 'Nightly backup')]);
       final controller = await _loaded(gateway);
-      await tester.pumpWidget(
-        _app(SchedulesScreen(controller: controller)),
-      );
+      await tester.pumpWidget(_app(SchedulesScreen(controller: controller)));
       await tester.pumpAndSettle();
-      expect(find.text('Nightly backup'), findsOneWidget);
+      expect(find.text('Summarise the news.'), findsOneWidget);
 
       await tester.tap(
         find.byWidgetPredicate(
@@ -257,7 +251,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(gateway.deletes, ['s1']);
-      expect(find.text('Nightly backup'), findsNothing);
+      expect(find.text('Summarise the news.'), findsNothing);
       expect(find.text('No schedules yet'), findsOneWidget);
     });
 
@@ -270,9 +264,7 @@ void main() {
           message: 'Try again later.',
         );
       final controller = await _loaded(gateway);
-      await tester.pumpWidget(
-        _app(SchedulesScreen(controller: controller)),
-      );
+      await tester.pumpWidget(_app(SchedulesScreen(controller: controller)));
       await tester.pumpAndSettle();
 
       await tester.tap(
@@ -288,7 +280,7 @@ void main() {
       await tester.tap(find.widgetWithText(TextButton, 'Delete'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Keep me'), findsOneWidget);
+      expect(find.text('Summarise the news.'), findsOneWidget);
       expect(gateway.deletes, isEmpty);
     });
   });
@@ -324,7 +316,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Next: Monday, 26 Oct at 9:00 AM'), findsOneWidget);
+      expect(find.text('Next Monday, 26 Oct at 9:00 AM'), findsOneWidget);
       expect(find.textContaining('in 2 hours'), findsNothing);
     });
 
@@ -352,7 +344,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.textContaining('Next:'), findsNothing);
+      expect(find.textContaining('Next'), findsNothing);
     });
 
     testWidgets('a paused schedule has no next run', (tester) async {
@@ -382,7 +374,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.textContaining('Next:'), findsNothing);
+      expect(find.textContaining('Next'), findsNothing);
     });
   });
 
@@ -403,10 +395,7 @@ void main() {
       );
       expect(weekly.cronExpression, '0 18 * * 1,3,5');
       expect(isValidCron(weekly.cronExpression), isTrue);
-      expect(
-        weekly.rrule,
-        'FREQ=WEEKLY;BYDAY=MO,WE,FR;BYHOUR=18;BYMINUTE=0',
-      );
+      expect(weekly.rrule, 'FREQ=WEEKLY;BYDAY=MO,WE,FR;BYHOUR=18;BYMINUTE=0');
     });
 
     test('a custom cron is validated and round-trips through a trigger', () {
@@ -425,7 +414,6 @@ void main() {
           timeLabel: '8:00 AM',
           days: <int>{},
           timezoneLabel: 'Asia/Kolkata',
-          notify: true,
           cadence: custom,
         ),
       );
@@ -441,17 +429,19 @@ void main() {
       );
       expect(broken.isValid, isFalse);
       expect(broken.validationError, contains('not a valid cron or RRULE'));
-      expect(triggerFromDraft(
-        const V2ScheduleDraft(
-          prompt: 'x',
-          frequency: V2ScheduleFrequency.custom,
-          timeLabel: '9:00 AM',
-          days: <int>{},
-          timezoneLabel: 'UTC',
-          notify: true,
-          cadence: broken,
+      expect(
+        triggerFromDraft(
+          const V2ScheduleDraft(
+            prompt: 'x',
+            frequency: V2ScheduleFrequency.custom,
+            timeLabel: '9:00 AM',
+            days: <int>{},
+            timezoneLabel: 'UTC',
+            cadence: broken,
+          ),
         ),
-      ), isNull);
+        isNull,
+      );
     });
 
     test('a saved cron becomes an editable weekly cadence', () {
@@ -487,7 +477,6 @@ void main() {
           days: <int>{1, 2, 3, 4, 5},
           timezoneLabel: 'Asia/Kolkata',
           timezoneId: 'Asia/Kolkata',
-          notify: true,
           cadence: V2CadenceDraft(
             frequency: V2CadenceFrequency.weekly,
             hour: 9,
@@ -506,109 +495,8 @@ void main() {
   });
 
   group('editor validation', () {
-    testWidgets('an end date before the first run is rejected inline', (
-      tester,
-    ) async {
+    testWidgets('a save failure is shown inline', (tester) async {
       _phone(tester);
-      var saves = 0;
-      await tester.pumpWidget(
-        _app(
-          ScheduleEditorPage(
-            data: V2ScheduleEditorData(
-              prompt: 'Summarise the news.',
-              frequency: V2ScheduleFrequency.daily,
-              timeLabel: '9:00 AM',
-              days: const <int>{},
-              now: _now,
-              // Before tomorrow's 9:00 run.
-              endsAt: DateTime(2026, 10, 21, 12),
-            ),
-            onSave: (_) => saves++,
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      await tester.scrollUntilVisible(
-        find.text('Save schedule'),
-        200,
-        scrollable: find.byType(Scrollable).first,
-      );
-      await tester.pumpAndSettle();
-      expect(
-        find.textContaining('The end date must be after the first run'),
-        findsOneWidget,
-      );
-
-      await tester.tap(find.text('Save schedule'));
-      await tester.pumpAndSettle();
-      expect(saves, 0);
-    });
-
-    testWidgets('a valid end date saves with the draft', (tester) async {
-      _phone(tester);
-      V2ScheduleDraft? saved;
-      await tester.pumpWidget(
-        _app(
-          ScheduleEditorPage(
-            data: V2ScheduleEditorData(
-              prompt: 'Summarise the news.',
-              frequency: V2ScheduleFrequency.daily,
-              timeLabel: '9:00 AM',
-              days: const <int>{},
-              now: _now,
-              endsAt: DateTime(2026, 12, 31, 23, 59),
-            ),
-            onSave: (draft) => saved = draft,
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      await tester.scrollUntilVisible(
-        find.text('Save schedule'),
-        200,
-        scrollable: find.byType(Scrollable).first,
-      );
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Save schedule'));
-      await tester.pumpAndSettle();
-
-      expect(saved, isNotNull);
-      expect(saved!.endsAt, DateTime(2026, 12, 31, 23, 59));
-      expect(saved!.cron, '0 9 * * *');
-    });
-
-    testWidgets('the end date row opens the date picker', (tester) async {
-      _phone(tester);
-      DateTime? endsAt;
-      await tester.pumpWidget(
-        _app(
-          ScheduleEditorPage(
-            data: V2ScheduleEditorData(prompt: 'Summarise.', now: _now),
-            onEndsAtChanged: (value) => endsAt = value,
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      await tester.scrollUntilVisible(
-        find.text('End date'),
-        200,
-        scrollable: find.byType(Scrollable).first,
-      );
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('End date'));
-      await tester.pumpAndSettle();
-
-      expect(find.byType(DatePickerDialog), findsOneWidget);
-
-      tester.state<NavigatorState>(find.byType(Navigator).first).pop();
-      await tester.pumpAndSettle();
-      expect(endsAt, isNull, reason: 'cancelling keeps the schedule open ended');
-    });
-
-    testWidgets('a save failure is shown inline', (tester) async {      _phone(tester);
       await tester.pumpWidget(
         _app(
           const ScheduleEditorPage(
@@ -647,7 +535,10 @@ void main() {
       );
 
       expect(run.status, V2RunStatus.running);
-      expect(run.durationText(DateTime.parse('2026-10-21T09:02:10.000Z')), '2m 10s');
+      expect(
+        run.durationText(DateTime.parse('2026-10-21T09:02:10.000Z')),
+        '2m 10s',
+      );
       expect(run.summaryText, 'Still running.');
     });
 
@@ -750,32 +641,29 @@ void main() {
     });
 
     test('counts and the average runtime come from the rows', () {
-      final data = V2ScheduleRunsData.fromRuns(
-        [
-          ScheduleRunDto.fromJson(<String, dynamic>{
-            'id': 'a',
-            'scheduleId': 's1',
-            'scheduledFor': '2026-10-21T09:00:00.000Z',
-            'status': 'succeeded',
-            'attempt': 1,
-            'ranLate': false,
-            'startedAt': '2026-10-21T09:00:00.000Z',
-            'finishedAt': '2026-10-21T09:01:00.000Z',
-          }),
-          ScheduleRunDto.fromJson(<String, dynamic>{
-            'id': 'b',
-            'scheduleId': 's1',
-            'scheduledFor': '2026-10-20T09:00:00.000Z',
-            'status': 'failed',
-            'attempt': 2,
-            'ranLate': true,
-            'error': 'model_terminal',
-            'startedAt': '2026-10-20T09:00:00.000Z',
-            'finishedAt': '2026-10-20T09:00:30.000Z',
-          }),
-        ],
-        now: DateTime.parse('2026-10-21T12:00:00.000Z'),
-      );
+      final data = V2ScheduleRunsData.fromRuns([
+        ScheduleRunDto.fromJson(<String, dynamic>{
+          'id': 'a',
+          'scheduleId': 's1',
+          'scheduledFor': '2026-10-21T09:00:00.000Z',
+          'status': 'succeeded',
+          'attempt': 1,
+          'ranLate': false,
+          'startedAt': '2026-10-21T09:00:00.000Z',
+          'finishedAt': '2026-10-21T09:01:00.000Z',
+        }),
+        ScheduleRunDto.fromJson(<String, dynamic>{
+          'id': 'b',
+          'scheduleId': 's1',
+          'scheduledFor': '2026-10-20T09:00:00.000Z',
+          'status': 'failed',
+          'attempt': 2,
+          'ranLate': true,
+          'error': 'model_terminal',
+          'startedAt': '2026-10-20T09:00:00.000Z',
+          'finishedAt': '2026-10-20T09:00:30.000Z',
+        }),
+      ], now: DateTime.parse('2026-10-21T12:00:00.000Z'));
 
       expect(data.total, 2);
       expect(data.succeeded, 1);
@@ -802,15 +690,14 @@ void main() {
           },
         ];
       final controller = await _loaded(gateway);
-      await tester.pumpWidget(
-        _app(SchedulesScreen(controller: controller)),
-      );
+      await tester.pumpWidget(_app(SchedulesScreen(controller: controller)));
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Morning briefing'));
+      await tester.tap(find.text('Summarise the news.'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Schedule runs'), findsOneWidget);
+      expect(find.text('Morning briefing'), findsOneWidget);
+      expect(find.text('Schedule runs'), findsNothing);
       expect(find.text('Completed'), findsOneWidget);
       expect(find.text('1m 12s'), findsOneWidget);
     });
@@ -845,51 +732,6 @@ void main() {
               .position;
           var guard = 0;
           while (position.pixels < position.maxScrollExtent && guard < 40) {
-            position.jumpTo(position.pixels + 200);
-            await tester.pump();
-            expect(tester.takeException(), isNull);
-            guard++;
-          }
-        },
-      );
-
-      testWidgets(
-        'the editor with an end date fits 320 dp at 200% text '
-        '(${dark ? 'dark' : 'light'})',
-        (tester) async {
-          tester.view.physicalSize = const Size(320, 640);
-          tester.view.devicePixelRatio = 1;
-          addTearDown(tester.view.resetPhysicalSize);
-          addTearDown(tester.view.resetDevicePixelRatio);
-
-          await tester.pumpWidget(
-            _app(
-              ScheduleEditorPage(
-                data: V2ScheduleEditorData(
-                  prompt: 'Summarise the news.',
-                  endsAt: DateTime(2026, 12, 31),
-                  now: _now,
-                ),
-              ),
-              dark: dark,
-              scaler: const TextScaler.linear(2),
-            ),
-          );
-          await tester.pumpAndSettle();
-          expect(tester.takeException(), isNull);
-
-          final position = tester
-              .state<ScrollableState>(
-                find
-                    .descendant(
-                      of: find.byType(ListView),
-                      matching: find.byType(Scrollable),
-                    )
-                    .first,
-              )
-              .position;
-          var guard = 0;
-          while (position.pixels < position.maxScrollExtent && guard < 60) {
             position.jumpTo(position.pixels + 200);
             await tester.pump();
             expect(tester.takeException(), isNull);

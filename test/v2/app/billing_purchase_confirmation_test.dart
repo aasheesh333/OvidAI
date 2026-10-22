@@ -87,20 +87,19 @@ void main() {
   });
 
   void serve(String tier) {
-    OvidCloudService.httpClientFactoryForTest = () => MockClient((
-      request,
-    ) async {
-      paths.add(request.url.path);
-      return http.Response(
-        jsonEncode({
-          'tier': tier,
-          'is_paid': tier != 'free',
-          'remaining_pct': 0.5,
-          'models': const <String>[],
-        }),
-        200,
-      );
-    });
+    OvidCloudService.httpClientFactoryForTest = () =>
+        MockClient((request) async {
+          paths.add(request.url.path);
+          return http.Response(
+            jsonEncode({
+              'tier': tier,
+              'is_paid': tier != 'free',
+              'remaining_pct': 0.5,
+              'models': const <String>[],
+            }),
+            200,
+          );
+        });
   }
 
   Future<BuildContext> mount(WidgetTester tester) async {
@@ -134,10 +133,7 @@ void main() {
     expect(paths.where((p) => p == '/usage'), isNotEmpty);
     expect(AppState.I.ovidCloudTier, 'free');
     expect(isServerConfirmed('7x'), isFalse);
-    expect(
-      find.textContaining('unlocks as soon as our server confirms'),
-      findsOneWidget,
-    );
+    expect(find.textContaining('unlocks after confirmation'), findsOneWidget);
     // Cancel the store's timers before the widget test checks for leaks.
     usage.release();
   });

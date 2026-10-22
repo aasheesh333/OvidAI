@@ -93,7 +93,7 @@ void main() {
     await _pumpMenu(tester);
 
     expect(find.text('MODEL SELECTION'), findsOneWidget);
-    expect(find.text('Tier: Free'), findsOneWidget);
+    expect(find.text('Tier: Free'), findsNothing);
     expect(find.text('Auto'), findsOneWidget);
     expect(find.text('Included free'), findsOneWidget);
     expect(find.byIcon(Icons.check_circle_rounded), findsOneWidget);
@@ -105,13 +105,13 @@ void main() {
     expect(find.text('Manage models'), findsOneWidget);
     expect(find.text('Compare plans'), findsOneWidget);
     expect(find.text(r'From $18/mo'), findsOneWidget);
-    expect(find.text('Free plan uses Auto only.'), findsOneWidget);
-    expect(find.text(_upgradeHint), findsOneWidget);
+    expect(find.text('Free plan uses Auto only.'), findsNothing);
+    expect(find.text(_upgradeHint), findsNothing);
     expect(tester.takeException(), isNull);
 
     // Nothing in the header or the action row is clipped at the card edge.
     final menu = tester.getRect(find.byType(V2ModelChipMenu));
-    for (final label in ['Tier: Free', 'Compare plans', r'From $18/mo']) {
+    for (final label in ['Compare plans', r'From $18/mo']) {
       final rect = tester.getRect(find.text(label));
       expect(rect.left, greaterThanOrEqualTo(menu.left), reason: label);
       expect(rect.right, lessThanOrEqualTo(menu.right), reason: label);
@@ -197,7 +197,7 @@ void main() {
         onComparePlans: () => compared++,
       );
 
-      expect(find.text(_upgradeHint), findsOneWidget);
+      expect(find.text(_upgradeHint), findsNothing);
       expect(find.text('Plus plan'), findsNWidgets(3));
       expect(find.byIcon(Icons.lock_outline_rounded), findsWidgets);
 
@@ -258,7 +258,7 @@ void main() {
       onSelect: (id) => selected = id,
     );
 
-    expect(find.text(_upgradeHint), findsOneWidget);
+    expect(find.text(_upgradeHint), findsNothing);
     expect(find.text('Plus plan'), findsNWidgets(3));
 
     await tester.tap(find.text('Ovid Flash 2.5'));
@@ -331,7 +331,7 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('Auto'), findsOneWidget);
     expect(find.text('Compare plans'), findsOneWidget);
-    expect(find.text(_upgradeHint), findsOneWidget);
+    expect(find.text(_upgradeHint), findsNothing);
   });
 
   testWidgets('fits 320 dp at 200 % text in dark', (tester) async {
@@ -345,7 +345,7 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('Auto'), findsOneWidget);
     expect(find.text('Compare plans'), findsOneWidget);
-    expect(find.text(_upgradeHint), findsOneWidget);
+    expect(find.text(_upgradeHint), findsNothing);
   });
 
   testWidgets('paid menu fits 320 dp at 200 % text in light and dark', (
@@ -411,11 +411,11 @@ void main() {
 
     // Everything below the fold is reachable by scrolling, not clipped away.
     await tester.scrollUntilVisible(
-      find.text('Free plan uses Auto only.'),
+      find.text('Manage models'),
       120,
       scrollable: find.byType(Scrollable).last,
     );
-    expect(find.text('Free plan uses Auto only.'), findsOneWidget);
+    expect(find.text('Manage models'), findsOneWidget);
   });
 
   testWidgets('reduced motion hides nothing', (tester) async {
@@ -424,7 +424,6 @@ void main() {
     expect(find.text('MODEL SELECTION'), findsOneWidget);
     expect(find.text('Auto'), findsOneWidget);
     expect(find.text('Compare plans'), findsOneWidget);
-    expect(find.text('Free plan uses Auto only.'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

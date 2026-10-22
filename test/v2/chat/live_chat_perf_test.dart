@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/chat/live_chat_page.dart';
 import 'package:ovid_ai/ui/v2/chat/message_blocks.dart';
@@ -33,9 +34,7 @@ void main() {
     Future<int> mounted(int count) async {
       await tester.pumpWidget(
         _app(
-          V2LiveChatPage(
-            data: V2LiveChatData(items: _thinkingItems(count)),
-          ),
+          V2LiveChatPage(data: V2LiveChatData(items: _thinkingItems(count))),
         ),
       );
       await tester.pump();
@@ -60,6 +59,9 @@ void main() {
         V2LiveChatPage(
           data: V2LiveChatData(items: _thinkingItems(12)),
           onDraftChanged: (value) => draft = value,
+          // The composer only enables Send when a handler owns it; typing must
+          // still not rebuild the transcript.
+          onSend: (_) {},
         ),
       ),
     );
@@ -172,13 +174,14 @@ void main() {
     );
     await tester.pump();
 
-    final rows = find.byType(IntrinsicHeight).evaluate().length;
+    final rows = find.byType(OCard).evaluate().length;
     expect(rows, greaterThan(0));
     expect(rows, lessThan(30));
   });
 
   test('unchanged markdown is parsed once and reused', () {
-    const markdown = '## Heading\n\nSome **bold** text with `code`.\n\n- a\n- b';
+    const markdown =
+        '## Heading\n\nSome **bold** text with `code`.\n\n- a\n- b';
     final first = parseV2MessageBlocksCached(markdown);
     final second = parseV2MessageBlocksCached(markdown);
     expect(identical(first, second), isTrue);

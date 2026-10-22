@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../../core/collaboration/models.dart' show maxActiveMembers;
 import '../../design/o_components.dart';
-import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 
 // TODO(l10n): extract this screen's English copy during the ARB pass.
@@ -28,6 +28,9 @@ class V2CollabMember {
 
   final String id;
   final String name;
+
+  /// Retained for hosts that carry a secondary line. The minimal roster shows
+  /// the name and the role only.
   final String subtitle;
   final V2CollabRole role;
   final bool isYou;
@@ -37,9 +40,10 @@ class V2CollabMember {
   final bool isCreator;
 
   /// True only when this device may remove the member (the owner, looking at
-  /// somebody else). The overflow menu is hidden otherwise.
+  /// somebody else). The remove control is hidden otherwise.
   final bool canRemove;
 
+  /// Retained for hosts; the roster does not render presence.
   final bool online;
   final String? initials;
 }
@@ -63,6 +67,8 @@ class V2CollabMembersPageData {
   }) : assert(capacity > 0, 'A room always has a capacity');
 
   final String title;
+
+  /// Retained for hosts. The roster's one subtitle is the member count.
   final String chatName;
 
   /// The rows visible in the roster.
@@ -93,8 +99,9 @@ class V2CollabMembersPageData {
       storageTotalLabel.isNotEmpty || storageUsedLabel.isNotEmpty;
 }
 
-/// Member roster for a shared live chat.
-class CollabMembersPage extends StatefulWidget {
+/// Member roster for a shared live chat: one list with a role and a remove
+/// action per row.
+class CollabMembersPage extends StatelessWidget {
   const CollabMembersPage({
     super.key,
     required this.data,
@@ -106,528 +113,173 @@ class CollabMembersPage extends StatefulWidget {
   });
 
   final V2CollabMembersPageData data;
+
+  /// Retained for hosts. The roster is short enough to scan without search.
   final ValueChanged<String>? onSearch;
   final VoidCallback? onInvite;
+
+  /// Opens the member's actions. The page offers it as the remove control.
   final ValueChanged<V2CollabMember>? onMemberMenu;
   final VoidCallback? onLeave;
   final VoidCallback? onRetry;
 
   @override
-  State<CollabMembersPage> createState() => _CollabMembersPageState();
-}
-
-class _CollabMembersPageState extends State<CollabMembersPage> {
-  final TextEditingController _controller = TextEditingController();
-  String _query = '';
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  void _onQueryChanged(String value) {
-    setState(() => _query = value.trim());
-    widget.onSearch?.call(value.trim());
-  }
-
-  void _clearSearch() {
-    _controller.clear();
-    _onQueryChanged('');
-  }
-
-  List<V2CollabMember> get _visibleMembers {
-    if (_query.isEmpty) return widget.data.members;
-    final needle = _query.toLowerCase();
-    return widget.data.members
-        .where(
-          (member) =>
-              member.name.toLowerCase().contains(needle) ||
-              member.subtitle.toLowerCase().contains(needle),
-        )
-        .toList();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return OScaffold(
-      appBar: OAppBar(
-        title: widget.data.title,
-        subtitle: widget.data.chatName.isEmpty ? null : widget.data.chatName,
-        actions: [
-          if (widget.onInvite != null)
-            OIconButton(
-              icon: Icons.person_add_alt_1_rounded,
-              semanticLabel: 'Invite someone',
-              onPressed: widget.onInvite,
-            ),
-        ],
-      ),
-      body: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 720),
-          child: switch (widget.data.status) {
-            V2CollabMembersStatus.loading => const OSkeletonList(rows: 6),
-            V2CollabMembersStatus.error => OErrorState(
-              message: widget.data.errorMessage,
-              onRetry: widget.onRetry,
-            ),
-            V2CollabMembersStatus.empty => _emptyRoster(compact: false),
-            V2CollabMembersStatus.ready => _content(context),
-          },
+    return OScreen(
+      title: data.title,
+      subtitle: data.capacityLabel,
+      maxWidth: 640,
+      padding: false,
+      actions: [
+        if (onInvite != null)
+          OIconButton(
+            icon: Icons.person_add_alt_1_rounded,
+            semanticLabel: 'Invite someone',
+            onPressed: onInvite,
+          ),
+      ],
+      child: switch (data.status) {
+        V2CollabMembersStatus.loading => const OSkeletonList(rows: 6),
+        V2CollabMembersStatus.error => OErrorState(
+          message: data.errorMessage,
+          onRetry: onRetry,
         ),
-      ),
+        V2CollabMembersStatus.empty => _empty(),
+        V2CollabMembersStatus.ready =>
+          data.members.isEmpty ? _empty() : _list(),
+      },
     );
   }
 
-  Widget _emptyRoster({required bool compact}) {
+  Widget _empty() {
     return OEmptyState(
-      compact: compact,
       icon: Icons.group_outlined,
       title: 'No members yet',
-      message: 'Invite someone to this chat. They can watch or take a turn.',
-      action: widget.onInvite == null
+      message: 'Invite someone to this chat.',
+      action: onInvite == null
           ? null
           : OButton(
               label: 'Invite someone',
               icon: Icons.person_add_alt_1_rounded,
-              onPressed: widget.onInvite,
+              onPressed: onInvite,
             ),
     );
   }
 
-  Widget _content(BuildContext context) {
-    final c = OColors.of(context);
-    final visible = _visibleMembers;
-    return ListView(
+  Widget _list() {
+    final members = data.members;
+    final footerCount = onLeave == null ? 0 : 1;
+    return ListView.builder(
       padding: const EdgeInsets.fromLTRB(
         OSpace.l,
-        OSpace.m,
+        OSpace.s,
         OSpace.l,
         OSpace.l,
       ),
-      children: [
-        OFadeSlide(
-          child: OStagger(
-            children: [
-              _SummaryCard(data: widget.data, c: c),
-              const SizedBox(height: OSpace.m),
-              OSearchField(
-                controller: _controller,
-                hint: 'Search members',
-                onChanged: _onQueryChanged,
-              ),
-              const SizedBox(height: OSpace.m),
-              OSectionHeader(
-                label: 'Members',
-                padding: const EdgeInsets.fromLTRB(0, OSpace.s, 0, OSpace.s),
-                trailing: Text(
-                  '${visible.length} shown',
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ),
-              if (visible.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: OSpace.l),
-                  child: _query.isEmpty
-                      ? _emptyRoster(compact: true)
-                      : OEmptyState(
-                          compact: true,
-                          icon: Icons.search_off_rounded,
-                          title: 'No members found',
-                          message: 'Try another name.',
-                          action: OButton(
-                            label: 'Clear search',
-                            icon: Icons.close_rounded,
-                            onPressed: _clearSearch,
-                          ),
-                        ),
-                )
-              else
-                for (final member in visible) ...[
-                  _MemberRow(
-                    member: member,
-                    onMenu: widget.onMemberMenu == null || !member.canRemove
-                        ? null
-                        : () => widget.onMemberMenu!(member),
-                  ),
-                  const SizedBox(height: OSpace.s),
-                ],
-              const SizedBox(height: OSpace.m),
-              _StorageCard(data: widget.data, c: c),
-              if (widget.onLeave != null) ...[
-                const SizedBox(height: OSpace.l),
-                OButton(
-                  label: 'Leave chat',
-                  icon: Icons.logout_rounded,
-                  variant: OButtonVariant.danger,
-                  expand: true,
-                  onPressed: widget.onLeave,
-                ),
-                const SizedBox(height: OSpace.s),
-                Text(
-                  'Leaving removes this shared chat from your list. The creator keeps the storage.',
-                  textAlign: TextAlign.center,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _SummaryCard extends StatelessWidget {
-  const _SummaryCard({required this.data, required this.c});
-
-  final V2CollabMembersPageData data;
-  final OColors c;
-
-  @override
-  Widget build(BuildContext context) {
-    return OCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Wrap(
-            spacing: OSpace.s,
-            runSpacing: OSpace.s,
-            alignment: WrapAlignment.spaceBetween,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              Text(
-                data.capacityLabel,
-                style: OType.h2.copyWith(color: c.text),
-              ),
-              _Tag(
-                label: data.roomFull
-                    ? 'Room full'
-                    : '${data.seatsLeft} seats left',
-                tone: data.roomFull ? _TagTone.warn : _TagTone.success,
-                dot: true,
-              ),
-            ],
-          ),
-          const SizedBox(height: OSpace.m),
-          OProgressBar(
-            value: data.capacity == 0 ? 0 : data.memberCount / data.capacity,
-          ),
-          const SizedBox(height: OSpace.m),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Icon(Icons.group_rounded, size: 16, color: c.accent),
-              const SizedBox(width: OSpace.s),
-              Expanded(
-                child: Text(
-                  'Up to ${data.capacity} people can join, including the '
-                  'creator.',
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: OSpace.s),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Icon(Icons.info_outline_rounded, size: 16, color: c.accent),
-              const SizedBox(width: OSpace.s),
-              Expanded(
-                child: Text(
-                  'Only one person can send at a time.',
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
+      itemCount: members.length + footerCount,
+      itemBuilder: (context, index) {
+        if (index == members.length) {
+          return Padding(
+            padding: const EdgeInsets.only(top: OSpace.l),
+            child: OButton(
+              label: 'Leave chat',
+              icon: Icons.logout_rounded,
+              variant: OButtonVariant.danger,
+              expand: true,
+              onPressed: onLeave,
+            ),
+          );
+        }
+        final member = members[index];
+        return Column(
+          children: [
+            _MemberRow(
+              member: member,
+              onRemove: onMemberMenu == null || !member.canRemove
+                  ? null
+                  : () => onMemberMenu!(member),
+            ),
+            if (index < members.length - 1)
+              Divider(height: 1, color: OColors.of(context).hairline),
+          ],
+        );
+      },
     );
   }
 }
 
 class _MemberRow extends StatelessWidget {
-  const _MemberRow({required this.member, this.onMenu});
+  const _MemberRow({required this.member, this.onRemove});
 
   final V2CollabMember member;
-  final VoidCallback? onMenu;
+  final VoidCallback? onRemove;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     final (roleLabel, roleTone) = switch (member.role) {
-      V2CollabRole.owner => ('Owner', _TagTone.accent),
-      V2CollabRole.canChat => ('Can chat', _TagTone.neutral),
-      V2CollabRole.viewOnly => ('View only', _TagTone.neutral),
+      V2CollabRole.owner => ('Owner', OPillTone.accent),
+      V2CollabRole.canChat => ('Can chat', OPillTone.neutral),
+      V2CollabRole.viewOnly => ('View only', OPillTone.neutral),
     };
-    final tag = _Tag(label: roleLabel, tone: roleTone);
-    return OCard(
-      accent: member.isYou,
-      padding: const EdgeInsets.symmetric(
-        horizontal: OSpace.m,
-        vertical: OSpace.m,
-      ),
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          // With large text, or on a narrow card, the name and the role pill
-          // cannot share one line without squeezing the name to a sliver.
-          // The pill moves under the avatar instead.
-          final stacked =
-              constraints.maxWidth < 300 ||
-              MediaQuery.textScalerOf(context).scale(1) > 1.3;
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
+    return ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: OSpace.listRow),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: OSpace.m),
+        child: Row(
+          children: [
+            OAvatar(
+              initials: member.initials ?? member.name,
+              size: 40,
+              semanticLabel: member.name,
+            ),
+            const SizedBox(width: OSpace.m),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  Expanded(child: _identity(context, c)),
-                  if (!stacked) ...[const SizedBox(width: OSpace.s), tag],
-                  if (onMenu != null)
-                    OIconButton(
-                      icon: Icons.more_vert_rounded,
-                      semanticLabel: 'Member options for ${member.name}',
-                      onPressed: onMenu,
-                    ),
-                ],
-              ),
-              if (stacked) ...[
-                const SizedBox(height: OSpace.s),
-                Padding(padding: const EdgeInsets.only(left: 56), child: tag),
-              ],
-            ],
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _identity(BuildContext context, OColors c) {
-    return Row(
-      children: [
-        OAvatar(
-          initials: member.initials ?? member.name,
-          size: 44,
-          semanticLabel: member.name,
-        ),
-        const SizedBox(width: OSpace.m),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Wrap(
-                spacing: OSpace.xs,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  Text(
-                    member.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.bodySm.copyWith(
-                      color: c.text,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  if (member.isYou)
-                    Text(
-                      '(you)',
-                      style: OType.caption.copyWith(color: c.accent),
-                    ),
-                  if (member.isCreator)
-                    const _Tag(label: 'Creator', tone: _TagTone.accent),
-                ],
-              ),
-              if (member.subtitle.isNotEmpty) ...[
-                const SizedBox(height: OSpace.xs),
-                Row(
-                  children: [
-                    if (member.online) ...[
-                      Container(
-                        width: 6,
-                        height: 6,
-                        decoration: BoxDecoration(
-                          color: c.success,
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                      const SizedBox(width: OSpace.xs),
-                    ],
-                    Expanded(
-                      child: Text(
-                        member.subtitle,
+                  Wrap(
+                    spacing: OSpace.xs,
+                    runSpacing: OSpace.xxs,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      Text(
+                        member.name,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-enum _TagTone { neutral, accent, success, warn }
-
-/// Small status tag. Mirrors the shared `OPill` look but grows with the text
-/// scale instead of clipping its label inside a fixed 24 dp box.
-class _Tag extends StatelessWidget {
-  const _Tag({
-    required this.label,
-    this.tone = _TagTone.neutral,
-    this.dot = false,
-  });
-
-  final String label;
-  final _TagTone tone;
-  final bool dot;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final (bg, fg) = switch (tone) {
-      _TagTone.neutral => (c.surfaceAlt, c.textMuted),
-      _TagTone.accent => (c.accentSoft, c.accent),
-      _TagTone.success => (c.success.withValues(alpha: 0.12), c.success),
-      _TagTone.warn => (c.warn.withValues(alpha: 0.12), c.warn),
-    };
-    return Container(
-      constraints: const BoxConstraints(minHeight: 24),
-      padding: const EdgeInsets.symmetric(horizontal: 10),
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (dot) ...[
-            Container(
-              width: 6,
-              height: 6,
-              decoration: BoxDecoration(color: fg, shape: BoxShape.circle),
-            ),
-            const SizedBox(width: 6),
-          ],
-          Flexible(
-            child: Text(
-              label,
-              style: OType.caption.copyWith(
-                color: fg,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _StorageCard extends StatelessWidget {
-  const _StorageCard({required this.data, required this.c});
-
-  final V2CollabMembersPageData data;
-  final OColors c;
-
-  @override
-  Widget build(BuildContext context) {
-    final hasInfo = data.hasStorageInfo;
-    final percent = hasInfo
-        ? Text(
-            '${(data.storagePercent * 100).round()}%',
-            style: OType.caption.copyWith(
-              color: c.accent,
-              fontWeight: FontWeight.w600,
-            ),
-          )
-        : null;
-    return OCard(
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final stacked =
-              constraints.maxWidth < 280 ||
-              MediaQuery.textScalerOf(context).scale(1) > 1.3;
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      color: c.accentSoft,
-                      borderRadius: BorderRadius.circular(ORadius.m),
-                    ),
-                    child: Icon(
-                      Icons.workspace_premium_rounded,
-                      size: 19,
-                      color: c.accent,
-                    ),
-                  ),
-                  const SizedBox(width: OSpace.m),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'The creator pays for storage',
-                          style: OType.bodySm.copyWith(
-                            color: c.text,
-                            fontWeight: FontWeight.w600,
-                          ),
+                        style: OType.bodySm.copyWith(
+                          color: c.text,
+                          fontWeight: FontWeight.w600,
                         ),
-                        if (data.creatorName.isNotEmpty) ...[
-                          const SizedBox(height: OSpace.xs),
-                          Text(
-                            '${data.creatorName} pays for this chat. Storage '
-                            'is billed to the creator\'s plan.',
-                            style: OType.caption.copyWith(color: c.textMuted),
-                          ),
-                        ],
-                        if (stacked && percent != null) ...[
-                          const SizedBox(height: OSpace.xs),
-                          percent,
-                        ],
-                      ],
-                    ),
+                      ),
+                      if (member.isYou)
+                        Text(
+                          '(you)',
+                          style: OType.caption.copyWith(color: c.accent),
+                        ),
+                      if (member.isCreator)
+                        const OPill(
+                          label: 'Creator',
+                          tone: OPillTone.accent,
+                        ),
+                    ],
                   ),
-                  if (!stacked && percent != null) ...[
-                    const SizedBox(width: OSpace.s),
-                    percent,
-                  ],
+                  const SizedBox(height: OSpace.xs),
+                  OPill(label: roleLabel, tone: roleTone),
                 ],
               ),
-              if (hasInfo) ...[
-                const SizedBox(height: OSpace.m),
-                OProgressBar(value: data.storagePercent, height: 8),
-                const SizedBox(height: OSpace.s),
-                Wrap(
-                  spacing: OSpace.m,
-                  runSpacing: OSpace.xs,
-                  children: [
-                    Text(
-                      '${data.storageUsedLabel} of ${data.storageTotalLabel} used',
-                      style: OType.caption.copyWith(color: c.textMuted),
-                    ),
-                    Text(
-                      '${data.storageFreeLabel} free',
-                      style: OType.caption.copyWith(color: c.textFaint),
-                    ),
-                  ],
-                ),
-              ],
+            ),
+            if (onRemove != null) ...[
+              const SizedBox(width: OSpace.s),
+              OIconButton(
+                icon: Icons.person_remove_rounded,
+                semanticLabel: 'Remove ${member.name}',
+                onPressed: onRemove,
+              ),
             ],
-          );
-        },
+          ],
+        ),
       ),
     );
   }

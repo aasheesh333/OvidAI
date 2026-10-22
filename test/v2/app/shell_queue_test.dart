@@ -131,9 +131,10 @@ void main() {
     );
     await tester.pump();
 
-    // Count and preview are the facade's real queue, not a hard-coded zero.
-    expect(find.text('2 queued messages'), findsOneWidget);
-    expect(find.text('Queue me first'), findsOneWidget);
+    // Count comes from the facade's real queue, not a hard-coded zero. The
+    // dock is one line: count, "Send now", dismiss — no preview paragraph.
+    expect(find.text('2 queued'), findsOneWidget);
+    expect(find.text('Queue me first'), findsNothing);
 
     await tester.tap(find.text('Send now'));
     await tester.pump();
@@ -155,8 +156,8 @@ void main() {
     await tester.pump();
 
     expect(facade.queuedCountFor(session.id), 1);
-    expect(find.text('1 queued message'), findsOneWidget);
-    expect(find.text('Then this one'), findsOneWidget);
+    expect(find.text('1 queued'), findsOneWidget);
+    expect(find.text('Then this one'), findsNothing);
     expect(find.text('Queue me first'), findsNothing);
   });
 }

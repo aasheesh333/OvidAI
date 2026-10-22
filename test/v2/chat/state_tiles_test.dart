@@ -164,6 +164,20 @@ void main() {
     }
   });
 
+  test('default copy stays inside the minimal text budget', () {
+    int words(String value) => value.trim().split(RegExp(r'\s+')).length;
+    for (final kind in V2StateTileKind.values) {
+      final copy = V2StateTileCopy.of(kind);
+      expect(words(copy.title), lessThanOrEqualTo(4), reason: '$kind title');
+      expect(words(copy.message), lessThanOrEqualTo(18), reason: '$kind body');
+      expect(
+        words(copy.actionLabel),
+        lessThanOrEqualTo(3),
+        reason: '$kind action',
+      );
+    }
+  });
+
   testWidgets('renders all six states in light mode', (tester) async {
     await _tall(tester);
     await tester.pumpWidget(_app(_allTiles(named: true)));
@@ -240,10 +254,7 @@ void main() {
     expect(find.text('Plan limit reached'), findsOneWidget);
     expect(find.text('Resets in 6h 12m'), findsOneWidget);
     expect(
-      find.text(
-        'You have reached the limit for your plan. Upgrade to keep going now, '
-        'or wait for your allowance to reset.',
-      ),
+      find.text('Your allowance is spent. Upgrade now or wait for the reset.'),
       findsOneWidget,
     );
   });

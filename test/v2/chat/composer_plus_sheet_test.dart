@@ -15,6 +15,8 @@ Widget _app(
   VoidCallback? onStudioFolder,
   VoidCallback? onConnectors,
   VoidCallback? onOpenStudio,
+  VoidCallback? onPermission,
+  String? permissionLabel,
   VoidCallback? onClose,
 }) {
   return MaterialApp(
@@ -34,6 +36,8 @@ Widget _app(
         onStudioFolder: onStudioFolder,
         onConnectors: onConnectors,
         onOpenStudio: onOpenStudio,
+        onPermission: onPermission,
+        permissionLabel: permissionLabel,
         onClose: onClose,
       ),
     ),
@@ -45,69 +49,89 @@ const _pickableFolderData = V2ComposerPlusData(
   studioFolder: 'ovid/site',
 );
 
+const _rowKeys = [
+  'composer-plus-file',
+  'composer-plus-photo',
+  'composer-plus-camera',
+  'composer-plus-studio',
+];
+
 void main() {
-  testWidgets('renders the five actions and their availability states', (
-    tester,
-  ) async {
+  testWidgets('renders four one-line actions', (tester) async {
     for (final dark in [false, true]) {
       await tester.pumpWidget(_app(const V2ComposerPlusData(), dark: dark));
       await tester.pumpAndSettle();
 
       expect(find.text('Add to chat'), findsOneWidget);
-      for (final title in [
-        'Photo',
-        'Camera',
-        'File',
-        'Studio folder',
-        'Connectors',
-      ]) {
+      expect(find.text('Attach a photo, file or connector.'), findsNothing);
+      for (final title in ['File', 'Photo', 'Camera', 'Studio folder']) {
         expect(
           find.text(title),
           findsOneWidget,
           reason: '$title in dark=$dark',
         );
       }
-      expect(find.text('Free plan'), findsOneWidget);
-      expect(find.text('Folder needed'), findsOneWidget);
       expect(
-        find.text('Studio chat stays blocked until you pick a folder.'),
-        findsOneWidget,
+        find.text('Connectors'),
+        findsNothing,
+        reason: 'the sheet is four rows; connectors live in their own screen',
       );
-      expect(
-        find.text('Built-in apps only. Custom connectors start on Go.'),
-        findsOneWidget,
-      );
+      expect(find.text('Free plan'), findsNothing);
+      expect(find.text('Folder needed'), findsNothing);
+      expect(find.text('Documents, code and images up to 8 MB.'), findsNothing);
+      for (final key in _rowKeys) {
+        expect(find.byKey(ValueKey(key)), findsOneWidget);
+      }
     }
   });
 
-  testWidgets('tapping Photo, File and Connectors fires each callback', (
+  testWidgets('a wired permission adds one row that reports the mode', (
     tester,
   ) async {
+    var changes = 0;
+    await tester.pumpWidget(
+      _app(
+        const V2ComposerPlusData(),
+        onPermission: () => changes++,
+        permissionLabel: 'General',
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final row = find.byKey(const ValueKey('composer-plus-permission'));
+    expect(row, findsOneWidget);
+    expect(find.text('Permission: General'), findsOneWidget);
+    expect(tester.getSize(row).height, greaterThanOrEqualTo(48));
+
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+    expect(changes, 1);
+  });
+
+  testWidgets('tapping File and Photo fires each callback', (tester) async {
     var photos = 0;
     var files = 0;
-    var connectors = 0;
 
     await tester.pumpWidget(
       _app(
         const V2ComposerPlusData(),
         onPhoto: () => photos++,
         onFile: () => files++,
-        onConnectors: () => connectors++,
       ),
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const ValueKey('composer-plus-photo')));
     await tester.tap(find.byKey(const ValueKey('composer-plus-file')));
-    await tester.tap(find.byKey(const ValueKey('composer-plus-connectors')));
+    await tester.tap(find.byKey(const ValueKey('composer-plus-photo')));
     await tester.pumpAndSettle();
 
     expect(photos, 1);
     expect(files, 1);
-    expect(connectors, 1);
   });
 
-  testWidgets('Studio row is blocked until a folder is picked', (tester) async {
+  testWidgets('Studio row opens Studio until a folder is picked', (
+    tester,
+  ) async {
     final handle = tester.ensureSemantics();
     var folders = 0;
     var studioOpens = 0;
@@ -126,26 +150,23 @@ void main() {
         .getSemanticsData();
     expect(row.label, contains('Folder needed'));
     expect(row.flagsCollection.isButton, isTrue);
-    expect(row.flagsCollection.isEnabled, Tristate.isFalse);
+    expect(
+      row.flagsCollection.isEnabled,
+      Tristate.isTrue,
+      reason: 'the row is the way to pick a folder, so it stays tappable',
+    );
 
+    // The blocked row opens Studio instead of attaching a folder.
     await tester.tap(find.byKey(const ValueKey('composer-plus-studio')));
     await tester.pumpAndSettle();
     expect(folders, 0, reason: 'a blocked row must not attach a folder');
-
-    await tester.tap(find.byKey(const ValueKey('composer-plus-studio-note')));
-    await tester.pumpAndSettle();
     expect(studioOpens, 1);
 
-    // With a folder the row is enabled, shows the folder and attaches it.
+    // With a folder the row is enabled and attaches it.
     await tester.pumpWidget(
       _app(_pickableFolderData, onStudioFolder: () => folders++),
     );
     await tester.pumpAndSettle();
-    expect(find.text('Use files from ovid/site.'), findsOneWidget);
-    expect(
-      find.text('Studio chat stays blocked until you pick a folder.'),
-      findsNothing,
-    );
 
     await tester.tap(find.byKey(const ValueKey('composer-plus-studio')));
     await tester.pumpAndSettle();
@@ -154,7 +175,7 @@ void main() {
     handle.dispose();
   });
 
-  testWidgets('unavailable camera is disabled and explains why', (
+  testWidgets('unavailable camera is disabled and explains itself', (
     tester,
   ) async {
     final handle = tester.ensureSemantics();
@@ -168,13 +189,10 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('No camera'), findsOneWidget);
-    expect(find.text('This device does not have a camera.'), findsOneWidget);
-
     final row = tester
         .getSemantics(find.byKey(const ValueKey('composer-plus-camera')))
         .getSemanticsData();
-    expect(row.label, contains('No camera'));
+    expect(row.label, contains('This device does not have a camera.'));
     expect(row.flagsCollection.isEnabled, Tristate.isFalse);
 
     await tester.tap(find.byKey(const ValueKey('composer-plus-camera')));
@@ -187,6 +205,7 @@ void main() {
   testWidgets('photo without permission stays tappable to request access', (
     tester,
   ) async {
+    final handle = tester.ensureSemantics();
     var photos = 0;
 
     await tester.pumpWidget(
@@ -197,55 +216,17 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Allow access'), findsOneWidget);
-    expect(
-      find.text('Photo access is off. Allow it to pick an image.'),
-      findsOneWidget,
-    );
+    final row = tester
+        .getSemantics(find.byKey(const ValueKey('composer-plus-photo')))
+        .getSemanticsData();
+    expect(row.label, contains('Allow access'));
+    expect(row.flagsCollection.isEnabled, Tristate.isTrue);
 
     await tester.tap(find.byKey(const ValueKey('composer-plus-photo')));
     await tester.pumpAndSettle();
     expect(photos, 1);
-  });
 
-  testWidgets('connectors describe the plan and a used-up allowance', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      _app(
-        const V2ComposerPlusData(
-          plan: V2ComposerPlusPlan.go,
-          customConnectorsUsed: 2,
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(find.text('Go plan'), findsOneWidget);
-    expect(find.text('Go includes 5 custom connectors.'), findsOneWidget);
-
-    await tester.pumpWidget(
-      _app(
-        const V2ComposerPlusData(
-          plan: V2ComposerPlusPlan.go,
-          customConnectorsUsed: 5,
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(find.text('Limit reached'), findsOneWidget);
-    expect(find.text('All 5 custom connectors are in use.'), findsOneWidget);
-
-    await tester.pumpWidget(
-      _app(
-        const V2ComposerPlusData(
-          plan: V2ComposerPlusPlan.pro,
-          customConnectorsUsed: 3,
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(find.text('Pro plan'), findsOneWidget);
-    expect(find.text('Pro includes 20 custom connectors.'), findsOneWidget);
+    handle.dispose();
   });
 
   testWidgets('close button reports its label', (tester) async {
@@ -255,33 +236,29 @@ void main() {
     expect(find.bySemanticsLabel('Close add menu'), findsOneWidget);
   });
 
-  testWidgets('camera reason is caller-supplied and connectors can be hidden', (
-    tester,
-  ) async {
+  testWidgets('camera reason is caller-supplied', (tester) async {
+    final handle = tester.ensureSemantics();
     await tester.pumpWidget(
       _app(
         const V2ComposerPlusData(
           cameraAvailable: false,
           cameraUnavailableReason: V2ComposerPlusSheet.cameraBuildReason,
-          showConnectors: false,
         ),
       ),
     );
     await tester.pumpAndSettle();
 
     expect(
-      find.text(V2ComposerPlusSheet.cameraBuildReason),
-      findsOneWidget,
+      tester
+          .getSemantics(find.byKey(const ValueKey('composer-plus-camera')))
+          .getSemanticsData()
+          .label,
+      contains(V2ComposerPlusSheet.cameraBuildReason),
     );
-    expect(
-      find.byKey(const ValueKey('composer-plus-connectors')),
-      findsNothing,
-      reason: 'a row with no route must not be shown dead',
-    );
+    handle.dispose();
   });
 
-  testWidgets('320 dp at 100 % text stacks trailing pills instead of '
-      'overflowing', (tester) async {
+  testWidgets('320 dp at 100 % text keeps one line per row', (tester) async {
     tester.view.physicalSize = const Size(320, 640);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
@@ -295,7 +272,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(errors, isEmpty);
-    expect(find.text('Folder needed'), findsOneWidget);
+    expect(find.text('File'), findsOneWidget);
   });
 
   for (final dark in [false, true]) {
@@ -311,7 +288,6 @@ void main() {
       addTearDown(() => FlutterError.onError = previous);
 
       var files = 0;
-      // Both the blocked Studio note and the picked-folder row must fit.
       for (final withFolder in [false, true]) {
         errors.clear();
         await tester.pumpWidget(
@@ -337,13 +313,7 @@ void main() {
               '(${withFolder ? 'folder picked' : 'folder blocked'})',
         );
 
-        for (final key in [
-          'composer-plus-photo',
-          'composer-plus-camera',
-          'composer-plus-file',
-          'composer-plus-studio',
-          'composer-plus-connectors',
-        ]) {
+        for (final key in _rowKeys) {
           final size = tester.getSize(find.byKey(ValueKey(key)));
           expect(
             size.height,
@@ -361,4 +331,38 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   }
+
+  testWidgets('opens as a centred dialog at 600 dp and wider', (tester) async {
+    tester.view.physicalSize = const Size(900, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: OTheme.light(),
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: Center(
+              child: TextButton(
+                onPressed: () => showV2ComposerPlusSheet(
+                  context,
+                  data: const V2ComposerPlusData(),
+                ),
+                child: const Text('Open plus'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Open plus'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(Dialog), findsOneWidget);
+    expect(find.byType(BottomSheet), findsNothing);
+    final sheet = tester.getRect(find.byType(V2ComposerPlusSheet));
+    expect(sheet.width, lessThanOrEqualTo(560));
+    expect(sheet.center.dx, closeTo(450, 1));
+  });
 }

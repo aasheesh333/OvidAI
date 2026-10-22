@@ -43,6 +43,10 @@ class V2RunRoutes {
                   : () => _shareRun(routeContext, session),
               onOpenSource: (label) => _openSource(routeContext, label),
               onOpenSubagent: (id) => openSubagent(routeContext, id),
+              // onOpenFile / onRerun / onOpenPreview stay unset: the minimal
+              // trajectory screen renders no file, rerun or preview control,
+              // so a callback here would never reach the user. The share
+              // action above is the screen's one wired action.
             );
           },
         ),
@@ -229,9 +233,7 @@ class V2RunRoutes {
   static Future<void> _openSource(BuildContext context, String label) async {
     final raw = label.trim();
     if (raw.isEmpty) return;
-    final uri = Uri.tryParse(
-      raw.contains('://') ? raw : 'https://$raw',
-    );
+    final uri = Uri.tryParse(raw.contains('://') ? raw : 'https://$raw');
     if (uri == null || uri.host.isEmpty) {
       _snack(context, 'This source has no openable address.');
       return;
@@ -270,10 +272,7 @@ class V2RunRoutes {
 
   /// The full tool log for one subagent, as a scrollable sheet. The page's
   /// preview only shows the last five rows; this shows every recorded row.
-  static Future<void> _showFullLog(
-    BuildContext context,
-    ChatSession session,
-  ) {
+  static Future<void> _showFullLog(BuildContext context, ChatSession session) {
     final lines = _allLogLines(session);
     return showModalBottomSheet<void>(
       context: context,
@@ -322,9 +321,9 @@ class V2RunRoutes {
   }
 
   static void _snack(BuildContext context, String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   // ---------------------------------------------------------------------------
@@ -353,22 +352,26 @@ class V2RunRoutes {
           durationLabel: _durationFor(child),
           startedAt: child.createdAt,
           status: _launchStatus(child.agentState),
-          statusLabel: const {'running', 'finished', 'failed', 'stopped'}
-                  .contains(child.agentState)
+          statusLabel:
+              const {
+                'running',
+                'finished',
+                'failed',
+                'stopped',
+              }.contains(child.agentState)
               ? null
               : 'Not reported',
         ),
     ];
   }
 
-  static V2SubagentLaunchStatus _launchStatus(String? state) =>
-      switch (state) {
-        'running' => V2SubagentLaunchStatus.running,
-        'finished' => V2SubagentLaunchStatus.completed,
-        'failed' => V2SubagentLaunchStatus.failed,
-        'stopped' => V2SubagentLaunchStatus.cancelled,
-        _ => V2SubagentLaunchStatus.cancelled,
-      };
+  static V2SubagentLaunchStatus _launchStatus(String? state) => switch (state) {
+    'running' => V2SubagentLaunchStatus.running,
+    'finished' => V2SubagentLaunchStatus.completed,
+    'failed' => V2SubagentLaunchStatus.failed,
+    'stopped' => V2SubagentLaunchStatus.cancelled,
+    _ => V2SubagentLaunchStatus.cancelled,
+  };
 
   static String _durationFor(ChatSession session) {
     final end = session.agentState == 'running'
@@ -378,9 +381,8 @@ class V2RunRoutes {
     return elapsed.isNegative ? '' : formatCompactDuration(elapsed);
   }
 
-  static int _toolCount(ChatSession session) => session.messages
-      .where((message) => message.kind == MsgKind.tool)
-      .length;
+  static int _toolCount(ChatSession session) =>
+      session.messages.where((message) => message.kind == MsgKind.tool).length;
 
   /// Decodes the subagent's strict JSON contract from its final answer.
   ///
@@ -547,7 +549,8 @@ class V2RunRoutes {
   /// tools carry a path too, so only mutating tools count as writes.
   static String? _toolFile(Message message) {
     final name = (message.toolName ?? '').toLowerCase();
-    final writes = name.contains('write') ||
+    final writes =
+        name.contains('write') ||
         name.contains('edit') ||
         name.contains('create') ||
         name.contains('append') ||
@@ -628,7 +631,8 @@ class V2RunRoutes {
   }
 
   static String _tokensLabel(ChatSession session) {
-    final total = session.analytics.inputTokens + session.analytics.outputTokens;
+    final total =
+        session.analytics.inputTokens + session.analytics.outputTokens;
     return total <= 0 ? notReported : '${formatCompactCount(total)} tokens';
   }
 
@@ -639,8 +643,9 @@ class V2RunRoutes {
         : formatCompactDuration(Duration(milliseconds: ms));
   }
 
-  static String _elapsedLabel(int? ms) =>
-      ms == null || ms <= 0 ? '' : formatCompactDuration(Duration(milliseconds: ms));
+  static String _elapsedLabel(int? ms) => ms == null || ms <= 0
+      ? ''
+      : formatCompactDuration(Duration(milliseconds: ms));
 
   static String _agentStateLabel(String? state) => switch (state) {
     'running' => 'Working',

@@ -100,9 +100,9 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Nothing here yet'), findsOneWidget);
+    expect(find.text('No memories yet'), findsOneWidget);
     expect(
-      find.text('Start a chat in this project or add a memory file.'),
+      find.text('Memories from this project appear here.'),
       findsOneWidget,
     );
 
@@ -408,7 +408,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
-    expect(find.text('Nothing here yet', skipOffstage: false), findsOneWidget);
+    expect(find.text('No memories yet', skipOffstage: false), findsOneWidget);
 
     await tester.pumpWidget(
       _narrow(
@@ -442,7 +442,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('Nothing here yet'), findsOneWidget);
+    expect(find.text('No memories yet'), findsOneWidget);
     expect(find.text('Add memory'), findsNothing);
   });
 }

@@ -88,20 +88,16 @@ class V2SettingsActions {
       );
       if (!context.mounted) return;
       if (!receipt.isPending) {
-        _snack(
-          context,
-          'The account service did not confirm the request. Nothing was '
-          'deleted.',
-        );
+        _snack(context, 'Deletion unconfirmed. Nothing was deleted.');
         return;
       }
       final deadline = receipt.deleteAfter;
       _snack(
         context,
         deadline == null
-            ? 'Deletion scheduled. Sign in before the deadline to restore it.'
-            : 'Deletion scheduled. Sign in before '
-                  '${formatLocalDateTime(deadline)} to restore it.',
+            ? 'Deletion scheduled. Sign in to restore.'
+            : 'Deletion scheduled until '
+                  '${formatLocalDateTime(deadline)}. Sign in to restore.',
       );
     } on AccountException catch (e) {
       if (context.mounted) _snack(context, e.message);
@@ -181,15 +177,17 @@ class V2SettingsActions {
       _snack(context, _billingMessage(outcome.result));
       return;
     }
-    final unlocked = await _applyPurchase(outcome, viaRevenueCat: viaRevenueCat);
+    final unlocked = await _applyPurchase(
+      outcome,
+      viaRevenueCat: viaRevenueCat,
+    );
     if (!context.mounted) return;
     refreshUsage();
     _snack(
       context,
       unlocked
           ? 'Plan updated.'
-          : 'Payment received. Your plan unlocks as soon as our server '
-                'confirms it.',
+          : 'Payment received. Plan unlocks after confirmation.',
     );
   }
 
@@ -204,15 +202,17 @@ class V2SettingsActions {
       _snack(context, _billingMessage(outcome.result));
       return;
     }
-    final unlocked = await _applyPurchase(outcome, viaRevenueCat: viaRevenueCat);
+    final unlocked = await _applyPurchase(
+      outcome,
+      viaRevenueCat: viaRevenueCat,
+    );
     if (!context.mounted) return;
     refreshUsage();
     _snack(
       context,
       unlocked
           ? 'Purchases restored.'
-          : 'Purchase found. Your plan unlocks as soon as our server confirms '
-                'it.',
+          : 'Purchase found. Plan unlocks after confirmation.',
     );
   }
 
@@ -240,11 +240,24 @@ class V2SettingsActions {
     );
   }
 
-  Future<void> exportData(BuildContext context) async {
+  /// Exports the account's chats.
+  ///
+  /// [sessionIds] carries the export picker's real selection (server ids); null
+  /// means "every chat". Filtering here is what makes the selection real: the
+  /// picker can no longer tick a chat that the archive then ignores.
+  Future<void> exportData(
+    BuildContext context, {
+    Set<String>? sessionIds,
+  }) async {
     _snack(context, 'Preparing your export…');
     try {
       final snapshot = await CloudBackup().fetchHistory();
-      final plan = SettingsBackupService.planExport(snapshot.sessions);
+      final chosen = sessionIds == null
+          ? snapshot.sessions
+          : snapshot.sessions
+                .where((session) => sessionIds.contains(session.id))
+                .toList();
+      final plan = SettingsBackupService.planExport(chosen);
       if (plan.included.isEmpty) {
         if (context.mounted) {
           _snack(context, plan.limitHit ?? 'There is nothing to export yet.');
@@ -303,7 +316,8 @@ class V2SettingsActions {
       if (!context.mounted) return;
       final ok = await _confirm(
         context,
-        title: 'Import ${sessions.length} ${sessions.length == 1 ? 'chat' : 'chats'}?',
+        title:
+            'Import ${sessions.length} ${sessions.length == 1 ? 'chat' : 'chats'}?',
         body: 'They are added as new chats. Nothing existing is replaced.',
         confirm: 'Import',
       );
@@ -342,6 +356,53 @@ class V2SettingsActions {
     if (context.mounted) _snack(context, 'All data deleted.');
   }
 
+  /// Deletes the root chats whose last activity is older than [olderThan].
+  ///
+  /// This is the Storage screen's "Delete old chats" row. It deletes real
+  /// chats through [AppState.deleteSession] (which also removes their
+  /// subagents) and reports the number actually deleted.
+  Future<void> deleteOldChats(
+    BuildContext context, {
+    Duration olderThan = const Duration(days: 60),
+  }) async {
+    final cutoff = DateTime.now().subtract(olderThan);
+    final doomed = AppState.I.sessions
+        .where(
+          (session) =>
+              session.parentId == null &&
+              session.lastActivityAt.isBefore(cutoff),
+        )
+        .toList();
+    if (doomed.isEmpty) {
+      _snack(context, 'No chats older than 60 days.');
+      return;
+    }
+    final ok = await _confirm(
+      context,
+      title: 'Delete old chats?',
+      body:
+          '${doomed.length} ${doomed.length == 1 ? 'chat has' : 'chats have'} '
+          'no activity in 60 days. They are removed for good.',
+      confirm: 'Delete chats',
+      danger: true,
+    );
+    if (!ok) return;
+    var deleted = 0;
+    for (final session in doomed) {
+      try {
+        await AppState.I.deleteSession(session.id);
+        deleted++;
+      } catch (_) {
+        // A chat that could not be deleted stays; the count is what happened.
+      }
+    }
+    if (!context.mounted) return;
+    _snack(
+      context,
+      deleted == 1 ? 'Deleted 1 old chat.' : 'Deleted $deleted old chats.',
+    );
+  }
+
   Future<void> resetMemory(BuildContext context) async {
     final ok = await _confirm(
       context,
@@ -364,7 +425,9 @@ class V2SettingsActions {
       }
       if (context.mounted) _snack(context, 'Memory reset for this chat.');
     } catch (_) {
-      if (context.mounted) _snack(context, 'Could not reset memory. Try again.');
+      if (context.mounted) {
+        _snack(context, 'Could not reset memory. Try again.');
+      }
     }
   }
 
@@ -383,8 +446,7 @@ class V2SettingsActions {
     return AppState.I.setThemeMode(value);
   }
 
-  Future<void> setTextScale(double value) =>
-      AppState.I.setChatFontScale(value);
+  Future<void> setTextScale(double value) => AppState.I.setChatFontScale(value);
 
   /// Persists the dictation language and mirrors it into the composer.
   Future<void> setVoiceLanguage(String id) async {
@@ -408,14 +470,11 @@ class V2SettingsActions {
   Future<void> setChannelSound(String channelId, V2NotificationSound sound) {
     for (final channel in OvidChannel.values) {
       if (channel.key != channelId) continue;
-      return BackgroundNotifier.I.setChannelSound(
-        channel,
-        switch (sound) {
-          V2NotificationSound.chime => NotificationSound.chime,
-          V2NotificationSound.system => NotificationSound.system,
-          V2NotificationSound.silent => NotificationSound.silent,
-        },
-      );
+      return BackgroundNotifier.I.setChannelSound(channel, switch (sound) {
+        V2NotificationSound.chime => NotificationSound.chime,
+        V2NotificationSound.system => NotificationSound.system,
+        V2NotificationSound.silent => NotificationSound.silent,
+      });
     }
     return Future<void>.value();
   }
@@ -439,7 +498,10 @@ class V2SettingsActions {
       await AccountSettingsClient.I.setNotificationsEnabled(value);
     } catch (_) {
       if (context.mounted) {
-        _snack(context, 'Could not update notifications. Check your connection.');
+        _snack(
+          context,
+          'Could not update notifications. Check your connection.',
+        );
       }
       return;
     }
@@ -447,7 +509,8 @@ class V2SettingsActions {
   }
 
   /// Opt in or out of anonymous crash reports and analytics.
-  Future<void> setCrashReports(bool value) => FirebaseService.I.setConsent(value);
+  Future<void> setCrashReports(bool value) =>
+      FirebaseService.I.setConsent(value);
 
   void selectPreset(String id) {
     unawaited(CommandService.I.execute('/preset $id'));
@@ -472,10 +535,10 @@ class V2SettingsActions {
               autofocus: true,
               textCapitalization: TextCapitalization.words,
               decoration: const InputDecoration(hintText: 'Preset name'),
-              onSubmitted: (value) => Navigator.pop(
-                dialogContext,
-                (label: value, description: description.text),
-              ),
+              onSubmitted: (value) => Navigator.pop(dialogContext, (
+                label: value,
+                description: description.text,
+              )),
             ),
             const SizedBox(height: 12),
             TextField(
@@ -493,10 +556,10 @@ class V2SettingsActions {
             child: const Text('Cancel'),
           ),
           TextButton(
-            onPressed: () => Navigator.pop(
-              dialogContext,
-              (label: controller.text, description: description.text),
-            ),
+            onPressed: () => Navigator.pop(dialogContext, (
+              label: controller.text,
+              description: description.text,
+            )),
             child: const Text('Create'),
           ),
         ],
@@ -542,10 +605,6 @@ class V2SettingsActions {
 
   void refreshUsage() => usage.refresh();
 
-  void notReady(BuildContext context, String label) {
-    _snack(context, '$label is not available yet.');
-  }
-
   Future<bool> _confirm(
     BuildContext context, {
     required String title,
@@ -585,7 +644,8 @@ class V2SettingsActions {
 
   String _billingMessage(UpgradeResult result) => switch (result) {
     UpgradeResult.ok => 'Plan updated.',
-    UpgradeResult.pending => 'Payment pending. Your plan activates once confirmed.',
+    UpgradeResult.pending =>
+      'Payment pending. Your plan activates once confirmed.',
     UpgradeResult.cancelled => 'Purchase cancelled.',
     UpgradeResult.notAvailable => 'Google Play billing is not available.',
     UpgradeResult.rejected => 'This purchase was not accepted.',

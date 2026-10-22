@@ -165,18 +165,18 @@ void main() {
     }
   });
 
-  testWidgets('changes render as letter badges and folders aggregate them', (
+  testWidgets('rows show the file name only, with no change badges', (
     tester,
   ) async {
     await tester.pumpWidget(_app(V2FileTree(data: _tree)));
     await tester.pumpAndSettle();
 
-    expect(find.text('M'), findsOneWidget);
-    expect(find.text('A'), findsOneWidget);
-    expect(find.text('D'), findsOneWidget);
-    // lib contains main.dart + app.dart; assets contains the removed image.
-    expect(find.text('2'), findsOneWidget);
-    expect(find.text('1'), findsOneWidget);
+    // Name is the only text in a row: no M/A/D letters, no counts.
+    expect(find.text('M'), findsNothing);
+    expect(find.text('A'), findsNothing);
+    expect(find.text('D'), findsNothing);
+    expect(find.text('2'), findsNothing);
+    expect(find.text('1'), findsNothing);
 
     expect(
       tester.getSemantics(_row('lib/main.dart')),
@@ -185,7 +185,7 @@ void main() {
     expect(
       tester.getSemantics(_row('lib')),
       isSemantics(
-        label: 'Folder lib, 3 files, 2 changed',
+        label: 'Folder lib, 3 files',
         isButton: true,
         hasExpandedState: true,
         isExpanded: true,
@@ -194,7 +194,7 @@ void main() {
     expect(
       tester.getSemantics(_row('assets')),
       isSemantics(
-        label: 'Folder assets, 1 file, 1 changed',
+        label: 'Folder assets, 1 file',
         hasExpandedState: true,
         isExpanded: true,
       ),
@@ -248,11 +248,7 @@ void main() {
         V2FileTree(
           data: const V2FileTreeData(
             nodes: <V2FileTreeEntry>[
-              V2FileTreeEntry(
-                name: 'empty',
-                path: 'empty',
-                isFolder: true,
-              ),
+              V2FileTreeEntry(name: 'empty', path: 'empty', isFolder: true),
               V2FileTreeEntry(
                 name: 'src',
                 path: 'src',
@@ -270,14 +266,8 @@ void main() {
     await tester.pumpAndSettle();
 
     // The real folder keeps its chevron; the empty one never gets one.
-    expect(
-      find.byKey(const Key('v2-file-tree-expander-src')),
-      findsOneWidget,
-    );
-    expect(
-      find.byKey(const Key('v2-file-tree-expander-empty')),
-      findsNothing,
-    );
+    expect(find.byKey(const Key('v2-file-tree-expander-src')), findsOneWidget);
+    expect(find.byKey(const Key('v2-file-tree-expander-empty')), findsNothing);
     expect(
       tester.getSemantics(_row('empty')),
       isSemantics(label: 'Folder empty, empty', hasExpandedState: false),
@@ -414,7 +404,6 @@ void main() {
     await tester.enterText(find.byType(TextField), 'button');
     await tester.pumpAndSettle();
 
-    expect(find.text('1 file found'), findsOneWidget);
     expect(find.text('lib'), findsOneWidget);
     expect(find.text('widgets'), findsOneWidget);
     expect(find.text('button.dart'), findsOneWidget);
@@ -460,7 +449,6 @@ void main() {
     await tester.enterText(find.byType(TextField), 'assets');
     await tester.pumpAndSettle();
 
-    expect(find.text('1 file found'), findsOneWidget);
     expect(_row('assets'), findsOneWidget);
     expect(find.text('hero_banner.png'), findsOneWidget);
     expect(find.text('lib'), findsNothing);
@@ -483,7 +471,6 @@ void main() {
       isEmpty,
     );
     expect(find.text('main.dart'), findsOneWidget);
-    expect(find.text('1 file found'), findsNothing);
   });
 
   testWidgets('no-match state offers a clear action', (tester) async {
@@ -494,11 +481,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('No matching files'), findsOneWidget);
-    expect(
-      find.text('Nothing matches “zzzz”. Try a different name or path.'),
-      findsOneWidget,
-    );
-    expect(find.textContaining('files found'), findsNothing);
+    expect(find.textContaining('Nothing matches'), findsNothing);
 
     await tester.tap(find.text('Clear search'));
     await tester.pumpAndSettle();

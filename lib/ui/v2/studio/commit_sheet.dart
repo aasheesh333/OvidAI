@@ -3,14 +3,13 @@
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
-import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
 
 /// What the commit sheet is doing right now.
 enum V2CommitSheetStatus { loading, content, empty, error }
 
-/// The hard limit for a commit subject line. The counter and the guidance copy
-/// both read from this so the copy can never drift from the rule.
+/// The hard limit for a commit subject line. The counter reads from this so the
+/// rule and the copy can never drift apart.
 const int v2CommitMessageLimit = 72;
 
 /// How many changed files are listed before the summary collapses the rest.
@@ -149,7 +148,7 @@ class _V2CommitSheetState extends State<V2CommitSheet> {
 
   String get _commitSemanticLabel {
     if (widget.onCommit == null) {
-      return 'Commit & push, committing is not available yet';
+      return 'Commit & push, unavailable';
     }
     if (!widget.data.hasChanges) return 'Commit & push, no changes to commit';
     if (_trimmed.isEmpty) return 'Commit & push, write a message first';
@@ -170,23 +169,36 @@ class _V2CommitSheetState extends State<V2CommitSheet> {
       color: c.surface,
       child: SafeArea(
         top: false,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (widget.showHandle) ...[
-              const SizedBox(height: OSpace.s),
-              Container(
-                width: 36,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: c.hairlineStrong,
-                  borderRadius: BorderRadius.circular(2),
+        child: Align(
+          alignment: Alignment.topCenter,
+          heightFactor: 1,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 560),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (widget.showHandle) ...[
+                  const SizedBox(height: OSpace.s),
+                  Container(
+                    width: 36,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: c.hairlineStrong,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ],
+                OSheetHeader(
+                  title: 'Commit changes',
+                  onClose: widget.onClose,
+                  closeKey: const Key('commit-sheet-close'),
+                  closeLabel: 'Close commit sheet',
                 ),
-              ),
-            ],
-            Flexible(child: _buildBody(context)),
-            if (showFooter) _buildFooter(context),
-          ],
+                Flexible(child: _buildBody(context)),
+                if (showFooter) _buildFooter(context),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -199,13 +211,9 @@ class _V2CommitSheetState extends State<V2CommitSheet> {
         return const SizedBox(height: 300, child: OSkeletonList(rows: 4));
       case V2CommitSheetStatus.error:
         return SizedBox(
-          height: 380,
+          height: 320,
           child: OErrorState(
-            title: 'Could not prepare your commit',
-            message:
-                data.errorMessage ??
-                'We could not read the working tree. Check your connection '
-                    'and try again.',
+            message: data.errorMessage ?? 'This commit did not load.',
             onRetry: widget.onRetry,
           ),
         );
@@ -219,12 +227,12 @@ class _V2CommitSheetState extends State<V2CommitSheet> {
 
   Widget _buildEmpty() {
     return SizedBox(
-      height: 380,
+      height: 320,
       child: OEmptyState(
         compact: true,
         icon: Icons.check_circle_outline_rounded,
         title: 'No changes to commit',
-        message: 'Edits you make in Studio will show up here.',
+        message: '',
         action: widget.onClose == null
             ? null
             : OButton(
@@ -250,77 +258,30 @@ class _V2CommitSheetState extends State<V2CommitSheet> {
       child: Center(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 560),
-          child: OFadeSlide(
-            child: OStagger(
-              children: [
-                _buildHeader(context, c, branch),
-                if (branch.isNotEmpty) ...[
-                  const SizedBox(height: OSpace.m),
-                  _BranchRow(branch: branch),
-                ],
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (branch.isNotEmpty) ...[
+                _BranchRow(branch: branch),
                 const SizedBox(height: OSpace.m),
-                _ChangedFilesCard(data: data),
-                if (data.behindCount > 0) ...[
-                  const SizedBox(height: OSpace.m),
-                  _SyncFirstCard(
-                    count: data.behindCount,
-                    onSync: widget.onSync,
-                  ),
-                ],
-                const SizedBox(height: OSpace.l),
-                _buildMessageField(context, c),
-                const SizedBox(height: OSpace.m),
-                _PushNote(
-                  protectedBranch: data.protectedBranch,
-                  branch: branch,
-                  note: data.pushNote,
-                ),
               ],
-            ),
+              _ChangedFilesCard(data: data),
+              if (data.behindCount > 0) ...[
+                const SizedBox(height: OSpace.m),
+                _SyncFirstCard(count: data.behindCount, onSync: widget.onSync),
+              ],
+              const SizedBox(height: OSpace.l),
+              _buildMessageField(context, c),
+            ],
           ),
         ),
       ),
     );
   }
 
-  Widget _buildHeader(BuildContext context, OColors c, String branch) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('Commit changes', style: OType.h2.copyWith(color: c.text)),
-              const SizedBox(height: OSpace.xs),
-              Text(
-                branch.isEmpty
-                    ? 'Review your changes before pushing.'
-                    : 'Review your changes before pushing to $branch.',
-                style: OType.bodySm.copyWith(color: c.textMuted),
-              ),
-            ],
-          ),
-        ),
-        if (widget.onClose != null)
-          OIconButton(
-            icon: Icons.close_rounded,
-            semanticLabel: 'Close commit sheet',
-            tooltip: 'Close',
-            onPressed: widget.onClose,
-          ),
-      ],
-    );
-  }
-
   Widget _buildMessageField(BuildContext context, OColors c) {
     final length = _length;
     final tooLong = _tooLong;
-    final helper = tooLong
-        ? 'Too long by ${length - v2CommitMessageLimit} '
-              '${length - v2CommitMessageLimit == 1 ? 'character' : 'characters'}. '
-              'Shorten it to $v2CommitMessageLimit characters.'
-        : 'Keep it short: aim for $v2CommitMessageLimit characters or fewer.';
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -371,13 +332,6 @@ class _V2CommitSheetState extends State<V2CommitSheet> {
             ),
           ),
         ),
-        const SizedBox(height: OSpace.xs),
-        Text(
-          helper,
-          style: OType.caption.copyWith(
-            color: tooLong ? c.danger : c.textMuted,
-          ),
-        ),
       ],
     );
   }
@@ -395,21 +349,13 @@ class _V2CommitSheetState extends State<V2CommitSheet> {
         OSpace.l,
         OSpace.m,
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          OButton(
-            key: const ValueKey('v2-commit-submit'),
-            label: 'Commit & push',
-            icon: Icons.send_rounded,
-            expand: true,
-            semanticLabel: _commitSemanticLabel,
-            onPressed: _canCommit
-                ? () => widget.onCommit?.call(_trimmed)
-                : null,
-          ),
-        ],
+      child: OButton(
+        key: const ValueKey('v2-commit-submit'),
+        label: 'Commit & push',
+        icon: Icons.send_rounded,
+        expand: true,
+        semanticLabel: _commitSemanticLabel,
+        onPressed: _canCommit ? () => widget.onCommit?.call(_trimmed) : null,
       ),
     );
   }
@@ -450,8 +396,6 @@ class _BranchRow extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              const SizedBox(width: OSpace.s),
-              Text('origin', style: OType.caption.copyWith(color: c.textFaint)),
             ],
           ),
         ),
@@ -470,9 +414,6 @@ class _ChangedFilesCard extends StatelessWidget {
     final c = OColors.of(context);
     final visible = data.files.take(v2CommitFilePreviewLimit).toList();
     final hidden = data.files.length - visible.length;
-    final total = data.additions + data.deletions;
-    final addFlex = data.additions <= 0 ? 1 : data.additions;
-    final removeFlex = data.deletions <= 0 ? 1 : data.deletions;
     return Semantics(
       container: true,
       excludeSemantics: true,
@@ -485,89 +426,33 @@ class _ChangedFilesCard extends StatelessWidget {
           children: [
             Row(
               children: [
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: c.accentSoft,
-                    borderRadius: BorderRadius.circular(ORadius.m),
-                  ),
-                  child: Icon(
-                    Icons.difference_rounded,
-                    size: 21,
-                    color: c.accent,
-                  ),
-                ),
-                const SizedBox(width: OSpace.m),
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        data.filesLabel,
-                        style: OType.bodyStrong.copyWith(color: c.text),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      Text(
-                        'Will be committed together',
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ],
+                  child: Text(
+                    data.filesLabel,
+                    style: OType.bodyStrong.copyWith(color: c.text),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
                 const SizedBox(width: OSpace.s),
-                Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Text(
-                      '+${data.additions}',
-                      style: OType.bodySm.copyWith(
-                        color: c.success,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    Text(
-                      '−${data.deletions}',
-                      style: OType.bodySm.copyWith(
-                        color: c.danger,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
+                Text(
+                  '+${data.additions}',
+                  style: OType.bodySm.copyWith(
+                    color: c.success,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(width: OSpace.s),
+                Text(
+                  '−${data.deletions}',
+                  style: OType.bodySm.copyWith(
+                    color: c.danger,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ],
             ),
-            if (total > 0) ...[
-              const SizedBox(height: OSpace.m),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(3),
-                child: SizedBox(
-                  height: 6,
-                  child: Row(
-                    children: [
-                      Expanded(
-                        flex: addFlex,
-                        child: ColoredBox(
-                          color: c.success,
-                          child: const SizedBox.expand(),
-                        ),
-                      ),
-                      const SizedBox(width: 2),
-                      Expanded(
-                        flex: removeFlex,
-                        child: ColoredBox(
-                          color: c.danger,
-                          child: const SizedBox.expand(),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-            const SizedBox(height: OSpace.m),
+            const SizedBox(height: OSpace.s),
             Divider(height: 1, color: c.hairline),
             const SizedBox(height: OSpace.s),
             for (final file in visible) _FileRow(file: file),
@@ -575,7 +460,7 @@ class _ChangedFilesCard extends StatelessWidget {
               Padding(
                 padding: const EdgeInsets.only(top: OSpace.xs),
                 child: Text(
-                  '+$hidden more ${hidden == 1 ? 'file' : 'files'}',
+                  '+$hidden more',
                   style: OType.caption.copyWith(
                     color: c.textMuted,
                     fontWeight: FontWeight.w600,
@@ -601,8 +486,6 @@ class _FileRow extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 3),
       child: Row(
         children: [
-          Icon(Icons.description_outlined, size: 16, color: c.textFaint),
-          const SizedBox(width: OSpace.s),
           Expanded(
             child: Text(
               file.path,
@@ -642,7 +525,7 @@ class _SyncFirstCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final commits = count == 1 ? 'commit' : 'commits';
+    final commits = count == 1 ? 'commit behind' : 'commits behind';
     return Container(
       padding: const EdgeInsets.all(OSpace.m),
       decoration: BoxDecoration(
@@ -654,34 +537,24 @@ class _SyncFirstCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Icon(Icons.sync_rounded, size: 20, color: c.warn),
               const SizedBox(width: OSpace.s),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Sync first',
-                      style: OType.bodySm.copyWith(
-                        color: c.text,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      'Remote has $count new $commits. Pull them in before you '
-                      'push so this commit lands cleanly.',
-                      style: OType.caption.copyWith(color: c.textMuted),
-                    ),
-                  ],
+                child: Text(
+                  '$count $commits',
+                  style: OType.bodySm.copyWith(
+                    color: c.text,
+                    fontWeight: FontWeight.w600,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
             ],
           ),
-          const SizedBox(height: OSpace.s),
-          if (onSync != null)
+          if (onSync != null) ...[
+            const SizedBox(height: OSpace.s),
             OButton(
               key: const ValueKey('v2-commit-sync'),
               label: 'Sync latest changes',
@@ -690,71 +563,8 @@ class _SyncFirstCard extends StatelessWidget {
               expand: true,
               semanticLabel: 'Sync latest changes, $count behind',
               onPressed: onSync,
-            )
-          else
-            Text(
-              key: const ValueKey('v2-commit-sync-unavailable'),
-              'Syncing is not available yet. Pull the latest changes from '
-              'Studio before you commit.',
-              style: OType.caption.copyWith(color: c.textMuted),
             ),
-        ],
-      ),
-    );
-  }
-}
-
-class _PushNote extends StatelessWidget {
-  const _PushNote({
-    required this.protectedBranch,
-    required this.branch,
-    this.note,
-  });
-
-  final bool protectedBranch;
-  final String branch;
-  final String? note;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final title = protectedBranch ? 'Protected branch' : 'Push protected';
-    final body =
-        note ??
-        (protectedBranch
-            ? '${branch.isEmpty ? 'This branch' : branch} is protected. Ovid '
-                  'pushes a new branch and opens a pull request instead of '
-                  'pushing directly.'
-            : 'Your push is protected. Ovid uses a one-time credential helper, '
-                  'so your GitHub token never lands in .git/config.');
-    return Container(
-      padding: const EdgeInsets.all(OSpace.m),
-      decoration: BoxDecoration(
-        color: c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.m),
-        border: Border.all(color: c.hairline),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.lock_outline_rounded, size: 18, color: c.textMuted),
-          const SizedBox(width: OSpace.s),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: OType.caption.copyWith(
-                    color: c.text,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(body, style: OType.caption.copyWith(color: c.textMuted)),
-              ],
-            ),
-          ),
+          ],
         ],
       ),
     );

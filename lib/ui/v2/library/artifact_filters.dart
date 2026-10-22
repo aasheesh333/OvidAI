@@ -531,7 +531,8 @@ class ArtifactFilterBar extends StatelessWidget {
     _change(filters.copyWith(date: picked));
   }
 
-  Future<void> _pickSort(BuildContext context) async {    final picked = await showOSheet<V2ArtifactSort>(
+  Future<void> _pickSort(BuildContext context) async {
+    final picked = await showOSheet<V2ArtifactSort>(
       context,
       title: 'Sort by',
       builder: (sheetContext) => ListView(

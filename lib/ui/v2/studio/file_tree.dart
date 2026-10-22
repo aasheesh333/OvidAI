@@ -82,7 +82,7 @@ class V2FileTreeData {
     this.initialQuery = '',
     this.searchHint = 'Search files',
     this.emptyTitle = 'No files yet',
-    this.emptyMessage = 'Files in this branch will appear here.',
+    this.emptyMessage = '',
     this.errorMessage,
   });
 
@@ -265,10 +265,7 @@ class _V2FileTreeState extends State<V2FileTree> {
       case V2FileTreeStatus.error:
         return OErrorState(
           title: 'Files did not load',
-          message:
-              data.errorMessage ??
-              'We could not list the files in this workspace. Check your '
-                  'connection and try again.',
+          message: data.errorMessage ?? '',
           onRetry: widget.onRetry,
         );
       case V2FileTreeStatus.empty:
@@ -307,7 +304,6 @@ class _V2FileTreeState extends State<V2FileTree> {
       forceExpanded: searching,
       searching: searching,
     );
-    final matches = searching ? _countFiles(visible) : 0;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -331,9 +327,8 @@ class _V2FileTreeState extends State<V2FileTree> {
                   ),
           ),
         ),
-        if (searching && rows.isNotEmpty) _ResultCount(count: matches),
         if (rows.isEmpty)
-          _NoMatches(query: query, onClear: _clearSearch)
+          _NoMatches(onClear: _clearSearch)
         else if (searching)
           Column(
             mainAxisSize: MainAxisSize.min,
@@ -387,24 +382,19 @@ class _V2FileTreeState extends State<V2FileTree> {
     required bool forceExpanded,
     required bool searching,
   }) {
-    // Post-order counts, computed once per build rather than per row.
-    final changedCounts = <String, int>{};
+    // Post-order file counts, computed once per build rather than per row.
     final fileCounts = <String, int>{};
     int count(entry) {
       if (!entry.isFolder) {
-        changedCounts[entry.id] = entry.isChanged ? 1 : 0;
         fileCounts[entry.id] = 1;
-        return entry.isChanged ? 1 : 0;
+        return 1;
       }
-      var changed = entry.isChanged ? 1 : 0;
       var files = 0;
       for (final child in entry.children) {
-        changed += count(child);
-        files += fileCounts[child.id] ?? 0;
+        files += count(child);
       }
-      changedCounts[entry.id] = changed;
       fileCounts[entry.id] = files;
-      return changed;
+      return files;
     }
 
     for (final node in nodes) {
@@ -421,7 +411,6 @@ class _V2FileTreeState extends State<V2FileTree> {
           depth: depth,
           expanded: expanded,
           fileCount: fileCounts[entry.id] ?? 0,
-          changedCount: changedCounts[entry.id] ?? 0,
         ),
       );
       if (!expanded) return;
@@ -446,7 +435,6 @@ class _V2FileTreeState extends State<V2FileTree> {
               widget.data.selectedPath != null &&
               (row.entry.path ?? row.entry.name) == widget.data.selectedPath,
           fileCount: row.fileCount,
-          changedCount: row.changedCount,
           searching: searching,
           interactive:
               row.entry.canExpand ||
@@ -463,14 +451,12 @@ class _TreeRowData {
     required this.depth,
     required this.expanded,
     required this.fileCount,
-    required this.changedCount,
   });
 
   final V2FileTreeEntry entry;
   final int depth;
   final bool expanded;
   final int fileCount;
-  final int changedCount;
 }
 
 class _FileTreeRow extends StatelessWidget {
@@ -481,7 +467,6 @@ class _FileTreeRow extends StatelessWidget {
     required this.expanded,
     required this.selected,
     required this.fileCount,
-    required this.changedCount,
     required this.searching,
     required this.interactive,
     required this.onTap,
@@ -492,7 +477,6 @@ class _FileTreeRow extends StatelessWidget {
   final bool expanded;
   final bool selected;
   final int fileCount;
-  final int changedCount;
   final bool searching;
   final bool interactive;
   final VoidCallback onTap;
@@ -508,8 +492,6 @@ class _FileTreeRow extends StatelessWidget {
         : entry.isFolder
         ? (expanded ? c.accent : c.textMuted)
         : language.color(c);
-    final badge = _badgeFor(c);
-
     final content = ConstrainedBox(
       constraints: const BoxConstraints(minHeight: OSpace.touch),
       child: Padding(
@@ -555,7 +537,6 @@ class _FileTreeRow extends StatelessWidget {
                 ),
               ),
             ),
-            if (badge != null) ...[const SizedBox(width: OSpace.xs), badge],
           ],
         ),
       ),
@@ -588,105 +569,18 @@ class _FileTreeRow extends StatelessWidget {
   String _semanticLabel(_Language language) {
     if (entry.isFolder) {
       final files = fileCount == 1 ? '1 file' : '$fileCount files';
-      final changed = changedCount > 0 ? ', $changedCount changed' : '';
       if (!entry.canExpand) return 'Folder ${entry.name}, empty';
-      return 'Folder ${entry.name}, $files$changed';
+      return 'Folder ${entry.name}, $files';
     }
     final change = entry.change;
     final suffix = change == null ? '' : ', ${change.semanticLabel}';
     return '${entry.name}, ${language.label}$suffix';
   }
-
-  Widget? _badgeFor(OColors c) {
-    if (entry.isFolder) {
-      if (changedCount == 0) return null;
-      return _TreeBadge(
-        label: '$changedCount',
-        foreground: c.accent,
-        background: c.accentSoft,
-      );
-    }
-    final change = entry.change;
-    if (change == null) return null;
-    final (foreground, background) = switch (change) {
-      V2FileChange.added => (c.success, c.success.withValues(alpha: 0.12)),
-      V2FileChange.modified => (c.warn, c.warn.withValues(alpha: 0.12)),
-      V2FileChange.removed => (c.danger, c.danger.withValues(alpha: 0.12)),
-    };
-    return _TreeBadge(
-      label: change.badge,
-      foreground: foreground,
-      background: background,
-    );
-  }
-}
-
-class _TreeBadge extends StatelessWidget {
-  const _TreeBadge({
-    required this.label,
-    required this.foreground,
-    required this.background,
-  });
-
-  final String label;
-  final Color foreground;
-  final Color background;
-
-  @override
-  Widget build(BuildContext context) {
-    // No fixed height: at 200 % text the badge grows instead of clipping.
-    return Container(
-      constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-      decoration: BoxDecoration(
-        color: background,
-        borderRadius: BorderRadius.circular(ORadius.s),
-      ),
-      child: Text(
-        label,
-        textAlign: TextAlign.center,
-        style: OType.caption.copyWith(
-          color: foreground,
-          fontWeight: FontWeight.w600,
-          height: 1.1,
-        ),
-      ),
-    );
-  }
-}
-
-class _ResultCount extends StatelessWidget {
-  const _ResultCount({required this.count});
-
-  final int count;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final label = count == 1 ? '1 file found' : '$count files found';
-    return Semantics(
-      container: true,
-      liveRegion: true,
-      label: label,
-      child: ExcludeSemantics(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(
-            OSpace.m,
-            OSpace.s,
-            OSpace.m,
-            OSpace.xs,
-          ),
-          child: Text(label, style: OType.caption.copyWith(color: c.textMuted)),
-        ),
-      ),
-    );
-  }
 }
 
 class _NoMatches extends StatelessWidget {
-  const _NoMatches({required this.query, required this.onClear});
+  const _NoMatches({required this.onClear});
 
-  final String query;
   final VoidCallback onClear;
 
   @override
@@ -695,7 +589,7 @@ class _NoMatches extends StatelessWidget {
       compact: true,
       icon: Icons.search_off_rounded,
       title: 'No matching files',
-      message: 'Nothing matches “$query”. Try a different name or path.',
+      message: '',
       action: OButton(
         label: 'Clear search',
         icon: Icons.close_rounded,

@@ -113,9 +113,6 @@ class ShareChatSheet extends StatelessWidget {
       onRetry: onRetry,
       onClose: onClose,
       title: 'Share this chat',
-      subtitle: 'Anyone with the link can view or fork it.',
-      forkNote:
-          'Forking makes a copy in their own account. Your original stays private.',
     );
   }
 }

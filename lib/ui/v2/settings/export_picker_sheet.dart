@@ -137,34 +137,6 @@ class V2ExportPickerSheetData {
     return null;
   }
 
-  /// Why the archive picker was opened. Explains every limit the whole account
-  /// breaks, not just the 64 MB one.
-  String get intro {
-    final reasons = <String>[];
-    if (totalBytes > limitBytes) {
-      reasons.add(
-        'Your chats are ${_formatSize(totalBytes)}, over the '
-        '$limitSizeLabel archive limit.',
-      );
-    }
-    if (totalMessages > limitMessages) {
-      reasons.add(
-        'Your chats hold ${_formatCount(totalMessages)} messages, over the '
-        '${_formatCount(limitMessages)} message limit.',
-      );
-    }
-    if (sessions.length > limitChats) {
-      reasons.add(
-        'You have ${_formatCount(sessions.length)} chats, over the '
-        '${_formatCount(limitChats)} chat limit.',
-      );
-    }
-    if (reasons.isEmpty) {
-      return 'Select the chats to include in this backup.';
-    }
-    return '${reasons.join(' ')} Select the chats to include in this backup.';
-  }
-
   /// A chat can always be deselected. An unselected chat is only available if
   /// adding it keeps every running total within its limit.
   bool canAdd(V2ExportPickerSession session) =>
@@ -275,7 +247,12 @@ class ExportPickerSheet extends StatelessWidget {
           child: ListView(
             padding: padding,
             children: [
-              _Header(intro: data.intro),
+              OSheetHeader(
+                icon: Icons.inventory_2_outlined,
+                title: 'Export chats',
+                padding: EdgeInsets.zero,
+                onClose: onClose,
+              ),
               const SizedBox(height: OSpace.m),
               child,
             ],
@@ -313,7 +290,7 @@ class ExportPickerSheet extends StatelessWidget {
           compact: true,
           icon: Icons.chat_bubble_outline_rounded,
           title: 'No chats to export',
-          message: 'Start a chat first. Then come back to back it up.',
+          message: 'Start a chat, then come back.',
           action: OButton(label: data.emptyActionLabel, onPressed: onClose),
         ),
       ),
@@ -321,10 +298,15 @@ class ExportPickerSheet extends StatelessWidget {
   }
 
   Widget _content(BuildContext context) {
-    // Header, summary, select-all, one row per chat, then the heavy-artifacts
-    // note. The builder keeps long 1,000-chat lists lazy.
+    // Header, summary, select-all, then one row per chat. The builder keeps
+    // long 1,000-chat lists lazy.
     final leading = <Widget>[
-      _Header(intro: data.intro),
+      OSheetHeader(
+        icon: Icons.inventory_2_outlined,
+        title: 'Export chats',
+        padding: EdgeInsets.zero,
+        onClose: onClose,
+      ),
       const SizedBox(height: OSpace.m),
       _Summary(data: data),
       const SizedBox(height: OSpace.s),
@@ -350,69 +332,19 @@ class ExportPickerSheet extends StatelessWidget {
               OSpace.xl,
               OSpace.m,
             ),
-            itemCount: leading.length + sessionCount + 1,
+            itemCount: leading.length + sessionCount,
             itemBuilder: (context, index) {
               if (index < leading.length) return leading[index];
-              final sessionIndex = index - leading.length;
-              if (sessionIndex < sessionCount) {
-                final session = data.sessions[sessionIndex];
-                return _SessionRow(
-                  data: data,
-                  session: session,
-                  onToggle: onToggleSession,
-                );
-              }
-              return Padding(
-                padding: const EdgeInsets.only(top: OSpace.m),
-                child: const _HeavyArtifactsNote(),
+              final session = data.sessions[index - leading.length];
+              return _SessionRow(
+                data: data,
+                session: session,
+                onToggle: onToggleSession,
               );
             },
           ),
         ),
         _Footer(data: data, onExport: onExport, onClose: onClose),
-      ],
-    );
-  }
-}
-
-class _Header extends StatelessWidget {
-  const _Header({required this.intro});
-
-  final String intro;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                color: c.accentSoft,
-                borderRadius: BorderRadius.circular(ORadius.m),
-              ),
-              child: Icon(
-                Icons.inventory_2_outlined,
-                size: 21,
-                color: c.accent,
-              ),
-            ),
-            const SizedBox(width: OSpace.m),
-            Expanded(
-              child: Text(
-                'Choose chats to export',
-                style: OType.h2.copyWith(color: c.text),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: OSpace.s),
-        Text(intro, style: OType.bodySm.copyWith(color: c.textMuted)),
       ],
     );
   }
@@ -599,14 +531,6 @@ class _SelectAllRow extends StatelessWidget {
                 ),
               ),
             ),
-            if (someCannotFit)
-              Padding(
-                padding: const EdgeInsets.only(left: OSpace.touch),
-                child: Text(
-                  'Some chats are too large to add to this archive.',
-                  style: OType.caption.copyWith(color: c.textFaint),
-                ),
-              ),
           ],
         ),
       ),
@@ -760,37 +684,6 @@ String _blockedLimitCopy(V2ExportPickerSheetData data, _BlockedLimit limit) =>
         '${_formatCount(data.limitMessages)} message limit',
       _BlockedLimit.chats => '${_formatCount(data.limitChats)} chat limit',
     };
-
-class _HeavyArtifactsNote extends StatelessWidget {
-  const _HeavyArtifactsNote();
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      key: const ValueKey('export-picker-heavy-note'),
-      padding: const EdgeInsets.all(OSpace.m),
-      decoration: BoxDecoration(
-        color: c.warn.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(ORadius.m),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.upload_file_rounded, size: 18, color: c.warn),
-          const SizedBox(width: OSpace.s),
-          Expanded(
-            child: Text(
-              'Heavy artifacts are not included in a backup. Large files, '
-              'videos and generated assets must be re-uploaded after importing.',
-              style: OType.caption.copyWith(color: c.textMuted),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
 
 class _Footer extends StatelessWidget {
   const _Footer({required this.data, this.onExport, this.onClose});

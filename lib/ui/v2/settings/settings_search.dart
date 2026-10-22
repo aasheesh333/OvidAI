@@ -2,7 +2,7 @@
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
-import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'settings_hub.dart';
 
@@ -44,7 +44,7 @@ class V2SettingsSearchData {
     this.sections = const <V2SettingsSection>[],
     this.status = V2SettingsSearchStatus.ready,
     this.initialQuery = '',
-    this.searchHint = 'Search sections and rows',
+    this.searchHint = 'Search',
     this.errorMessage,
     this.canActivate,
   });
@@ -213,35 +213,30 @@ class _SettingsSearchPageState extends State<SettingsSearchPage> {
 
   @override
   Widget build(BuildContext context) {
-    return OScaffold(
-      appBar: const OAppBar(title: 'Search settings'),
-      body: OFadeSlide(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: OSpace.screen),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const SizedBox(height: OSpace.s),
-              OSearchField(
-                controller: _controller,
-                hint: widget.data.searchHint,
-                autofocus: true,
-                onChanged: _onChanged,
-                trailing: _query.isEmpty
-                    ? null
-                    : OIconButton(
-                        icon: Icons.close_rounded,
-                        size: 18,
-                        semanticLabel: 'Clear settings search',
-                        tooltip: 'Clear settings search',
-                        onPressed: _clearSearch,
-                      ),
-              ),
-              const SizedBox(height: OSpace.m),
-              Expanded(child: _buildBody(context)),
-            ],
+    return OScreen(
+      title: 'Search settings',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const SizedBox(height: OSpace.s),
+          OSearchField(
+            controller: _controller,
+            hint: widget.data.searchHint,
+            autofocus: true,
+            onChanged: _onChanged,
+            trailing: _query.isEmpty
+                ? null
+                : OIconButton(
+                    icon: Icons.close_rounded,
+                    size: 18,
+                    semanticLabel: 'Clear search',
+                    tooltip: 'Clear search',
+                    onPressed: _clearSearch,
+                  ),
           ),
-        ),
+          const SizedBox(height: OSpace.m),
+          Expanded(child: _buildBody(context)),
+        ],
       ),
     );
   }
@@ -255,7 +250,6 @@ class _SettingsSearchPageState extends State<SettingsSearchPage> {
         );
       case V2SettingsSearchStatus.error:
         return OErrorState(
-          title: 'Settings search did not load',
           message:
               widget.data.errorMessage ??
               'Check your connection and try again.',
@@ -272,35 +266,27 @@ class _SettingsSearchPageState extends State<SettingsSearchPage> {
     return OEmptyState(
       icon: Icons.tune_rounded,
       title: 'No settings to search',
-      message: 'Your settings will appear here when your account is ready.',
-      action: OButton(
-        label: 'Refresh settings',
-        icon: Icons.refresh_rounded,
-        onPressed: widget.onRetry,
-      ),
+      message: 'Settings appear when your account is ready.',
+      action: widget.onRetry == null
+          ? null
+          : OButton(
+              label: 'Refresh',
+              icon: Icons.refresh_rounded,
+              onPressed: widget.onRetry,
+            ),
     );
   }
 
-  /// Empty query: show tappable section names, so a person can reach results
+  /// Empty query: show the sections as chips, so a person can reach results
   /// without typing anything.
   Widget _browse(BuildContext context) {
-    final c = OColors.of(context);
     final sections = widget.data.sections
         .where((section) => section.items.isNotEmpty)
         .toList(growable: false);
     return ListView(
       padding: const EdgeInsets.only(bottom: OSpace.xl),
       children: [
-        Text(
-          'Search sections and rows by name. Tap a section to see its '
-          'settings, or type to filter.',
-          style: OType.caption.copyWith(color: c.textMuted),
-        ),
-        const SizedBox(height: OSpace.s),
-        OSectionHeader(
-          label: 'Browse settings',
-          padding: const EdgeInsets.fromLTRB(0, OSpace.s, 0, OSpace.s),
-        ),
+        const OSectionTitle(title: 'Sections'),
         Wrap(
           spacing: OSpace.s,
           runSpacing: OSpace.s,
@@ -308,7 +294,6 @@ class _SettingsSearchPageState extends State<SettingsSearchPage> {
             for (final section in sections)
               OChip(
                 label: section.title,
-                icon: Icons.search_rounded,
                 onTap: () => _setQuery(section.title),
               ),
           ],
@@ -318,16 +303,13 @@ class _SettingsSearchPageState extends State<SettingsSearchPage> {
   }
 
   Widget _results(BuildContext context) {
-    final c = OColors.of(context);
     final query = _query.trim();
     final groups = widget.data.groups(query);
     if (groups.isEmpty) {
       return OEmptyState(
         icon: Icons.search_off_rounded,
         title: 'No settings found',
-        message:
-            'No section or row matches “$query”. Try another name, like '
-            '“Account” or “Storage”.',
+        message: 'Nothing matches “$query”.',
         action: OButton(
           label: 'Clear search',
           variant: OButtonVariant.secondary,
@@ -336,106 +318,44 @@ class _SettingsSearchPageState extends State<SettingsSearchPage> {
       );
     }
 
-    final count = groups.fold<int>(
-      0,
-      (total, group) => total + group.results.length,
-    );
-    return ListView(
+    return ListView.builder(
       padding: const EdgeInsets.only(bottom: OSpace.xl),
-      children: [
-        Semantics(
-          liveRegion: true,
-          child: Text(
-            count == 1
-                ? '1 result for “$query”'
-                : '$count results for “$query”',
-            style: OType.caption.copyWith(color: c.textMuted),
-          ),
-        ),
-        const SizedBox(height: OSpace.s),
-        OStagger(
+      itemCount: groups.length,
+      itemBuilder: (context, index) {
+        final group = groups[index];
+        final c = OColors.of(context);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            for (final group in groups)
-              Padding(
-                padding: const EdgeInsets.only(bottom: OSpace.m),
-                child: _GroupCard(
-                  group: group,
-                  query: query,
-                  onTap: _open,
-                  canActivate: _canActivate,
-                ),
+            OSectionTitle(title: group.sectionTitle),
+            OCard(
+              padding: EdgeInsets.zero,
+              child: Column(
+                children: [
+                  for (
+                    var row = 0;
+                    row < group.results.length;
+                    row++
+                  ) ...[
+                    if (row > 0)
+                      Divider(
+                        height: 1,
+                        thickness: 1,
+                        indent: 64,
+                        color: c.hairline,
+                      ),
+                    _ResultRow(
+                      result: group.results[row],
+                      actionable: _canActivate(group.results[row].item),
+                      onTap: () => _open(group.results[row]),
+                    ),
+                  ],
+                ],
               ),
-          ],
-        ),
-      ],
-    );
-  }
-}
-
-class _GroupCard extends StatelessWidget {
-  const _GroupCard({
-    required this.group,
-    required this.query,
-    required this.onTap,
-    required this.canActivate,
-  });
-
-  final V2SettingsSearchGroup group;
-  final String query;
-  final ValueChanged<V2SettingsSearchResult> onTap;
-  final bool Function(V2SettingsItem item) canActivate;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final rows = <Widget>[];
-    for (var index = 0; index < group.results.length; index++) {
-      final result = group.results[index];
-      rows.add(
-        Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _ResultRow(
-              result: result,
-              query: query,
-              actionable: canActivate(result.item),
-              onTap: () => onTap(result),
             ),
-            if (index != group.results.length - 1)
-              Divider(height: 1, thickness: 1, indent: 64, color: c.hairline),
           ],
-        ),
-      );
-    }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(OSpace.xs, 0, OSpace.xs, OSpace.s),
-          child: Row(
-            children: [
-              Expanded(
-                child: _HighlightedText(
-                  text: group.sectionTitle.toUpperCase(),
-                  query: query,
-                  style: OType.overline.copyWith(color: c.textMuted),
-                ),
-              ),
-              const SizedBox(width: OSpace.s),
-              Text(
-                group.results.length == 1
-                    ? '1 row'
-                    : '${group.results.length} rows',
-                style: OType.caption.copyWith(color: c.textFaint),
-              ),
-            ],
-          ),
-        ),
-        OCard(
-          padding: EdgeInsets.zero,
-          child: OStagger(children: rows),
-        ),
-      ],
+        );
+      },
     );
   }
 }
@@ -443,156 +363,25 @@ class _GroupCard extends StatelessWidget {
 class _ResultRow extends StatelessWidget {
   const _ResultRow({
     required this.result,
-    required this.query,
     required this.actionable,
     required this.onTap,
   });
 
   final V2SettingsSearchResult result;
-  final String query;
   final bool actionable;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    final c = OColors.of(context);
     final item = result.item;
-    final fg = item.danger ? c.danger : c.text;
-    final baseTitle = OType.body.copyWith(
-      color: fg,
-      fontWeight: FontWeight.w500,
-    );
-    final baseSubtitle = OType.caption.copyWith(color: c.textMuted);
-    final enabled = actionable;
-    return OPressable(
-      onTap: enabled ? onTap : null,
-      semanticLabel: [
-        item.label,
-        result.sectionTitle,
-        if (!enabled) 'disabled',
-      ].join(', '),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: OSpace.listRow),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: OSpace.l,
-            vertical: OSpace.s,
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: item.danger
-                      ? c.danger.withValues(alpha: 0.10)
-                      : c.surfaceAlt,
-                  borderRadius: BorderRadius.circular(ORadius.m),
-                ),
-                child: Icon(
-                  item.icon,
-                  size: 19,
-                  color: item.danger ? c.danger : c.textMuted,
-                ),
-              ),
-              const SizedBox(width: OSpace.m),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    _HighlightedText(
-                      text: item.label,
-                      query: query,
-                      style: enabled
-                          ? baseTitle
-                          : baseTitle.copyWith(color: c.textFaint),
-                    ),
-                    if (item.subtitle != null) ...[
-                      const SizedBox(height: 2),
-                      Text(
-                        item.subtitle!,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: baseSubtitle,
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              if (enabled) ...[
-                const SizedBox(width: OSpace.s),
-                Icon(Icons.chevron_right_rounded, size: 20, color: c.textFaint),
-              ],
-            ],
-          ),
-        ),
-      ),
+    return OListRow(
+      key: ValueKey<String>('search-result-${item.id}'),
+      icon: item.icon,
+      title: item.label,
+      danger: item.danger,
+      enabled: actionable,
+      showChevron: actionable,
+      onTap: actionable ? onTap : null,
     );
   }
-}
-
-/// A single text run with every case-insensitive occurrence of [query]
-/// highlighted. Section headers reuse it with their uppercase label.
-class _HighlightedText extends StatelessWidget {
-  const _HighlightedText({
-    required this.text,
-    required this.query,
-    required this.style,
-  });
-
-  final String text;
-  final String query;
-  final TextStyle style;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final highlight = style.copyWith(
-      color: c.accent,
-      backgroundColor: c.accentSoft,
-      fontWeight: FontWeight.w600,
-    );
-    return Text.rich(
-      TextSpan(children: _spans(text, query, style, highlight)),
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-    );
-  }
-}
-
-List<TextSpan> _spans(
-  String text,
-  String query,
-  TextStyle base,
-  TextStyle highlight,
-) {
-  final needle = query.trim().toLowerCase();
-  if (needle.isEmpty || text.isEmpty) {
-    return <TextSpan>[TextSpan(text: text, style: base)];
-  }
-  final lower = text.toLowerCase();
-  final spans = <TextSpan>[];
-  var start = 0;
-  while (true) {
-    final index = lower.indexOf(needle, start);
-    if (index < 0) break;
-    if (index > start) {
-      spans.add(TextSpan(text: text.substring(start, index), style: base));
-    }
-    spans.add(
-      TextSpan(
-        text: text.substring(index, index + needle.length),
-        style: highlight,
-      ),
-    );
-    start = index + needle.length;
-  }
-  if (start < text.length) {
-    spans.add(TextSpan(text: text.substring(start), style: base));
-  }
-  if (spans.isEmpty) {
-    spans.add(TextSpan(text: text, style: base));
-  }
-  return spans;
 }

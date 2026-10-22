@@ -74,7 +74,7 @@ void main() {
     });
   });
 
-  testWidgets('shows what is removed, the grace period and the Play note', (
+  testWidgets('shows what is removed and the Play note', (
     tester,
   ) async {
     for (final dark in <bool>[false, true]) {
@@ -85,12 +85,10 @@ void main() {
 
       expect(find.text(_data.title), findsOneWidget);
       expect(find.text(_data.irreversibleLabel), findsOneWidget);
-      expect(find.text(_data.intro), findsOneWidget);
       expect(find.text(_data.removalsTitle), findsOneWidget);
       for (final removal in _data.removals) {
         expect(find.text(removal), findsOneWidget);
       }
-      expect(find.text(_data.graceNote), findsOneWidget);
       expect(find.text(_data.playNote), findsOneWidget);
       expect(find.text(_data.confirmationTarget), findsWidgets);
       expect(find.text(_data.prompt), findsOneWidget);
@@ -192,10 +190,8 @@ void main() {
       contact: 'aarav@example.com',
       title: 'Delete this project?',
       irreversibleLabel: '',
-      intro: 'The project and its chats are removed for good.',
       removalsTitle: 'Only this project goes away:',
       removals: <String>['The launch chat', 'Its uploaded files'],
-      graceNote: '',
       playNote: '',
       prompt: 'Type the account email to confirm',
       confirmLabel: 'Delete project',
@@ -230,8 +226,9 @@ void main() {
     await tester.pumpWidget(_app(const V2ConfirmTypedSheet(data: _data)));
     await tester.pumpAndSettle();
 
-    final icon = tester.widget<Icon>(find.byIcon(Icons.warning_amber_rounded));
-    expect(icon.color, OColors.light.danger);
+    // The irreversible action is named by a danger pill, not a decorative
+    // warning icon.
+    expect(find.text(_data.irreversibleLabel), findsOneWidget);
 
     final button = _filled(tester);
     expect(

@@ -6,7 +6,6 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/cloud/browser_stream.dart';
 import '../../../core/cloud/cloud_session_store.dart';
-import '../../../core/cloud/cloud_ws.dart';
 import '../../../core/state.dart';
 import '../../design/o_components.dart';
 import '../../design/o_tokens.dart';
@@ -296,7 +295,6 @@ class _BrowserLivePageState extends State<BrowserLivePage>
             ),
             OListRow(
               title: 'Reconnect',
-              subtitle: 'Attach to the live view again',
               icon: Icons.refresh_rounded,
               onTap: () {
                 Navigator.of(sheetContext).pop();
@@ -328,9 +326,9 @@ class _BrowserLivePageState extends State<BrowserLivePage>
       backgroundColor: Colors.transparent,
       barrierColor: Colors.transparent,
       builder: (sheetContext) => AnimatedBuilder(
-        // The sheet follows both the server state and the local keyboard
-        // tool, so its chip reflects the real toggle.
-        animation: Listenable.merge(<Listenable>[_client, _keyboard]),
+        // The sheet follows the server state, so its state reflects the real
+        // takeover request rather than an optimistic local guess.
+        animation: _client,
         builder: (context, _) {
           if (_client.takeoverActive && !closing) {
             closing = true;
@@ -341,14 +339,9 @@ class _BrowserLivePageState extends State<BrowserLivePage>
             });
           }
           return TakeControlSheet(
-            data: V2TakeControlData(
-              status: _sheetStatus,
-              countdownLabel: 'Ovid is driving this page',
-              keyboard: _keyboard.value,
-            ),
+            data: V2TakeControlData(status: _sheetStatus),
             onStart: _client.takeoverPending ? null : _requestTakeover,
             onStayWatching: () => Navigator.of(sheetContext).maybePop(),
-            onToggleKeyboard: _toggleKeyboard,
             onRetry: _requestTakeover,
           );
         },
@@ -385,22 +378,14 @@ class _BrowserLivePageState extends State<BrowserLivePage>
 
   String _errorCopy(BrowserStreamError error) {
     return switch (error.code) {
-      'forbidden' => "This chat isn't on your account, so its browser can't be "
-          'shown.',
+      'forbidden' =>
+        "This chat isn't on your account, so its browser can't be "
+            'shown.',
       'unavailable' => 'The cloud browser is not available right now.',
       'unauthenticated' =>
         'Your sign-in expired. Sign in again to view the browser.',
       _ => "Couldn't connect to the cloud browser.",
     };
-  }
-
-  V2BrowserConnection get _connection {
-    if (_client.linkState == WsLinkState.online) {
-      return V2BrowserConnection.live;
-    }
-    return _client.reconnecting
-        ? V2BrowserConnection.reconnecting
-        : V2BrowserConnection.offline;
   }
 
   V2BrowserStatus get _status {
@@ -420,9 +405,7 @@ class _BrowserLivePageState extends State<BrowserLivePage>
     if (state == null) return V2ViewportStatus.loading;
     if (_frame == null) {
       if (!state.live) return V2ViewportStatus.waiting;
-      return _waitExpired
-          ? V2ViewportStatus.waiting
-          : V2ViewportStatus.loading;
+      return _waitExpired ? V2ViewportStatus.waiting : V2ViewportStatus.loading;
     }
     if (_stalled || !state.screencast) return V2ViewportStatus.streamLost;
     if (!state.live) return V2ViewportStatus.streamLost;
@@ -453,46 +436,27 @@ class _BrowserLivePageState extends State<BrowserLivePage>
       tabs: tabs,
       activeTabId: state == null ? '' : '${state.activeTabIndex}',
       address: state?.url ?? '',
-      readOnly: !controlling,
-      drivingTitle: controlling ? 'You are driving' : 'Ovid is driving',
-      drivingDetail: controlling
-          ? 'Tap the page to click. Use the keyboard tool to type.'
-          : _client.controlledElsewhere
-          ? 'Another device is controlling this page'
-          : state?.live == true
-          ? 'The live view refreshes 3–5 times a second'
-          : 'Starting the browser',
-      liveLabel: controlling ? 'You are in control' : 'Live',
-      streamLabel: state == null
-          ? ''
-          : '${state.viewportWidth}×${state.viewportHeight}',
-      // The server's 45 s headless countdown is not part of the client state
-      // this build parses, so no invented countdown is shown.
-      headlessLabel: '',
-      connection: _connection,
-      actions: const <V2BrowserAction>[],
       status: status,
       frame: _frameProvider,
       viewportStatus: _viewportStatus,
       controlling: controlling,
       keyboard: _keyboard.value,
+      // The gateway exposes no history op, so no back / forward control is
+      // passed and the bar does not render one.
       canGoBack: false,
       canGoForward: false,
       viewportAspectRatio: state == null
           ? null
           : state.viewportWidth / state.viewportHeight,
-      fpsLabel: '3–5 fps',
       emptyTitle: _waitExpired && state == null
-          ? 'Ovid has not opened the browser'
+          ? 'Browser not open'
           : 'No page open',
       emptyMessage: _waitExpired && state == null
-          ? 'Ovid opens the browser when a task needs it. This screen updates '
-                'on its own, or you can try again.'
-          : 'Ask Ovid to open a page and it will show up here.',
+          ? 'Ovid opens the browser when a task needs it.'
+          : 'Pages Ovid opens appear here.',
       errorMessage: _client.error == null
           ? 'The live view lost its connection.'
           : _errorCopy(_client.error!),
-      offlineMessage: 'Ovid will reconnect on its own. You can also try now.',
     );
   }
 
@@ -504,7 +468,6 @@ class _BrowserLivePageState extends State<BrowserLivePage>
         BrowserPage(
           data: data,
           onMenu: _openMenu,
-          onCopyAddress: _copyAddress,
           onSelectTab: (id) {
             final index = int.tryParse(id);
             if (index != null) unawaited(_client.switchTab(index));

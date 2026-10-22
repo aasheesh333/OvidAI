@@ -486,8 +486,7 @@ void main() {
     expect(find.text('No permissions to review'), findsOneWidget);
     expect(
       find.text(
-        'GitHub has not asked for anything yet. When it is connected, Ovid '
-        'lists exactly what it can use here.',
+        'GitHub has not asked for anything yet.',
       ),
       findsOneWidget,
     );

@@ -18,8 +18,6 @@ class V2ConfirmTypedSheetData {
     required this.contact,
     this.title = 'Delete your account?',
     this.irreversibleLabel = 'Cannot be undone',
-    this.intro =
-        'Your account is kept for a 24-hour grace period before it is deleted.',
     this.removalsTitle = 'This permanently removes:',
     this.removals = const <String>[
       'Every chat and message',
@@ -28,9 +26,6 @@ class V2ConfirmTypedSheetData {
       'Connectors and saved cloud keys',
       'Drafts, scheduled runs and shared links',
     ],
-    this.graceNote =
-        'Signing in during the 24-hour grace period cancels the deletion and '
-        'restores your account.',
     this.playNote =
         'Your Google Play subscription is not cancelled automatically. '
         'Manage it before deleting, or it keeps renewing.',
@@ -60,14 +55,10 @@ class V2ConfirmTypedSheetData {
 
   /// Shown as a danger pill under the title. An empty string hides it.
   final String irreversibleLabel;
-  final String intro;
   final String removalsTitle;
 
   /// Concrete things the action removes. Not an abstract "all your data".
   final List<String> removals;
-
-  /// Reassurance that the account can still be restored, with the window.
-  final String graceNote;
 
   /// Play billing warning. An empty string hides the note and its action.
   final String playNote;
@@ -210,20 +201,19 @@ class _V2ConfirmTypedSheetState extends State<V2ConfirmTypedSheet> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       _header(context),
-                      if (data.intro.isNotEmpty) ...[
-                        const SizedBox(height: OSpace.m),
-                        Text(
-                          data.intro,
-                          style: OType.body.copyWith(color: c.text),
+                      if (data.irreversibleLabel.isNotEmpty) ...[
+                        const SizedBox(height: OSpace.s),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: OPill(
+                            label: data.irreversibleLabel,
+                            tone: OPillTone.danger,
+                          ),
                         ),
                       ],
                       if (data.removals.isNotEmpty) ...[
                         const SizedBox(height: OSpace.l),
                         _removals(context),
-                      ],
-                      if (data.graceNote.isNotEmpty) ...[
-                        const SizedBox(height: OSpace.m),
-                        _graceNote(context),
                       ],
                       if (data.playNote.isNotEmpty) ...[
                         const SizedBox(height: OSpace.m),
@@ -263,40 +253,14 @@ class _V2ConfirmTypedSheetState extends State<V2ConfirmTypedSheet> {
   }
 
   Widget _header(BuildContext context) {
-    final c = OColors.of(context);
     final data = widget.data;
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Container(
-          width: 48,
-          height: 48,
-          decoration: BoxDecoration(
-            color: c.danger.withValues(alpha: 0.12),
-            shape: BoxShape.circle,
-          ),
-          child: Icon(Icons.warning_amber_rounded, size: 24, color: c.danger),
-        ),
-        const SizedBox(width: OSpace.m),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Semantics(
-                header: true,
-                child: Text(
-                  data.title,
-                  style: OType.h2.copyWith(color: c.text),
-                ),
-              ),
-              if (data.irreversibleLabel.isNotEmpty) ...[
-                const SizedBox(height: OSpace.xs),
-                OPill(label: data.irreversibleLabel, tone: OPillTone.danger),
-              ],
-            ],
-          ),
-        ),
-      ],
+    // One sheet header, the same shape as every other sheet: title plus a
+    // close control. The danger pill sits under it so 200 % text cannot
+    // squeeze the title into a sliver.
+    return OSheetHeader(
+      title: data.title,
+      padding: EdgeInsets.zero,
+      onClose: widget.onCancel,
     );
   }
 
@@ -348,31 +312,6 @@ class _V2ConfirmTypedSheetState extends State<V2ConfirmTypedSheet> {
           ),
         ),
       ],
-    );
-  }
-
-  Widget _graceNote(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      key: const ValueKey('confirm-typed-grace'),
-      padding: const EdgeInsets.all(OSpace.m),
-      decoration: BoxDecoration(
-        color: c.accentSoft,
-        borderRadius: BorderRadius.circular(ORadius.m),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.restore_rounded, size: 19, color: c.accent),
-          const SizedBox(width: OSpace.s),
-          Expanded(
-            child: Text(
-              widget.data.graceNote,
-              style: OType.bodySm.copyWith(color: c.text),
-            ),
-          ),
-        ],
-      ),
     );
   }
 

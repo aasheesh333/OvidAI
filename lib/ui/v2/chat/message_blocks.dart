@@ -557,15 +557,8 @@ class V2MessageBlocks extends StatelessWidget {
     final c = OColors.of(context);
     return switch (block) {
       V2HeadingBlock heading => _HeadingView(block: heading, onOpenLink: open),
-      V2ParagraphBlock paragraph => _paragraph(
-        context,
-        paragraph.text,
-        open,
-      ),
-      V2BulletListBlock list => _BulletListView(
-        block: list,
-        onOpenLink: open,
-      ),
+      V2ParagraphBlock paragraph => _paragraph(context, paragraph.text, open),
+      V2BulletListBlock list => _BulletListView(block: list, onOpenLink: open),
       V2CodeBlock code => _CodeBlockCard(block: code, onCopy: onCopyCode),
       V2DiagramBlock diagram => _DiagramCard(block: diagram),
       V2ImageBlock image => _ImageCard(
@@ -855,16 +848,6 @@ class _CodeBlockCardState extends State<_CodeBlockCard> {
                     style: OType.overline.copyWith(color: c.textFaint),
                   ),
                 ),
-                if (_copied)
-                  Text(
-                    'Copied',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.caption.copyWith(
-                      color: c.success,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
                 OIconButton(
                   icon: _copied
                       ? Icons.check_rounded
@@ -916,86 +899,38 @@ class _DiagramCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Wrap(
-            spacing: OSpace.s,
-            runSpacing: OSpace.xs,
-            crossAxisAlignment: WrapCrossAlignment.center,
+          Row(
             children: [
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    width: 34,
-                    height: 34,
-                    decoration: BoxDecoration(
-                      color: c.accentSoft,
-                      borderRadius: BorderRadius.circular(ORadius.s),
-                    ),
-                    child: Icon(
-                      Icons.account_tree_rounded,
-                      size: 18,
-                      color: c.accent,
-                    ),
-                  ),
-                  const SizedBox(width: OSpace.s),
-                  Flexible(
-                    child: Text(
-                      block.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: OType.bodyStrong.copyWith(color: c.text),
-                    ),
-                  ),
-                ],
+              Icon(Icons.account_tree_rounded, size: 18, color: c.accent),
+              const SizedBox(width: OSpace.s),
+              Expanded(
+                child: Text(
+                  block.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.bodyStrong.copyWith(color: c.text),
+                ),
               ),
-              const OPill(label: 'Mermaid', tone: OPillTone.accent),
             ],
           ),
           const SizedBox(height: OSpace.m),
-          const _DiagramGlyph(),
-          const SizedBox(height: OSpace.m),
-          Text(
-            'Diagram preview is not available on this device.',
-            style: OType.caption.copyWith(color: c.textMuted),
+          // The source is the honest representation of the diagram: no fake
+          // preview, no "unavailable" copy.
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(OSpace.m),
+            decoration: BoxDecoration(
+              color: c.codeBg,
+              borderRadius: BorderRadius.circular(ORadius.m),
+            ),
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Text(
+                block.source,
+                style: OType.mono.copyWith(color: c.textMuted),
+              ),
+            ),
           ),
-        ],
-      ),
-    );
-  }
-}
-
-class _DiagramGlyph extends StatelessWidget {
-  const _DiagramGlyph();
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    Widget node(IconData icon) => Container(
-      width: 36,
-      height: 36,
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(ORadius.s),
-        border: Border.all(color: c.hairlineStrong),
-      ),
-      child: Icon(icon, size: 17, color: c.accent),
-    );
-    Widget connector() =>
-        Expanded(child: Container(height: 1.5, color: c.hairlineStrong));
-    return Container(
-      height: 104,
-      padding: const EdgeInsets.symmetric(horizontal: OSpace.m),
-      decoration: BoxDecoration(
-        color: c.codeBg,
-        borderRadius: BorderRadius.circular(ORadius.m),
-      ),
-      child: Row(
-        children: [
-          node(Icons.play_arrow_rounded),
-          connector(),
-          node(Icons.auto_awesome_rounded),
-          connector(),
-          node(Icons.check_rounded),
         ],
       ),
     );
@@ -1018,87 +953,63 @@ class _ImageCard extends StatelessWidget {
     final c = OColors.of(context);
     final alt = block.alt.isEmpty ? 'Image' : block.alt;
     final url = block.url;
-    final card = Container(
+    // One row, like every other attachment. A fake 96 dp preview band added
+    // height without adding information.
+    return Container(
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         color: c.surface,
         borderRadius: BorderRadius.circular(ORadius.l),
         border: Border.all(color: c.hairline),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Container(
-            height: 132,
-            color: c.codeBg,
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                Center(
-                  child: Container(
-                    width: 56,
-                    height: 56,
-                    decoration: BoxDecoration(
-                      color: c.accentSoft,
-                      borderRadius: BorderRadius.circular(ORadius.m),
+      child: OPressable(
+        onTap: () => onOpen(url),
+        semanticLabel: 'Open image: $alt',
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(
+            OSpace.m,
+            OSpace.s,
+            OSpace.xs,
+            OSpace.s,
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.image_rounded, size: 20, color: c.accent),
+              const SizedBox(width: OSpace.m),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      alt,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: OType.bodySmStrong.copyWith(color: c.text),
                     ),
-                    child: Icon(Icons.image_rounded, size: 28, color: c.accent),
-                  ),
+                    if (url.isNotEmpty) ...[
+                      const SizedBox(height: OSpace.xxs),
+                      Text(
+                        _linkHost(url),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: OType.caption.copyWith(color: c.textMuted),
+                      ),
+                    ],
+                  ],
                 ),
-                Positioned(
-                  top: OSpace.s,
-                  left: OSpace.s,
-                  child: OPill(label: 'Image', tone: OPillTone.accent),
-                ),
-              ],
-            ),
+              ),
+              OIconButton(
+                icon: Icons.download_rounded,
+                semanticLabel: 'Download image',
+                size: 20,
+                onPressed: () => onDownload(url),
+              ),
+              Icon(Icons.chevron_right_rounded, size: 18, color: c.textFaint),
+            ],
           ),
-          Padding(
-            padding: const EdgeInsets.all(OSpace.m),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  alt,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.bodySm.copyWith(
-                    color: c.text,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                if (url.isNotEmpty) ...[
-                  const SizedBox(height: 2),
-                  Text(
-                    _linkHost(url),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ],
+        ),
       ),
-    );
-    return Stack(
-      children: [
-        OPressable(
-          onTap: () => onOpen(url),
-          semanticLabel: 'Open image: $alt',
-          child: card,
-        ),
-        Positioned(
-          top: 0,
-          right: 0,
-          child: OIconButton(
-            icon: Icons.download_rounded,
-            semanticLabel: 'Download image',
-            onPressed: () => onDownload(url),
-          ),
-        ),
-      ],
     );
   }
 }
@@ -1129,76 +1040,52 @@ class _FileCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(ORadius.l),
         border: Border.all(color: c.hairline),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          OPressable(
-            onTap: () => onOpen(block.href),
-            semanticLabel: 'Open ${block.fileName}',
-            child: Padding(
-              padding: const EdgeInsets.all(OSpace.m),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    width: 40,
-                    height: 40,
-                    decoration: BoxDecoration(
-                      color: c.accentSoft,
-                      borderRadius: BorderRadius.circular(ORadius.s),
+      child: OPressable(
+        onTap: () => onOpen(block.href),
+        semanticLabel: 'Open ${block.fileName}',
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(
+            OSpace.m,
+            OSpace.s,
+            OSpace.xs,
+            OSpace.s,
+          ),
+          child: Row(
+            children: [
+              Icon(_fileIcon(extension), size: 20, color: c.accent),
+              const SizedBox(width: OSpace.m),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      block.fileName,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: OType.bodySmStrong.copyWith(color: c.text),
                     ),
-                    child: Icon(
-                      _fileIcon(extension),
-                      size: 20,
-                      color: c.accent,
+                    const SizedBox(height: OSpace.xxs),
+                    Text(
+                      meta,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: OType.caption.copyWith(color: c.textMuted),
                     ),
-                  ),
-                  const SizedBox(width: OSpace.m),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          block.fileName,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: OType.bodySm.copyWith(
-                            color: c.text,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          meta,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: OType.caption.copyWith(color: c.textMuted),
-                        ),
-                      ],
-                    ),
-                  ),
-                  Icon(
-                    Icons.open_in_new_rounded,
-                    size: 18,
-                    color: c.textFaint,
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
+              // The icon says "download"; the visible label would repeat it.
+              OIconButton(
+                icon: Icons.download_rounded,
+                semanticLabel: 'Download ${block.fileName}',
+                size: 20,
+                onPressed: () => onDownload(block.href),
+              ),
+              Icon(Icons.chevron_right_rounded, size: 18, color: c.textFaint),
+            ],
           ),
-          Divider(height: 1, color: c.hairline),
-          Padding(
-            padding: const EdgeInsets.all(OSpace.s),
-            child: OButton(
-              label: 'Download',
-              icon: Icons.download_rounded,
-              variant: OButtonVariant.secondary,
-              expand: true,
-              semanticLabel: 'Download ${block.fileName}',
-              onPressed: () => onDownload(block.href),
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }

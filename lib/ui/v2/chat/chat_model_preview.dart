@@ -97,8 +97,7 @@ class _V2ChatModelPreviewState extends State<V2ChatModelPreview> {
                   items: List<V2LiveChatItem>.unmodifiable(_items),
                   emptyTitle: 'Test Auto vs manual',
                   emptyMessage:
-                      'Type a message and send it. The reply states which model '
-                      'answered so the routing is visible.',
+                      'Type a message to see which model answers.',
                 ),
                 onSend: _send,
               ),

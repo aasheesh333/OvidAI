@@ -6,14 +6,15 @@ import 'package:flutter/services.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import '../a11y/live_region.dart';
 import 'composer_attachments.dart';
 import 'composer_mentions.dart';
 import 'composer_plus_sheet.dart';
+import 'composer_row.dart';
 import 'composer_voice.dart';
 import 'model_chip.dart';
-import 'permission_sheet.dart';
 import 'queue_dock.dart';
 
 // TODO(l10n): move user-facing copy to ARB keys in the localization pass.
@@ -44,23 +45,23 @@ class V2ChatPageData {
     this.modelLabel = 'Auto',
     this.tokensLabel = '50M tokens left today',
     this.fastAgentLabel = 'Fast agent',
-    this.headline = 'What should we build today?',
+    this.headline = 'What should we build?',
     this.subtitle = 'Ask anything. Ovid works in the background.',
     this.draft = '',
     this.state = V2ChatState.empty,
     this.suggestions = const [
       V2ChatSuggestion(
-        title: 'Build me a landing page',
+        title: 'Build a landing page',
         subtitle: 'React & Tailwind components',
         icon: Icons.web_rounded,
       ),
       V2ChatSuggestion(
-        title: 'Research a topic for me',
+        title: 'Research a topic',
         subtitle: 'Deep web synthesis & citations',
         icon: Icons.auto_awesome_rounded,
       ),
       V2ChatSuggestion(
-        title: 'Fix a bug in my repo',
+        title: 'Fix a repo bug',
         subtitle: 'Git branch integration',
         icon: Icons.bug_report_rounded,
       ),
@@ -360,6 +361,10 @@ class _V2ChatPageState extends State<V2ChatPage> {
       onPhoto: () => unawaited(_pickAttachments(images: true)),
       onFile: () => unawaited(_pickAttachments(images: false)),
       onOpenStudio: widget.onStudio,
+      // The chip's fallback: at 320 dp / 200 % text the row cannot hold it,
+      // so the same sheet action keeps permission reachable.
+      permissionLabel: widget.data.permissionLabel,
+      onPermission: widget.onPermissionTap,
     );
   }
 
@@ -425,6 +430,7 @@ class _V2ChatPageState extends State<V2ChatPage> {
 
   void _send() {
     final text = _controller.text.trim();
+    if (widget.onSubmit == null && widget.onSend == null) return;
     if (text.isEmpty && _attachments.isEmpty) return;
     if (text.isEmpty && widget.onSubmit == null) return;
     if (_voice.listening) unawaited(_voice.stop());
@@ -472,6 +478,7 @@ class _V2ChatPageState extends State<V2ChatPage> {
   bool get _canSend =>
       !_locked &&
       !_running &&
+      (widget.onSubmit != null || widget.onSend != null) &&
       (_controller.text.trim().isNotEmpty ||
           (widget.onSubmit != null && _attachments.isNotEmpty));
 
@@ -527,7 +534,6 @@ class _V2ChatPageState extends State<V2ChatPage> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    _StatusRow(data: data),
                     if (data.queuedCount > 0)
                       V2QueueDock(
                         count: data.queuedCount,
@@ -628,6 +634,22 @@ class _ChatTopBar extends StatelessWidget implements PreferredSizeWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // The budget is the space this bar actually got, not the window: at
+        // 600 dp the shell keeps its 280 dp rail, so the header has 320 dp and
+        // two actions overflowed it by 16 dp at 200 % text.
+        final wideHeader = !OBreakpoints.isCompact(constraints.maxWidth);
+        return _buildBar(context, c, wideHeader: wideHeader);
+      },
+    );
+  }
+
+  Widget _buildBar(
+    BuildContext context,
+    OColors c, {
+    required bool wideHeader,
+  }) {
     return Semantics(
       container: true,
       explicitChildNodes: true,
@@ -636,65 +658,69 @@ class _ChatTopBar extends StatelessWidget implements PreferredSizeWidget {
         automaticallyImplyLeading: false,
         titleSpacing: 0,
         leadingWidth: OSpace.touch,
-        leading: OIconButton(
-          icon: Icons.menu_rounded,
-          semanticLabel: 'Open menu',
-          onPressed: onMenu,
-        ),
-      title: Row(
-        children: [
-          // The chip and the title share the bar. Both are flexible so a
-          // 200 % text scale on a 320 dp screen ellipsizes them instead of
-          // overflowing the row.
-          Flexible(
-            flex: 3,
-            child: V2ModelChip(
-              label: modelLabel,
-              autoOnly: autoOnly,
-              subagentCount: subagentCount,
-              enabled: onModelChipTap != null,
-              onTap: onModelChipTap,
-            ),
-          ),
-          const SizedBox(width: OSpace.xs),
-          Flexible(
-            flex: 2,
-            child: Semantics(
-              container: true,
-              header: true,
-              child: Text(
-                title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: OType.h2.copyWith(color: c.text),
+        // Above 600 dp the rail replaces the drawer, so the shell passes no
+        // handler: drawing the glyph anyway would be a dead control.
+        leading: onMenu == null
+            ? null
+            : OIconButton(
+                icon: Icons.menu_rounded,
+                semanticLabel: 'Open menu',
+                onPressed: onMenu,
               ),
+        title: MediaQuery.withClampedTextScaling(
+          maxScaleFactor: 1.3,
+          child: Row(
+            children: [
+              // The chip keeps its intrinsic width; the title expands into the
+              // free space and ellipsizes instead of squeezing the chip.
+              V2ModelChip(
+                label: modelLabel,
+                autoOnly: autoOnly,
+                subagentCount: subagentCount,
+                enabled: onModelChipTap != null,
+                onTap: onModelChipTap,
+              ),
+              const SizedBox(width: OSpace.s),
+              Expanded(
+                child: Semantics(
+                  container: true,
+                  header: true,
+                  child: Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: OType.h2.copyWith(color: c.text),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          if (wideHeader) ...[
+            OIconButton(
+              icon: Icons.terminal_rounded,
+              semanticLabel: 'Open Studio',
+              onPressed: onStudio,
             ),
-          ),
+            OIconButton(
+              icon: Icons.public_rounded,
+              semanticLabel: 'Open Browser',
+              onPressed: onBrowser,
+            ),
+          ],
+          if (onMore != null)
+            OIconButton(
+              icon: Icons.more_vert_rounded,
+              semanticLabel: 'More options',
+              onPressed: onMore,
+            ),
+          const SizedBox(width: OSpace.xs),
         ],
-      ),
-      actions: [
-        OIconButton(
-          icon: Icons.terminal_rounded,
-          semanticLabel: 'Open Studio',
-          onPressed: onStudio,
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(1),
+          child: Divider(height: 1, color: c.hairline),
         ),
-        OIconButton(
-          icon: Icons.public_rounded,
-          semanticLabel: 'Open Browser',
-          onPressed: onBrowser,
-        ),
-        if (onMore != null)
-          OIconButton(
-            icon: Icons.more_vert_rounded,
-            semanticLabel: 'More options',
-            onPressed: onMore,
-          ),
-        const SizedBox(width: OSpace.xs),
-      ],
-      bottom: PreferredSize(
-        preferredSize: const Size.fromHeight(1),
-        child: Divider(height: 1, color: c.hairline),
-      ),
       ),
     );
   }
@@ -716,133 +742,58 @@ class _HomeContent extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.screen,
-        OSpace.m,
-        OSpace.screen,
-        OSpace.l,
-      ),
-      child: OFadeSlide(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (offline) ...[
-              _OfflineBanner(data: data, onRetry: onRetry),
-              const SizedBox(height: OSpace.xl),
-            ],
-            Center(
-              child: Container(
-                width: 64,
-                height: 64,
-                decoration: BoxDecoration(
-                  color: c.surfaceAlt,
-                  shape: BoxShape.circle,
-                  border: Border.all(color: c.hairline),
-                ),
-                child: Icon(
-                  Icons.auto_awesome_rounded,
-                  size: 30,
-                  color: c.accent,
+    // Same capped column as the transcript, so the home state centres on a
+    // tablet instead of stretching the headline and chips. The cap comes from
+    // the breakpoint (640 at 600 dp, 720 at 900 dp), never a fixed number.
+    return OContent(
+      alignment: Alignment.topCenter,
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.only(top: OSpace.xl, bottom: OSpace.l),
+        child: OFadeSlide(
+          duration: OMotion.base,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (offline) ...[
+                _OfflineBanner(data: data, onRetry: onRetry),
+                const SizedBox(height: OSpace.xl),
+              ],
+              Semantics(
+                container: true,
+                header: true,
+                child: Text(
+                  data.headline,
+                  textAlign: TextAlign.center,
+                  style: OType.h2.copyWith(color: c.text),
                 ),
               ),
-            ),
-            const SizedBox(height: OSpace.l),
-            Semantics(
-              container: true,
-              header: true,
-              child: Text(
-                data.headline,
+              const SizedBox(height: OSpace.s),
+              Text(
+                data.subtitle,
                 textAlign: TextAlign.center,
-                style: OType.h1.copyWith(color: c.text),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: OType.bodySm.copyWith(color: c.textMuted),
               ),
-            ),
-            const SizedBox(height: OSpace.s),
-            Text(
-              data.subtitle,
-              textAlign: TextAlign.center,
-              style: OType.bodySm.copyWith(color: c.textMuted),
-            ),
-            const SizedBox(height: OSpace.xl),
-            OStagger(
-              children: [
-                for (var i = 0; i < data.suggestions.length; i++)
-                  Padding(
-                    padding: EdgeInsets.only(
-                      bottom: i == data.suggestions.length - 1 ? 0 : OSpace.s,
+              const SizedBox(height: OSpace.xl),
+              // Three starting points at most, as chips: one line each, no
+              // card subtitles and no trailing arrow.
+              Wrap(
+                alignment: WrapAlignment.center,
+                spacing: OSpace.s,
+                runSpacing: OSpace.s,
+                children: [
+                  for (final suggestion in data.suggestions.take(3))
+                    OChip(
+                      label: suggestion.title,
+                      icon: suggestion.icon,
+                      onTap: () => onSuggestionTap(suggestion),
                     ),
-                    child: _SuggestionCard(
-                      suggestion: data.suggestions[i],
-                      tone: i == 0
-                          ? c.accent
-                          : i == 1
-                          ? c.success
-                          : c.warn,
-                      onTap: () => onSuggestionTap(data.suggestions[i]),
-                    ),
-                  ),
-              ],
-            ),
-          ],
+                ],
+              ),
+            ],
+          ),
         ),
-      ),
-    );
-  }
-}
-
-class _SuggestionCard extends StatelessWidget {
-  const _SuggestionCard({
-    required this.suggestion,
-    required this.tone,
-    required this.onTap,
-  });
-
-  final V2ChatSuggestion suggestion;
-  final Color tone;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return OCard(
-      padding: const EdgeInsets.all(OSpace.m),
-      onTap: onTap,
-      semanticLabel: '${suggestion.title}, ${suggestion.subtitle}',
-      child: Row(
-        children: [
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: c.surfaceAlt,
-              borderRadius: BorderRadius.circular(ORadius.m),
-            ),
-            child: Icon(suggestion.icon, size: 21, color: tone),
-          ),
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  suggestion.title,
-                  style: OType.bodySm.copyWith(
-                    color: c.text,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  suggestion.subtitle,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: OSpace.s),
-          Icon(Icons.north_east_rounded, size: 18, color: c.textMuted),
-        ],
       ),
     );
   }
@@ -877,13 +828,13 @@ class _OfflineBanner extends StatelessWidget {
                   data.offlineTitle,
                   style: OType.label.copyWith(color: c.text),
                 ),
-                const SizedBox(height: 2),
+                const SizedBox(height: OSpace.xxs),
                 Text(
                   data.offlineMessage,
                   style: OType.caption.copyWith(color: c.textMuted),
                 ),
                 if (data.queuedCount > 0) ...[
-                  const SizedBox(height: 2),
+                  const SizedBox(height: OSpace.xxs),
                   Text(
                     data.queuedCount == 1
                         ? '1 message is waiting to send.'
@@ -918,6 +869,7 @@ class _RunningState extends StatelessWidget {
       child: SingleChildScrollView(
         padding: const EdgeInsets.all(OSpace.xl),
         child: OFadeSlide(
+          duration: OMotion.base,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -937,15 +889,6 @@ class _RunningState extends StatelessWidget {
                 textAlign: TextAlign.center,
                 style: OType.h2.copyWith(color: c.text),
               ),
-              const SizedBox(height: OSpace.s),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 300),
-                child: Text(
-                  'Your chat will appear here as soon as it is ready.',
-                  textAlign: TextAlign.center,
-                  style: OType.bodySm.copyWith(color: c.textMuted),
-                ),
-              ),
               const SizedBox(height: OSpace.l),
               OButton(
                 label: 'Stop',
@@ -955,69 +898,6 @@ class _RunningState extends StatelessWidget {
             ],
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _StatusRow extends StatelessWidget {
-  const _StatusRow({required this.data});
-
-  final V2ChatPageData data;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.screen + OSpace.xs,
-        OSpace.xs,
-        OSpace.screen + OSpace.xs,
-        OSpace.s,
-      ),
-      child: Wrap(
-        alignment: WrapAlignment.spaceBetween,
-        crossAxisAlignment: WrapCrossAlignment.center,
-        spacing: OSpace.s,
-        runSpacing: OSpace.xs,
-        children: [
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 6,
-                height: 6,
-                decoration: BoxDecoration(
-                  color: c.success,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const SizedBox(width: 6),
-              Flexible(
-                child: Text(
-                  '${data.modelLabel} · ${data.tokensLabel}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ),
-            ],
-          ),
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.bolt_rounded, size: 14, color: c.textFaint),
-              const SizedBox(width: 2),
-              Text(
-                data.fastAgentLabel,
-                style: OType.caption.copyWith(
-                  color: c.textMuted,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ),
-        ],
       ),
     );
   }
@@ -1062,38 +942,43 @@ class _Composer extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     final enabled = !locked && !running;
-    return Container(
-      margin: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.s),
-      padding: const EdgeInsets.all(OSpace.s),
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(ORadius.xl),
-        border: Border.all(color: c.hairline),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (attachments.isNotEmpty)
-            V2AttachmentChips(
-              attachments: attachments,
-              enabled: enabled,
-              onRemove: onRemoveAttachment,
-            ),
-          if (attachmentError != null)
-            V2ComposerNotice(message: attachmentError!),
-          if (voiceError != null)
-            V2ComposerNotice(message: voiceError!, icon: Icons.mic_off_rounded),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
+    return Align(
+      alignment: Alignment.topCenter,
+      // The input never grows past the transcript column on a tablet.
+      child: ConstrainedBox(
+        key: const ValueKey('v2-chat-composer-column'),
+        constraints: BoxConstraints(
+          maxWidth: OResponsive.of(context).maxContentWidth,
+        ),
+        child: Container(
+          margin: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.s),
+          padding: const EdgeInsets.all(OSpace.s),
+          decoration: BoxDecoration(
+            color: c.surface,
+            borderRadius: BorderRadius.circular(ORadius.xl),
+            border: Border.all(color: c.hairline),
+          ),
+          child: Column(
+            key: const ValueKey('v2-chat-composer-stack'),
+            mainAxisSize: MainAxisSize.min,
             children: [
-              OIconButton(
-                icon: Icons.add_rounded,
-                semanticLabel: 'Add attachment or action',
-                onPressed: enabled ? onAttach : null,
-              ),
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.only(top: 3, right: OSpace.s),
+              if (attachments.isNotEmpty)
+                V2AttachmentChips(
+                  attachments: attachments,
+                  enabled: enabled,
+                  onRemove: onRemoveAttachment,
+                ),
+              if (attachmentError != null)
+                V2ComposerNotice(message: attachmentError!),
+              if (voiceError != null)
+                V2ComposerNotice(
+                  message: voiceError!,
+                  icon: Icons.mic_off_rounded,
+                ),
+              // One row: plus, permission, field, mic, send. Nothing else.
+              V2ComposerRow(
+                field: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: OSpace.xs),
                   child: CallbackShortcuts(
                     bindings: {
                       const SingleActivator(LogicalKeyboardKey.enter): () {
@@ -1107,7 +992,7 @@ class _Composer extends StatelessWidget {
                       controller: controller,
                       enabled: enabled,
                       minLines: 1,
-                      maxLines: 4,
+                      maxLines: 3,
                       keyboardType: TextInputType.multiline,
                       textInputAction: TextInputAction.newline,
                       style: OType.body.copyWith(color: c.text),
@@ -1124,36 +1009,14 @@ class _Composer extends StatelessWidget {
                         enabledBorder: InputBorder.none,
                         focusedBorder: InputBorder.none,
                         disabledBorder: InputBorder.none,
-                        contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                        contentPadding: const EdgeInsets.symmetric(
+                          vertical: 12,
+                        ),
                       ),
                     ),
                   ),
                 ),
-              ),
-            ],
-          ),
-          Padding(
-            padding: const EdgeInsets.only(top: OSpace.xs),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: V2PermissionChip(
-                      label: data.permissionLabel,
-                      onTap: onPermissionTap,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: OSpace.xs),
-                OIconButton(
-                  icon: listening ? Icons.mic_rounded : Icons.mic_none_rounded,
-                  semanticLabel: listening ? 'Stop voice input' : 'Voice input',
-                  active: listening,
-                  onPressed: enabled ? onMic : null,
-                ),
-                const SizedBox(width: OSpace.xs),
-                _RoundAction(
+                send: _RoundAction(
                   icon: running
                       ? Icons.stop_rounded
                       : Icons.arrow_upward_rounded,
@@ -1165,10 +1028,15 @@ class _Composer extends StatelessWidget {
                       ? onSend
                       : null,
                 ),
-              ],
-            ),
+                onPlus: enabled ? onAttach : null,
+                onMic: enabled ? onMic : null,
+                listening: listening,
+                permissionLabel: data.permissionLabel,
+                onPermission: onPermissionTap,
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }

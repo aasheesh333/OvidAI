@@ -134,40 +134,15 @@ class V2ModelChipMenu extends StatelessWidget {
                 OSpace.s,
                 OSpace.s,
               ),
-              child: Wrap(
-                alignment: WrapAlignment.spaceBetween,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                spacing: OSpace.s,
-                runSpacing: OSpace.xs,
-                children: [
-                  Semantics(
-                    container: true,
-                    header: true,
-                    child: Text(
-                      'MODEL SELECTION',
-                      style: OType.overline.copyWith(color: c.textMuted),
-                    ),
-                  ),
-                  Text(
-                    'Tier: ${data.tierLabel}',
-                    style: OType.overline.copyWith(color: c.textFaint),
-                  ),
-                ],
+              child: Semantics(
+                container: true,
+                header: true,
+                child: Text(
+                  'MODEL SELECTION',
+                  style: OType.overline.copyWith(color: c.textMuted),
+                ),
               ),
             ),
-            if (data.autoOnly)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(
-                  OSpace.s,
-                  0,
-                  OSpace.s,
-                  OSpace.s,
-                ),
-                child: _UpgradeNotice(
-                  hint: data.upgradeHint,
-                  planLabel: data.lockedPlanLabel,
-                ),
-              ),
             _AutoRow(data: data, onTap: () => onSelect('auto')),
             for (final model in data.lockedModels)
               if (data.autoOnly)
@@ -194,18 +169,6 @@ class V2ModelChipMenu extends StatelessWidget {
               accent: true,
               onTap: onComparePlans,
             ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                OSpace.s,
-                OSpace.s,
-                OSpace.s,
-                OSpace.xs,
-              ),
-              child: Text(
-                data.note,
-                style: OType.caption.copyWith(color: c.textFaint),
-              ),
-            ),
           ],
         ),
       ),
@@ -215,70 +178,6 @@ class V2ModelChipMenu extends StatelessWidget {
 
 /// Small status tag. Mirrors the shared `OPill` look but grows with the text
 /// scale instead of clipping its label inside a fixed 24 dp box.
-class _PlanTag extends StatelessWidget {
-  const _PlanTag({required this.label, required this.tone});
-
-  final String label;
-  final OPillTone tone;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final (bg, fg) = switch (tone) {
-      OPillTone.neutral => (c.surfaceAlt, c.textMuted),
-      OPillTone.accent => (c.accentSoft, c.accent),
-      OPillTone.success => (c.success.withValues(alpha: 0.12), c.success),
-      OPillTone.warn => (c.warn.withValues(alpha: 0.12), c.warn),
-      OPillTone.danger => (c.danger.withValues(alpha: 0.12), c.danger),
-    };
-    return Container(
-      constraints: const BoxConstraints(minHeight: 24),
-      padding: const EdgeInsets.symmetric(horizontal: 10),
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-      ),
-      child: Text(
-        label,
-        style: OType.caption.copyWith(color: fg, fontWeight: FontWeight.w600),
-      ),
-    );
-  }
-}
-
-class _UpgradeNotice extends StatelessWidget {
-  const _UpgradeNotice({required this.hint, required this.planLabel});
-
-  final String hint;
-  final String planLabel;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Semantics(
-      label: '$planLabel required. $hint',
-      child: Container(
-        padding: const EdgeInsets.all(OSpace.s),
-        decoration: BoxDecoration(
-          color: c.accentSoft,
-          borderRadius: BorderRadius.circular(ORadius.m),
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(Icons.lock_outline_rounded, size: 18, color: c.accent),
-            const SizedBox(width: OSpace.s),
-            Expanded(
-              child: Text(hint, style: OType.caption.copyWith(color: c.text)),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 class _AutoRow extends StatelessWidget {
   const _AutoRow({required this.data, required this.onTap});
 
@@ -334,7 +233,7 @@ class _AutoRow extends StatelessWidget {
                           data.autoName,
                           style: OType.label.copyWith(color: c.text),
                         ),
-                        _PlanTag(label: data.autoTag, tone: OPillTone.success),
+                        OPill(label: data.autoTag, tone: OPillTone.success),
                       ],
                     ),
                     const SizedBox(height: 2),
@@ -499,7 +398,7 @@ class _LockedRow extends StatelessWidget {
               // wraps rather than pushing the row past the screen edge.
               ConstrainedBox(
                 constraints: BoxConstraints(maxWidth: constraints.maxWidth / 2),
-                child: _PlanTag(label: planLabel, tone: OPillTone.accent),
+                child: OPill(label: planLabel, tone: OPillTone.accent),
               ),
               const SizedBox(width: OSpace.xs),
               Icon(Icons.lock_outline_rounded, size: 18, color: c.textFaint),

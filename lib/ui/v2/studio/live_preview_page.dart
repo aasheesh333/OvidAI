@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
-import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the next wave.
@@ -86,7 +86,7 @@ class V2LivePreviewData {
   final String featureBadge;
   final String expiresLabel;
 
-  /// When the preview URL stops working. When set, the expiry card shows a
+  /// When the preview URL stops working. When set, the expiry line shows a
   /// live countdown instead of the static [expiresLabel].
   final DateTime? expiresAt;
 
@@ -111,12 +111,15 @@ class V2LivePreviewData {
       featureBody.trim().isNotEmpty ||
       featureBadge.trim().isNotEmpty;
 
-  /// True only when there is something real to show. Drives the "Live" and
-  /// "Online" indicators so they can never describe an empty box.
+  /// True only when there is something real to show. Drives the status pill so
+  /// it can never describe an empty box.
   bool get hasPreviewContent => hasFrame || hasSiteCopy;
 }
 
-/// A phone-sized preview of the site in the workspace.
+/// A viewer for the site running in the workspace: url, status, one frame.
+///
+/// It owns no primary action. Share, open and stop are compact secondary
+/// controls and only appear when the wiring layer supplies them.
 class V2LivePreviewPage extends StatelessWidget {
   const V2LivePreviewPage({
     super.key,
@@ -142,41 +145,28 @@ class V2LivePreviewPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hasPreview = data.status == V2PreviewStatus.content;
-    return OScaffold(
-      appBar: OAppBar(
-        title: 'Live preview',
-        subtitle: hasPreview && data.siteName.isNotEmpty ? data.siteName : null,
-        actions: [
-          if (hasPreview) ...[
-            OIconButton(
-              icon: Icons.refresh_rounded,
-              semanticLabel: 'Refresh preview',
-              tooltip: 'Refresh preview',
-              onPressed: onRefresh,
-            ),
-            OIconButton(
-              icon: Icons.open_in_new_rounded,
-              semanticLabel: 'Open in browser',
-              tooltip: 'Open in browser',
-              onPressed: onOpenInBrowser,
-            ),
-          ],
-        ],
-      ),
-      body: switch (data.status) {
-        V2PreviewStatus.loading => _buildLoading(context),
+    return OScreen(
+      title: 'Live preview',
+      padding: false,
+      actions: [
+        if (hasPreview && onRefresh != null)
+          OIconButton(
+            icon: Icons.refresh_rounded,
+            semanticLabel: 'Refresh preview',
+            tooltip: 'Refresh',
+            onPressed: onRefresh,
+          ),
+      ],
+      child: switch (data.status) {
+        V2PreviewStatus.loading => _buildLoading(),
         V2PreviewStatus.error => OErrorState(
-          message:
-              data.errorMessage ??
-              'We could not start your preview. Check your connection and try again.',
+          message: data.errorMessage ?? 'This preview did not start.',
           onRetry: onRetry,
         ),
         V2PreviewStatus.empty => OEmptyState(
           icon: Icons.play_circle_outline_rounded,
           title: 'No preview running',
-          message: onStart == null
-              ? 'A preview cannot be started from here yet.'
-              : 'Start a preview to see your site on a phone.',
+          message: '',
           action: onStart == null
               ? null
               : OButton(
@@ -190,20 +180,18 @@ class V2LivePreviewPage extends StatelessWidget {
     );
   }
 
-  Widget _buildLoading(BuildContext context) {
+  Widget _buildLoading() {
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(OSpace.screen),
+      padding: const EdgeInsets.all(OSpace.l),
       child: Center(
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 520),
+          constraints: const BoxConstraints(maxWidth: 960),
           child: const Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              OSkeleton(height: 40, radius: ORadius.m),
+              OSkeleton(height: 24, radius: ORadius.m),
               SizedBox(height: OSpace.m),
               OSkeleton(height: 420, radius: ORadius.xl),
-              SizedBox(height: OSpace.m),
-              OSkeleton(height: 80, radius: ORadius.l),
             ],
           ),
         ),
@@ -212,39 +200,42 @@ class V2LivePreviewPage extends StatelessWidget {
   }
 
   Widget _buildContent(BuildContext context) {
+    final hasActions =
+        onShareLink != null || onOpenInBrowser != null || onStop != null;
+    final expiresLabel = data.expiresLabel.trim();
+    final hasExpiry = expiresLabel.isNotEmpty || data.expiresAt != null;
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(
-        OSpace.screen,
+        OSpace.l,
         OSpace.s,
-        OSpace.screen,
-        OSpace.xxl,
+        OSpace.l,
+        OSpace.xl,
       ),
       child: Center(
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 520),
-          child: OFadeSlide(
+          constraints: const BoxConstraints(maxWidth: 960),
+          child: OFadeIn(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                _PreviewHeader(data: data),
+                _StatusRow(url: data.url, live: data.hasPreviewContent),
                 const SizedBox(height: OSpace.m),
-                _PhoneFrame(data: data, onRetry: onRetry),
-                const SizedBox(height: OSpace.m),
-                const _ReadOnlyNote(),
-                if (data.expiresLabel.isNotEmpty || data.expiresAt != null) ...[
-                  const SizedBox(height: OSpace.m),
-                  _ExpiryCard(
-                    expiresLabel: data.expiresLabel,
+                _Frame(data: data, onRetry: onRetry),
+                if (hasExpiry) ...[
+                  const SizedBox(height: OSpace.s),
+                  _ExpiryLine(
+                    expiresLabel: expiresLabel,
                     expiresAt: data.expiresAt,
-                    onExtend: onExtend,
                   ),
                 ],
-                const SizedBox(height: OSpace.m),
-                _PreviewActions(
-                  onShare: onShareLink,
-                  onOpenInBrowser: onOpenInBrowser,
-                  onStop: onStop,
-                ),
+                if (hasActions) ...[
+                  const SizedBox(height: OSpace.m),
+                  _SecondaryActions(
+                    onShare: onShareLink,
+                    onOpenInBrowser: onOpenInBrowser,
+                    onStop: onStop,
+                  ),
+                ],
               ],
             ),
           ),
@@ -254,149 +245,45 @@ class V2LivePreviewPage extends StatelessWidget {
   }
 }
 
-class _PreviewHeader extends StatelessWidget {
-  const _PreviewHeader({required this.data});
+/// The one line above the frame: the real url and the live status.
+class _StatusRow extends StatelessWidget {
+  const _StatusRow({required this.url, required this.live});
 
-  final V2LivePreviewData data;
+  final String url;
+  final bool live;
+
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final live = data.hasPreviewContent;
+    final label = url.trim();
     return Row(
       children: [
+        if (label.isNotEmpty) ...[
+          Icon(Icons.lock_outline_rounded, size: 14, color: c.success),
+          const SizedBox(width: OSpace.xs),
+          Expanded(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: OType.caption.copyWith(color: c.textMuted),
+            ),
+          ),
+          const SizedBox(width: OSpace.s),
+        ] else
+          const Spacer(),
         OPill(
           label: live ? 'Online' : 'Starting',
           tone: live ? OPillTone.success : OPillTone.neutral,
           dot: true,
-        ),
-        const SizedBox(width: OSpace.s),
-        Expanded(
-          child: Text(
-            live
-                ? 'Changes from Studio show up here.'
-                : 'Waiting for the first frame from your workspace.',
-            style: OType.caption.copyWith(color: c.textMuted),
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-          ),
         ),
       ],
     );
   }
 }
 
-class _ReadOnlyNote extends StatelessWidget {
-  const _ReadOnlyNote();
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      padding: const EdgeInsets.all(OSpace.m),
-      decoration: BoxDecoration(
-        color: c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.m),
-        border: Border.all(color: c.hairline),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.visibility_outlined, size: 18, color: c.textMuted),
-          const SizedBox(width: OSpace.s),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Read-only preview',
-                  style: OType.bodySm.copyWith(
-                    color: c.text,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  'This is a view-only copy of your site. Edits happen in '
-                  'Studio.',
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _PreviewActions extends StatelessWidget {
-  const _PreviewActions({this.onShare, this.onOpenInBrowser, this.onStop});
-
-  final VoidCallback? onShare;
-  final VoidCallback? onOpenInBrowser;
-  final VoidCallback? onStop;
-
-  @override
-  Widget build(BuildContext context) {
-    final share = OButton(
-      label: 'Share preview',
-      icon: Icons.share_rounded,
-      variant: OButtonVariant.secondary,
-      onPressed: onShare,
-    );
-    final open = OButton(
-      label: 'Open in browser',
-      semanticLabel: 'Open preview in browser',
-      icon: Icons.open_in_new_rounded,
-      variant: OButtonVariant.secondary,
-      onPressed: onOpenInBrowser,
-    );
-    final stop = OButton(
-      label: 'Stop preview',
-      icon: Icons.stop_circle_outlined,
-      variant: OButtonVariant.danger,
-      onPressed: onStop,
-    );
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        // Two labels plus icons ellipsize on a narrow phone or at a large text
-        // scale, so the actions stack instead of squeezing.
-        final tight =
-            constraints.maxWidth < 460 ||
-            MediaQuery.textScalerOf(context).scale(1) > 1.3;
-        if (tight) {
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              share,
-              const SizedBox(height: OSpace.s),
-              open,
-              const SizedBox(height: OSpace.s),
-              stop,
-            ],
-          );
-        }
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              children: [
-                Expanded(child: share),
-                const SizedBox(width: OSpace.s),
-                Expanded(child: open),
-              ],
-            ),
-            const SizedBox(height: OSpace.s),
-            stop,
-          ],
-        );
-      },
-    );
-  }
-}
-
-class _PhoneFrame extends StatelessWidget {
-  const _PhoneFrame({required this.data, this.onRetry});
+class _Frame extends StatelessWidget {
+  const _Frame({required this.data, this.onRetry});
 
   final V2LivePreviewData data;
   final VoidCallback? onRetry;
@@ -404,60 +291,35 @@ class _PhoneFrame extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    final Widget content;
+    if (data.frame != null) {
+      content = Image(
+        image: data.frame!,
+        fit: BoxFit.cover,
+        width: double.infinity,
+        gaplessPlayback: true,
+        semanticLabel: data.siteName.isEmpty
+            ? 'Live preview'
+            : 'Live preview of ${data.siteName}',
+        errorBuilder: (context, error, stack) => _FrameError(onRetry: onRetry),
+      );
+    } else if (data.hasSiteCopy) {
+      content = Padding(
+        padding: const EdgeInsets.all(OSpace.l),
+        child: _SiteContent(data: data),
+      );
+    } else {
+      content = _WaitingFrame(onRetry: onRetry);
+    }
     return Container(
+      key: const Key('preview-frame'),
       decoration: BoxDecoration(
         color: c.surface,
         borderRadius: BorderRadius.circular(ORadius.xl),
         border: Border.all(color: c.hairlineStrong),
-        boxShadow: OShadow.floating,
       ),
       clipBehavior: Clip.antiAlias,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _BrowserChrome(url: data.url),
-          // Both children sit in the stack so the live chip can grow with the
-          // text scale instead of being clipped by a fixed bottom inset.
-          Stack(
-            alignment: Alignment.bottomCenter,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(
-                  OSpace.l,
-                  OSpace.l,
-                  OSpace.l,
-                  OSpace.huge,
-                ),
-                child: SizedBox(
-                  width: double.infinity,
-                  child: data.frame != null
-                      ? Image(
-                          image: data.frame!,
-                          fit: BoxFit.cover,
-                          gaplessPlayback: true,
-                          semanticLabel: data.siteName.isEmpty
-                              ? 'Live preview'
-                              : 'Live preview of ${data.siteName}',
-                          errorBuilder: (context, error, stack) =>
-                              _FrameError(onRetry: onRetry),
-                        )
-                      : data.hasSiteCopy
-                      ? _SiteContent(data: data)
-                      : _WaitingFrame(onRetry: onRetry),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.only(
-                  left: OSpace.m,
-                  right: OSpace.m,
-                  bottom: OSpace.m,
-                ),
-                child: _LiveChip(live: data.hasPreviewContent),
-              ),
-            ],
-          ),
-        ],
-      ),
+      child: content,
     );
   }
 }
@@ -481,15 +343,9 @@ class _FrameError extends StatelessWidget {
           Icon(Icons.broken_image_outlined, size: 40, color: c.danger),
           const SizedBox(height: OSpace.m),
           Text(
-            'The preview frame could not load',
+            'Frame did not load',
             textAlign: TextAlign.center,
             style: OType.body.copyWith(color: c.text),
-          ),
-          const SizedBox(height: OSpace.xs),
-          Text(
-            'The sandbox is running but its frame did not arrive.',
-            textAlign: TextAlign.center,
-            style: OType.caption.copyWith(color: c.textMuted),
           ),
           if (onRetry != null) ...[
             const SizedBox(height: OSpace.m),
@@ -526,12 +382,6 @@ class _WaitingFrame extends StatelessWidget {
             textAlign: TextAlign.center,
             style: OType.body.copyWith(color: c.text),
           ),
-          const SizedBox(height: OSpace.xs),
-          Text(
-            'Your site appears here as soon as the workspace starts it.',
-            textAlign: TextAlign.center,
-            style: OType.caption.copyWith(color: c.textMuted),
-          ),
           if (onRetry != null) ...[
             const SizedBox(height: OSpace.m),
             OButton(
@@ -540,81 +390,6 @@ class _WaitingFrame extends StatelessWidget {
               onPressed: onRetry,
             ),
           ],
-        ],
-      ),
-    );
-  }
-}
-
-class _BrowserChrome extends StatelessWidget {
-  const _BrowserChrome({required this.url});
-
-  final String url;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final hasUrl = url.trim().isNotEmpty;
-    return Container(
-      constraints: const BoxConstraints(minHeight: 44),
-      color: c.surfaceAlt,
-      padding: const EdgeInsets.symmetric(
-        horizontal: OSpace.m,
-        vertical: OSpace.xs,
-      ),
-      child: Row(
-        children: [
-          for (var i = 0; i < 3; i++) ...[
-            Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(
-                color: c.hairlineStrong,
-                shape: BoxShape.circle,
-              ),
-            ),
-            if (i < 2) const SizedBox(width: OSpace.xs),
-          ],
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Container(
-              constraints: const BoxConstraints(minHeight: 28),
-              padding: const EdgeInsets.symmetric(
-                horizontal: OSpace.s,
-                vertical: 2,
-              ),
-              decoration: BoxDecoration(
-                color: c.surface,
-                borderRadius: BorderRadius.circular(ORadius.pill),
-                border: Border.all(color: c.hairline),
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    hasUrl
-                        ? Icons.lock_outline_rounded
-                        : Icons.hourglass_empty_rounded,
-                    size: 12,
-                    color: hasUrl ? c.success : c.textFaint,
-                  ),
-                  const SizedBox(width: OSpace.xs),
-                  Flexible(
-                    child: Text(
-                      hasUrl ? url : 'Waiting for preview URL',
-                      style: OType.caption.copyWith(
-                        color: hasUrl ? c.textMuted : c.textFaint,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(width: OSpace.m),
-          Icon(Icons.devices_rounded, size: 17, color: c.textMuted),
         ],
       ),
     );
@@ -658,7 +433,10 @@ class _SiteContent extends StatelessWidget {
                 overflow: TextOverflow.ellipsis,
               ),
             ),
-            if (data.version.isNotEmpty) OPill(label: data.version),
+            if (data.version.isNotEmpty)
+              // Flexible so a 200 % text scale shrinks the pill instead of
+              // pushing the row past its width.
+              Flexible(child: OPill(label: data.version)),
           ],
         ),
         if (data.eyebrow.isNotEmpty) ...[
@@ -892,135 +670,67 @@ class _FeatureCard extends StatelessWidget {
   }
 }
 
-class _LiveChip extends StatelessWidget {
-  const _LiveChip({required this.live});
+/// One line: when the preview expires. No button, no card.
+class _ExpiryLine extends StatelessWidget {
+  const _ExpiryLine({required this.expiresLabel, this.expiresAt});
 
-  final bool live;
+  final String expiresLabel;
+  final DateTime? expiresAt;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: OSpace.m,
-        vertical: OSpace.s,
-      ),
-      decoration: BoxDecoration(
-        color: c.surfaceRaised,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-        border: Border.all(color: c.hairlineStrong),
-        boxShadow: OShadow.floating,
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(
-              color: live ? c.success : c.textFaint,
-              shape: BoxShape.circle,
-            ),
-          ),
-          const SizedBox(width: OSpace.s),
-          Flexible(
-            child: Text(
-              live
-                  ? 'Live · Preview from your workspace'
-                  : 'Waiting for the first frame',
-              style: OType.caption.copyWith(color: c.text),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-        ],
-      ),
+    return Row(
+      children: [
+        Icon(Icons.schedule_rounded, size: 16, color: c.textMuted),
+        const SizedBox(width: OSpace.xs),
+        Expanded(
+          child: expiresAt != null
+              ? _CountdownLabel(expiresAt: expiresAt!)
+              : Text(
+                  'Expires in $expiresLabel',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
+        ),
+      ],
     );
   }
 }
 
-class _ExpiryCard extends StatelessWidget {
-  const _ExpiryCard({
-    required this.expiresLabel,
-    this.expiresAt,
-    this.onExtend,
-  });
+class _SecondaryActions extends StatelessWidget {
+  const _SecondaryActions({this.onShare, this.onOpenInBrowser, this.onStop});
 
-  final String expiresLabel;
-  final DateTime? expiresAt;
-  final VoidCallback? onExtend;
+  final VoidCallback? onShare;
+  final VoidCallback? onOpenInBrowser;
+  final VoidCallback? onStop;
 
   @override
   Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final info = Row(
+    return Wrap(
+      spacing: OSpace.s,
+      runSpacing: OSpace.xs,
       children: [
-        Container(
-          width: 40,
-          height: 40,
-          decoration: BoxDecoration(
-            color: c.accentSoft,
-            shape: BoxShape.circle,
+        if (onShare != null)
+          OTextAction(
+            label: 'Share',
+            icon: Icons.share_rounded,
+            onPressed: onShare,
           ),
-          child: Icon(Icons.schedule_rounded, size: 20, color: c.accent),
-        ),
-        const SizedBox(width: OSpace.m),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (expiresAt != null)
-                _CountdownLabel(expiresAt: expiresAt!)
-              else
-                Text(
-                  'Expires in $expiresLabel',
-                  style: OType.bodySm.copyWith(
-                    color: c.text,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              Text(
-                'Sandboxed cloud instance',
-                style: OType.caption.copyWith(color: c.textMuted),
-              ),
-            ],
+        if (onOpenInBrowser != null)
+          OTextAction(
+            label: 'Open',
+            icon: Icons.open_in_new_rounded,
+            onPressed: onOpenInBrowser,
           ),
-        ),
+        if (onStop != null)
+          OTextAction(
+            label: 'Stop',
+            icon: Icons.stop_circle_outlined,
+            onPressed: onStop,
+          ),
       ],
-    );
-    final extend = OButton(
-      label: '+30 min',
-      variant: OButtonVariant.ghost,
-      onPressed: onExtend,
-    );
-    return OCard(
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          // A narrow phone or a large text scale leaves no room for the label
-          // beside the button, so the button moves under the text instead of
-          // squeezing it.
-          final tight =
-              constraints.maxWidth < 280 ||
-              MediaQuery.textScalerOf(context).scale(1) > 1.3;
-          if (!tight) {
-            return Row(
-              children: [
-                Expanded(child: info),
-                const SizedBox(width: OSpace.s),
-                extend,
-              ],
-            );
-          }
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              info,
-              const SizedBox(height: OSpace.s),
-              Align(alignment: Alignment.centerRight, child: extend),
-            ],
-          );
-        },
-      ),
     );
   }
 }
@@ -1093,8 +803,10 @@ class _CountdownLabelState extends State<_CountdownLabel> {
     final expired = _remaining <= Duration.zero;
     return Text(
       expired ? 'Expired' : 'Expires in ${formatPreviewCountdown(_remaining)}',
-      style: OType.bodySm.copyWith(
-        color: expired ? c.danger : c.text,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: OType.caption.copyWith(
+        color: expired ? c.danger : c.textMuted,
         fontWeight: FontWeight.w600,
       ),
     );

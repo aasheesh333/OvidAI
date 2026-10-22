@@ -20,22 +20,21 @@ class V2CollabRoutes {
     final controller = AppState.I.collaboration;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => _LiveCollabRoute(
-          controller: controller,
-          sessionId: sessionId,
-        ),
+        builder: (_) =>
+            _LiveCollabRoute(controller: controller, sessionId: sessionId),
       ),
     );
   }
 
-  static Future<void> openMembers(BuildContext context, String sessionId) async {
+  static Future<void> openMembers(
+    BuildContext context,
+    String sessionId,
+  ) async {
     final controller = AppState.I.collaboration;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => _CollabMembersRoute(
-          controller: controller,
-          sessionId: sessionId,
-        ),
+        builder: (_) =>
+            _CollabMembersRoute(controller: controller, sessionId: sessionId),
       ),
     );
   }
@@ -220,10 +219,7 @@ class V2CollabRoutes {
     }
     final model = _defaultModel();
     if (model == null) {
-      _snack(
-        context,
-        'Add a provider with your own key, or sign in to Ovid Cloud, to reply.',
-      );
+      _snack(context, 'Add a key or sign in to reply.');
       return;
     }
     try {
@@ -266,12 +262,8 @@ class V2CollabRoutes {
     BuildContext context,
     CollaborationProduction controller,
   ) async {
-    if (!controller.available) {
-      _snack(context, 'Live sessions are unavailable right now.');
-      return;
-    }
     if (!controller.isOwner) {
-      _snack(context, 'Only the creator can invite people to this room.');
+      _snack(context, 'Only the creator can invite.');
       return;
     }
     try {
@@ -285,7 +277,7 @@ class V2CollabRoutes {
       }
       await Clipboard.setData(ClipboardData(text: link));
       if (context.mounted) {
-        _snack(context, 'Invite link copied. Share it with the person you add.');
+        _snack(context, 'Invite link copied.');
       }
     } catch (error) {
       if (context.mounted) _snack(context, collaborationErrorMessage(error));
@@ -387,9 +379,9 @@ class V2CollabRoutes {
   }
 
   static void _snack(BuildContext context, String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   // ---------------------------------------------------------------------------
@@ -412,9 +404,7 @@ class V2CollabRoutes {
           : _authorName(state, message),
       timeLabel: _timeLabel(message.createdAt),
       text: message.text,
-      kind: assistant
-          ? V2CollabMessageKind.agent
-          : V2CollabMessageKind.person,
+      kind: assistant ? V2CollabMessageKind.agent : V2CollabMessageKind.person,
       initials: _initials(_authorName(state, message)),
       isTurnHolder: isTurnHolder,
       agentStatus: assistant ? message.model : null,
@@ -424,8 +414,7 @@ class V2CollabRoutes {
   static String _authorName(
     CollaborationState state,
     CollaborationMessage message,
-  ) =>
-      message.authorName ?? state.nameOf(message.author);
+  ) => message.authorName ?? state.nameOf(message.author);
 
   static String _memberSubtitle(Member member) => switch (member.status) {
     MemberStatus.active => '',
@@ -492,10 +481,7 @@ class _LiveCollabRouteState extends State<_LiveCollabRoute> {
     return AnimatedBuilder(
       animation: controller,
       builder: (context, _) {
-        final state = V2CollabRoutes.stateFor(
-          controller,
-          widget.sessionId,
-        );
+        final state = V2CollabRoutes.stateFor(controller, widget.sessionId);
         return CollabLivePage(
           data: V2CollabRoutes.liveDataFor(state),
           onOpenMembers: () =>
@@ -513,7 +499,10 @@ class _LiveCollabRouteState extends State<_LiveCollabRoute> {
 
 /// Member route: the roster and its owner actions track the live projection.
 class _CollabMembersRoute extends StatefulWidget {
-  const _CollabMembersRoute({required this.controller, required this.sessionId});
+  const _CollabMembersRoute({
+    required this.controller,
+    required this.sessionId,
+  });
 
   final CollaborationProduction? controller;
   final String sessionId;
@@ -527,20 +516,17 @@ class _CollabMembersRouteState extends State<_CollabMembersRoute> {
   Widget build(BuildContext context) {
     final controller = widget.controller;
     if (controller == null) {
-      return CollabMembersPage(
-        data: V2CollabRoutes.membersDataFor(null),
-      );
+      return CollabMembersPage(data: V2CollabRoutes.membersDataFor(null));
     }
     return AnimatedBuilder(
       animation: controller,
       builder: (context, _) {
-        final state = V2CollabRoutes.stateFor(
-          controller,
-          widget.sessionId,
-        );
+        final state = V2CollabRoutes.stateFor(controller, widget.sessionId);
         return CollabMembersPage(
           data: V2CollabRoutes.membersDataFor(state),
-          onInvite: () => V2CollabRoutes._invite(context, controller),
+          onInvite: controller.available
+              ? () => V2CollabRoutes._invite(context, controller)
+              : null,
           onLeave: () => V2CollabRoutes._leave(context, controller),
           onMemberMenu: (member) =>
               V2CollabRoutes._memberMenu(context, controller, member),

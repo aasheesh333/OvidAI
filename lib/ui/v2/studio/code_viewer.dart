@@ -5,7 +5,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
-import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 
 /// What the code viewer is showing right now.
@@ -69,58 +69,22 @@ class V2CodeViewerData {
       status == V2CodeViewerStatus.content && lines.isNotEmpty;
 
   bool get truncated => lines.length > lineLimit;
-
-  int get addedCount =>
-      lines.where((line) => line.kind == V2CodeViewerLineKind.added).length;
-
-  int get removedCount =>
-      lines.where((line) => line.kind == V2CodeViewerLineKind.removed).length;
-
-  String get fileType {
-    final dot = fileName.lastIndexOf('.');
-    if (dot == -1 || dot == fileName.length - 1) return '';
-    return fileName.substring(dot + 1).toUpperCase();
-  }
 }
 
-/// Read-only code and diff viewer for a Studio file.
-///
-/// The full [V2CodeViewerData.lines] list is owned by the wiring layer; the
-/// viewer only builds the first [V2CodeViewerData.lineLimit] rows. [onCopy] is
-/// called when the user asks for a copy and should copy the whole file (or the
-/// whole diff), even when rendering is capped.
-class V2CodeViewerPage extends StatefulWidget {
-  const V2CodeViewerPage({
-    super.key,
-    required this.data,
-    this.onCopy,
-    this.onOpenExternally,
-    this.onRetry,
-    this.onBack,
-  });
+/// The scrollable code surface, shared by the viewer page and the workspace's
+/// inline editor so both render the same gutter, colours and line cap.
+class V2CodeBody extends StatefulWidget {
+  const V2CodeBody({super.key, required this.data});
 
   final V2CodeViewerData data;
-  final VoidCallback? onCopy;
-  final VoidCallback? onOpenExternally;
-  final VoidCallback? onRetry;
-  final VoidCallback? onBack;
 
   @override
-  State<V2CodeViewerPage> createState() => _V2CodeViewerPageState();
+  State<V2CodeBody> createState() => _V2CodeBodyState();
 }
 
-class _V2CodeViewerPageState extends State<V2CodeViewerPage> {
+class _V2CodeBodyState extends State<V2CodeBody> {
   final ScrollController _vertical = ScrollController();
   final ScrollController _horizontal = ScrollController();
-
-  @override
-  void didUpdateWidget(covariant V2CodeViewerPage oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.data.filePath != widget.data.filePath) {
-      if (_vertical.hasClients) _vertical.jumpTo(0);
-      if (_horizontal.hasClients) _horizontal.jumpTo(0);
-    }
-  }
 
   @override
   void dispose() {
@@ -131,180 +95,10 @@ class _V2CodeViewerPageState extends State<V2CodeViewerPage> {
 
   @override
   Widget build(BuildContext context) {
-    final data = widget.data;
-    final name = data.fileName.trim();
-    final path = data.filePath.trim();
-    return OScaffold(
-      appBar: OAppBar(
-        title: name.isEmpty ? 'Code' : name,
-        subtitle: path.isEmpty ? null : path,
-        actions: [
-          OIconButton(
-            key: const Key('v2-code-viewer-copy'),
-            icon: Icons.copy_rounded,
-            semanticLabel: data.diff ? 'Copy diff' : 'Copy file contents',
-            tooltip: 'Copy',
-            onPressed: data.hasContent ? widget.onCopy : null,
-          ),
-        ],
-      ),
-      body: switch (data.status) {
-        V2CodeViewerStatus.loading => const OSkeletonList(rows: 6),
-        V2CodeViewerStatus.error => OErrorState(
-          message:
-              data.errorMessage ??
-              'We could not load this file. Check your connection and try again.',
-          onRetry: widget.onRetry,
-        ),
-        V2CodeViewerStatus.empty => _buildEmpty(),
-        V2CodeViewerStatus.content =>
-          data.lines.isEmpty ? _buildEmpty() : _buildContent(context),
-      },
-    );
-  }
-
-  Widget _buildEmpty() {
-    return OEmptyState(
-      icon: Icons.code_off_rounded,
-      title: 'No file selected',
-      message: 'Pick a file in Studio to read its code here.',
-      action: widget.onBack == null
-          ? null
-          : OButton(
-              label: 'Back to workspace',
-              variant: OButtonVariant.secondary,
-              onPressed: widget.onBack,
-            ),
-    );
-  }
-
-  Widget _buildContent(BuildContext context) {
+    final c = OColors.of(context);
     final data = widget.data;
     final visible = data.lines.take(data.lineLimit).toList(growable: false);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(
-            OSpace.l,
-            OSpace.m,
-            OSpace.l,
-            OSpace.s,
-          ),
-          child: OFadeSlide(
-            child: _ViewerMeta(
-              fileType: data.fileType,
-              lineCount: data.lines.length,
-              diff: data.diff,
-              added: data.addedCount,
-              removed: data.removedCount,
-              truncated: data.truncated,
-            ),
-          ),
-        ),
-        Expanded(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: OSpace.l),
-            child: OFadeSlide(
-              delay: OMotion.stagger,
-              child: _CodeSurface(
-                lines: visible,
-                diff: data.diff,
-                verticalController: _vertical,
-                horizontalController: _horizontal,
-              ),
-            ),
-          ),
-        ),
-        if (data.truncated)
-          _TruncationBar(
-            shown: visible.length,
-            total: data.lines.length,
-            onOpenExternally: widget.onOpenExternally,
-          )
-        else
-          const SizedBox(height: OSpace.l),
-      ],
-    );
-  }
-}
-
-class _ViewerMeta extends StatelessWidget {
-  const _ViewerMeta({
-    required this.fileType,
-    required this.lineCount,
-    required this.diff,
-    required this.added,
-    required this.removed,
-    required this.truncated,
-  });
-
-  final String fileType;
-  final int lineCount;
-  final bool diff;
-  final int added;
-  final int removed;
-  final bool truncated;
-
-  @override
-  Widget build(BuildContext context) {
-    final lineLabel = lineCount == 1 ? '1 line' : '$lineCount lines';
-    return Wrap(
-      spacing: OSpace.s,
-      runSpacing: OSpace.xs,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      children: [
-        const _MetaPill(
-          label: 'Read only',
-          icon: Icons.lock_outline_rounded,
-          tone: OPillTone.neutral,
-        ),
-        if (fileType.isNotEmpty) _MetaPill(label: fileType),
-        if (diff) ...[
-          _MetaPill(
-            label: '+$added',
-            tone: OPillTone.success,
-            semanticLabel: '$added added ${added == 1 ? 'line' : 'lines'}',
-          ),
-          _MetaPill(
-            label: '−$removed',
-            tone: OPillTone.danger,
-            semanticLabel:
-                '$removed removed ${removed == 1 ? 'line' : 'lines'}',
-          ),
-        ] else
-          _MetaPill(
-            label: lineLabel,
-            semanticLabel: truncated ? '$lineLabel, preview only' : lineLabel,
-          ),
-        if (truncated)
-          const _MetaPill(
-            label: 'Preview',
-            tone: OPillTone.warn,
-            semanticLabel: 'Large file, preview only',
-          ),
-      ],
-    );
-  }
-}
-
-class _CodeSurface extends StatelessWidget {
-  const _CodeSurface({
-    required this.lines,
-    required this.diff,
-    required this.verticalController,
-    required this.horizontalController,
-  });
-
-  final List<V2CodeViewerLine> lines;
-  final bool diff;
-  final ScrollController verticalController;
-  final ScrollController horizontalController;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final resolved = _resolveLines(lines);
+    final resolved = _resolveLines(visible);
     final maxNumber = resolved.fold<int>(1, (largest, line) {
       return math.max(
         largest,
@@ -326,12 +120,12 @@ class _CodeSurface extends StatelessWidget {
       ),
       clipBehavior: Clip.antiAlias,
       child: Scrollbar(
-        controller: verticalController,
+        controller: _vertical,
         child: SingleChildScrollView(
-          controller: verticalController,
+          controller: _vertical,
           padding: const EdgeInsets.symmetric(vertical: OSpace.s),
           child: SingleChildScrollView(
-            controller: horizontalController,
+            controller: _horizontal,
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.symmetric(horizontal: OSpace.m),
             child: Column(
@@ -342,7 +136,7 @@ class _CodeSurface extends StatelessWidget {
                     key: ValueKey<String>('v2-code-line-${i + 1}'),
                     line: resolved[i],
                     plainNumber: i + 1,
-                    diff: diff,
+                    diff: data.diff,
                     gutterWidth: gutterWidth,
                   ),
               ],
@@ -373,6 +167,111 @@ class _CodeSurface extends StatelessWidget {
       );
     }
     return resolved;
+  }
+}
+
+/// Read-only code and diff viewer for a Studio file.
+///
+/// The full [V2CodeViewerData.lines] list is owned by the wiring layer; the
+/// viewer only builds the first [V2CodeViewerData.lineLimit] rows. [onCopy] is
+/// called when the user asks for a copy and should copy the whole file (or the
+/// whole diff), even when rendering is capped.
+class V2CodeViewerPage extends StatelessWidget {
+  const V2CodeViewerPage({
+    super.key,
+    required this.data,
+    this.onCopy,
+    this.onOpenExternally,
+    this.onRetry,
+    this.onBack,
+  });
+
+  final V2CodeViewerData data;
+  final VoidCallback? onCopy;
+  final VoidCallback? onOpenExternally;
+  final VoidCallback? onRetry;
+  final VoidCallback? onBack;
+
+  @override
+  Widget build(BuildContext context) {
+    final name = data.fileName.trim();
+    return OScreen(
+      title: name.isEmpty ? 'Code' : name,
+      padding: false,
+      leading: onBack == null
+          ? null
+          : OIconButton(
+              icon: Icons.arrow_back_rounded,
+              semanticLabel: 'Back',
+              onPressed: onBack,
+            ),
+      actions: [
+        OIconButton(
+          key: const Key('v2-code-viewer-copy'),
+          icon: Icons.copy_rounded,
+          semanticLabel: data.diff ? 'Copy diff' : 'Copy file contents',
+          tooltip: 'Copy',
+          onPressed: data.hasContent ? onCopy : null,
+        ),
+      ],
+      child: switch (data.status) {
+        V2CodeViewerStatus.loading => const OSkeletonList(rows: 6),
+        V2CodeViewerStatus.error => OErrorState(
+          message: data.errorMessage ?? 'This file did not load.',
+          onRetry: onRetry,
+        ),
+        V2CodeViewerStatus.empty => _buildEmpty(),
+        V2CodeViewerStatus.content =>
+          data.lines.isEmpty ? _buildEmpty() : _buildContent(context),
+      },
+    );
+  }
+
+  Widget _buildEmpty() {
+    return OEmptyState(
+      icon: Icons.code_off_rounded,
+      title: 'No file selected',
+      message: '',
+      action: onBack == null
+          ? null
+          : OButton(
+              label: 'Back to workspace',
+              variant: OButtonVariant.secondary,
+              onPressed: onBack,
+            ),
+    );
+  }
+
+  Widget _buildContent(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(
+              OSpace.l,
+              OSpace.m,
+              OSpace.l,
+              OSpace.s,
+            ),
+            child: OFadeIn(
+              child: V2CodeBody(
+                key: ValueKey<String>(data.filePath),
+                data: data,
+              ),
+            ),
+          ),
+        ),
+        if (data.truncated)
+          _TruncationBar(
+            shown: data.lineLimit,
+            total: data.lines.length,
+            onOpenExternally: onOpenExternally,
+          )
+        else
+          const SizedBox(height: OSpace.l),
+      ],
+    );
   }
 }
 
@@ -541,29 +440,18 @@ class _TruncationBar extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Icon(Icons.layers_outlined, size: 18, color: c.warn),
-              const SizedBox(width: OSpace.s),
-              Expanded(
-                child: Semantics(
-                  label:
-                      'Large file. Showing the first $shown of $total lines. '
-                      'Open externally to read the rest.',
-                  excludeSemantics: true,
-                  child: Text(
-                    '$shown of $total lines shown',
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.bodySm.copyWith(
-                      color: c.text,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
+          Semantics(
+            label: 'Large file. Showing the first $shown of $total lines.',
+            excludeSemantics: true,
+            child: Text(
+              '$shown of $total lines',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: OType.bodySm.copyWith(
+                color: c.text,
+                fontWeight: FontWeight.w600,
               ),
-            ],
+            ),
           ),
           const SizedBox(height: OSpace.s),
           OButton(
@@ -575,69 +463,6 @@ class _TruncationBar extends StatelessWidget {
             onPressed: onOpenExternally,
           ),
         ],
-      ),
-    );
-  }
-}
-
-/// Small status pill that grows with the text scale instead of clipping at a
-/// fixed height.
-class _MetaPill extends StatelessWidget {
-  const _MetaPill({
-    required this.label,
-    this.tone = OPillTone.neutral,
-    this.icon,
-    this.semanticLabel,
-  });
-
-  final String label;
-  final OPillTone tone;
-  final IconData? icon;
-  final String? semanticLabel;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final (bg, fg) = switch (tone) {
-      OPillTone.neutral => (c.surfaceAlt, c.textMuted),
-      OPillTone.accent => (c.accentSoft, c.accent),
-      OPillTone.success => (c.success.withValues(alpha: 0.12), c.success),
-      OPillTone.warn => (c.warn.withValues(alpha: 0.12), c.warn),
-      OPillTone.danger => (c.danger.withValues(alpha: 0.12), c.danger),
-    };
-    return Semantics(
-      label: semanticLabel ?? label,
-      excludeSemantics: true,
-      child: Container(
-        constraints: const BoxConstraints(minHeight: 24),
-        padding: const EdgeInsets.symmetric(
-          horizontal: 10,
-          vertical: OSpace.xs / 2,
-        ),
-        decoration: BoxDecoration(
-          color: bg,
-          borderRadius: BorderRadius.circular(ORadius.pill),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (icon != null) ...[
-              Icon(icon, size: 13, color: fg),
-              const SizedBox(width: 5),
-            ],
-            Flexible(
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: OType.caption.copyWith(
-                  color: fg,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }

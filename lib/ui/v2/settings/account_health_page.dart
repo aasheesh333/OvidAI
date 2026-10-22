@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
-import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the localization pass.
@@ -208,8 +208,7 @@ class V2AccountHealthPageData {
   /// dropped, or an empty string when the caller has no dates yet.
   String get deletionSummary => [
     if (deletionRequestedLabel.isNotEmpty) 'Requested $deletionRequestedLabel',
-    if (deletionScheduledLabel.isNotEmpty)
-      'Deletes on $deletionScheduledLabel',
+    if (deletionScheduledLabel.isNotEmpty) 'Deletes on $deletionScheduledLabel',
   ].join(' · ');
 
   /// True once a security check has actually run and reported a time.
@@ -243,16 +242,26 @@ class AccountHealthPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return OScaffold(
-      appBar: const OAppBar(title: 'Account health'),
-      body: _body(context),
+    return OScreen(
+      title: 'Account health',
+      actions: [
+        if (data.onRunCheck != null)
+          OIconButton(
+            key: const ValueKey<String>('account-health-run-check'),
+            icon: Icons.refresh_rounded,
+            semanticLabel: data.hasCheckResult
+                ? 'Run check again'
+                : 'Run check',
+            tooltip: data.hasCheckResult ? 'Run again' : 'Run check',
+            onPressed: data.onRunCheck,
+          ),
+      ],
+      child: _body(context),
     );
   }
 
   Widget _body(BuildContext context) {
-    if (data.loading) {
-      return const OFadeSlide(child: OSkeletonList(rows: 6));
-    }
+    if (data.loading) return const OSkeletonList(rows: 6);
     if (data.errorMessage != null) {
       return OErrorState(message: data.errorMessage!, onRetry: data.onRetry);
     }
@@ -260,7 +269,7 @@ class AccountHealthPage extends StatelessWidget {
       return OEmptyState(
         icon: Icons.health_and_safety_outlined,
         title: 'No health data yet',
-        message: 'Run a check to see how your account and devices are doing.',
+        message: 'Run a check to see account status.',
         action: data.onRunCheck == null
             ? null
             : OButton(
@@ -270,158 +279,15 @@ class AccountHealthPage extends StatelessWidget {
               ),
       );
     }
-    return OFadeSlide(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(
-          OSpace.screen,
-          OSpace.l,
-          OSpace.screen,
-          OSpace.xxl,
-        ),
-        child: OStagger(
-          children: [
-            _hero(context),
-            _summary(context),
-            if (data.accountStatus == V2AccountStatus.suspendedForAbuse)
-              _suspendedNotice(context),
-            if (data.deletionPending) _deletionRequest(context),
-            _healthCard(context),
-            _devices(context),
-            _recentSignIns(context),
-            _serviceStatus(context),
-            if (data.regionLabel.isNotEmpty || data.onContactSupport != null)
-              _regionSupport(context),
-            _isolationNote(context),
-          ],
-        ),
-      ),
-    );
-  }
 
-  Widget _hero(BuildContext context) {
     final c = OColors.of(context);
-    final score = data.resolvedScore;
-    final checked = data.hasCheckResult;
-    final healthy = data.effectiveHealthy;
-    final unknown = !checked || data.healthy == null;
-    final tone = unknown ? c.textMuted : (healthy ? c.success : c.warn);
-    final title = checked ? data.statusTitle : 'Health check not run yet';
-    final message = checked
-        ? data.statusMessage
-        : 'Run a check to verify your account, devices and sign-ins.';
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: OCard(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  width: 44,
-                  height: 44,
-                  decoration: BoxDecoration(
-                    color: tone.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(ORadius.m),
-                  ),
-                  child: Icon(
-                    unknown
-                        ? Icons.health_and_safety_outlined
-                        : healthy
-                        ? Icons.health_and_safety_outlined
-                        : Icons.gpp_maybe_outlined,
-                    size: 24,
-                    color: tone,
-                  ),
-                ),
-                const SizedBox(width: OSpace.m),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(title, style: OType.h2.copyWith(color: c.text)),
-                      const SizedBox(height: OSpace.xs),
-                      OPill(
-                        label: data.healthPillLabel,
-                        tone: unknown
-                            ? OPillTone.neutral
-                            : healthy
-                            ? OPillTone.success
-                            : OPillTone.warn,
-                        dot: true,
-                      ),
-                      const SizedBox(height: OSpace.xs),
-                      Text(
-                        message,
-                        style: OType.bodySm.copyWith(color: c.textMuted),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            if (score != null) ...[
-              const SizedBox(height: OSpace.m),
-              Container(
-                padding: const EdgeInsets.all(OSpace.m),
-                decoration: BoxDecoration(
-                  color: c.surfaceAlt,
-                  borderRadius: BorderRadius.circular(ORadius.m),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (MediaQuery.textScalerOf(context).scale(1) > 1.4) ...[
-                      Text(
-                        'Security score',
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                      const SizedBox(height: OSpace.xs),
-                      Text(
-                        '$score/100',
-                        style: OType.bodyStrong.copyWith(color: c.text),
-                      ),
-                    ] else
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              'Security score',
-                              style: OType.caption.copyWith(color: c.textMuted),
-                            ),
-                          ),
-                          Text(
-                            '$score/100',
-                            style: OType.bodyStrong.copyWith(color: c.text),
-                          ),
-                        ],
-                      ),
-                    const SizedBox(height: OSpace.s),
-                    OProgressBar(value: score / 100),
-                  ],
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// One card answers "how much is left, and where does my account stand".
-  /// The page shows `Not measured yet` rather than a made-up number.
-  Widget _summary(BuildContext context) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
+    return SingleChildScrollView(
+      padding: const EdgeInsets.only(top: OSpace.l, bottom: OSpace.xxl),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          OSectionHeader(
-            label: 'Account summary',
-            padding: const EdgeInsets.only(bottom: OSpace.s),
-          ),
+          _statusLine(context),
+          const SizedBox(height: OSpace.l),
           OCard(
             padding: EdgeInsets.zero,
             child: Column(
@@ -430,7 +296,6 @@ class AccountHealthPage extends StatelessWidget {
                   key: const ValueKey<String>('health-account-status'),
                   icon: Icons.verified_user_outlined,
                   title: 'Account status',
-                  subtitle: data.accountStatusDetail,
                   showChevron: false,
                   trailing: OPill(
                     label: data.accountStatusLabel,
@@ -443,161 +308,144 @@ class AccountHealthPage extends StatelessWidget {
                     dot: true,
                   ),
                 ),
-                for (final metric in data.usage) ...[
+                Divider(color: c.hairline, height: 1),
+                _HealthRow(
+                  icon: Icons.alternate_email_rounded,
+                  title: 'Email',
+                  showChevron: false,
+                  onTap: data.emailVerified ? null : data.onVerifyEmail,
+                  trailing: data.emailVerified
+                      ? const OPill(
+                          label: 'Verified',
+                          tone: OPillTone.success,
+                          dot: true,
+                        )
+                      : data.onVerifyEmail != null
+                      ? OButton(
+                          label: 'Verify',
+                          variant: OButtonVariant.ghost,
+                          onPressed: data.onVerifyEmail,
+                        )
+                      : const OPill(
+                          label: 'Not verified',
+                          tone: OPillTone.warn,
+                          dot: true,
+                        ),
+                ),
+                if (data.twoFactorEnabled != null) ...[
                   Divider(color: c.hairline, height: 1),
                   _HealthRow(
-                    key: ValueKey<String>('health-usage-${metric.id}'),
-                    icon: _usageIcon(metric.id),
-                    title: metric.title,
-                    subtitle: _usageDetail(metric),
+                    icon: Icons.password_rounded,
+                    title: 'Two-step sign-in',
                     showChevron: false,
+                    onTap: data.twoFactorEnabled!
+                        ? null
+                        : data.onEnableTwoFactor,
+                    trailing: data.twoFactorEnabled!
+                        ? const OPill(
+                            label: 'On',
+                            tone: OPillTone.success,
+                            dot: true,
+                          )
+                        : data.onEnableTwoFactor != null
+                        ? OButton(
+                            label: 'Turn on',
+                            variant: OButtonVariant.ghost,
+                            onPressed: data.onEnableTwoFactor,
+                          )
+                        : const OPill(
+                            label: 'Off',
+                            tone: OPillTone.warn,
+                            dot: true,
+                          ),
+                  ),
+                ],
+                for (final device in data.devices) ...[
+                  Divider(color: c.hairline, height: 1),
+                  _HealthRow(
+                    icon: Icons.devices_rounded,
+                    title: device.name,
+                    subtitle: device.detail,
+                    showChevron: false,
+                    onTap: data.onDeviceTap == null
+                        ? null
+                        : () => data.onDeviceTap!(device.id),
+                    trailing: device.current
+                        ? const OPill(
+                            label: 'This device',
+                            tone: OPillTone.accent,
+                          )
+                        : data.onRevokeDevice == null
+                        ? null
+                        : OButton(
+                            label: 'Revoke',
+                            variant: OButtonVariant.danger,
+                            onPressed: () =>
+                                _confirmRevokeDevice(context, device),
+                          ),
+                  ),
+                ],
+                if (data.onContactSupport != null) ...[
+                  Divider(color: c.hairline, height: 1),
+                  _HealthRow(
+                    icon: Icons.support_agent_rounded,
+                    title: 'Contact support',
+                    onTap: data.onContactSupport,
                   ),
                 ],
               ],
             ),
           ),
-        ],
-      ),
-    );
-  }
-
-  IconData _usageIcon(String id) => switch (id) {
-    'storage' => Icons.cloud_outlined,
-    'daily_usage' => Icons.today_outlined,
-    'monthly_usage' => Icons.calendar_month_outlined,
-    _ => Icons.bar_chart_rounded,
-  };
-
-  String _usageDetail(V2AccountUsageMetric metric) {
-    if (metric.value.trim().isEmpty) return 'Not measured yet';
-    if (metric.detail.trim().isEmpty) return metric.value;
-    return '${metric.value} · ${metric.detail}';
-  }
-
-  Widget _suspendedNotice(BuildContext context) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: Container(
-        key: const ValueKey<String>('account-health-suspended-notice'),
-        padding: const EdgeInsets.all(OSpace.l),
-        decoration: BoxDecoration(
-          color: c.danger.withValues(alpha: 0.10),
-          borderRadius: BorderRadius.circular(ORadius.l),
-          border: Border.all(color: c.danger.withValues(alpha: 0.35)),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(Icons.gpp_bad_outlined, size: 20, color: c.danger),
-                const SizedBox(width: OSpace.s),
-                Expanded(
-                  child: Text(
-                    'Suspended for abuse',
-                    style: OType.h3.copyWith(color: c.text),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: OSpace.s),
-            Text(
-              'Your data is kept. Contact support to appeal this decision.',
-              style: OType.bodySm.copyWith(color: c.textMuted),
-            ),
-            if (data.onContactSupport != null) ...[
-              const SizedBox(height: OSpace.m),
-              OButton(
-                key: const ValueKey<String>('account-health-suspended-support'),
-                label: 'Contact support',
-                icon: Icons.support_agent_rounded,
-                variant: OButtonVariant.secondary,
-                expand: true,
-                onPressed: data.onContactSupport,
-              ),
-            ],
+          if (_bottomAction(context) != null) ...[
+            const SizedBox(height: OSpace.l),
+            _bottomAction(context)!,
           ],
-        ),
+        ],
       ),
     );
   }
 
-  Widget _deletionRequest(BuildContext context) {
+  /// One status line: the pill plus the last real check. No green tick unless a
+  /// check actually ran.
+  Widget _statusLine(BuildContext context) {
     final c = OColors.of(context);
-    final summary = data.deletionSummary;
-    final when = data.deletionScheduledLabel.isEmpty
-        ? ''
-        : ' on ${data.deletionScheduledLabel}';
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          OSectionHeader(
-            label: 'Deletion request',
-            padding: const EdgeInsets.only(bottom: OSpace.s),
-          ),
-          OCard(
-            key: const ValueKey<String>('account-health-deletion-card'),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Icon(
-                      Icons.delete_outline_rounded,
-                      size: 20,
-                      color: c.warn,
-                    ),
-                    const SizedBox(width: OSpace.s),
-                    Expanded(
-                      child: Text(
-                        'Deletion requested',
-                        style: OType.h3.copyWith(color: c.text),
-                      ),
-                    ),
-                    const SizedBox(width: OSpace.s),
-                    const OPill(
-                      label: 'Pending',
-                      tone: OPillTone.warn,
-                      dot: true,
-                    ),
-                  ],
-                ),
-                if (summary.isNotEmpty) ...[
-                  const SizedBox(height: OSpace.s),
-                  Text(
-                    summary,
-                    style: OType.bodySm.copyWith(color: c.textMuted),
-                  ),
-                ],
-                const SizedBox(height: OSpace.s),
-                Text(
-                  'Your chats, files, memory and artifacts will be deleted'
-                  '$when. Until then, you can cancel.',
-                  style: OType.bodySm.copyWith(color: c.textMuted),
-                ),
-                if (data.onCancelDeletion != null) ...[
-                  const SizedBox(height: OSpace.m),
-                  OButton(
-                    key: const ValueKey<String>(
-                      'account-health-cancel-deletion',
-                    ),
-                    label: 'Cancel deletion',
-                    variant: OButtonVariant.secondary,
-                    expand: true,
-                    onPressed: () => _confirmCancelDeletion(context),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ],
-      ),
+    final checked = data.hasCheckResult;
+    final healthy = data.effectiveHealthy;
+    final unknown = !checked || data.healthy == null;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        OPill(
+          label: data.healthPillLabel,
+          tone: unknown
+              ? OPillTone.neutral
+              : healthy
+              ? OPillTone.success
+              : OPillTone.warn,
+          dot: true,
+        ),
+        const SizedBox(height: OSpace.xs),
+        Text(
+          checked ? data.lastCheckSummary : 'No check has run yet.',
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: OType.bodySm.copyWith(color: c.textMuted),
+        ),
+      ],
     );
+  }
+
+  Widget? _bottomAction(BuildContext context) {
+    if (data.deletionPending && data.onCancelDeletion != null) {
+      return OButton(
+        key: const ValueKey<String>('account-health-cancel-deletion'),
+        label: 'Cancel deletion',
+        variant: OButtonVariant.danger,
+        expand: true,
+        onPressed: () => _confirmCancelDeletion(context),
+      );
+    }
+    return null;
   }
 
   Future<void> _confirmCancelDeletion(BuildContext context) async {
@@ -613,8 +461,7 @@ class AccountHealthPage extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Text(
-                'Your account and all its data will be kept. You can request '
-                'deletion again at any time.',
+                'Your account and its data will be kept.',
                 style: OType.bodySm.copyWith(color: c.textMuted),
               ),
               const SizedBox(height: OSpace.l),
@@ -639,327 +486,6 @@ class AccountHealthPage extends StatelessWidget {
       },
     );
     if (confirmed == true) data.onCancelDeletion?.call();
-  }
-
-  Widget _healthCard(BuildContext context) {
-    final c = OColors.of(context);
-    final checked = data.hasCheckResult;
-    final checkTone = !checked
-        ? c.textMuted
-        : data.healthy == true
-        ? c.success
-        : data.healthy == false
-        ? c.warn
-        : c.textMuted;
-    final checkIcon = !checked
-        ? Icons.schedule_rounded
-        : data.healthy == true
-        ? Icons.check_circle_outline_rounded
-        : data.healthy == false
-        ? Icons.error_outline_rounded
-        : Icons.help_outline_rounded;
-    final twoFactor = data.twoFactorEnabled;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          OSectionHeader(
-            label: 'Account health',
-            padding: const EdgeInsets.only(bottom: OSpace.s),
-            trailing: data.onRunCheck == null
-                ? Text(
-                    checked ? 'Checked' : 'Not run yet',
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  )
-                : OButton(
-                    key: const ValueKey<String>('account-health-run-check'),
-                    label: checked ? 'Run again' : 'Run check',
-                    variant: OButtonVariant.ghost,
-                    size: OButtonSize.compact,
-                    onPressed: data.onRunCheck,
-                  ),
-          ),
-          OCard(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                // Real Firebase state: never a green tick without it.
-                _HealthRow(
-                  icon: Icons.alternate_email_rounded,
-                  title: 'Email verification',
-                  subtitle: data.emailLabel.isEmpty ? null : data.emailLabel,
-                  showChevron: false,
-                  onTap: data.emailVerified ? null : data.onVerifyEmail,
-                  trailing: data.emailVerified
-                      ? const OPill(
-                          label: 'Verified',
-                          tone: OPillTone.success,
-                          dot: true,
-                        )
-                      : data.onVerifyEmail != null
-                      ? OButton(
-                          label: 'Verify',
-                          variant: OButtonVariant.ghost,
-                          onPressed: data.onVerifyEmail,
-                        )
-                      : const OPill(
-                          label: 'Not verified',
-                          tone: OPillTone.warn,
-                          dot: true,
-                        ),
-                ),
-                if (twoFactor != null) ...[
-                  Divider(color: c.hairline, height: 1),
-                  _HealthRow(
-                    icon: Icons.password_rounded,
-                    title: 'Two-step sign-in',
-                    subtitle: twoFactor
-                        ? 'On. A code is required when you sign in.'
-                        : 'Off. Add a second step to protect your account.',
-                    showChevron: false,
-                    onTap: twoFactor ? null : data.onEnableTwoFactor,
-                    trailing: twoFactor
-                        ? const OPill(
-                            label: 'On',
-                            tone: OPillTone.success,
-                            dot: true,
-                          )
-                        : data.onEnableTwoFactor != null
-                        ? OButton(
-                            label: 'Turn on',
-                            variant: OButtonVariant.ghost,
-                            onPressed: data.onEnableTwoFactor,
-                          )
-                        : const OPill(
-                            label: 'Off',
-                            tone: OPillTone.warn,
-                            dot: true,
-                          ),
-                  ),
-                ],
-                Divider(color: c.hairline, height: 1),
-                _HealthRow(
-                  icon: Icons.schedule_rounded,
-                  title: 'Last security check',
-                  subtitle: checked
-                      ? data.lastCheckSummary
-                      : 'No check has run yet.',
-                  showChevron: false,
-                  stackTrailing: false,
-                  trailing: checked
-                      ? Icon(checkIcon, size: 20, color: checkTone)
-                      : null,
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _devices(BuildContext context) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          OSectionHeader(
-            label: 'Active sign-ins',
-            padding: const EdgeInsets.only(bottom: OSpace.s),
-          ),
-          if (data.devices.isEmpty)
-            OCard(
-              child: Text(
-                'No other devices are signed in.',
-                style: OType.bodySm.copyWith(color: c.textMuted),
-              ),
-            )
-          else
-            OCard(
-              padding: EdgeInsets.zero,
-              child: Column(
-                children: [
-                  for (var i = 0; i < data.devices.length; i++) ...[
-                    if (i > 0) Divider(color: c.hairline, height: 1),
-                    _HealthRow(
-                      icon: Icons.devices_rounded,
-                      title: data.devices[i].name,
-                      subtitle: data.devices[i].detail,
-                      trailing: data.devices[i].current
-                          ? const OPill(
-                              label: 'This device',
-                              tone: OPillTone.accent,
-                            )
-                          : data.onRevokeDevice == null
-                          ? null
-                          : OButton(
-                              label: 'Revoke',
-                              variant: OButtonVariant.danger,
-                              onPressed: () => _confirmRevokeDevice(
-                                context,
-                                data.devices[i],
-                              ),
-                            ),
-                      onTap: data.onDeviceTap == null
-                          ? null
-                          : () => data.onDeviceTap!(data.devices[i].id),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _recentSignIns(BuildContext context) {
-    final c = OColors.of(context);
-    final count = data.recentSignIns.length;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          OSectionHeader(
-            label: 'Recent sign-ins',
-            padding: const EdgeInsets.only(bottom: OSpace.s),
-            trailing: Text(
-              '$count ${count == 1 ? 'event' : 'events'}',
-              style: OType.caption.copyWith(color: c.textMuted),
-            ),
-          ),
-          if (data.recentSignIns.isEmpty)
-            OCard(
-              child: Text(
-                'No recent sign-ins to review.',
-                style: OType.bodySm.copyWith(color: c.textMuted),
-              ),
-            )
-          else
-            OCard(
-              padding: EdgeInsets.zero,
-              child: Column(
-                children: [
-                  for (var i = 0; i < data.recentSignIns.length; i++) ...[
-                    if (i > 0) Divider(color: c.hairline, height: 1),
-                    _HealthRow(
-                      icon: Icons.login_rounded,
-                      title: data.recentSignIns[i].device,
-                      subtitle:
-                          '${data.recentSignIns[i].location} · ${data.recentSignIns[i].timeLabel}',
-                      showChevron: false,
-                      trailing: data.recentSignIns[i].current
-                          ? const OPill(
-                              label: 'This device',
-                              tone: OPillTone.accent,
-                            )
-                          : null,
-                    ),
-                  ],
-                ],
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _serviceStatus(BuildContext context) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          OSectionHeader(
-            label: 'Service status',
-            padding: const EdgeInsets.only(bottom: OSpace.s),
-            trailing: data.services.isEmpty
-                ? null
-                : Text(
-                    'Reported',
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-          ),
-          if (data.services.isEmpty)
-            OCard(
-              child: Text(
-                'Status is not available right now.',
-                style: OType.bodySm.copyWith(color: c.textMuted),
-              ),
-            )
-          else
-            OCard(
-              padding: EdgeInsets.zero,
-              child: Column(
-                children: [
-                  for (var i = 0; i < data.services.length; i++) ...[
-                    if (i > 0) Divider(color: c.hairline, height: 1),
-                    _HealthRow(
-                      icon: data.services[i].healthy
-                          ? Icons.cloud_done_outlined
-                          : Icons.cloud_off_outlined,
-                      title: data.services[i].name,
-                      showChevron: false,
-                      trailing: OPill(
-                        label: data.services[i].statusLabel,
-                        tone: data.services[i].healthy
-                            ? OPillTone.success
-                            : OPillTone.warn,
-                        dot: true,
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _regionSupport(BuildContext context) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          OSectionHeader(
-            label: 'Region and support',
-            padding: const EdgeInsets.only(bottom: OSpace.s),
-          ),
-          OCard(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                if (data.regionLabel.isNotEmpty) ...[
-                  _HealthRow(
-                    icon: Icons.public_rounded,
-                    title: 'Region',
-                    subtitle: data.regionLabel,
-                    showChevron: false,
-                  ),
-                  if (data.onContactSupport != null)
-                    Divider(color: c.hairline, height: 1),
-                ],
-                if (data.onContactSupport != null)
-                  _HealthRow(
-                    icon: Icons.support_agent_rounded,
-                    title: 'Contact support',
-                    subtitle: 'Get help with your account or sign-in',
-                    onTap: data.onContactSupport,
-                  ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
   }
 
   Future<void> _confirmRevokeDevice(
@@ -1002,26 +528,6 @@ class AccountHealthPage extends StatelessWidget {
     );
     if (confirmed == true) data.onRevokeDevice?.call(device.id);
   }
-
-  Widget _isolationNote(BuildContext context) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(top: OSpace.s),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.lock_outline_rounded, size: 18, color: c.textFaint),
-          const SizedBox(width: OSpace.s),
-          Expanded(
-            child: Text(
-              'Keys stay encrypted on this device. Ovid only uses them while a task is running.',
-              style: OType.caption.copyWith(color: c.textFaint),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 /// Settings row that keeps its trailing pill or button inside the card.
@@ -1039,7 +545,6 @@ class _HealthRow extends StatelessWidget {
     this.trailing,
     this.onTap,
     this.showChevron = true,
-    this.stackTrailing = true,
   });
 
   final String title;
@@ -1049,10 +554,6 @@ class _HealthRow extends StatelessWidget {
   final VoidCallback? onTap;
   final bool showChevron;
 
-  /// False for a tiny trailing marker (a dot or a 20 dp icon) that always fits
-  /// next to the title, so it stays inline instead of stacking.
-  final bool stackTrailing;
-
   /// Above this scale the trailing control drops below the title.
   static const _stackAbove = 1.4;
 
@@ -1060,7 +561,6 @@ class _HealthRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final trailingWidget = trailing;
     final stacked =
-        stackTrailing &&
         trailingWidget != null &&
         MediaQuery.textScalerOf(context).scale(1) > _stackAbove;
     if (!stacked) {

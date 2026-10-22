@@ -47,20 +47,19 @@ void main() {
 
       expect(find.text('Commit changes'), findsOneWidget);
       expect(find.text('feature/hero-revamp'), findsOneWidget);
-      expect(find.text('origin'), findsOneWidget);
       expect(find.text('3 changed files'), findsOneWidget);
       expect(find.text('+48'), findsOneWidget);
       expect(find.text('−12'), findsOneWidget);
       expect(find.text('src/pages/index.html'), findsOneWidget);
       expect(find.text('src/theme/styles.css'), findsOneWidget);
       expect(find.text('39/72'), findsOneWidget);
-      expect(
-        find.text('Keep it short: aim for 72 characters or fewer.'),
-        findsOneWidget,
-      );
-      expect(find.text('Push protected'), findsOneWidget);
-      expect(find.textContaining('.git/config'), findsOneWidget);
       expect(find.text('Commit & push'), findsOneWidget);
+
+      // The sheet is a form, not an essay.
+      expect(find.text('origin'), findsNothing);
+      expect(find.textContaining('Keep it short'), findsNothing);
+      expect(find.text('Push protected'), findsNothing);
+      expect(find.textContaining('.git/config'), findsNothing);
     }
   });
 
@@ -107,19 +106,13 @@ void main() {
   });
 
   testWidgets('a message past 72 characters blocks the commit', (tester) async {
-    await tester.pumpWidget(
-      _app(V2CommitSheet(data: _data, onCommit: (_) {})),
-    );
+    await tester.pumpWidget(_app(V2CommitSheet(data: _data, onCommit: (_) {})));
     await tester.pumpAndSettle();
 
     await tester.enterText(find.byKey(_messageKey), 'a' * 73);
     await tester.pump();
 
     expect(find.text('73/72'), findsOneWidget);
-    expect(
-      find.text('Too long by 1 character. Shorten it to 72 characters.'),
-      findsOneWidget,
-    );
     expect(_submit(tester).onPressed, isNull);
     expect(
       _submit(tester).semanticLabel,
@@ -130,12 +123,9 @@ void main() {
     await tester.pump();
     expect(find.text('72/72'), findsOneWidget);
     expect(_submit(tester).onPressed, isNotNull);
-    expect(find.textContaining('Too long'), findsNothing);
   });
 
-  testWidgets('behind remote shows a sync-first warning that syncs', (
-    tester,
-  ) async {
+  testWidgets('behind remote shows one sync line and syncs', (tester) async {
     var synced = 0;
     await tester.pumpWidget(
       _app(
@@ -152,8 +142,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Sync first'), findsOneWidget);
-    expect(find.textContaining('Remote has 2 new commits.'), findsOneWidget);
+    expect(find.text('2 commits behind'), findsOneWidget);
     expect(
       tester.widget<OButton>(find.byKey(_syncKey)).semanticLabel,
       'Sync latest changes, 2 behind',
@@ -163,7 +152,7 @@ void main() {
     expect(synced, 1);
   });
 
-  testWidgets('singular sync copy and hidden warning when in sync', (
+  testWidgets('singular sync copy and hidden line when in sync', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -174,35 +163,11 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.textContaining('Remote has 1 new commit.'), findsOneWidget);
+    expect(find.text('1 commit behind'), findsOneWidget);
 
     await tester.pumpWidget(_app(const V2CommitSheet(data: _data)));
     await tester.pumpAndSettle();
-    expect(find.text('Sync first'), findsNothing);
-  });
-
-  testWidgets('protected branch explains the pull request fallback', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      _app(
-        const V2CommitSheet(
-          data: V2CommitSheetData(
-            files: _files,
-            branchLabel: 'main',
-            protectedBranch: true,
-          ),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('Protected branch'), findsOneWidget);
-    expect(
-      find.textContaining('opens a pull request instead of pushing directly'),
-      findsOneWidget,
-    );
-    expect(find.textContaining('.git/config'), findsNothing);
+    expect(find.textContaining('behind'), findsNothing);
   });
 
   testWidgets('summary collapses extra files', (tester) async {
@@ -220,7 +185,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('6 changed files'), findsOneWidget);
-    expect(find.text('+2 more files'), findsOneWidget);
+    expect(find.text('+2 more'), findsOneWidget);
     expect(find.text('e.dart'), findsNothing);
   });
 
@@ -295,9 +260,7 @@ void main() {
     handle.dispose();
   });
 
-  testWidgets('an unwired commit action stays disabled with a message', (
-    tester,
-  ) async {
+  testWidgets('an unwired commit action stays disabled', (tester) async {
     final handle = tester.ensureSemantics();
     await tester.pumpWidget(
       _app(
@@ -312,14 +275,11 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(_submit(tester).onPressed, isNull);
-    expect(
-      _submit(tester).semanticLabel,
-      'Commit & push, committing is not available yet',
-    );
+    expect(_submit(tester).semanticLabel, 'Commit & push, unavailable');
     handle.dispose();
   });
 
-  testWidgets('an unwired sync is explained instead of shown as a dead button', (
+  testWidgets('an unwired sync shows no dead button and no excuse', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -331,14 +291,12 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    expect(find.text('2 commits behind'), findsOneWidget);
     expect(find.byKey(_syncKey), findsNothing);
-    expect(
-      find.byKey(const ValueKey('v2-commit-sync-unavailable')),
-      findsOneWidget,
-    );
+    expect(find.textContaining('not available'), findsNothing);
   });
 
-  testWidgets('fits 320 dp at 200% text and scrolls to the push note', (
+  testWidgets('fits 320 dp at 200% text and scrolls to the commit action', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(320, 900);
@@ -370,7 +328,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
-    expect(find.textContaining('.git/config'), findsOneWidget);
+    expect(find.byKey(_submitKey), findsOneWidget);
   });
 
   testWidgets('every state fits 320 dp at 200% text', (tester) async {

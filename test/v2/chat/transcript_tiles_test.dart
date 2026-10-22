@@ -31,8 +31,14 @@ void main() {
       expect(v2ToolStateOf('error'), V2ToolState.failed);
       expect(v2ToolStateOf('stopped'), V2ToolState.stopped);
       expect(v2ToolStateOf('unknown'), V2ToolState.unknown);
-      expect(v2ToolStateOf('Analyzing 4 systems', progress: 0.72), V2ToolState.running);
-      expect(v2ToolStateOf('Analyzing 4 systems', progress: 1), V2ToolState.done);
+      expect(
+        v2ToolStateOf('Analyzing 4 systems', progress: 0.72),
+        V2ToolState.running,
+      );
+      expect(
+        v2ToolStateOf('Analyzing 4 systems', progress: 1),
+        V2ToolState.done,
+      );
     });
 
     test('turns tokens into human labels and keeps prose', () {
@@ -109,25 +115,24 @@ void main() {
       expect(find.byType(LinearProgressIndicator), findsOneWidget);
 
       await tester.pumpWidget(
-        _app(
-          const V2ToolTile(title: 'Browsing', status: 'ok', progress: 1),
-        ),
+        _app(const V2ToolTile(title: 'Browsing', status: 'ok', progress: 1)),
       );
       expect(find.byType(LinearProgressIndicator), findsNothing);
-      expect(find.text('Done'), findsOneWidget);
+      expect(find.text('Done'), findsNothing);
+      expect(find.byIcon(Icons.check_rounded), findsOneWidget);
     });
 
     testWidgets('shows the failed and stopped states honestly', (tester) async {
       await tester.pumpWidget(
         _app(const V2ToolTile(title: 'Deploy', status: 'error', progress: 1)),
       );
-      expect(find.text('Failed'), findsOneWidget);
+      expect(find.text('Failed'), findsNothing);
       expect(find.byIcon(Icons.close_rounded), findsOneWidget);
 
       await tester.pumpWidget(
         _app(const V2ToolTile(title: 'Deploy', status: 'stopped', progress: 1)),
       );
-      expect(find.text('Stopped'), findsOneWidget);
+      expect(find.text('Stopped'), findsNothing);
       expect(find.byIcon(Icons.stop_rounded), findsOneWidget);
     });
 
@@ -151,7 +156,8 @@ void main() {
       await tester.tap(find.text('Search'));
       await tester.pump();
       expect(find.text('3 results'), findsOneWidget);
-      expect(find.text('Status: Done'), findsOneWidget);
+      // The glyph carries the outcome; the detail pane does not restate it.
+      expect(find.text('Status: Done'), findsNothing);
     });
   });
 
@@ -170,10 +176,8 @@ void main() {
       );
 
       await pumpLabel('Ready');
-      expect(
-        tester.widget<OPill>(find.byType(OPill)).tone,
-        OPillTone.success,
-      );
+      // "Ready" is the default; it repeats the row and is not shown.
+      expect(find.byType(OPill), findsNothing);
 
       await pumpLabel('Generating');
       expect(tester.widget<OPill>(find.byType(OPill)).tone, OPillTone.accent);
@@ -202,8 +206,10 @@ void main() {
 
       await tester.tap(find.text('portfolio.html'));
       expect(opens, 1);
-      await tester.tap(find.text('Download'));
+      await tester.tap(find.bySemanticsLabel('Download portfolio.html'));
       expect(downloads, 1);
+      // The download icon is its own control: the row must not also open.
+      expect(opens, 1);
 
       await tester.pumpWidget(
         _app(
@@ -216,7 +222,7 @@ void main() {
           ),
         ),
       );
-      expect(find.text('Download'), findsNothing);
+      expect(find.bySemanticsLabel('Download portfolio.html'), findsNothing);
     });
 
     testWidgets('the default detail route opens with the real file name', (

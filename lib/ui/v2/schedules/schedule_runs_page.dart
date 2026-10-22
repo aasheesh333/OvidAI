@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 
-import '../../../core/cloud/schedule_client.dart';
+import '../../../core/cloud/schedule_client.dart'
+    if (dart.library.js_interop) 'schedule_run_dto_web.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'run_timeline.dart';
 
@@ -12,7 +14,14 @@ enum V2ScheduleRunsStatus { loading, content, empty, error }
 
 /// The wire status of one scheduled occurrence, plus [unknown] for a value this
 /// build does not recognise (which must never be shown as a success).
-enum V2RunStatus { succeeded, failed, running, retryScheduled, skipped, unknown }
+enum V2RunStatus {
+  succeeded,
+  failed,
+  running,
+  retryScheduled,
+  skipped,
+  unknown,
+}
 
 enum V2RunsFilter { all, succeeded, failed }
 
@@ -24,7 +33,9 @@ String formatRunDuration(Duration duration) {
   final minutes = (total % 3600) ~/ 60;
   final seconds = total % 60;
   if (hours > 0) return minutes == 0 ? '${hours}h' : '${hours}h ${minutes}m';
-  if (minutes > 0) return seconds == 0 ? '${minutes}m' : '${minutes}m ${seconds}s';
+  if (minutes > 0) {
+    return seconds == 0 ? '${minutes}m' : '${minutes}m ${seconds}s';
+  }
   return '${seconds}s';
 }
 
@@ -77,10 +88,7 @@ class V2ScheduleRun {
 
   /// Maps one `GET /schedules/:id/runs` row onto the view model. Status and
   /// duration come from the server's own fields — nothing is assumed.
-  factory V2ScheduleRun.fromDto(
-    ScheduleRunDto dto, {
-    DateTime? now,
-  }) {
+  factory V2ScheduleRun.fromDto(ScheduleRunDto dto, {DateTime? now}) {
     final started = dto.startedAt?.toLocal();
     final finished = dto.finishedAt?.toLocal();
     final at = started ?? dto.scheduledFor?.toLocal();
@@ -190,7 +198,6 @@ class V2ScheduleRunsData {
   const V2ScheduleRunsData({
     this.status = V2ScheduleRunsStatus.content,
     this.scheduleTitle,
-    this.sessionTitle,
     this.total = 0,
     this.succeeded = 0,
     this.failed = 0,
@@ -206,7 +213,6 @@ class V2ScheduleRunsData {
   factory V2ScheduleRunsData.fromRuns(
     List<ScheduleRunDto> rows, {
     String? scheduleTitle,
-    String? sessionTitle,
     DateTime? now,
   }) {
     final clock = now ?? DateTime.now();
@@ -246,9 +252,10 @@ class V2ScheduleRunsData {
           ? V2ScheduleRunsStatus.empty
           : V2ScheduleRunsStatus.content,
       scheduleTitle: scheduleTitle,
-      sessionTitle: sessionTitle,
       total: runs.length,
-      succeeded: runs.where((run) => run.status == V2RunStatus.succeeded).length,
+      succeeded: runs
+          .where((run) => run.status == V2RunStatus.succeeded)
+          .length,
       failed: runs.where((run) => run.failed).length,
       avgRuntimeLabel: average == null ? '—' : formatRunDuration(average),
       groups: groups,
@@ -258,11 +265,8 @@ class V2ScheduleRunsData {
 
   final V2ScheduleRunsStatus status;
 
-  /// The schedule these runs belong to, shown above the stats.
+  /// The schedule these runs belong to; the page header carries its name.
   final String? scheduleTitle;
-
-  /// The chat the schedule runs in, shown for context.
-  final String? sessionTitle;
   final int total;
   final int succeeded;
   final int failed;
@@ -281,7 +285,6 @@ class ScheduleRunsPage extends StatefulWidget {
     super.key,
     required this.data,
     this.onRetryRun,
-    this.onOpenChat,
     this.onViewArtifact,
     this.onBackToSchedule,
     this.onMore,
@@ -290,7 +293,6 @@ class ScheduleRunsPage extends StatefulWidget {
 
   final V2ScheduleRunsData data;
   final ValueChanged<V2ScheduleRun>? onRetryRun;
-  final ValueChanged<V2ScheduleRun>? onOpenChat;
   final ValueChanged<V2ScheduleRun>? onViewArtifact;
   final VoidCallback? onBackToSchedule;
   final VoidCallback? onMore;
@@ -335,23 +337,19 @@ class _ScheduleRunsPageState extends State<ScheduleRunsPage> {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final session = widget.data.sessionTitle;
-    return OScaffold(
-      appBar: OAppBar(
-        title: 'Schedule runs',
-        subtitle: session != null && session.trim().isNotEmpty
-            ? 'Source session: $session'
-            : null,
-        actions: [
-          if (widget.onMore != null)
-            OIconButton(
-              icon: Icons.more_vert_rounded,
-              semanticLabel: 'More options',
-              onPressed: widget.onMore,
-            ),
-        ],
-      ),
-      body: OFadeSlide(
+    final name = widget.data.scheduleTitle?.trim() ?? '';
+    return OScreen(
+      title: name.isEmpty ? 'Schedule runs' : name,
+      showBack: true,
+      actions: [
+        if (widget.onMore != null)
+          OIconButton(
+            icon: Icons.more_vert_rounded,
+            semanticLabel: 'More options',
+            onPressed: widget.onMore,
+          ),
+      ],
+      child: OFadeSlide(
         child: OAnimatedSwap(
           child: switch (widget.data.status) {
             V2ScheduleRunsStatus.loading => const OSkeletonList(rows: 6),
@@ -359,83 +357,21 @@ class _ScheduleRunsPageState extends State<ScheduleRunsPage> {
               message: widget.data.errorMessage,
               onRetry: widget.onRetry,
             ),
-            V2ScheduleRunsStatus.empty => _empty(c),
+            V2ScheduleRunsStatus.empty => RunTimeline(
+              data: const V2RunTimelineData(status: V2RunTimelineStatus.empty),
+              onBackToSchedule: widget.onBackToSchedule,
+            ),
             V2ScheduleRunsStatus.content =>
-              widget.data.groups.isEmpty ? _empty(c) : _content(c),
+              widget.data.groups.isEmpty
+                  ? RunTimeline(
+                      data: const V2RunTimelineData(
+                        status: V2RunTimelineStatus.empty,
+                      ),
+                      onBackToSchedule: widget.onBackToSchedule,
+                    )
+                  : _content(c),
           },
         ),
-      ),
-    );
-  }
-
-  Widget _empty(OColors c) {
-    final empty = RunTimeline(
-      data: const V2RunTimelineData(status: V2RunTimelineStatus.empty),
-      onBackToSchedule: widget.onBackToSchedule,
-    );
-    if (!_hasContext) return empty;
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.screen,
-        OSpace.s,
-        OSpace.screen,
-        OSpace.xxl,
-      ),
-      children: [
-        _contextCard(c),
-        const SizedBox(height: OSpace.xl),
-        empty,
-      ],
-    );
-  }
-
-  bool get _hasContext {
-    final title = widget.data.scheduleTitle;
-    return title != null && title.trim().isNotEmpty;
-  }
-
-  /// The schedule these runs belong to, above the stats. The chat it runs in
-  /// is named in the app bar.
-  Widget _contextCard(OColors c) {
-    final title = widget.data.scheduleTitle!;
-    return OCard(
-      padding: const EdgeInsets.all(OSpace.m),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: c.accentSoft,
-              borderRadius: BorderRadius.circular(ORadius.m),
-            ),
-            child: Icon(
-              Icons.calendar_month_rounded,
-              size: 20,
-              color: c.accent,
-            ),
-          ),
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'SCHEDULE',
-                  style: OType.overline.copyWith(color: c.textMuted),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  title,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.bodyStrong.copyWith(color: c.text),
-                ),
-              ],
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -443,14 +379,8 @@ class _ScheduleRunsPageState extends State<ScheduleRunsPage> {
   Widget _content(OColors c) {
     final runs = _filteredRuns;
     return ListView(
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.screen,
-        OSpace.s,
-        OSpace.screen,
-        OSpace.xxl,
-      ),
+      padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xxl),
       children: [
-        if (_hasContext) ...[_contextCard(c), const SizedBox(height: OSpace.m)],
         _summary(c),
         const SizedBox(height: OSpace.m),
         _filters(),
@@ -462,7 +392,7 @@ class _ScheduleRunsPageState extends State<ScheduleRunsPage> {
             title: _filter == V2RunsFilter.failed
                 ? 'No failed runs'
                 : 'No succeeded runs',
-            message: 'Try another filter to see the rest of the history.',
+            message: 'Try another filter.',
             action: OButton(
               label: 'Show all runs',
               variant: OButtonVariant.secondary,
@@ -472,14 +402,18 @@ class _ScheduleRunsPageState extends State<ScheduleRunsPage> {
         else
           RunTimeline(
             data: V2RunTimelineData(runs: _timelineRuns(runs)),
-            onOpenArtifact: (run) {
-              final source = _runById(run.id);
-              if (source != null) widget.onViewArtifact?.call(source);
-            },
-            onRetryRun: (run) {
-              final source = _runById(run.id);
-              if (source != null) widget.onRetryRun?.call(source);
-            },
+            onOpenArtifact: widget.onViewArtifact == null
+                ? null
+                : (run) {
+                    final source = _runById(run.id);
+                    if (source != null) widget.onViewArtifact!(source);
+                  },
+            onRetryRun: widget.onRetryRun == null
+                ? null
+                : (run) {
+                    final source = _runById(run.id);
+                    if (source != null) widget.onRetryRun!(source);
+                  },
             onBackToSchedule: widget.onBackToSchedule,
           ),
       ],

@@ -4,6 +4,24 @@ import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/connectors/connector_detail_page.dart';
 import 'package:ovid_ai/ui/v2/connectors/connector_permissions.dart'
     as permissions;
+import 'package:ovid_ai/ui/v2/connectors/connector_probe.dart';
+import 'package:ovid_ai/ui/v2/connectors/connector_store.dart';
+
+class _FakeProbe implements V2ConnectorProbe {
+  _FakeProbe(this.report);
+
+  final V2ConnectorTestReport report;
+  V2ConnectorConnection? lastConnection;
+
+  @override
+  Future<V2ConnectorTestReport> test(
+    V2ConnectorConnection connection, {
+    String? apiKey,
+  }) async {
+    lastConnection = connection;
+    return report;
+  }
+}
 
 Widget _app(Widget child, {ThemeData? theme}) =>
     MaterialApp(theme: theme ?? OTheme.light(), home: child);
@@ -26,30 +44,11 @@ const _permissions = <V2ConnectorPermission>[
   ),
 ];
 
-const _agents = <V2ConnectorAgent>[
-  V2ConnectorAgent(
-    id: 'main',
-    name: 'Ovid main agent',
-    description: 'Primary workspace orchestrator',
-    accessLabel: 'Full access',
-    fullAccess: true,
-  ),
-  V2ConnectorAgent(
-    id: 'subagents',
-    name: 'Subagents',
-    description: 'Background tasks and linting',
-    accessLabel: 'Read-only',
-  ),
-];
-
 V2ConnectorDetailData _data({
   V2ConnectorDetailStatus status = V2ConnectorDetailStatus.content,
   bool connected = true,
-  V2ConnectorUsage? usage,
-  List<V2ConnectorActivity> activity = const <V2ConnectorActivity>[],
-  List<V2ConnectorTool> tools = const <V2ConnectorTool>[],
-  String safetyNote = '',
-  bool builtIn = true,
+  List<V2ConnectorPermission> permissions = _permissions,
+  String endpoint = 'https://api.github.test',
 }) {
   return V2ConnectorDetailData(
     id: 'github',
@@ -59,24 +58,10 @@ V2ConnectorDetailData _data({
         'together.',
     icon: Icons.code_rounded,
     connected: connected,
-    permissions: _permissions,
-    tools: tools,
-    agents: _agents,
-    usage: usage,
-    activity: activity,
-    safetyNote: safetyNote,
-    builtIn: builtIn,
+    endpoint: endpoint,
+    permissions: permissions,
     status: status,
   );
-}
-
-Future<void> _scrollTo(WidgetTester tester, Finder finder) async {
-  await tester.scrollUntilVisible(
-    finder,
-    300,
-    scrollable: find.byType(Scrollable).first,
-  );
-  await tester.pump(const Duration(milliseconds: 300));
 }
 
 Future<void> _pump(
@@ -89,104 +74,64 @@ Future<void> _pump(
   await tester.pump(const Duration(milliseconds: 500));
 }
 
+/// Pumps the page on top of a real route so `Navigator.canPop` is true.
+Future<void> _pumpPushed(WidgetTester tester, Widget child) async {
+  await tester.pumpWidget(
+    MaterialApp(
+      theme: OTheme.light(),
+      home: const Scaffold(body: SizedBox.shrink()),
+    ),
+  );
+  final context = tester.element(find.byType(Scaffold));
+  Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => child));
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 500));
+}
+
+Future<void> _scrollTo(WidgetTester tester, Finder finder) async {
+  await tester.scrollUntilVisible(
+    finder,
+    300,
+    scrollable: find.byType(Scrollable).first,
+  );
+  await tester.ensureVisible(finder);
+  await tester.pump(const Duration(milliseconds: 300));
+}
+
 void main() {
-  testWidgets('detail shows the connector, permissions and assigned agents', (
+  testWidgets('detail is status, one test button, grants and disconnect', (
     tester,
   ) async {
     await _pump(tester, ConnectorDetailPage(data: _data()));
 
-    expect(find.text('Connector details'), findsOneWidget);
+    // The connector name is the header, not a second body heading.
     expect(find.text('GitHub'), findsOneWidget);
-    expect(find.text('Connected'), findsOneWidget);
-    await _scrollTo(tester, find.text('Permissions granted'));
-    expect(find.text('Permissions granted'), findsOneWidget);
+    expect(find.text('Connector details'), findsNothing);
+    expect(find.text('On'), findsOneWidget);
+
+    // One test button, no endpoint paragraph or safety card.
+    expect(find.text('Test connection'), findsOneWidget);
+    expect(find.text('https://api.github.test'), findsNothing);
+    expect(find.byKey(const Key('connector-safety-note')), findsNothing);
+    // The status switch plus the three grants.
+    expect(find.byType(Switch), findsNWidgets(4));
+    expect(find.text('PERMISSIONS'), findsOneWidget);
+
+    await _scrollTo(tester, find.text('Open pull requests'));
     expect(find.text('Read your repositories'), findsOneWidget);
+    expect(find.text('Create branches'), findsOneWidget);
+    expect(find.text('Open pull requests'), findsOneWidget);
 
-    await tester.scrollUntilVisible(
-      find.text('Used by'),
-      300,
-      scrollable: find.byType(Scrollable).first,
+    // Destructive action lives at the bottom, in danger style.
+    await _scrollTo(tester, find.text('Disconnect'));
+    final disconnect = tester.widget<OutlinedButton>(
+      find.widgetWithText(OutlinedButton, 'Disconnect'),
     );
-    expect(find.text('Ovid main agent'), findsOneWidget);
-    expect(find.text('Subagents'), findsOneWidget);
-    expect(find.text('Full access'), findsOneWidget);
-    expect(find.text('Read-only'), findsOneWidget);
-  });
-
-  testWidgets('detail lists tools and shows a safety note', (tester) async {
-    await _pump(
-      tester,
-      ConnectorDetailPage(
-        data: _data(
-          tools: const [
-            V2ConnectorTool(
-              id: 'read_file',
-              name: 'read_file',
-              description: 'Read a file in the repository',
-            ),
-            V2ConnectorTool(
-              id: 'open_pull_request',
-              name: 'open_pull_request',
-              description: 'Open a pull request for review',
-              write: true,
-            ),
-          ],
-        ),
-      ),
-    );
-
-    await _scrollTo(tester, find.byKey(const Key('connector-safety-note')));
-    expect(find.byKey(const Key('connector-safety-note')), findsOneWidget);
-    expect(find.text('Built-in safety'), findsOneWidget);
-
-    await tester.scrollUntilVisible(
-      find.text('Tools'),
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
-    expect(find.text('2 available'), findsOneWidget);
-    expect(find.text('read_file'), findsOneWidget);
-    expect(find.text('Read only'), findsOneWidget);
-    expect(find.text('open_pull_request'), findsOneWidget);
-    expect(find.text('Can change'), findsOneWidget);
-  });
-
-  testWidgets('custom connectors carry the custom safety note', (tester) async {
-    await _pump(
-      tester,
-      ConnectorDetailPage(
-        data: _data(
-          builtIn: false,
-          safetyNote:
-              'Ovid never installs plugins from a chat message. Only add '
-              'servers you trust.',
-        ),
-      ),
-    );
-
-    await _scrollTo(tester, find.text('Custom connector safety'));
-    expect(find.text('Custom connector safety'), findsOneWidget);
-    expect(
-      find.text(
-        'Ovid never installs plugins from a chat message. Only add '
-        'servers you trust.',
-      ),
-      findsOneWidget,
-    );
-  });
-
-  testWidgets('empty tools explain the gap', (tester) async {
-    await _pump(tester, ConnectorDetailPage(data: _data()));
-
-    await tester.scrollUntilVisible(
-      find.text('Tools'),
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
-    expect(
-      find.text('No tools yet. Ovid will list them here.'),
-      findsOneWidget,
-    );
+    expect(disconnect.onPressed, isNotNull);
+    expect(find.text('Tools'), findsNothing);
+    expect(find.text('Usage'), findsNothing);
+    expect(find.text('Recent activity'), findsNothing);
+    expect(find.text('Automatic sync'), findsNothing);
   });
 
   testWidgets('detail renders in dark theme', (tester) async {
@@ -196,100 +141,78 @@ void main() {
       theme: OTheme.dark(),
     );
 
-    expect(find.text('Connector details'), findsOneWidget);
     expect(find.text('GitHub'), findsOneWidget);
-    await _scrollTo(tester, find.text('Permissions granted'));
-    expect(find.text('Permissions granted'), findsOneWidget);
+    await _scrollTo(tester, find.text('PERMISSIONS'));
+    expect(find.text('PERMISSIONS'), findsOneWidget);
   });
 
-  testWidgets('detail shows usage and recent activity', (tester) async {
+  testWidgets('the status switch reports the new value', (tester) async {
+    bool? enabled;
     await _pump(
       tester,
       ConnectorDetailPage(
-        data: _data(
-          usage: const V2ConnectorUsage(
-            calls: 120,
-            limit: 500,
-            resetLabel: 'Resets Monday',
-          ),
-          activity: const [
-            V2ConnectorActivity(
-              id: 'pr',
-              title: 'Created a pull request',
-              detail: 'Added the new billing page',
-              timeLabel: '2m',
-            ),
-            V2ConnectorActivity(
-              id: 'fail',
-              title: 'Sync failed',
-              detail: 'Trying again in 5 minutes',
-              timeLabel: '1h',
-              ok: false,
-            ),
-          ],
-        ),
+        data: _data(),
+        onEnabledChanged: (value) => enabled = value,
       ),
     );
 
-    await tester.scrollUntilVisible(
-      find.text('Usage'),
-      300,
-      scrollable: find.byType(Scrollable).first,
+    await tester.tap(
+      find.descendant(
+        of: find.byKey(const Key('connector-enabled-card')),
+        matching: find.byType(Switch),
+      ),
     );
-    expect(find.text('120 of 500 calls'), findsOneWidget);
-    expect(find.text('Resets Monday'), findsOneWidget);
-
-    await tester.scrollUntilVisible(
-      find.text('Recent activity'),
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
-    expect(find.text('Created a pull request'), findsOneWidget);
-    expect(find.text('Sync failed'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(enabled, isFalse);
   });
 
-  testWidgets('detail explains when there is no usage or activity yet', (
+  testWidgets('the test button runs the probe and shows the reason', (
     tester,
   ) async {
-    await _pump(tester, ConnectorDetailPage(data: _data()));
+    final probe = _FakeProbe(
+      const V2ConnectorTestReport(
+        ok: false,
+        statusCode: 401,
+        message: 'The server rejected the credential (HTTP 401).',
+      ),
+    );
+    await _pump(
+      tester,
+      ConnectorDetailPage(data: _data(), probe: probe),
+    );
 
-    await tester.scrollUntilVisible(
-      find.text('Usage'),
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
-    expect(
-      find.text('No calls yet. Ovid will count them here.'),
-      findsOneWidget,
-    );
+    await tester.tap(find.text('Test connection'));
+    await tester.pump(const Duration(milliseconds: 500));
 
-    await tester.scrollUntilVisible(
-      find.text('Recent activity'),
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
+    expect(probe.lastConnection?.endpoint, 'https://api.github.test');
     expect(
-      find.text('No activity yet. Ovid will show what it did here.'),
+      find.text('The server rejected the credential (HTTP 401).'),
       findsOneWidget,
     );
   });
 
-  testWidgets('not connected state offers a connect action', (tester) async {
-    var connects = 0;
+  testWidgets('a permission switch reports the new grant', (tester) async {
+    String? permissionId;
+    bool? granted;
     await _pump(
       tester,
       ConnectorDetailPage(
-        data: _data(connected: false),
-        onConnect: () => connects++,
+        data: _data(),
+        onPermissionChanged: (id, value) {
+          permissionId = id;
+          granted = value;
+        },
       ),
     );
 
-    expect(find.text('Not connected'), findsOneWidget);
-    expect(find.text('Connect GitHub'), findsOneWidget);
-
-    await tester.tap(find.text('Connect GitHub'));
+    final readSwitch = find.byKey(
+      const ValueKey('connector-permission-switch-read'),
+    );
+    await _scrollTo(tester, readSwitch);
+    await tester.tap(readSwitch);
     await tester.pump(const Duration(milliseconds: 300));
-    expect(connects, 1);
+    expect(permissionId, 'read');
+    expect(granted, isFalse);
   });
 
   testWidgets('disconnect asks for confirmation before the callback', (
@@ -301,20 +224,14 @@ void main() {
       ConnectorDetailPage(data: _data(), onDisconnect: () => disconnects++),
     );
 
-    await tester.scrollUntilVisible(
-      find.text('Disconnect GitHub'),
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
-    await tester.ensureVisible(find.text('Disconnect GitHub'));
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.tap(find.text('Disconnect GitHub'));
+    await _scrollTo(tester, find.text('Disconnect'));
+    await tester.tap(find.text('Disconnect'));
     await tester.pumpAndSettle();
 
     expect(find.text('Disconnect GitHub?'), findsOneWidget);
     expect(disconnects, 0);
 
-    await tester.tap(find.text('Disconnect GitHub').last);
+    await tester.tap(find.text('Disconnect').last);
     await tester.pumpAndSettle();
     expect(disconnects, 1);
   });
@@ -326,14 +243,8 @@ void main() {
       ConnectorDetailPage(data: _data(), onDisconnect: () => disconnects++),
     );
 
-    await tester.scrollUntilVisible(
-      find.text('Disconnect GitHub'),
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
-    await tester.ensureVisible(find.text('Disconnect GitHub'));
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.tap(find.text('Disconnect GitHub'));
+    await _scrollTo(tester, find.text('Disconnect'));
+    await tester.tap(find.text('Disconnect'));
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('Keep connected'));
@@ -341,19 +252,16 @@ void main() {
     expect(disconnects, 0);
   });
 
-  testWidgets('the permissions row opens the grouped permissions screen', (
-    tester,
-  ) async {
+  testWidgets('the menu opens the grouped permissions screen', (tester) async {
     await _pump(
       tester,
       ConnectorDetailPage(
         data: V2ConnectorDetailData(
           id: 'github',
           name: 'GitHub',
-          description:
-              'Read repositories, open pull requests, and review code together.',
-          icon: Icons.code_rounded,
+          description: 'Read repositories and review code.',
           connected: true,
+          endpoint: 'https://api.github.test',
           authLabel: 'OAuth',
           risk: V2ConnectorPermissionRisk.high,
           permissions: const [
@@ -378,77 +286,48 @@ void main() {
               description: 'Read a file in the repository',
             ),
           ],
-          agents: _agents,
         ),
       ),
     );
 
-    await _scrollTo(tester, find.byKey(const Key('connector-permissions-entry')));
-    expect(
-      find.byKey(const Key('connector-permissions-entry')),
-      findsOneWidget,
-    );
-    await tester.tap(find.byKey(const Key('connector-permissions-entry')));
+    await tester.tap(find.bySemanticsLabel('Connector menu'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Review permissions'));
     await tester.pumpAndSettle();
 
     expect(find.byType(permissions.ConnectorPermissionsPage), findsOneWidget);
-    expect(find.text('Permissions'), findsWidgets);
     expect(find.text('2 of 2 granted'), findsOneWidget);
-    expect(find.text('Read'), findsOneWidget);
-    expect(find.text('Write'), findsOneWidget);
     expect(find.text('High risk'), findsWidgets);
-    expect(find.text('Read your repositories'), findsWidgets);
   });
 
-  testWidgets('the permissions row can be overridden by the wiring layer', (
-    tester,
-  ) async {
+  testWidgets('the menu can be overridden by the wiring layer', (tester) async {
     var opened = 0;
     await _pump(
       tester,
-      ConnectorDetailPage(data: _data(), onOpenPermissions: () => opened++),
+      ConnectorDetailPage(data: _data(), onMenu: () => opened++),
     );
 
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('connector-permissions-entry')),
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
-    await tester.tap(find.byKey(const Key('connector-permissions-entry')));
+    await tester.tap(find.bySemanticsLabel('Connector menu'));
     await tester.pump(const Duration(milliseconds: 300));
-
     expect(opened, 1);
-    expect(find.byType(permissions.ConnectorPermissionsPage), findsNothing);
   });
 
-  testWidgets('a permission switch reports the new grant', (tester) async {
-    String? permissionId;
-    bool? granted;
+  testWidgets('not connected state offers a connect action', (tester) async {
+    var connects = 0;
     await _pump(
       tester,
       ConnectorDetailPage(
-        data: _data(),
-        onPermissionChanged: (id, value) {
-          permissionId = id;
-          granted = value;
-        },
+        data: _data(connected: false),
+        onConnect: () => connects++,
       ),
     );
 
-    final readSwitch = find.byKey(
-      const ValueKey('connector-permission-switch-read'),
-    );
-    await tester.scrollUntilVisible(
-      readSwitch,
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
-    await tester.ensureVisible(readSwitch);
+    expect(find.text('Not connected'), findsOneWidget);
+    expect(find.text('Connect'), findsOneWidget);
+
+    await tester.tap(find.text('Connect'));
     await tester.pump(const Duration(milliseconds: 300));
-    await tester.tap(readSwitch);
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(permissionId, 'read');
-    expect(granted, isFalse);
+    expect(connects, 1);
   });
 
   testWidgets('error state offers a retry', (tester) async {
@@ -467,95 +346,13 @@ void main() {
     expect(retries, 1);
   });
 
-  testWidgets('automatic sync reports the new value', (tester) async {
-    bool? autoSync;
-    await _pump(
-      tester,
-      ConnectorDetailPage(
-        data: _data(),
-        onAutoSyncChanged: (value) => autoSync = value,
-      ),
-    );
-
-    final autoSyncSwitch = find.byKey(
-      const Key('connector-autosync-switch'),
-    );
-    await _scrollTo(tester, autoSyncSwitch);
-    await tester.ensureVisible(autoSyncSwitch);
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.tap(autoSyncSwitch);
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(autoSync, isFalse);
-  });
-
-  testWidgets('empty permissions and agents explain the gap', (tester) async {
-    await _pump(
-      tester,
-      ConnectorDetailPage(
-        data: const V2ConnectorDetailData(
-          id: 'github',
-          name: 'GitHub',
-          description: 'Read repositories and review code.',
-          connected: true,
-        ),
-      ),
-    );
-
-    // No sample account or sync copy leaks in from the defaults.
-    expect(find.text('alexrivera'), findsNothing);
-    expect(find.text('Synced 2m ago'), findsNothing);
-
-    await tester.scrollUntilVisible(
-      find.text('No permissions granted yet.'),
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
-    expect(find.text('No permissions granted yet.'), findsOneWidget);
-
-    await tester.scrollUntilVisible(
-      find.text('No agents can use this connector yet.'),
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
-    expect(find.text('No agents can use this connector yet.'), findsOneWidget);
-  });
-
-  testWidgets('controls expose labels and announce the disabled state', (
+  testWidgets('a pushed detail page has a back arrow and one menu action', (
     tester,
   ) async {
-    final handle = tester.ensureSemantics();
-
-    await _pump(
-      tester,
-      ConnectorDetailPage(data: _data(), onPermissionChanged: (_, _) {}),
-    );
+    await _pumpPushed(tester, ConnectorDetailPage(data: _data()));
 
     expect(find.bySemanticsLabel('Back'), findsOneWidget);
     expect(find.bySemanticsLabel('Connector menu'), findsOneWidget);
-    await _scrollTo(
-      tester,
-      find.bySemanticsLabel('Read your repositories permission'),
-    );
-    expect(
-      find.bySemanticsLabel('Read your repositories permission'),
-      findsOneWidget,
-    );
-
-    await tester.scrollUntilVisible(
-      find.text('Disconnect GitHub'),
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
-    final disconnect = tester.widget<OutlinedButton>(
-      find.widgetWithText(OutlinedButton, 'Disconnect GitHub'),
-    );
-    expect(
-      disconnect.onPressed,
-      isNotNull,
-      reason: 'disconnect is wired to the store by default',
-    );
-
-    handle.dispose();
   });
 
   testWidgets('renders at 320 dp with 200% text without overflow', (
@@ -564,52 +361,6 @@ void main() {
     tester.view.physicalSize = const Size(320, 640);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
-
-    final data = V2ConnectorDetailData(
-      id: 'github',
-      name: 'GitHub',
-      description:
-          'Read repositories, open pull requests, and review code together.',
-      icon: Icons.code_rounded,
-      accountLabel: 'alex.rivera@example.com',
-      syncedLabel: 'Synced 2 minutes ago',
-      accessLabel: 'Read & Write',
-      permissions: _permissions,
-      tools: const [
-        V2ConnectorTool(
-          id: 'read_file',
-          name: 'read_file',
-          description: 'Read a file in the repository',
-        ),
-        V2ConnectorTool(
-          id: 'open_pull_request',
-          name: 'open_pull_request',
-          description: 'Open a pull request for review',
-          write: true,
-        ),
-      ],
-      agents: _agents,
-      usage: const V2ConnectorUsage(
-        calls: 120,
-        limit: 500,
-        resetLabel: 'Resets Monday',
-      ),
-      activity: const [
-        V2ConnectorActivity(
-          id: 'pr',
-          title: 'Created a pull request',
-          detail: 'Added the new billing page',
-          timeLabel: '2m',
-        ),
-        V2ConnectorActivity(
-          id: 'fail',
-          title: 'Sync failed',
-          detail: 'Trying again in 5 minutes',
-          timeLabel: '1h',
-          ok: false,
-        ),
-      ],
-    );
 
     for (final theme in [OTheme.light(), OTheme.dark()]) {
       await tester.pumpWidget(
@@ -621,11 +372,10 @@ void main() {
               textScaler: TextScaler.linear(2),
             ),
             child: ConnectorDetailPage(
-              data: data,
+              data: _data(),
               onDisconnect: () {},
               onConnect: () {},
               onPermissionChanged: (_, _) {},
-              onAutoSyncChanged: (_) {},
             ),
           ),
         ),
@@ -640,5 +390,19 @@ void main() {
       }
       expect(tester.takeException(), isNull);
     }
+  });
+
+  testWidgets('at 600 dp the detail centres in a 640 max width', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(600, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await _pump(tester, ConnectorDetailPage(data: _data()));
+
+    final list = tester.getRect(find.byType(ListView));
+    expect(list.width, lessThanOrEqualTo(640));
+    expect(list.center.dx, closeTo(300, 0.5));
+    expect(tester.takeException(), isNull);
   });
 }

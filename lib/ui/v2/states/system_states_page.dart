@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'state_tiles.dart';
 
@@ -129,16 +130,18 @@ class V2SystemStatesPage extends StatelessWidget {
         subtitle: 'Calm feedback when things change',
       ),
       body: OFadeSlide(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(
-            OSpace.screen,
-            OSpace.l,
-            OSpace.screen,
-            OSpace.xxl,
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
+        child: OContent(
+          padding: false,
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(
+              OSpace.screen,
+              OSpace.l,
+              OSpace.screen,
+              OSpace.xxl,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
               OStagger(
                 children: [
                   _tile(
@@ -275,6 +278,7 @@ class V2SystemStatesPage extends StatelessWidget {
               ),
             ],
           ),
+        ),
         ),
       ),
     );

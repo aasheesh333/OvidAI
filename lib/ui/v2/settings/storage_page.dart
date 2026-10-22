@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../../design/o_components.dart';
-import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'storage_breakdown.dart';
 
@@ -178,20 +178,17 @@ class StoragePage extends StatelessWidget {
   int get _usedBytes =>
       _entryBytes > _toBytes(data.usedGb) ? _entryBytes : _toBytes(data.usedGb);
 
-  double get _usedGb => _usedBytes / _bytesPerGb;
-
   @override
   Widget build(BuildContext context) {
-    return OScaffold(
-      appBar: const OAppBar(title: 'Storage'),
-      body: _body(context),
+    return OScreen(
+      title: 'Storage',
+      subtitle: data.planName.isEmpty ? null : data.planName,
+      child: _body(context),
     );
   }
 
   Widget _body(BuildContext context) {
-    if (data.loading) {
-      return const OFadeSlide(child: OSkeletonList(rows: 6));
-    }
+    if (data.loading) return const OSkeletonList(rows: 6);
     if (data.errorMessage != null) {
       return OErrorState(message: data.errorMessage!, onRetry: data.onRetry);
     }
@@ -199,34 +196,25 @@ class StoragePage extends StatelessWidget {
       return OEmptyState(
         icon: Icons.cloud_off_outlined,
         title: 'Storage is empty',
-        message:
-            'Chats, artifacts, and memory will show up here as you use Ovid.',
-        action: OButton(
-          label: 'See plans',
-          icon: Icons.arrow_forward_rounded,
-          onPressed: data.onGoUpgrade,
-        ),
+        message: 'Chats, artifacts and memory appear here.',
+        action: data.onGoUpgrade == null
+            ? null
+            : OButton(
+                label: 'See plans',
+                icon: Icons.arrow_forward_rounded,
+                onPressed: data.onGoUpgrade,
+              ),
       );
     }
-    return OFadeSlide(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(
-          OSpace.screen,
-          OSpace.l,
-          OSpace.screen,
-          OSpace.xxl,
-        ),
-        child: OStagger(
-          children: [
-            _storageBreakdown(context),
-            _overview(context),
-            _freeUpSpace(context),
-            _largestItems(context),
-            _upgrade(context),
-            if (data.offlineLabel != null && data.offlineLabel!.isNotEmpty)
-              _offlineNote(context),
-          ],
-        ),
+    return SingleChildScrollView(
+      padding: const EdgeInsets.only(top: OSpace.l, bottom: OSpace.xxl),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _storageBreakdown(context),
+          const SizedBox(height: OSpace.l),
+          _freeUpSpace(context),
+        ],
       ),
     );
   }
@@ -326,146 +314,57 @@ class StoragePage extends StatelessWidget {
     return V2StorageCategory.chats;
   }
 
-  Widget _overview(BuildContext context) {
+  /// One bar plus the legend lives in [StorageBreakdown]; this section is the
+  /// only place that frees space, one action per row.
+  Widget _freeUpSpace(BuildContext context) {
     final c = OColors.of(context);
-    final ratio = _totalGb <= 0
-        ? 0.0
-        : (_usedGb / _totalGb).clamp(0, 1).toDouble();
-    final percent = (ratio * 100).round();
-    final freeGb = (_totalGb - _usedGb).clamp(0, _totalGb).toDouble();
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: OCard(
-        child: Column(
-          children: [
-            Text(
-              '${_gb(_usedGb)} GB of ${_gb(_totalGb)} GB cloud storage used · ${_gb(freeGb)} GB free',
-              textAlign: TextAlign.center,
-              style: OType.bodySm.copyWith(color: c.textMuted),
+    return OCard(
+      padding: EdgeInsets.zero,
+      child: Column(
+        children: [
+          _actionRow(
+            context,
+            icon: Icons.layers_clear_outlined,
+            title: 'Clear previews',
+            subtitle: data.previewSizeLabel,
+            action: OButton(
+              label: 'Clear',
+              variant: OButtonVariant.secondary,
+              onPressed: () => _clearPreviews(context),
             ),
-            const SizedBox(height: OSpace.m),
-            Container(
-              key: const ValueKey('storage-plan-quota'),
-              padding: const EdgeInsets.all(OSpace.m),
-              decoration: BoxDecoration(
-                color: c.surfaceAlt,
-                borderRadius: BorderRadius.circular(ORadius.m),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          data.planName.isEmpty ? 'Your plan' : data.planName,
-                          style: OType.caption.copyWith(
-                            color: c.text,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: OSpace.s),
-                      Flexible(
-                        child: Text(
-                          data.quotaLabel.isEmpty
-                              ? '$percent% used'
-                              : data.quotaLabel,
-                          textAlign: TextAlign.end,
-                          style: OType.caption.copyWith(color: c.textMuted),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: OSpace.s),
-                  OProgressBar(
-                    key: const ValueKey('storage-quota-bar'),
-                    value: ratio,
-                    height: 8,
-                  ),
-                  const SizedBox(height: OSpace.s),
-                  Text(
-                    '${_gb(freeGb)} GB free on this plan',
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                ],
+          ),
+          if (data.showCache) ...[
+            Divider(color: c.hairline, height: 1),
+            _actionRow(
+              context,
+              icon: Icons.cleaning_services_outlined,
+              title: 'Clear cache',
+              subtitle: data.cacheSizeLabel,
+              action: OButton(
+                label: 'Clear',
+                variant: OButtonVariant.secondary,
+                onPressed: () => _clearCache(context),
               ),
             ),
           ],
-        ),
-      ),
-    );
-  }
-
-  Widget _freeUpSpace(BuildContext context) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          OSectionHeader(
-            label: 'Free up space',
-            padding: const EdgeInsets.only(bottom: OSpace.s),
-            trailing: Text(
-              'Recommendations',
-              style: OType.caption.copyWith(color: c.textMuted),
-            ),
+          Divider(color: c.hairline, height: 1),
+          OListRow(
+            icon: Icons.forum_outlined,
+            title: 'Delete old chats',
+            subtitle: 'Older than 60 days',
+            onTap: data.onDeleteOldChats,
           ),
-          OCard(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                _actionRow(
-                  context,
-                  icon: Icons.layers_clear_outlined,
-                  title: 'Clear previews',
-                  subtitle:
-                      '${data.previewSizeLabel} · Temporary renders and screenshots',
-                  action: OButton(
-                    label: 'Clear',
-                    variant: OButtonVariant.secondary,
-                    onPressed: () => _clearPreviews(context),
-                  ),
-                ),
-                if (data.showCache) ...[
-                  Divider(color: c.hairline, height: 1),
-                  OListRow(
-                    key: const ValueKey('clear-cache-row'),
-                    icon: Icons.cleaning_services_outlined,
-                    title: 'Clear cache',
-                    subtitle:
-                        '${data.cacheSizeLabel} · Temporary files on this phone you can rebuild',
-                    showChevron: false,
-                    onTap: () => _clearCache(context),
-                    trailing: _stacksActions(context)
-                        ? null
-                        : OPill(label: data.cacheSizeLabel),
-                  ),
-                ],
-                Divider(color: c.hairline, height: 1),
-                OListRow(
-                  icon: Icons.forum_outlined,
-                  title: 'Delete old chats',
-                  subtitle: 'Archive or remove chats older than 60 days',
-                  onTap: data.onDeleteOldChats,
-                ),
-                Divider(color: c.hairline, height: 1),
-                _actionRow(
-                  context,
-                  icon: Icons.delete_sweep_outlined,
-                  title:
-                      'Trash · ${data.trashItems} ${data.trashItems == 1 ? 'item' : 'items'}',
-                  subtitle:
-                      '${data.trashSizeLabel} · Deleted in the last 30 days',
-                  danger: true,
-                  action: OButton(
-                    label: 'Empty',
-                    variant: OButtonVariant.danger,
-                    onPressed: data.onEmptyTrash,
-                  ),
-                ),
-              ],
+          Divider(color: c.hairline, height: 1),
+          _actionRow(
+            context,
+            icon: Icons.delete_sweep_outlined,
+            title: 'Trash',
+            subtitle: data.trashSizeLabel,
+            danger: true,
+            action: OButton(
+              label: 'Empty',
+              variant: OButtonVariant.danger,
+              onPressed: data.onEmptyTrash,
             ),
           ),
         ],
@@ -578,164 +477,6 @@ class StoragePage extends StatelessWidget {
           child: SizedBox(width: double.infinity, child: action),
         ),
       ],
-    );
-  }
-
-  Widget _largestItems(BuildContext context) {
-    final c = OColors.of(context);
-    final count = data.largestItems.length;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          OSectionHeader(
-            label: 'Items by size',
-            padding: const EdgeInsets.only(bottom: OSpace.s),
-            trailing: Text(
-              '$count ${count == 1 ? 'item' : 'items'}',
-              style: OType.caption.copyWith(color: c.textMuted),
-            ),
-          ),
-          if (data.largestItems.isEmpty)
-            OCard(
-              child: Text(
-                'Nothing large yet. Big chats and files will show up here.',
-                style: OType.bodySm.copyWith(color: c.textMuted),
-              ),
-            )
-          else
-            OCard(
-              padding: EdgeInsets.zero,
-              child: Column(
-                children: [
-                  for (var i = 0; i < data.largestItems.length; i++) ...[
-                    if (i > 0) Divider(color: c.hairline, height: 1),
-                    OListRow(
-                      key: ValueKey('storage-item-${data.largestItems[i].id}'),
-                      leading: Container(
-                        width: 36,
-                        height: 36,
-                        decoration: BoxDecoration(
-                          color: c.surfaceAlt,
-                          borderRadius: BorderRadius.circular(ORadius.m),
-                        ),
-                        child: Icon(
-                          data.largestItems[i].icon,
-                          size: 19,
-                          color: c.textMuted,
-                        ),
-                      ),
-                      title: data.largestItems[i].name,
-                      // At large text sizes the size label moves into the
-                      // subtitle so the row cannot overflow or squeeze the
-                      // name into a one-character column.
-                      subtitle: _stacksActions(context)
-                          ? '${data.largestItems[i].detail} · ${data.largestItems[i].sizeLabel}'
-                          : data.largestItems[i].detail,
-                      showChevron: false,
-                      onTap: data.onLargestItemTap == null
-                          ? null
-                          : () =>
-                                data.onLargestItemTap!(data.largestItems[i].id),
-                      trailing: _stacksActions(context)
-                          ? null
-                          : Text(
-                              data.largestItems[i].sizeLabel,
-                              style: OType.bodyStrong.copyWith(color: c.text),
-                            ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _upgrade(BuildContext context) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: OCard(
-        accent: true,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  width: 44,
-                  height: 44,
-                  decoration: BoxDecoration(
-                    color: c.accentFill,
-                    borderRadius: BorderRadius.circular(ORadius.m),
-                  ),
-                  child: Icon(
-                    Icons.cloud_upload_outlined,
-                    size: 24,
-                    color: c.onAccent,
-                  ),
-                ),
-                const SizedBox(width: OSpace.m),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Wrap(
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        spacing: OSpace.s,
-                        runSpacing: OSpace.xs,
-                        children: [
-                          Text(
-                            'Need more room?',
-                            style: OType.h2.copyWith(color: c.text),
-                          ),
-                          const OPill(label: 'Upgrade', tone: OPillTone.accent),
-                        ],
-                      ),
-                      const SizedBox(height: OSpace.xs),
-                      Text(
-                        'Upgrade for 5 GB with Ovid Go, 15 GB with Plus or 75 GB '
-                        'with Pro.',
-                        style: OType.bodySm.copyWith(color: c.textMuted),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: OSpace.l),
-            OButton(
-              label: 'See plans',
-              icon: Icons.arrow_forward_rounded,
-              onPressed: data.onGoUpgrade,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _offlineNote(BuildContext context) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(top: OSpace.s),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.sync_rounded, size: 18, color: c.textFaint),
-          const SizedBox(width: OSpace.s),
-          Expanded(
-            child: Text(
-              data.offlineLabel!,
-              style: OType.caption.copyWith(color: c.textFaint),
-            ),
-          ),
-        ],
-      ),
     );
   }
 

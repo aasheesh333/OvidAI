@@ -85,7 +85,7 @@ void main() {
     testWidgets('renders the number form and terms note in light', (
       tester,
     ) async {
-      await _pump(tester);
+      await _pump(tester, onClose: () {});
 
       expect(find.text('Sign in with your phone'), findsOneWidget);
       expect(find.text('Phone number'), findsOneWidget);
@@ -97,6 +97,15 @@ void main() {
       expect(find.text('By continuing, you agree to our '), findsOneWidget);
       expect(find.byKey(const Key('phone-auth-close')), findsOneWidget);
       expect(find.byKey(const Key('phone-auth-code')), findsNothing);
+    });
+
+    testWidgets('no close control when the sheet cannot dismiss itself', (
+      tester,
+    ) async {
+      await _pump(tester);
+
+      // A close icon with no handler is a dead control: the host must wire it.
+      expect(find.byKey(const Key('phone-auth-close')), findsNothing);
     });
 
     testWidgets('renders in dark', (tester) async {
@@ -477,7 +486,7 @@ void main() {
             .enabled,
         isFalse,
       );
-      expect(find.text('Please wait…'), findsOneWidget);
+      expect(find.text('One moment…'), findsOneWidget);
       expect(_onPressed(tester, const Key('phone-auth-verify')), isNull);
     });
   });

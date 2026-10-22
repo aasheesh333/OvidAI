@@ -71,13 +71,21 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('All models are available on your plan.'), findsOneWidget);
+      expect(find.text('Smart routing'), findsOneWidget);
+      expect(
+        find.text('All models are available on your plan.'),
+        findsNothing,
+        reason: 'the minimal picker has no footer paragraph',
+      );
 
       await tester.tap(find.text('Ovid 2 Pro'));
       await tester.pumpAndSettle();
 
       expect(find.textContaining('onSelect 1'), findsOneWidget);
-      expect(find.textContaining('onSelect("ovid-2-pro") fired'), findsOneWidget);
+      expect(
+        find.textContaining('onSelect("ovid-2-pro") fired'),
+        findsOneWidget,
+      );
       expect(tester.takeException(), isNull);
     });
 
@@ -124,15 +132,15 @@ void main() {
       await tester.tap(find.text('Manual'));
       await tester.pumpAndSettle();
 
-      await tester.enterText(
-        find.byType(TextField).first,
-        'refactor billing',
-      );
+      await tester.enterText(find.byType(TextField).first, 'refactor billing');
       await tester.pump();
       await tester.tap(find.bySemanticsLabel('Send'));
       await tester.pumpAndSettle();
 
-      expect(find.textContaining('You picked this model manually'), findsOneWidget);
+      expect(
+        find.textContaining('You picked this model manually'),
+        findsOneWidget,
+      );
       expect(tester.takeException(), isNull);
     });
 

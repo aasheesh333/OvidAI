@@ -6,8 +6,8 @@ import '../../../core/app_info.dart';
 import '../../../core/legal_links.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
-import '../states/state_tiles.dart';
 import 'legal_page.dart';
 
 // TODO(l10n): move the English copy in this screen to the ARB files.
@@ -539,6 +539,8 @@ class V2AboutPageData {
   /// does not inject them still shows the shipped build, never a demo string.
   final String version;
   final String build;
+
+  /// Retained for callers; the minimal About screen has no hero or tagline.
   final String tagline;
   final V2SystemStatus systemStatus;
 
@@ -550,6 +552,9 @@ class V2AboutPageData {
   final VoidCallback? onPrivacyPolicy;
   final VoidCallback? onTerms;
   final VoidCallback? onLicences;
+
+  /// Retained for hosts. The minimal About screen shows only the build and
+  /// the three legal documents; support lives in Account.
   final VoidCallback? onContactSupport;
 
   /// Opens the full status page.
@@ -577,7 +582,8 @@ class V2AboutPageData {
       build.trim().isEmpty ? version : '$version · build $build';
 }
 
-/// About Ovid Si: the app mark, legal links, support links and build details.
+/// About Ovid Si: the build and the legal documents. No hero, no support row,
+/// and no status tile unless the caller wired a real status.
 class AboutPage extends StatelessWidget {
   const AboutPage({super.key, required this.data});
 
@@ -585,65 +591,44 @@ class AboutPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return OScaffold(
-      appBar: const OAppBar(title: 'About'),
-      body: OFadeSlide(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(
-            OSpace.screen,
-            OSpace.xl,
-            OSpace.screen,
-            OSpace.xxl,
-          ),
-          child: OStagger(
-            children: [
-              _hero(context),
-              _legal(context),
-              _support(context),
-              _about(context),
-              _account(context),
-              _footer(context),
-            ],
-          ),
+    final statusTap = _statusTap;
+    return OScreen(
+      title: 'About',
+      child: OFadeSlide(
+        child: ListView(
+          padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xxl),
+          children: [
+            if (data.hasVersion) _build(context),
+            _legal(context),
+            if (statusTap != null) _status(context, statusTap),
+          ],
         ),
       ),
     );
   }
 
-  Widget _hero(BuildContext context) {
-    final c = OColors.of(context);
+  /// The real version and build of this app, with the one copy action.
+  Widget _build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.only(bottom: OSpace.xl),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Container(
-            width: 88,
-            height: 88,
-            decoration: BoxDecoration(
-              color: c.accentFill,
-              borderRadius: BorderRadius.circular(ORadius.xl),
+          const OSectionTitle(title: 'Build'),
+          OCard(
+            padding: EdgeInsets.zero,
+            child: OListRow(
+              icon: Icons.info_outline_rounded,
+              title: 'Version',
+              subtitle: data.buildLabel,
+              showChevron: false,
+              trailing: OIconButton(
+                icon: Icons.copy_rounded,
+                semanticLabel: 'Copy version info',
+                tooltip: 'Copy version info',
+                onPressed: () => _copyVersion(context),
+              ),
             ),
-            child: Icon(Icons.bolt_rounded, size: 46, color: c.onAccent),
-          ),
-          const SizedBox(height: OSpace.l),
-          Semantics(
-            container: true,
-            header: true,
-            child: Text('Ovid Si', style: OType.h1.copyWith(color: c.text)),
-          ),
-          const SizedBox(height: OSpace.s),
-          if (data.hasVersion) ...[
-            _pill(
-              label: data.versionLabel,
-              foreground: c.accent,
-              background: c.accentSoft,
-            ),
-            const SizedBox(height: OSpace.m),
-          ],
-          Text(
-            data.tagline,
-            textAlign: TextAlign.center,
-            style: OType.body.copyWith(color: c.textMuted),
           ),
         ],
       ),
@@ -676,30 +661,39 @@ class AboutPage extends StatelessWidget {
         applicationVersion: data.buildLabel,
       ),
     );
-    return _section(
-      context,
-      title: 'Legal',
-      rows: [
-        _legalRow(
-          icon: Icons.shield_outlined,
-          title: 'Privacy policy',
-          onTap: privacyTap,
-        ),
-        _legalRow(
-          icon: Icons.description_outlined,
-          title: 'Terms of service',
-          onTap: termsTap,
-        ),
-        _legalRow(
-          icon: Icons.code_rounded,
-          title: 'Open-source licences',
-          onTap: licencesTap,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const OSectionTitle(title: 'Legal'),
+        OCard(
+          padding: EdgeInsets.zero,
+          child: Column(
+            children: [
+              _legalRow(
+                icon: Icons.shield_outlined,
+                title: 'Privacy policy',
+                onTap: privacyTap,
+              ),
+              const Divider(height: 1, thickness: 1),
+              _legalRow(
+                icon: Icons.description_outlined,
+                title: 'Terms of service',
+                onTap: termsTap,
+              ),
+              const Divider(height: 1, thickness: 1),
+              _legalRow(
+                icon: Icons.code_rounded,
+                title: 'Open-source licences',
+                onTap: licencesTap,
+              ),
+            ],
+          ),
         ),
       ],
     );
   }
 
-  /// A legal row is always actionable now, so it announces its enabled state
+  /// A legal row is always actionable, so it announces its enabled state
   /// explicitly (`OListRow` only sets it for disabled rows).
   Widget _legalRow({
     required IconData icon,
@@ -777,225 +771,36 @@ class AboutPage extends StatelessWidget {
       ..showSnackBar(const SnackBar(content: Text('Version copied.')));
   }
 
-  Widget _support(BuildContext context) {
-    final status = data.systemStatus;
-    final statusLabel = switch (status) {
-      V2SystemStatus.unknown => '',
-      V2SystemStatus.checking => 'Checking…',
-      V2SystemStatus.operational => 'Operational',
-      V2SystemStatus.degraded => 'Some issues',
-      V2SystemStatus.error => 'Could not check',
-    };
-    final retry = status == V2SystemStatus.error;
-    final statusTap = retry
-        ? (data.onRetrySystemStatus ?? data.onSystemStatus)
-        : data.onSystemStatus;
-    final baseSubtitle = switch (status) {
-      V2SystemStatus.checking => 'Checking the latest status.',
-      V2SystemStatus.error =>
-        'We could not reach the status page. Tap to try again.',
-      _ => 'Check if Ovid is working normally.',
-    };
-    // At 320 dp or 200 % text the tile shows the status inline with the
-    // subtitle instead of as a separate detail line.
-    final narrow =
-        MediaQuery.sizeOf(context).width < 360 ||
-        MediaQuery.textScalerOf(context).scale(14) > 18;
-    final showDetail = statusLabel.isNotEmpty && !narrow;
-    final message = showDetail || statusLabel.isEmpty
-        ? baseSubtitle
-        : '$statusLabel · $baseSubtitle';
-    final tone = switch (status) {
-      V2SystemStatus.degraded || V2SystemStatus.error => V2StateTileTone.warn,
-      _ => V2StateTileTone.neutral,
-    };
-    // Unknown status with no way to check it is not a control: hide the tile
-    // rather than show a card that cannot do anything.
-    final showStatus = status != V2SystemStatus.unknown || statusTap != null;
-    final tile = V2StateTile(
-      // The copy is fully custom; the kind only supplies the shared card.
-      kind: V2StateTileKind.offline,
-      copy: V2StateTileCopy(
-        icon: Icons.monitor_heart_outlined,
-        title: 'System status',
-        message: message,
-        actionLabel: '',
-        tone: tone,
-      ),
-      detail: showDetail ? statusLabel : null,
-    );
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _section(
-          context,
-          title: 'Support',
-          rows: [
-            OListRow(
-              icon: Icons.support_agent_rounded,
-              title: 'Contact support',
-              subtitle: 'We usually reply within a day.',
-              onTap: data.onContactSupport,
-              enabled: data.onContactSupport != null,
-            ),
-          ],
-        ),
-        if (showStatus)
-          Padding(
-            padding: const EdgeInsets.only(bottom: OSpace.xl),
-            child: Semantics(
-              container: true,
-              label: statusLabel.isEmpty
-                  ? 'System status, $baseSubtitle'
-                  : 'System status, $statusLabel, $baseSubtitle',
-              button: statusTap != null,
-              enabled: statusTap != null,
-              onTap: statusTap,
-              child: ExcludeSemantics(
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: statusTap,
-                  child: tile,
-                ),
-              ),
-            ),
-          ),
-      ],
-    );
+  String get _statusLabel => switch (data.systemStatus) {
+    V2SystemStatus.unknown => '',
+    V2SystemStatus.checking => 'Checking…',
+    V2SystemStatus.operational => 'Operational',
+    V2SystemStatus.degraded => 'Some issues',
+    V2SystemStatus.error => 'Could not check',
+  };
+
+  /// A failed check retries; otherwise the row opens the status page. With no
+  /// handler at all there is no row: a status tile that cannot do anything is
+  /// chrome.
+  VoidCallback? get _statusTap {
+    if (data.systemStatus == V2SystemStatus.error) {
+      return data.onRetrySystemStatus ?? data.onSystemStatus;
+    }
+    return data.onSystemStatus;
   }
 
-  Widget _about(BuildContext context) {
-    if (!data.hasVersion) return const SizedBox.shrink();
-    return _section(
-      context,
-      title: 'About',
-      rows: [
-        OListRow(
-          icon: Icons.info_outline_rounded,
-          title: 'Version and build',
-          subtitle: data.buildLabel,
-          showChevron: false,
-          trailing: OIconButton(
-            icon: Icons.copy_rounded,
-            semanticLabel: 'Copy version info',
-            tooltip: 'Copy version info',
-            onPressed: () => _copyVersion(context),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _account(BuildContext context) {
-    return _section(
-      context,
-      title: 'Account',
-      rows: [
-        OListRow(
-          key: const ValueKey<String>('about-delete-account'),
-          icon: Icons.delete_forever_outlined,
-          title: 'Delete account',
-          subtitle:
-              'Scheduled after a 24-hour grace period, then permanent. You can '
-              'restore it before the deadline.',
-          danger: true,
-          onTap: data.onDeleteAccount,
-          enabled: data.onDeleteAccount != null,
-        ),
-      ],
-    );
-  }
-
-  Widget _footer(BuildContext context) {
-    final c = OColors.of(context);
+  Widget _status(BuildContext context, VoidCallback? onTap) {
     return Padding(
-      padding: const EdgeInsets.only(top: OSpace.s),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.android_rounded, size: 16, color: c.textFaint),
-          const SizedBox(width: OSpace.xs),
-          Flexible(
-            child: Text(
-              'Made for Android',
-              textAlign: TextAlign.center,
-              style: OType.caption.copyWith(color: c.textFaint),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _pill({
-    required String label,
-    required Color foreground,
-    required Color background,
-    bool dot = false,
-  }) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: OSpace.xs),
-      decoration: BoxDecoration(
-        color: background,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (dot) ...[
-            Container(
-              width: 6,
-              height: 6,
-              decoration: BoxDecoration(
-                color: foreground,
-                shape: BoxShape.circle,
-              ),
-            ),
-            const SizedBox(width: 6),
-          ],
-          Flexible(
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: OType.caption.copyWith(
-                color: foreground,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _section(
-    BuildContext context, {
-    required String title,
-    required List<Widget> rows,
-  }) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.xl),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          OSectionHeader(
-            label: title,
-            padding: const EdgeInsets.only(bottom: OSpace.s),
-          ),
-          OCard(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                for (var i = 0; i < rows.length; i++) ...[
-                  if (i > 0) Divider(color: c.hairline, height: 1),
-                  rows[i],
-                ],
-              ],
-            ),
-          ),
-        ],
+      padding: const EdgeInsets.only(top: OSpace.xl),
+      child: OCard(
+        padding: EdgeInsets.zero,
+        child: OListRow(
+          icon: Icons.monitor_heart_outlined,
+          title: 'System status',
+          subtitle: _statusLabel.isEmpty ? null : _statusLabel,
+          showChevron: onTap != null,
+          onTap: onTap,
+        ),
       ),
     );
   }

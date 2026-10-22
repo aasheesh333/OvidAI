@@ -360,8 +360,7 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
       icon: Icons.verified_user_outlined,
       title: 'No permissions to review',
       message:
-          '${_data.connectorName} has not asked for anything yet. When it is '
-          'connected, Ovid lists exactly what it can use here.',
+          '${_data.connectorName} has not asked for anything yet.',
       action: OButton(
         label: 'Back to connector',
         icon: Icons.arrow_back_rounded,

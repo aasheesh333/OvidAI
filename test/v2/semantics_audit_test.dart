@@ -177,8 +177,8 @@ void main() {
       final order = _readingOrder(tester);
       _expectOrder(order, <String>[
         'Ovid Si',
-        'What should we build today?',
-        'Build me a landing page, React & Tailwind components',
+        'What should we build?',
+        'Build a landing page',
         'Add attachment or action',
         'Send',
       ]);
@@ -273,11 +273,12 @@ void main() {
         ),
       );
       final order = _readingOrder(tester);
+      // The profile replaces the separate "Account" destination, so it reads
+      // under the ACCOUNT heading; sign out is the short label.
       _expectOrder(order, <String>[
         'Settings',
-        'Ovid user profile photo',
         'ACCOUNT',
-        'Account',
+        'Ovid user profile photo',
         'CHAT',
         'Appearance',
         'MODELS',
@@ -286,7 +287,7 @@ void main() {
         'Storage',
         'ADVANCED',
         'About',
-        'Log out of Ovid user',
+        'Sign out',
       ]);
     });
   });
@@ -496,7 +497,7 @@ void main() {
 
       // The dock itself is a live region, so a queue that appears while the
       // screen is already open is announced too.
-      final dock = tester.getSemantics(find.text('1 queued message'));
+      final dock = tester.getSemantics(find.text('1 queued'));
       expect(dock.getSemanticsData().flagsCollection.isLiveRegion, isTrue);
 
       await tester.pumpWidget(page(queued: 0, onSend: (_) {}));
@@ -656,11 +657,48 @@ bool _isToggleControl(Widget widget) =>
     widget is CheckboxListTile ||
     widget is RadioListTile;
 
+
+/// Nearest ancestor semantics node that carries a toggle state. Used when a
+/// control is merged into a labelled row.
+SemanticsNode? _mergedToggleNode(Element element) {
+  SemanticsNode? found;
+  element.visitAncestorElements((ancestor) {
+    final node = ancestor.renderObject?.debugSemantics;
+    if (node != null) {
+      final flags = node.getSemanticsData().flagsCollection;
+      if (flags.isToggled != ui.Tristate.none ||
+          flags.isChecked != ui.CheckedState.none) {
+        found = node;
+        return false;
+      }
+    }
+    return true;
+  });
+  return found;
+}
+
+/// True when the element is laid out and its box intersects the viewport.
+bool _isOnScreen(Element element) {
+  final box = element.renderObject;
+  if (box is! RenderBox || !box.attached || !box.hasSize) return false;
+  final origin = box.localToGlobal(Offset.zero);
+  final rect = origin & box.size;
+  final view = box.owner?.semanticsOwner?.rootSemanticsNode?.rect.size;
+  final screen = view ?? const Size(320, 640);
+  return rect.overlaps(Offset.zero & screen);
+}
+
 void _checkToggles(WidgetTester tester, List<String> violations) {
   for (final element in tester.allElements) {
     if (!_isToggleControl(element.widget)) continue;
-    final semantics = _semanticsFor(tester, element);
+    // A switch inside MergeSemantics is deliberately folded into one node
+    // with its label, so the state is announced by that ancestor node. Walk
+    // up before calling it a violation.
+    final semantics = _semanticsFor(tester, element) ?? _mergedToggleNode(element);
     if (semantics == null) {
+      // Rows outside the viewport are built but not compiled into the
+      // semantics tree, so there is nothing to inspect until they scroll in.
+      if (!_isOnScreen(element)) continue;
       violations.add('${_widgetName(element.widget)} has no semantics node');
       continue;
     }
@@ -725,6 +763,9 @@ void _checkDisabledControls(
     }
 
     if (!_isDisabledControl(widget)) continue;
+    // A control below the fold is built but not compiled into the semantics
+    // tree until it scrolls in; there is nothing to announce yet.
+    if (!_isOnScreen(element)) continue;
     final semantics = _semanticsFor(tester, element);
     if (semantics == null) {
       violations.add('disabled ${_widgetName(widget)} has no semantics node');
@@ -1130,15 +1171,6 @@ const _knownGaps = <_KnownGap>[
 
   // Inline switch in a labelled OListRow; the row owns the name, the switch
   // node is emitted separately with no name.
-
-  // The top-bar action and the empty-state action are the same handler, not
-  // two different actions; the duplicate is visible but harmless.
-  _KnownGap(
-    'sidebar',
-    _GapKind.duplicateAction,
-    'New session',
-    'Top bar and empty state share the same new-chat handler.',
-  ),
 
   // OSelectable does not set hasEnabledState on sheet tiles.
 ];

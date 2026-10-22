@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'composer_sheet.dart';
 
 // TODO(l10n): move user-facing copy to ARB keys in the localization pass.
 
@@ -23,8 +24,8 @@ class V2PermissionMode {
   final String id;
   final String label;
 
-  /// Plain-language explanation of what Ovid may do. Avoid jargon: this is
-  /// the only place a user can see the consequence before picking a mode.
+  /// Plain-language explanation of what Ovid may do. The sheet shows one line
+  /// per mode, so this is announced rather than drawn.
   final String description;
   final IconData icon;
 
@@ -100,7 +101,7 @@ class V2PermissionSheetData {
 }
 
 /// Bottom sheet for choosing what Ovid may do in a chat: Read-Only, General,
-/// Full Access or Studio.
+/// Full Access or Studio. One line per mode.
 ///
 /// Presentational only. Tapping a row reports its id through [onSelect]; the
 /// caller decides whether to apply it. [showV2PermissionSheet] also closes the
@@ -130,51 +131,19 @@ class V2PermissionSheet extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Padding(
+            OSheetHeader(
+              title: 'Permissions',
+              onClose: onClose ?? () => Navigator.maybePop(context),
+              closeLabel: 'Close permissions',
               padding: const EdgeInsets.fromLTRB(
                 OSpace.l,
-                OSpace.l,
                 OSpace.s,
-                0,
-              ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Permissions',
-                          style: OType.h2.copyWith(color: c.text),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          'Choose what Ovid may do in this chat.',
-                          style: OType.caption.copyWith(color: c.textMuted),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: OSpace.s),
-                  OIconButton(
-                    icon: Icons.close_rounded,
-                    semanticLabel: 'Close permissions',
-                    onPressed: onClose ?? () => Navigator.maybePop(context),
-                  ),
-                ],
+                OSpace.s,
+                OSpace.xs,
               ),
             ),
             OAnimatedSwap(child: _buildBody(context)),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                OSpace.l,
-                OSpace.s,
-                OSpace.l,
-                OSpace.l,
-              ),
-              child: const _PushNote(),
-            ),
+            const SizedBox(height: OSpace.l),
           ],
         ),
       ),
@@ -185,11 +154,11 @@ class V2PermissionSheet extends StatelessWidget {
     final data = this.data;
 
     if (data.loading) {
-      return const SizedBox(height: 280, child: OSkeletonList(rows: 4));
+      return const SizedBox(height: 240, child: OSkeletonList(rows: 4));
     }
     if (data.errorMessage != null) {
       return SizedBox(
-        height: 300,
+        height: 260,
         child: OErrorState(
           title: 'Permissions did not load',
           message: data.errorMessage!,
@@ -199,7 +168,7 @@ class V2PermissionSheet extends StatelessWidget {
     }
     if (data.modes.isEmpty) {
       return SizedBox(
-        height: 300,
+        height: 260,
         child: OEmptyState(
           icon: Icons.verified_user_outlined,
           title: 'No permission modes',
@@ -215,21 +184,18 @@ class V2PermissionSheet extends StatelessWidget {
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(
-        OSpace.l,
-        OSpace.m,
-        OSpace.l,
+        OSpace.s,
+        OSpace.xs,
+        OSpace.s,
         OSpace.xs,
       ),
       child: OStagger(
         children: [
           for (final mode in data.modes)
-            Padding(
-              padding: const EdgeInsets.only(bottom: OSpace.s),
-              child: _ModeRow(
-                mode: mode,
-                selected: data.selectedId == mode.id,
-                onTap: () => onSelect(mode.id),
-              ),
+            _ModeRow(
+              mode: mode,
+              selected: data.selectedId == mode.id,
+              onTap: () => onSelect(mode.id),
             ),
         ],
       ),
@@ -255,8 +221,11 @@ class _ModeRow extends StatelessWidget {
     final tint = danger ? c.danger : c.accentFill;
 
     final row = Container(
-      constraints: const BoxConstraints(minHeight: OSpace.listRow),
-      padding: const EdgeInsets.all(OSpace.m),
+      constraints: const BoxConstraints(minHeight: OSpace.touch),
+      padding: const EdgeInsets.symmetric(
+        horizontal: OSpace.m,
+        vertical: OSpace.s,
+      ),
       decoration: BoxDecoration(
         color: danger
             ? c.danger.withValues(alpha: selected ? 0.10 : 0.05)
@@ -274,15 +243,8 @@ class _ModeRow extends StatelessWidget {
         ),
       ),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: danger ? c.danger.withValues(alpha: 0.12) : c.surfaceAlt,
-              borderRadius: BorderRadius.circular(ORadius.m),
-            ),
+          ExcludeSemantics(
             child: Icon(
               mode.icon,
               size: 20,
@@ -291,30 +253,13 @@ class _ModeRow extends StatelessWidget {
           ),
           const SizedBox(width: OSpace.m),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Wrap(
-                  spacing: OSpace.s,
-                  runSpacing: OSpace.xs,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    Text(
-                      mode.label,
-                      style: OType.bodyStrong.copyWith(
-                        color: danger ? c.danger : c.text,
-                      ),
-                    ),
-                    if (danger) const _NoPromptsTag(),
-                  ],
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  mode.description,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ],
+            child: Text(
+              mode.label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: OType.bodyStrong.copyWith(
+                color: danger ? c.danger : c.text,
+              ),
             ),
           ),
           const SizedBox(width: OSpace.s),
@@ -344,8 +289,8 @@ class _SelectionMark extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     return Container(
-      width: 26,
-      height: 26,
+      width: 22,
+      height: 22,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         color: selected
@@ -360,7 +305,7 @@ class _SelectionMark extends StatelessWidget {
       child: selected
           ? Icon(
               Icons.check_rounded,
-              size: 16,
+              size: 14,
               color: danger ? c.onDanger : c.onAccent,
             )
           : null,
@@ -368,104 +313,12 @@ class _SelectionMark extends StatelessWidget {
   }
 }
 
-/// Danger pill on the Full Access row. It grows with the text scale instead
-/// of pinning its height, so 200 % text never clips.
-class _NoPromptsTag extends StatelessWidget {
-  const _NoPromptsTag();
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      constraints: const BoxConstraints(minHeight: 24),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
-      decoration: BoxDecoration(
-        color: c.danger.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(ORadius.pill),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Flexible(
-            child: Text(
-              'No prompts',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: OType.caption.copyWith(
-                color: c.danger,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// The safety promise under the list. Full Access is the one exception, and
-/// the note says so instead of pretending otherwise.
-class _PushNote extends StatelessWidget {
-  const _PushNote();
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      padding: const EdgeInsets.all(OSpace.m),
-      decoration: BoxDecoration(
-        color: c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.m),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 26,
-            height: 26,
-            decoration: BoxDecoration(
-              color: c.surfaceRaised,
-              shape: BoxShape.circle,
-            ),
-            child: Icon(Icons.shield_outlined, size: 15, color: c.textMuted),
-          ),
-          const SizedBox(width: OSpace.s),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  'Ovid asks before pushing',
-                  style: OType.bodySm.copyWith(
-                    color: c.text,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: OSpace.xs),
-                Text(
-                  'Commits, publishes, and anything that leaves your workspace '
-                  'wait for your OK — Full Access skips these prompts.',
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 /// The compact permission chip shared by the chat and live-chat composers.
 ///
-/// The host owns the current mode and the sheet; the chip only reports a tap.
+/// The chip shows the current mode's name only. The host owns the mode and the
+/// sheet; the chip only reports a tap.
 class V2PermissionChip extends StatelessWidget {
-  const V2PermissionChip({
-    super.key,
-    required this.label,
-    required this.onTap,
-  });
+  const V2PermissionChip({super.key, required this.label, required this.onTap});
 
   final String label;
   final VoidCallback? onTap;
@@ -473,10 +326,13 @@ class V2PermissionChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    final enabled = onTap != null;
     return Semantics(
       label: 'Permission: $label. Change',
       button: true,
-      enabled: onTap != null,
+      enabled: enabled,
+      excludeSemantics: true,
+      onTap: onTap,
       child: Material(
         color: Colors.transparent,
         child: InkWell(
@@ -485,10 +341,11 @@ class V2PermissionChip extends StatelessWidget {
           child: ConstrainedBox(
             constraints: const BoxConstraints(minHeight: OSpace.touch),
             child: Center(
+              widthFactor: 1,
               child: Container(
                 constraints: const BoxConstraints(minHeight: 32),
                 padding: const EdgeInsets.symmetric(
-                  horizontal: OSpace.s,
+                  horizontal: OSpace.m,
                   vertical: 5,
                 ),
                 decoration: BoxDecoration(
@@ -496,26 +353,13 @@ class V2PermissionChip extends StatelessWidget {
                   borderRadius: BorderRadius.circular(ORadius.pill),
                   border: Border.all(color: c.hairline),
                 ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.shield_outlined, size: 16, color: c.accent),
-                    const SizedBox(width: 4),
-                    Flexible(
-                      child: Text(
-                        label,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.label.copyWith(color: c.textMuted),
-                      ),
-                    ),
-                    const SizedBox(width: 2),
-                    Icon(
-                      Icons.keyboard_arrow_down_rounded,
-                      size: 16,
-                      color: c.textFaint,
-                    ),
-                  ],
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.label.copyWith(
+                    color: enabled ? c.textMuted : c.textFaint,
+                  ),
                 ),
               ),
             ),
@@ -526,15 +370,15 @@ class V2PermissionChip extends StatelessWidget {
   }
 }
 
-/// Opens the permission sheet in the shared bottom-sheet container and closes
-/// it after the caller applies the pick.
+/// Opens the permission sheet in the shared sheet container and closes it
+/// after the caller applies the pick.
 Future<void> showV2PermissionSheet(
   BuildContext context, {
   required V2PermissionSheetData data,
   required ValueChanged<String> onSelect,
   VoidCallback? onRetry,
 }) {
-  return showOSheet<void>(
+  return showV2ChatSheet<void>(
     context,
     builder: (sheetContext) => V2PermissionSheet(
       data: data,

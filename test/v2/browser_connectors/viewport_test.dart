@@ -68,30 +68,33 @@ Future<void> _pumpSmall(
 }
 
 void main() {
-  testWidgets('live view paints the injected frame and the 3–5 fps hint', (
-    tester,
-  ) async {
+  testWidgets('live view paints the frame and one Live pill', (tester) async {
     final frame = MemoryImage(_frameBytes);
     await _pump(
       tester,
       BrowserViewport(
         frame: frame,
         cursor: const V2ViewportCursor(x: 0.4, y: 0.5),
-        onTakeControl: () {},
       ),
     );
 
     final image = tester.widget<Image>(find.byType(Image));
     expect(image.image, same(frame));
     expect(image.fit, BoxFit.contain);
-    expect(find.text('Live · 3–5 fps'), findsOneWidget);
+    expect(find.byKey(BrowserViewport.statusKey), findsOneWidget);
+    expect(find.text('Live'), findsOneWidget);
     expect(find.byKey(BrowserViewport.cursorKey), findsOneWidget);
-    expect(find.text('Ovid'), findsOneWidget);
-    expect(find.byKey(BrowserViewport.takeControlKey), findsOneWidget);
 
     // It is a frame painter, not a hidden embedded browser.
     expect(find.byType(AndroidView), findsNothing);
     expect(find.byType(PlatformViewLink), findsNothing);
+  });
+
+  testWidgets('the slow frame rate is not explained in words', (tester) async {
+    await _pump(tester, BrowserViewport(frame: MemoryImage(_frameBytes)));
+
+    expect(find.textContaining('fps'), findsNothing);
+    expect(find.textContaining('times a second'), findsNothing);
   });
 
   testWidgets('live without a frame is an honest waiting state, not a page', (
@@ -99,18 +102,11 @@ void main() {
   ) async {
     await _pump(tester, const BrowserViewport());
 
-    // It must not claim to be live while it has no picture, and it must not
-    // paint a surface that looks loaded.
-    expect(find.text('Live · 3–5 fps'), findsNothing);
+    // It must not claim to be live while it has no picture.
+    expect(find.text('Live'), findsNothing);
+    expect(find.text('Waiting'), findsOneWidget);
     expect(find.text('No picture yet'), findsWidgets);
-    expect(
-      find.text(
-        'The live view refreshes 3–5 times a second, not as video.',
-      ),
-      findsWidgets,
-    );
     expect(find.byType(Image), findsNothing);
-    expect(find.byKey(BrowserViewport.takeControlKey), findsNothing);
     // Nothing is invented as a page either.
     expect(find.text('The live page shows here'), findsNothing);
 
@@ -125,23 +121,19 @@ void main() {
     expect(find.textContaining('Bearer'), findsNothing);
   });
 
-  testWidgets('loading waits for the first frame and cannot be controlled', (
-    tester,
-  ) async {
+  testWidgets('loading waits for the first frame', (tester) async {
     await _pump(
       tester,
       BrowserViewport(
         frame: MemoryImage(_frameBytes),
         status: V2ViewportStatus.loading,
-        onTakeControl: () {},
       ),
     );
 
     expect(find.text('Connecting…'), findsOneWidget);
-    expect(find.text('Waiting for the first frame…'), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.text('Waiting'), findsOneWidget);
     expect(find.byType(Image), findsNothing);
-    expect(find.byKey(BrowserViewport.takeControlKey), findsNothing);
   });
 
   testWidgets('stream lost keeps the last frame and offers a reconnect', (
@@ -154,21 +146,13 @@ void main() {
         frame: MemoryImage(_frameBytes),
         status: V2ViewportStatus.streamLost,
         onRetry: () => retries++,
-        onTakeControl: () {},
       ),
     );
 
-    expect(find.text('Stream lost'), findsNWidgets(2));
-    expect(
-      find.text(
-        'Ovid keeps working. The picture returns on its own, '
-        'or reconnect now.',
-      ),
-      findsOneWidget,
-    );
+    expect(find.text('Stream lost'), findsOneWidget);
+    expect(find.text('Lost'), findsOneWidget);
     // The last frame stays behind the notice rather than going black.
     expect(find.byType(Image), findsOneWidget);
-    expect(find.byKey(BrowserViewport.takeControlKey), findsNothing);
 
     await tester.tap(find.byKey(BrowserViewport.retryKey));
     await tester.pump(const Duration(milliseconds: 300));
@@ -184,7 +168,7 @@ void main() {
     // No handler means no Reconnect button at all.
     expect(find.text('Reconnect'), findsNothing);
     expect(find.byKey(BrowserViewport.retryKey), findsNothing);
-    expect(find.text('Stream lost'), findsWidgets);
+    expect(find.text('Stream lost'), findsOneWidget);
   });
 
   testWidgets('the waiting state offers a real retry and stops spinning', (
@@ -273,57 +257,22 @@ void main() {
     expect(taps, isEmpty);
   });
 
-  testWidgets('tap-to-control is a labelled 48 dp target and fires once', (
+  testWidgets('controlling keeps the picture tappable without a second badge', (
     tester,
   ) async {
-    final handle = tester.ensureSemantics();
-    var takes = 0;
-    await _pump(
-      tester,
-      BrowserViewport(
-        frame: MemoryImage(_frameBytes),
-        onTakeControl: () => takes++,
-      ),
-    );
-
-    final finder = find.byKey(BrowserViewport.takeControlKey);
-    expect(tester.getSize(finder).height, greaterThanOrEqualTo(48));
-    expect(
-      tester.getSemantics(find.text('Take control')),
-      isSemantics(
-        label: 'Take control',
-        isButton: true,
-        isEnabled: true,
-        hasTapAction: true,
-      ),
-    );
-
-    await tester.tap(finder);
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(takes, 1);
-    handle.dispose();
-  });
-
-  testWidgets('the controlling state replaces the takeover overlay', (
-    tester,
-  ) async {
-    final handle = tester.ensureSemantics();
     await _pump(
       tester,
       BrowserViewport(
         frame: MemoryImage(_frameBytes),
         controlling: true,
-        onTakeControl: () {},
+        onPageTap: (_, _) {},
       ),
     );
 
-    expect(find.byKey(BrowserViewport.takeControlKey), findsNothing);
-    expect(find.text('You are controlling'), findsOneWidget);
-    expect(
-      tester.getSemantics(find.text('You are controlling')),
-      isSemantics(label: 'You are controlling'),
-    );
-    handle.dispose();
+    expect(find.byKey(BrowserViewport.pageTapKey), findsOneWidget);
+    // The control bar already says who is in control; the picture stays clean.
+    expect(find.text('You are controlling'), findsNothing);
+    expect(find.text('Live'), findsOneWidget);
   });
 
   testWidgets('the agent cursor is announced and stays inside the frame', (
@@ -350,21 +299,6 @@ void main() {
     handle.dispose();
   });
 
-  testWidgets('the fps hint can be omitted without dropping the live state', (
-    tester,
-  ) async {
-    await _pump(
-      tester,
-      BrowserViewport(
-        frame: MemoryImage(_frameBytes),
-        showFpsHint: false,
-      ),
-    );
-
-    expect(find.text('Live'), findsOneWidget);
-    expect(find.textContaining('3–5 fps'), findsNothing);
-  });
-
   for (final dark in [false, true]) {
     final name = dark ? 'dark' : 'light';
 
@@ -381,7 +315,6 @@ void main() {
             frame: frame,
             status: status,
             cursor: const V2ViewportCursor(x: 0.9, y: 0.8),
-            onTakeControl: () {},
             onRetry: () {},
           ),
           theme: theme,
@@ -393,23 +326,6 @@ void main() {
           reason: 'viewport overflowed in the $status state ($name)',
         );
       }
-
-      await _pumpSmall(
-        tester,
-        BrowserViewport(
-          frame: frame,
-          cursor: const V2ViewportCursor(x: 0.2, y: 0.2),
-          onTakeControl: () {},
-        ),
-        theme: theme,
-      );
-      expect(tester.takeException(), isNull);
-      final hint = find.text('Live · 3–5 fps');
-      expect(hint, findsOneWidget);
-      // A 12 pt caption at 200 % needs ~33.6 dp of line box; less means the
-      // hint was squeezed instead of scaled.
-      expect(tester.getSize(hint).height, greaterThanOrEqualTo(32));
-      expect(find.text('Take control'), findsOneWidget);
     });
   }
 

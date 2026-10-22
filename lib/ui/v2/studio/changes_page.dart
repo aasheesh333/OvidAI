@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'commit_sheet.dart';
 
@@ -190,30 +191,29 @@ class _V2ChangesPageState extends State<V2ChangesPage> {
     final data = widget.data;
     final hasContent =
         data.status == V2ChangesStatus.content && data.files.isNotEmpty;
-    final branch = data.branchLabel?.trim() ?? '';
-    return OScaffold(
-      appBar: OAppBar(
-        title: 'Changes',
-        subtitle: hasContent && branch.isNotEmpty
-            ? branch
-            : 'Review and commit',
-        actions: [
-          if (hasContent && widget.onMenu != null)
-            OIconButton(
-              icon: Icons.more_vert_rounded,
-              semanticLabel: 'More change options',
-              tooltip: 'More options',
-              onPressed: widget.onMenu,
+    return OScreen(
+      title: 'Changes',
+      padding: false,
+      leading: widget.onBack == null
+          ? null
+          : OIconButton(
+              icon: Icons.arrow_back_rounded,
+              semanticLabel: 'Back',
+              onPressed: widget.onBack,
             ),
-        ],
-      ),
-      bottomNavigationBar: hasContent ? _buildCommitDock(context) : null,
-      body: switch (data.status) {
-        V2ChangesStatus.loading => const OSkeletonList(rows: 5),
+      actions: [
+        OIconButton(
+          key: const Key('studio-open-commit-sheet'),
+          icon: Icons.check_rounded,
+          semanticLabel: 'Commit & push',
+          tooltip: 'Commit',
+          onPressed: hasContent ? _openCommitSheet : null,
+        ),
+      ],
+      child: switch (data.status) {
+        V2ChangesStatus.loading => const OSkeletonList(rows: 6),
         V2ChangesStatus.error => OErrorState(
-          message:
-              data.errorMessage ??
-              'We could not load your changes. Check your connection and try again.',
+          message: data.errorMessage ?? 'Changes did not load.',
           onRetry: widget.onRetry,
         ),
         V2ChangesStatus.empty => _buildEmpty(),
@@ -227,7 +227,7 @@ class _V2ChangesPageState extends State<V2ChangesPage> {
     return OEmptyState(
       icon: Icons.check_circle_outline_rounded,
       title: 'No changes to review',
-      message: 'Edits you make in Studio will show up here.',
+      message: '',
       action: widget.onBack == null
           ? null
           : OButton(
@@ -239,229 +239,41 @@ class _V2ChangesPageState extends State<V2ChangesPage> {
   }
 
   Widget _buildContent(BuildContext context) {
-    final data = widget.data;
-    final branch = data.branchLabel?.trim() ?? '';
-    return SingleChildScrollView(
+    final files = widget.data.files;
+    return ListView.builder(
       padding: const EdgeInsets.fromLTRB(
-        OSpace.screen,
-        OSpace.m,
-        OSpace.screen,
+        OSpace.l,
+        OSpace.s,
+        OSpace.l,
         OSpace.xl,
       ),
-      child: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 640),
-          child: OFadeSlide(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Wrap(
-                  spacing: OSpace.s,
-                  runSpacing: OSpace.s,
-                  children: [
-                    const _MetaPill(
-                      label: 'Working tree',
-                      tone: OPillTone.success,
-                      dot: true,
-                    ),
-                    if (branch.isNotEmpty)
-                      _MetaPill(label: branch, tone: OPillTone.accent),
-                    _MetaPill(
-                      label:
-                          '${data.files.length} changed · +${data.additions} −${data.deletions}',
-                    ),
-                  ],
-                ),
-                const SizedBox(height: OSpace.m),
-                _SummaryCard(data: data),
-                const SizedBox(height: OSpace.m),
-                OStagger(
-                  children: [
-                    for (final file in data.files)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: OSpace.s),
-                        child: _DiffFileCard(
-                          file: file,
-                          expanded: _expanded.contains(file.path),
-                          onToggle: () => _toggleFile(file),
-                          onCopyDiff: () => widget.onCopyDiff?.call(file.path),
-                        ),
-                      ),
-                  ],
-                ),
-                if (data.behindCount > 0) ...[
-                  const SizedBox(height: OSpace.s),
-                  _SyncRow(count: data.behindCount, onSync: widget.onSync),
-                ],
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildCommitDock(BuildContext context) {
-    final c = OColors.of(context);
-    final files = widget.data.files.length;
-    return SafeArea(
-      top: false,
-      child: Container(
-        decoration: BoxDecoration(
-          color: c.surface,
-          border: Border(top: BorderSide(color: c.hairline)),
-        ),
-        padding: const EdgeInsets.fromLTRB(
-          OSpace.l,
-          OSpace.m,
-          OSpace.l,
-          OSpace.m,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              files == 1
-                  ? '1 file ready to commit'
-                  : '$files files ready to commit',
-              style: OType.caption.copyWith(color: c.textMuted),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-            const SizedBox(height: OSpace.xs),
-            OButton(
-              key: const Key('studio-open-commit-sheet'),
-              label: 'Commit & push',
-              icon: Icons.send_rounded,
-              expand: true,
-              semanticLabel: 'Commit & push, review files and write a message',
-              onPressed: _openCommitSheet,
-            ),
-          ],
-        ),
-      ),
+      itemCount: files.length,
+      itemBuilder: (context, index) {
+        final file = files[index];
+        return _DiffFileRow(
+          file: file,
+          path: _commitPath(file),
+          expanded: _expanded.contains(file.path),
+          onToggle: () => _toggleFile(file),
+          onCopyDiff: () => widget.onCopyDiff?.call(file.path),
+        );
+      },
     );
   }
 }
 
-class _SummaryCard extends StatelessWidget {
-  const _SummaryCard({required this.data});
-
-  final V2ChangesData data;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final total = data.additions + data.deletions;
-    final addFlex = data.additions <= 0 ? 1 : data.additions;
-    final removeFlex = data.deletions <= 0 ? 1 : data.deletions;
-    final filesLabel = data.files.length == 1
-        ? '1 changed file'
-        : '${data.files.length} changed files';
-    return Semantics(
-      container: true,
-      excludeSemantics: true,
-      label:
-          '$filesLabel, +${data.additions} added, −${data.deletions} removed, ready to review and stage',
-      child: OCard(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              children: [
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: c.accentSoft,
-                    borderRadius: BorderRadius.circular(ORadius.m),
-                  ),
-                  child: Icon(
-                    Icons.difference_rounded,
-                    size: 21,
-                    color: c.accent,
-                  ),
-                ),
-                const SizedBox(width: OSpace.m),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        data.files.length == 1
-                            ? '1 changed file'
-                            : '${data.files.length} changed files',
-                        style: OType.bodyStrong.copyWith(color: c.text),
-                      ),
-                      Text(
-                        'Ready to review and stage',
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: OSpace.s),
-                Text(
-                  '+${data.additions}',
-                  style: OType.bodySm.copyWith(
-                    color: c.success,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(width: OSpace.s),
-                Text(
-                  '−${data.deletions}',
-                  style: OType.bodySm.copyWith(
-                    color: c.danger,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: OSpace.m),
-            if (total > 0)
-              ClipRRect(
-                borderRadius: BorderRadius.circular(3),
-                child: SizedBox(
-                  height: 6,
-                  child: Row(
-                    children: [
-                      Expanded(
-                        flex: addFlex,
-                        child: ColoredBox(
-                          color: c.success,
-                          child: const SizedBox.expand(),
-                        ),
-                      ),
-                      const SizedBox(width: 2),
-                      Expanded(
-                        flex: removeFlex,
-                        child: ColoredBox(
-                          color: c.danger,
-                          child: const SizedBox.expand(),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _DiffFileCard extends StatelessWidget {
-  const _DiffFileCard({
+/// One changed file: full path on the left, +N −N on the right.
+class _DiffFileRow extends StatelessWidget {
+  const _DiffFileRow({
     required this.file,
+    required this.path,
     required this.expanded,
     required this.onToggle,
     this.onCopyDiff,
   });
 
   final V2ChangedFile file;
+  final String path;
   final bool expanded;
   final VoidCallback onToggle;
   final VoidCallback? onCopyDiff;
@@ -483,50 +295,19 @@ class _DiffFileCard extends StatelessWidget {
       constraints: const BoxConstraints(minHeight: OSpace.listRow),
       child: Padding(
         padding: const EdgeInsets.symmetric(
-          horizontal: OSpace.l,
+          horizontal: OSpace.s,
           vertical: OSpace.s,
         ),
         child: Row(
           children: [
-            Container(
-              width: 36,
-              height: 36,
-              decoration: BoxDecoration(
-                color: c.surfaceAlt,
-                borderRadius: BorderRadius.circular(ORadius.s),
-              ),
-              child: Icon(_icon, size: 19, color: c.accent),
-            ),
-            const SizedBox(width: OSpace.m),
+            Icon(_icon, size: 18, color: c.textMuted),
+            const SizedBox(width: OSpace.s),
             Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    file.name,
-                    style: OType.bodySm.copyWith(
-                      color: c.text,
-                      fontWeight: FontWeight.w600,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  if (file.directory.isNotEmpty)
-                    Text(
-                      file.directory,
-                      style: OType.caption.copyWith(color: c.textMuted),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  if (!file.canExpand)
-                    Text(
-                      'No diff available',
-                      key: ValueKey<String>('v2-diff-unavailable-${file.path}'),
-                      style: OType.caption.copyWith(color: c.textFaint),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                ],
+              child: Text(
+                path,
+                style: OType.bodySm.copyWith(color: c.text),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
               ),
             ),
             const SizedBox(width: OSpace.s),
@@ -545,8 +326,8 @@ class _DiffFileCard extends StatelessWidget {
                 fontWeight: FontWeight.w600,
               ),
             ),
-            const SizedBox(width: OSpace.xs),
-            if (file.canExpand)
+            if (file.canExpand) ...[
+              const SizedBox(width: OSpace.xs),
               AnimatedRotation(
                 turns: expanded ? 0.5 : 0,
                 duration: OMove.duration(context, OMotion.fast),
@@ -556,46 +337,36 @@ class _DiffFileCard extends StatelessWidget {
                   color: c.textFaint,
                 ),
               ),
+            ],
           ],
         ),
       ),
     );
-    return Container(
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(ORadius.l),
-        border: Border.all(color: c.hairline),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (file.canExpand)
           Material(
             color: Colors.transparent,
-            child: file.canExpand
-                ? InkWell(
-                    onTap: onToggle,
-                    child: Semantics(
-                      label:
-                          '${file.name}, +${file.additions} −${file.deletions}',
-                      button: true,
-                      expanded: expanded,
-                      child: row,
-                    ),
-                  )
-                : Semantics(
-                    label:
-                        '${file.name}, +${file.additions} −${file.deletions}, '
-                        'no diff available',
-                    child: row,
-                  ),
+            child: InkWell(
+              onTap: onToggle,
+              child: Semantics(
+                label: '$path, +${file.additions} −${file.deletions}',
+                button: true,
+                expanded: expanded,
+                child: row,
+              ),
+            ),
+          )
+        else
+          Semantics(
+            label: '$path, +${file.additions} −${file.deletions}',
+            child: row,
           ),
-          if (file.canExpand && expanded) ...[
-            Divider(height: 1, color: c.hairline),
-            _DiffBody(file: file, onCopyDiff: onCopyDiff),
-          ],
-        ],
-      ),
+        if (file.canExpand && expanded)
+          _DiffBody(file: file, onCopyDiff: onCopyDiff),
+        Divider(height: 1, color: c.hairline),
+      ],
     );
   }
 }
@@ -710,129 +481,6 @@ class _DiffLineRow extends StatelessWidget {
             Text(line.text, softWrap: false, style: style),
           ],
         ),
-      ),
-    );
-  }
-}
-
-class _SyncRow extends StatelessWidget {
-  const _SyncRow({required this.count, this.onSync});
-
-  final int count;
-  final VoidCallback? onSync;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final wired = onSync != null;
-    return OCard(
-      onTap: onSync,
-      semanticLabel: wired
-          ? 'Sync latest first, $count behind'
-          : 'Behind remote by $count, syncing is not available yet',
-      child: Row(
-        children: [
-          Container(
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              color: c.accentSoft,
-              shape: BoxShape.circle,
-            ),
-            child: Icon(Icons.sync_rounded, size: 19, color: c.accent),
-          ),
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            flex: 3,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  wired ? 'Sync latest first' : 'Behind remote',
-                  style: OType.bodySm.copyWith(
-                    color: c.text,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                Text(
-                  wired
-                      ? 'Pulls $count upstream ${count == 1 ? 'commit' : 'commits'} safely'
-                      : '$count upstream ${count == 1 ? 'commit' : 'commits'} to pull before pushing',
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: OSpace.s),
-          Flexible(
-            flex: 2,
-            child: _MetaPill(
-              label: wired ? '$count behind' : 'Sync unavailable',
-              tone: wired ? OPillTone.accent : OPillTone.warn,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Small status pill that mirrors [OPill] but grows with the text scale instead
-/// of clipping at a fixed 24 dp height.
-class _MetaPill extends StatelessWidget {
-  const _MetaPill({
-    required this.label,
-    this.tone = OPillTone.neutral,
-    this.dot = false,
-  });
-
-  final String label;
-  final OPillTone tone;
-  final bool dot;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final (bg, fg) = switch (tone) {
-      OPillTone.neutral => (c.surfaceAlt, c.textMuted),
-      OPillTone.accent => (c.accentSoft, c.accent),
-      OPillTone.success => (c.success.withValues(alpha: 0.12), c.success),
-      OPillTone.warn => (c.warn.withValues(alpha: 0.12), c.warn),
-      OPillTone.danger => (c.danger.withValues(alpha: 0.12), c.danger),
-    };
-    return Container(
-      constraints: const BoxConstraints(minHeight: 24),
-      padding: const EdgeInsets.symmetric(
-        horizontal: 10,
-        vertical: OSpace.xs / 2,
-      ),
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (dot) ...[
-            Container(
-              width: 6,
-              height: 6,
-              decoration: BoxDecoration(color: fg, shape: BoxShape.circle),
-            ),
-            const SizedBox(width: 6),
-          ],
-          Flexible(
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: OType.caption.copyWith(
-                color: fg,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }

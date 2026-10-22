@@ -229,7 +229,7 @@ void main() {
       );
 
       await _fillCustomForm(tester);
-      await tester.tap(find.text('Save'));
+      await tester.tap(find.byKey(const Key('connector-save')));
       await tester.pump(const Duration(milliseconds: 500));
 
       final saved = (await store.load()).single;
@@ -266,7 +266,7 @@ void main() {
         name: 'Gmail',
         url: 'https://gmail.internal.test/mcp',
       );
-      await tester.tap(find.text('Save'));
+      await tester.tap(find.byKey(const Key('connector-save')));
       await tester.pump(const Duration(milliseconds: 500));
 
       final saved = (await store.load()).single;
@@ -285,7 +285,7 @@ void main() {
         ),
       );
 
-      await tester.tap(find.text('Save'));
+      await tester.tap(find.byKey(const Key('connector-save')));
       await tester.pump(const Duration(milliseconds: 300));
       await _scrollTo(tester, find.byKey(const Key('add-connector-name')));
 
@@ -310,18 +310,13 @@ void main() {
 
       await _fillCustomForm(tester);
 
-      final save = tester.widget<OButton>(
+      final save = tester.widget<OIconButton>(
         find.byKey(const Key('connector-save')),
       );
       expect(save.onPressed, isNull, reason: 'Free has no connector slots');
       expect(await store.load(), isEmpty);
 
-      await tester.scrollUntilVisible(
-        find.byKey(const Key('connector-cap-notice')),
-        300,
-        scrollable: find.byType(Scrollable).first,
-      );
-      await tester.ensureVisible(find.byKey(const Key('connector-cap-upgrade')));
+      await tester.drag(find.byType(Scrollable).first, const Offset(0, 3000));
       await tester.pump(const Duration(milliseconds: 300));
       await tester.tap(find.byKey(const Key('connector-cap-upgrade')));
       await tester.pump(const Duration(milliseconds: 300));
@@ -432,18 +427,16 @@ void main() {
 
       expect(find.text('On'), findsWidgets);
 
-      // Narrow to the saved row so the footer count is on screen.
+      // Narrow to the saved row before opening it.
       await tester.enterText(find.byType(TextField).first, 'github');
       await tester.pump(const Duration(milliseconds: 400));
-      await _scrollTo(tester, find.textContaining('installed'));
-      expect(find.textContaining('1 installed'), findsOneWidget);
 
       await tester.tap(find.text('GitHub').first);
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 700));
 
-      expect(find.text('Connector details'), findsOneWidget);
-      expect(find.text('https://api.github.test'), findsOneWidget);
+      expect(find.byType(ConnectorDetailPage), findsOneWidget);
+      expect(find.text('Test connection'), findsOneWidget);
     });
 
     testWidgets('the row switch persists through the store', (tester) async {
@@ -606,12 +599,6 @@ void main() {
                 ),
                 store: V2MemoryConnectorStore([_github()]),
                 secrets: V2MemoryConnectorSecrets(),
-                probe: _FakeProbe(
-                  const V2ConnectorTestReport(
-                    ok: false,
-                    message: 'Could not reach api.github.test.',
-                  ),
-                ),
               ),
             ),
           ),

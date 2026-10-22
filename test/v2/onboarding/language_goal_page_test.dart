@@ -13,7 +13,6 @@ Future<void> _pump(
   void Function(String goalId, bool selected)? onGoalToggled,
   V2LanguageGoalContinue? onContinue,
   VoidCallback? onRetry,
-  VoidCallback? onSeeAllLanguages,
   VoidCallback? onClose,
   VoidCallback? onBack,
 }) async {
@@ -26,7 +25,6 @@ Future<void> _pump(
         onGoalToggled: onGoalToggled,
         onContinue: onContinue,
         onRetry: onRetry,
-        onSeeAllLanguages: onSeeAllLanguages,
         onClose: onClose,
         onBack: onBack,
       ),
@@ -65,17 +63,18 @@ void main() {
   ) async {
     await _pump(tester);
 
-    expect(find.text('Which language do you think in?'), findsOneWidget);
+    expect(find.text('SPOKEN LANGUAGE'), findsOneWidget);
     expect(find.text('English'), findsOneWidget);
     expect(find.text('हिन्दी'), findsOneWidget);
+    expect(find.text('Hinglish'), findsOneWidget);
     expect(find.text('ਪੰਜਾਬੀ'), findsOneWidget);
     expect(find.text('தமிழ்'), findsOneWidget);
     expect(find.text('Build something'), findsOneWidget);
     expect(find.text('Research'), findsOneWidget);
     expect(find.text('Write'), findsOneWidget);
     expect(find.text('Automate my work'), findsOneWidget);
-    expect(find.text('Just explore'), findsOneWidget);
-    expect(find.text('STEP 1 OF 3'), findsOneWidget);
+    expect(find.text('Explore'), findsOneWidget);
+    expect(find.text('STEP 2 OF 4'), findsOneWidget);
     expect(find.byKey(const Key('language-goal-continue')), findsOneWidget);
   });
 
@@ -85,13 +84,13 @@ void main() {
     await _pumpSmall(tester);
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Which language do you think in?'), findsOneWidget);
+    expect(find.text('SPOKEN LANGUAGE'), findsOneWidget);
   });
 
   testWidgets('language and goal renders correctly in dark', (tester) async {
     await _pump(tester, dark: true);
 
-    expect(find.text('Which language do you think in?'), findsOneWidget);
+    expect(find.text('SPOKEN LANGUAGE'), findsOneWidget);
     expect(find.text('हिन्दी'), findsOneWidget);
     expect(find.byKey(const Key('language-goal-continue')), findsOneWidget);
   });
@@ -181,15 +180,15 @@ void main() {
     expect(backs, 1);
   });
 
-  testWidgets('see all languages is shown when wired', (tester) async {
-    var taps = 0;
-    await _pump(tester, onSeeAllLanguages: () => taps++);
+  testWidgets('the grid offers exactly the supported languages', (
+    tester,
+  ) async {
+    await _pump(tester);
 
-    await tester.ensureVisible(find.text('See all 40+ languages'));
-    await tester.tap(find.text('See all 40+ languages'));
-    await tester.pump();
-
-    expect(taps, 1);
+    expect(const V2LanguageGoalData().languages, hasLength(5));
+    // No "40+ languages" promise while only five are offered.
+    expect(find.textContaining('40+'), findsNothing);
+    expect(find.text('See all 40+ languages'), findsNothing);
   });
 
   testWidgets('loading shows skeletons and hides the continue bar', (
@@ -244,10 +243,7 @@ void main() {
     await _pumpSmall(tester, dark: true);
 
     expect(tester.takeException(), isNull);
-    expect(
-      find.text('What do you want Ovid to help with first?'),
-      findsOneWidget,
-    );
+    expect(find.text('FIRST GOAL'), findsOneWidget);
   });
 
   testWidgets('every goal chip stays reachable at 200 % text', (tester) async {
@@ -273,8 +269,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.text('Just explore'));
-    await tester.tap(find.text('Just explore'));
+    await tester.ensureVisible(find.text('Explore'));
+    await tester.tap(find.text('Explore'));
     await tester.pump();
 
     expect(events, ['explore:true']);
@@ -300,7 +296,7 @@ void main() {
   ) async {
     final handle = tester.ensureSemantics();
 
-    await _pump(tester);
+    await _pump(tester, onContinue: (_, _) {});
 
     expect(
       tester.getSemantics(find.bySemanticsLabel('English, Global')),
@@ -403,8 +399,8 @@ void main() {
       await _pump(tester);
 
       expect(find.byType(OnboardingStepProgress), findsOneWidget);
-      expect(find.text('STEP 1 OF 3'), findsOneWidget);
-      expect(find.bySemanticsLabel('Step 1 of 3'), findsOneWidget);
+      expect(find.text('STEP 2 OF 4'), findsOneWidget);
+      expect(find.bySemanticsLabel('Step 2 of 4'), findsOneWidget);
 
       handle.dispose();
     });

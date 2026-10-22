@@ -56,31 +56,52 @@ V2SharedMemoryPageData _ready({
 }
 
 void main() {
-  testWidgets('renders the explainer, scopes and retention note in light', (
+  testWidgets('renders one list of scopes with a filter in light', (
     tester,
   ) async {
-    await _pump(tester, _ready());
+    await _pump(tester, _ready(onForget: () {}));
 
     expect(find.text('Shared memory'), findsOneWidget);
-    expect(find.text('What shared memory does'), findsOneWidget);
-    expect(find.text('SCOPES'), findsOneWidget);
+    expect(find.text('Share memory'), findsOneWidget);
     expect(find.text('This chat'), findsOneWidget);
-    expect(find.text('Project'), findsOneWidget);
-    expect(find.text('Global'), findsOneWidget);
-    expect(find.text('Who can see it: Project members'), findsOneWidget);
+    expect(find.text('Project'), findsWidgets);
+    expect(find.text('Global'), findsWidgets);
+    expect(find.text('Only you'), findsOneWidget);
+    expect(find.text('Project members'), findsOneWidget);
+    expect(find.text('Forget shared facts'), findsOneWidget);
+    // The explainer and the retention card are gone.
+    expect(find.text('What shared memory does'), findsNothing);
     expect(
       find.textContaining('Shared facts stay until you forget them'),
-      findsOneWidget,
+      findsNothing,
     );
-    expect(find.text('Forget shared facts'), findsOneWidget);
   });
 
   testWidgets('renders in dark', (tester) async {
-    await _pump(tester, _ready(), dark: true);
+    await _pump(tester, _ready(onForget: () {}), dark: true);
 
-    expect(find.text('What shared memory does'), findsOneWidget);
+    expect(find.text('Share memory'), findsOneWidget);
     expect(find.text('This chat'), findsOneWidget);
     expect(find.text('Forget shared facts'), findsOneWidget);
+  });
+
+  testWidgets('scope chips filter the list', (tester) async {
+    await _pump(tester, _ready());
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('shared-memory-filter-project')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Project'), findsWidgets);
+    expect(find.text('This chat'), findsNothing);
+    expect(find.text('Global'), findsOneWidget);
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('shared-memory-filter-all')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('This chat'), findsOneWidget);
   });
 
   testWidgets('master toggle turns sharing on', (tester) async {
@@ -180,7 +201,6 @@ void main() {
       find.byKey(const ValueKey<String>('forget-shared-facts')),
     );
     expect(button.onPressed, isNull);
-    expect(find.text('There are no shared facts to forget.'), findsOneWidget);
 
     final semantics = tester
         .getSemantics(find.byKey(const ValueKey<String>('forget-shared-facts')))
@@ -217,10 +237,8 @@ void main() {
     );
 
     expect(find.text('Nothing is shared yet'), findsOneWidget);
-    final refresh = tester.widget<OButton>(
-      find.widgetWithText(OButton, 'Refresh'),
-    );
-    expect(refresh.onPressed, isNull);
+    // No callback, no button: a dead Refresh control is not drawn.
+    expect(find.widgetWithText(OButton, 'Refresh'), findsNothing);
 
     await _pump(
       tester,
@@ -309,18 +327,25 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('reduced motion keeps every section', (tester) async {
-    await _pump(tester, _ready(), reduceMotion: true);
+  testWidgets('centres the content at 600 dp', (tester) async {
+    await _pump(tester, _ready(), size: const Size(600, 1000));
+
+    final card = find.byType(OCard).first;
+    expect(tester.getSize(card).width, lessThanOrEqualTo(640));
+    expect(tester.getCenter(card).dx, closeTo(300, 0.5));
+  });
+
+  testWidgets('reduced motion keeps every row', (tester) async {
+    await _pump(tester, _ready(onForget: () {}), reduceMotion: true);
 
     for (final label in const [
-      'What shared memory does',
-      'SCOPES',
+      'Share memory',
       'This chat',
       'Project',
       'Global',
       'Forget shared facts',
     ]) {
-      expect(find.text(label), findsOneWidget, reason: '$label is hidden');
+      expect(find.text(label), findsWidgets, reason: '$label is hidden');
     }
   });
 
@@ -343,32 +368,31 @@ void main() {
   ) async {
     await _pump(tester, _ready(enabled: false, onEnabledChanged: (_) {}));
 
-    expect(find.text('Sharing off'), findsNWidgets(2));
-    await tester.tap(
-      find.byKey(const ValueKey<String>('shared-memory-master-switch')),
+    final master = find.byKey(
+      const ValueKey<String>('shared-memory-master-switch'),
     );
+    expect(tester.widget<Switch>(master).value, isFalse);
+    await tester.tap(master);
     await tester.pumpAndSettle();
 
-    expect(find.text('Sharing on'), findsNWidgets(2));
-    expect(find.text('Sharing off'), findsNothing);
+    expect(tester.widget<Switch>(master).value, isTrue);
   });
 
-  testWidgets('a scope switch really changes the shared count', (tester) async {
+  testWidgets('a scope switch really changes its value', (tester) async {
     await _pump(tester, _ready(onScopeChanged: (_, _) {}));
 
-    expect(find.text('1 of 3 shared'), findsOneWidget);
     final projectSwitch = find.byKey(
       const ValueKey<String>('shared-memory-scope-project-switch'),
     );
     await tester.ensureVisible(projectSwitch);
+    expect(tester.widget<Switch>(projectSwitch).value, isFalse);
     await tester.tap(projectSwitch);
     await tester.pumpAndSettle();
 
-    expect(find.text('2 of 3 shared'), findsOneWidget);
     expect(tester.widget<Switch>(projectSwitch).value, isTrue);
   });
 
-  testWidgets('forget clears the shared facts and every scope', (tester) async {
+  testWidgets('forget clears every scope and disables itself', (tester) async {
     await _pump(tester, _ready(factCount: 3, onForget: () {}));
 
     final button = find.byKey(const ValueKey<String>('forget-shared-facts'));
@@ -378,9 +402,16 @@ void main() {
     await tester.tap(find.text('Forget'));
     await tester.pumpAndSettle();
 
-    expect(find.text('0 facts shared'), findsOneWidget);
-    expect(find.text('0 of 3 shared'), findsOneWidget);
-    expect(find.text('There are no shared facts to forget.'), findsOneWidget);
     expect(tester.widget<OButton>(button).onPressed, isNull);
+    expect(
+      tester
+          .widget<Switch>(
+            find.byKey(
+              const ValueKey<String>('shared-memory-scope-chat-switch'),
+            ),
+          )
+          .value,
+      isFalse,
+    );
   });
 }

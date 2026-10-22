@@ -1,5 +1,3 @@
-import 'dart:ui' show Tristate;
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/account_service.dart';
@@ -70,8 +68,6 @@ V2AccountData _accountData({
   bool deletionPending = false,
   DateTime? deletionDeadline,
   bool deletionLoading = false,
-  String syncLabel = 'All synced',
-  bool syncOk = true,
 }) {
   return V2AccountData(
     status: status,
@@ -97,8 +93,6 @@ V2AccountData _accountData({
     deletionPending: deletionPending,
     deletionDeadline: deletionDeadline,
     deletionLoading: deletionLoading,
-    syncLabel: syncLabel,
-    syncOk: syncOk,
   );
 }
 
@@ -131,6 +125,14 @@ void _narrowSize(WidgetTester tester) {
   addTearDown(tester.view.resetDevicePixelRatio);
 }
 
+/// Tablet / desktop width, tall enough for the whole page.
+void _wideSize(WidgetTester tester, double width) {
+  tester.view.physicalSize = Size(width, 1600);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+}
+
 /// Types the account email into the typed-confirmation sheet.
 Future<void> _typeEmail(WidgetTester tester) async {
   await tester.enterText(
@@ -150,30 +152,47 @@ Future<void> _tapTypedConfirm(WidgetTester tester) async {
 }
 
 void main() {
-  testWidgets('renders the profile and linked accounts in light', (
+  testWidgets('renders the header, profile and at most five rows', (
     tester,
   ) async {
     _phoneSize(tester);
     await tester.pumpWidget(
-      _app(OTheme.light(), _accountData(onChangePhoto: () {})),
+      _app(
+        OTheme.light(),
+        _accountData(
+          onChangePhoto: () {},
+          onEditProfile: () {},
+          onOpenCredentials: () {},
+          onTeamSupport: () {},
+          onSignOut: () {},
+          onDeleteAccount: () {},
+        ),
+      ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('Aarav Sharma'), findsWidgets);
-    expect(find.text('Senior Platform Architect'), findsOneWidget);
+
+    expect(find.text('Account'), findsOneWidget);
+    expect(find.text('Aarav Sharma'), findsOneWidget);
     expect(find.text('Ovid Plus'), findsOneWidget);
-    expect(find.text('Change photo'), findsOneWidget);
-    expect(find.text('PROFILE DETAILS'), findsOneWidget);
-    expect(find.text('All synced'), findsOneWidget);
-    expect(find.text('Display name'), findsOneWidget);
-    expect(find.text('Email address'), findsOneWidget);
-    expect(find.text('Verified'), findsOneWidget);
-    expect(find.text('SIGN-IN METHODS'), findsOneWidget);
-    expect(find.text('Google'), findsOneWidget);
-    expect(find.text('Apple'), findsOneWidget);
+    // The header is avatar + name + plan. Profile details, email included,
+    // live behind the one "Edit profile" action.
+    expect(find.text('aarav@gmail.com'), findsNothing);
+
+    expect(find.text('Edit profile'), findsOneWidget);
+    expect(find.text('Sign-in methods'), findsOneWidget);
+    expect(find.text('Google, Apple'), findsOneWidget);
     expect(find.text('Credentials'), findsOneWidget);
     expect(find.text('Team & support'), findsOneWidget);
     expect(find.text('Sign out'), findsOneWidget);
     expect(find.text('Delete account'), findsOneWidget);
+
+    // The profile-detail grid is gone.
+    expect(find.text('PROFILE DETAILS'), findsNothing);
+    expect(find.text('Display name'), findsNothing);
+    expect(find.text('Email address'), findsNothing);
+    expect(find.text('Verified'), findsNothing);
+    expect(find.text('Senior Platform Architect'), findsNothing);
+    expect(find.text('All synced'), findsNothing);
   });
 
   testWidgets('renders correctly in dark', (tester) async {
@@ -181,12 +200,12 @@ void main() {
     await tester.pumpWidget(_app(OTheme.dark(), _accountData()));
     await tester.pumpAndSettle();
 
-    expect(find.text('Aarav Sharma'), findsWidgets);
-    expect(find.text('PROFILE DETAILS'), findsOneWidget);
-    expect(find.text('Connected'), findsNWidgets(2));
+    expect(find.text('Aarav Sharma'), findsOneWidget);
+    expect(find.text('Sign-in methods'), findsOneWidget);
+    expect(find.text('Google, Apple'), findsOneWidget);
   });
 
-  testWidgets('photo controls are hidden when no picker is wired', (
+  testWidgets('photo control is hidden when no picker is wired', (
     tester,
   ) async {
     _phoneSize(tester);
@@ -198,28 +217,69 @@ void main() {
     expect(find.byTooltip('Change photo'), findsNothing);
   });
 
-  testWidgets('read-only detail rows are not presented as editable', (
-    tester,
-  ) async {
+  testWidgets('edit profile calls the injected callback', (tester) async {
     _phoneSize(tester);
-    final tapped = <String>[];
+    var edits = 0;
     await tester.pumpWidget(
-      _app(OTheme.light(), _accountData(onFieldTap: (f) => tapped.add(f.id))),
+      _app(OTheme.light(), _accountData(onEditProfile: () => edits++)),
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Email address'));
+    await tester.tap(find.text('Edit profile'));
     await tester.pump();
-    expect(tapped, isEmpty);
 
-    await tester.tap(find.text('Display name'));
-    await tester.pump();
-    expect(tapped, <String>['display_name']);
+    expect(edits, 1);
   });
 
-  testWidgets('empty linked accounts shows an action that fires', (
+  testWidgets('edit profile falls back to the first editable field', (
     tester,
   ) async {
+    _phoneSize(tester);
+    V2AccountField? tapped;
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        _accountData(onFieldTap: (field) => tapped = field),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Edit profile'));
+    await tester.pump();
+
+    expect(tapped?.id, 'display_name');
+  });
+
+  testWidgets('sign-in methods opens a sheet with the linked accounts', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    var opened = 0;
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        _accountData(onAccountTap: (_) => opened++),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Sign-in methods'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Google'), findsOneWidget);
+    expect(find.text('Apple'), findsOneWidget);
+    expect(find.text('Connected'), findsNWidgets(2));
+
+    await tester.tap(find.text('Google'));
+    await tester.pumpAndSettle();
+
+    expect(opened, 1);
+  });
+
+  testWidgets('empty linked accounts shows None linked and can link', (
+    tester,
+  ) async {
+    _phoneSize(tester);
     var linked = 0;
     await tester.pumpWidget(
       _app(
@@ -229,11 +289,12 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('No linked accounts'), findsOneWidget);
-    await tester.ensureVisible(find.text('Link account'));
+    expect(find.text('None linked'), findsOneWidget);
+
+    await tester.tap(find.text('Sign-in methods'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Link account'));
-    await tester.pump();
+    await tester.pumpAndSettle();
 
     expect(linked, 1);
   });
@@ -253,32 +314,6 @@ void main() {
     expect(signedOut, 1);
   });
 
-  testWidgets('edit profile calls the injected callback', (tester) async {
-    var edits = 0;
-    await tester.pumpWidget(
-      _app(OTheme.light(), _accountData(onEditProfile: () => edits++)),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byTooltip('Edit profile'));
-    await tester.pump();
-
-    expect(edits, 1);
-  });
-
-  testWidgets('tapping a detail row sends the field', (tester) async {
-    V2AccountField? tapped;
-    await tester.pumpWidget(
-      _app(OTheme.light(), _accountData(onFieldTap: (field) => tapped = field)),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text('Display name'));
-    await tester.pump();
-
-    expect(tapped?.id, 'display_name');
-  });
-
   testWidgets('credentials row opens the credentials screen', (tester) async {
     _phoneSize(tester);
     var opened = 0;
@@ -287,8 +322,6 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.text('Credentials'));
-    await tester.pumpAndSettle();
     await tester.tap(find.text('Credentials'));
     await tester.pump();
 
@@ -303,15 +336,13 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.text('Team & support'));
-    await tester.pumpAndSettle();
     await tester.tap(find.text('Team & support'));
     await tester.pump();
 
     expect(opened, 1);
   });
 
-  testWidgets('delete explains the grace period and can be cancelled', (
+  testWidgets('delete asks for a typed confirmation and can be cancelled', (
     tester,
   ) async {
     _phoneSize(tester);
@@ -333,14 +364,9 @@ void main() {
     await tester.tap(find.text('Delete account'));
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('24-hour grace period'), findsWidgets);
-    expect(
-      find.textContaining(
-        'Signing in during the 24-hour grace period lets you choose',
-      ),
-      findsOneWidget,
-    );
-    expect(find.textContaining('Nothing is deleted before'), findsOneWidget);
+    expect(find.text('Delete your account?'), findsOneWidget);
+    expect(find.text('Cannot be undone'), findsOneWidget);
+    expect(find.text('This permanently removes:'), findsOneWidget);
     expect(find.text('Manage Play subscription'), findsOneWidget);
     expect(deleted, 0);
 
@@ -624,17 +650,22 @@ void main() {
 
   testWidgets('fits 320 dp at 200% text without overflow', (tester) async {
     _narrowSize(tester);
-    await tester.pumpWidget(_app(OTheme.light(), _accountData(), textScale: 2));
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        _accountData(onSignOut: () {}, onDeleteAccount: () {}),
+        textScale: 2,
+      ),
+    );
     await tester.pumpAndSettle();
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Aarav Sharma'), findsWidgets);
-    expect(find.text('Verified'), findsOneWidget);
-    expect(find.text('Connected'), findsNWidgets(2));
+    expect(find.text('Aarav Sharma'), findsOneWidget);
+    expect(find.text('Sign-in methods'), findsOneWidget);
 
     // The body scrolls, so the destructive action stays reachable.
     await tester.drag(
-      find.byType(SingleChildScrollView),
+      find.byType(SingleChildScrollView).first,
       const Offset(0, -600),
     );
     await tester.pumpAndSettle();
@@ -660,7 +691,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Connected'), findsNWidgets(2));
+    expect(find.text('Sign-in methods'), findsOneWidget);
     expect(find.text('Deletion scheduled'), findsOneWidget);
   });
 
@@ -683,29 +714,42 @@ void main() {
     expect(find.byType(OSkeletonList), findsOneWidget);
   });
 
-  testWidgets('sync label is hidden when none is supplied', (tester) async {
-    _phoneSize(tester);
-    await tester.pumpWidget(_app(OTheme.light(), _accountData(syncLabel: '')));
-    await tester.pumpAndSettle();
-
-    expect(find.text('All synced'), findsNothing);
-    expect(find.text('PROFILE DETAILS'), findsOneWidget);
-  });
-
-  testWidgets('unwired actions are announced as disabled', (tester) async {
-    final semantics = tester.ensureSemantics();
+  testWidgets('unwired actions are not shown at all', (tester) async {
     _phoneSize(tester);
     await tester.pumpWidget(_app(OTheme.light(), _accountData()));
     await tester.pumpAndSettle();
 
-    final signOut = tester
-        .getSemantics(find.bySemanticsLabel('Sign out').first)
-        .getSemanticsData();
-    // Tristate.none would mean the control does not announce its state at all.
-    expect(signOut.flagsCollection.isEnabled, Tristate.isFalse);
-
-    semantics.dispose();
+    // No dead buttons: without a handler the control is removed.
+    expect(find.text('Sign out'), findsNothing);
+    expect(find.text('Delete account'), findsNothing);
+    expect(find.text('Edit profile'), findsNothing);
+    expect(find.text('Credentials'), findsNothing);
+    expect(find.text('Team & support'), findsNothing);
   });
+
+  for (final width in <double>[600, 900]) {
+    testWidgets('content is centred and capped at $width dp', (tester) async {
+      _wideSize(tester, width);
+      await tester.pumpWidget(
+        _app(
+          OTheme.light(),
+          _accountData(onEditProfile: () {}, onSignOut: () {}),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final card = tester.getRect(find.byType(OCard).first);
+      final limit = width >= 900 ? 720.0 : 640.0;
+
+      expect(card.width, lessThanOrEqualTo(limit));
+      expect(card.width, lessThan(width), reason: 'rows must not stretch');
+      expect(
+        card.center.dx,
+        moreOrLessEquals(width / 2, epsilon: 1),
+        reason: 'content must be centred, not left aligned',
+      );
+    });
+  }
 
   testWidgets('icon controls meet the 48 dp target and carry labels', (
     tester,
@@ -714,20 +758,14 @@ void main() {
     await tester.pumpWidget(
       _app(
         OTheme.light(),
-        _accountData(onEditProfile: () {}, onChangePhoto: () {}),
+        _accountData(onChangePhoto: () {}, onSignOut: () {}),
       ),
     );
     await tester.pumpAndSettle();
 
-    for (final label in const ['Change photo', 'Edit profile']) {
-      expect(find.bySemanticsLabel(label), findsWidgets);
-    }
+    expect(find.bySemanticsLabel('Change photo'), findsWidgets);
     expect(
       tester.getSize(find.byTooltip('Change photo')).height,
-      greaterThanOrEqualTo(48),
-    );
-    expect(
-      tester.getSize(find.byTooltip('Edit profile')).height,
       greaterThanOrEqualTo(48),
     );
     expect(

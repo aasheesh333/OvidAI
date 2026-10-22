@@ -1,12 +1,11 @@
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
-import '../../../core/cloud/cloud_backup.dart';
-import '../../../core/settings_backup_service.dart';
 import '../../design/o_components.dart';
-import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'confirm_typed_sheet.dart';
+import 'data_control_export.dart'
+    if (dart.library.io) 'data_control_export_io.dart';
 import 'export_picker_sheet.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the localization pass.
@@ -22,7 +21,7 @@ class V2ImportValidation {
     required this.fileName,
     required this.message,
     required this.valid,
-    this.checkedLabel = 'Checked just now',
+    this.checkedLabel = 'Checked now',
     this.planQuotaLabel = '',
     this.fitsPlan = true,
   });
@@ -178,7 +177,8 @@ class V2DataControlPageData {
   bool get canImport => importValidation?.canImport ?? false;
 }
 
-/// Privacy and data controls: backup, permissions, crash reports and deletion.
+/// Privacy and data controls: backup, account consent and destructive actions.
+/// Every row is an action or a value; there are no explanatory paragraphs.
 class DataControlPage extends StatelessWidget {
   const DataControlPage({super.key, required this.data});
 
@@ -186,269 +186,205 @@ class DataControlPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return OScaffold(
-      appBar: const OAppBar(title: 'Data control'),
-      body: _body(context),
-    );
-  }
-
-  Widget _body(BuildContext context) {
-    if (data.loading) {
-      return const OFadeSlide(child: OSkeletonList(rows: 6));
-    }
-    if (data.errorMessage != null) {
-      return OErrorState(message: data.errorMessage!, onRetry: data.onRetry);
-    }
-    if (!data.hasData) {
-      return OEmptyState(
-        icon: Icons.shield_outlined,
-        title: 'No data to manage yet',
-        message: 'Your chats, files, and memory will appear here.',
-        action: OButton(
-          label: 'Export or import',
-          icon: Icons.swap_vert_rounded,
-          onPressed: data.onExportImport ?? data.onChooseImport,
-        ),
-      );
-    }
-    return OFadeSlide(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(
-          OSpace.screen,
-          OSpace.l,
-          OSpace.screen,
-          OSpace.xxl,
-        ),
-        child: OStagger(
-          children: [
-            _intro(context),
-            _backupCard(context),
-            _generalControls(context),
-            _dangerZone(context),
-          ],
-        ),
+    final status = data.loading
+        ? OStatus.loading
+        : data.errorMessage != null
+        ? OStatus.error
+        : data.hasData
+        ? OStatus.content
+        : OStatus.empty;
+    return OScreen(
+      title: 'Data control',
+      child: OStateView(
+        status: status,
+        errorMessage: data.errorMessage,
+        onRetry: data.onRetry,
+        skeletonRows: 5,
+        emptyTitle: 'No data to manage',
+        emptyBody: 'Chats and files appear here.',
+        emptyActionLabel: 'Export data',
+        onEmptyAction: data.onExportImport ?? data.onExport,
+        child: _content(context),
       ),
     );
   }
 
-  Widget _intro(BuildContext context) {
+  Widget _content(BuildContext context) {
     final c = OColors.of(context);
-    final status = [
-      data.lastExportLabel,
-      data.backupSizeLabel,
-    ].where((s) => s.isNotEmpty).join(' · ');
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: OCard(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  width: 44,
-                  height: 44,
-                  decoration: BoxDecoration(
-                    color: c.accentSoft,
-                    borderRadius: BorderRadius.circular(ORadius.m),
-                  ),
-                  child: Icon(
-                    Icons.admin_panel_settings_outlined,
-                    size: 24,
-                    color: c.accent,
-                  ),
-                ),
-                const SizedBox(width: OSpace.m),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Privacy & Data Control',
-                        style: OType.h2.copyWith(color: c.text),
-                      ),
-                      const SizedBox(height: OSpace.xs),
-                      Text(
-                        'Take full ownership of your data, exports, and permissions. You decide what stays and what goes.',
-                        style: OType.bodySm.copyWith(color: c.textMuted),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: OSpace.m),
-            if (status.isNotEmpty)
-              Container(
-                padding: const EdgeInsets.all(OSpace.m),
-                decoration: BoxDecoration(
-                  color: c.surfaceAlt,
-                  borderRadius: BorderRadius.circular(ORadius.m),
-                ),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 8,
-                      height: 8,
-                      decoration: BoxDecoration(
-                        color: c.success,
-                        shape: BoxShape.circle,
-                      ),
-                    ),
-                    const SizedBox(width: OSpace.s),
-                    Expanded(
-                      child: Text(
-                        status,
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _backupCard(BuildContext context) {
-    final c = OColors.of(context);
-    final check = data.importValidation;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
+    final export = data.onExport == null ? null : () => _handleExport(context);
+    return SingleChildScrollView(
+      padding: const EdgeInsets.only(top: OSpace.l, bottom: OSpace.xxl),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          OSectionHeader(
-            label: 'Backup and restore',
-            padding: const EdgeInsets.only(bottom: OSpace.s),
-            trailing: Text(
-              'Encrypted',
-              style: OType.caption.copyWith(color: c.success),
-            ),
-          ),
+          OSectionTitle(title: 'Backup'),
           OCard(
+            padding: EdgeInsets.zero,
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Container(
-                      width: 36,
-                      height: 36,
-                      decoration: BoxDecoration(
-                        color: c.surfaceAlt,
-                        borderRadius: BorderRadius.circular(ORadius.m),
-                      ),
-                      child: Icon(
-                        Icons.inventory_2_outlined,
-                        size: 19,
-                        color: c.textMuted,
-                      ),
-                    ),
-                    const SizedBox(width: OSpace.m),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Move your data in or out',
-                            style: OType.body.copyWith(
-                              color: c.text,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                          const SizedBox(height: OSpace.xs),
-                          Text(
-                            data.exportLimitLabel,
-                            style: OType.caption.copyWith(color: c.textMuted),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-                if (data.totalDataSizeLabel.isNotEmpty) ...[
-                  const SizedBox(height: OSpace.m),
-                  Container(
-                    padding: const EdgeInsets.all(OSpace.m),
-                    decoration: BoxDecoration(
-                      color: c.surfaceAlt,
-                      borderRadius: BorderRadius.circular(ORadius.m),
-                    ),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Icon(
-                          Icons.data_usage_rounded,
-                          size: 18,
-                          color: c.textMuted,
-                        ),
-                        const SizedBox(width: OSpace.s),
-                        Expanded(
-                          child: Text(
-                            'Total data in your account',
-                            style: OType.caption.copyWith(color: c.textMuted),
-                          ),
-                        ),
-                        const SizedBox(width: OSpace.s),
-                        Flexible(
-                          child: Text(
-                            data.totalDataSizeLabel,
-                            textAlign: TextAlign.end,
-                            style: OType.caption.copyWith(
-                              color: c.text,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
+                Semantics(
+                  enabled: true,
+                  child: OListRow(
+                    icon: Icons.save_alt_rounded,
+                    title: 'Save to device',
+                    onTap: () => _handleExport(context, save: true),
                   ),
-                ],
-                const SizedBox(height: OSpace.m),
-                Wrap(
-                  spacing: OSpace.s,
-                  runSpacing: OSpace.s,
-                  children: [
-                    OButton(
-                      label: 'Export backup',
-                      icon: Icons.download_rounded,
-                      variant: OButtonVariant.secondary,
-                      onPressed: data.onExport == null
-                          ? null
-                          : () => _handleExport(context),
-                    ),
-                    OButton(
-                      key: const ValueKey('save-export-button'),
-                      label: 'Save to device',
-                      icon: Icons.save_alt_rounded,
-                      variant: OButtonVariant.secondary,
-                      onPressed: () => _handleExport(context, save: true),
-                    ),
-                    OButton(
-                      label: 'Choose backup',
-                      icon: Icons.upload_file_rounded,
-                      variant: OButtonVariant.ghost,
-                      onPressed: data.onChooseImport,
-                    ),
-                  ],
                 ),
-                if (data.showExportSelection) ...[
-                  const SizedBox(height: OSpace.m),
-                  _exportPickerNote(context),
+                Divider(color: c.hairline, height: 1),
+                OListRow(
+                  icon: Icons.upload_file_rounded,
+                  title: 'Choose backup',
+                  onTap: data.onChooseImport,
+                ),
+                if (data.importChecking || data.importValidation != null) ...[
+                  Divider(color: c.hairline, height: 1),
+                  _importRow(context),
                 ],
-                const SizedBox(height: OSpace.m),
-                _importStatus(context, check),
-                const SizedBox(height: OSpace.m),
-                _heavyArtifactsNote(context),
               ],
             ),
           ),
+          OSectionTitle(title: 'Account'),
+          OCard(
+            padding: EdgeInsets.zero,
+            child: Column(
+              children: [
+                OListRow(
+                  icon: Icons.cloud_outlined,
+                  title: 'Storage',
+                  subtitle: data.storageUsedLabel.isEmpty
+                      ? null
+                      : data.storageUsedLabel,
+                  onTap: data.onStorage,
+                ),
+                Divider(color: c.hairline, height: 1),
+                OListRow(
+                  icon: Icons.verified_user_outlined,
+                  title: 'Permissions',
+                  subtitle: data.permissionSummary.isEmpty
+                      ? null
+                      : data.permissionSummary,
+                  onTap: data.onPermissions,
+                ),
+                Divider(color: c.hairline, height: 1),
+                // One semantics node: the row name plus the switch state. The
+                // row and the switch must not both announce "Crash reports".
+                Semantics(
+                  label: 'Crash reports',
+                  toggled: data.crashReports,
+                  button: true,
+                  enabled: data.onCrashReportsChanged != null,
+                  excludeSemantics: true,
+                  onTap: data.onCrashReportsChanged == null
+                      ? null
+                      : () => data.onCrashReportsChanged!(!data.crashReports),
+                  child: OListRow(
+                    icon: Icons.bug_report_outlined,
+                    title: 'Crash reports',
+                    showChevron: false,
+                    trailing: ExcludeSemantics(
+                      child: Switch(
+                        value: data.crashReports,
+                        onChanged: data.onCrashReportsChanged,
+                        activeThumbColor: c.onAccent,
+                        activeTrackColor: c.accentFill,
+                        inactiveThumbColor: c.textFaint,
+                        inactiveTrackColor: c.surfaceRaised,
+                        trackOutlineColor: WidgetStatePropertyAll(
+                          c.hairlineStrong,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          OSectionTitle(title: 'Danger'),
+          OCard(
+            padding: EdgeInsets.zero,
+            child: Column(
+              children: [
+                OListRow(
+                  key: const ValueKey('delete-data-row'),
+                  icon: Icons.delete_forever_outlined,
+                  title: 'Delete your data',
+                  danger: true,
+                  enabled: data.onDeleteData != null,
+                  onTap: data.onDeleteData == null
+                      ? null
+                      : () => _confirmDelete(context),
+                ),
+                Divider(color: c.hairline, height: 1),
+                OListRow(
+                  key: const ValueKey('reset-memory-row'),
+                  icon: Icons.history_rounded,
+                  title: 'Reset memory',
+                  danger: true,
+                  enabled: data.onResetMemory != null,
+                  onTap: data.onResetMemory == null
+                      ? null
+                      : () => _confirmResetMemory(context),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: OSpace.l),
+          OButton(
+            label: 'Export data',
+            icon: Icons.download_rounded,
+            expand: true,
+            onPressed: export,
+          ),
         ],
       ),
+    );
+  }
+
+  /// The checked backup, or the check in flight. One row, no paragraphs.
+  Widget _importRow(BuildContext context) {
+    final check = data.importValidation;
+    if (data.importChecking || check == null) {
+      return OListRow(
+        icon: Icons.hourglass_empty_rounded,
+        title: 'Checking backup…',
+        showChevron: false,
+      );
+    }
+    final action = check.canImport
+        ? OButton(
+            label: 'Import',
+            variant: OButtonVariant.ghost,
+            onPressed: data.onImport,
+          )
+        : check.valid && !check.fitsPlan && data.onStorage != null
+        ? OButton(
+            label: 'Storage',
+            variant: OButtonVariant.ghost,
+            onPressed: data.onStorage,
+          )
+        : OButton(
+            label: 'Choose',
+            variant: OButtonVariant.ghost,
+            onPressed: data.onChooseImport,
+          );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        OListRow(
+          icon: check.valid
+              ? Icons.check_circle_outline_rounded
+              : Icons.error_outline_rounded,
+          title: check.fileName,
+          subtitle: check.message,
+          showChevron: false,
+        ),
+        // The action sits under the text instead of beside it: at 200 % text
+        // a trailing button and a long file name cannot share one line.
+        Padding(
+          padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.s),
+          child: Align(alignment: Alignment.centerRight, child: action),
+        ),
+      ],
     );
   }
 
@@ -508,38 +444,26 @@ class DataControlPage extends StatelessWidget {
   Future<void> _saveExport(BuildContext context) async {
     try {
       final writer = data.onSaveExport;
-      final path = writer != null ? await writer() : await _defaultSaveExport();
-      if (!context.mounted) return;
-      if (path == null) {
-        _snack(context, 'Export cancelled.');
+      if (writer != null) {
+        final path = await writer();
+        if (!context.mounted) return;
+        _snack(context, path == null ? 'Export cancelled.' : 'Saved to $path');
         return;
       }
-      _snack(context, 'Saved to $path');
-    } on BackupLimitException catch (e) {
-      if (context.mounted) _snack(context, e.message);
+      final result = await saveHistoryExport();
+      if (!context.mounted) return;
+      if (result.path != null) {
+        _snack(context, 'Saved to ${result.path}');
+      } else if (result.message != null) {
+        _snack(context, result.message!);
+      } else {
+        _snack(context, 'Export cancelled.');
+      }
     } catch (_) {
       if (context.mounted) {
         _snack(context, 'Could not save the export. Try again.');
       }
     }
-  }
-
-  Future<String?> _defaultSaveExport() async {
-    final snapshot = await CloudBackup().fetchHistory();
-    final plan = SettingsBackupService.planExport(snapshot.sessions);
-    if (plan.included.isEmpty) {
-      throw BackupLimitException(
-        plan.limitHit ?? 'There is nothing to export yet.',
-      );
-    }
-    final bytes = await SettingsBackupService().export(plan.included);
-    return FilePicker.platform.saveFile(
-      dialogTitle: 'Save Ovid backup',
-      fileName: 'ovid-transcripts-v1.zip',
-      type: FileType.custom,
-      allowedExtensions: const <String>['zip'],
-      bytes: bytes,
-    );
   }
 
   /// Applies the picker's complete id set as individual toggles, so the page's
@@ -552,389 +476,6 @@ class DataControlPage extends StatelessWidget {
       final next = selected.contains(session.id);
       if (next != session.selected) toggle(session.id, next);
     }
-  }
-
-  Widget _exportPickerNote(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      key: const ValueKey('export-picker-note'),
-      padding: const EdgeInsets.all(OSpace.m),
-      decoration: BoxDecoration(
-        color: c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.m),
-        border: Border.all(color: c.hairline),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.filter_alt_outlined, size: 18, color: c.accent),
-          const SizedBox(width: OSpace.s),
-          Expanded(
-            child: Text(
-              'Your data is ${_mb(data.exportTotalBytes)}, over the '
-              '${_mb(data.exportLimitBytes)} archive limit. Export backup '
-              'opens a picker so you choose which chats to include.',
-              style: OType.caption.copyWith(color: c.textMuted),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _heavyArtifactsNote(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      key: const ValueKey('heavy-artifacts-note'),
-      padding: const EdgeInsets.all(OSpace.m),
-      decoration: BoxDecoration(
-        color: c.warn.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(ORadius.m),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.upload_file_rounded, size: 18, color: c.warn),
-          const SizedBox(width: OSpace.s),
-          Expanded(
-            child: Text(
-              'Heavy artifacts are not included in a backup. Large files, '
-              'videos and generated assets must be re-uploaded after importing.',
-              style: OType.caption.copyWith(color: c.textMuted),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _importStatus(BuildContext context, V2ImportValidation? check) {
-    final c = OColors.of(context);
-    return Container(
-      padding: const EdgeInsets.all(OSpace.m),
-      decoration: BoxDecoration(
-        color: c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.m),
-      ),
-      child: data.importChecking
-          ? Row(
-              children: [
-                const OSkeleton(width: 20, height: 20, radius: ORadius.pill),
-                const SizedBox(width: OSpace.s),
-                Expanded(
-                  child: Text(
-                    'Checking the backup file…',
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                ),
-              ],
-            )
-          : check == null
-          ? Text(
-              'Choose a backup file to check its size and contents before importing.',
-              style: OType.caption.copyWith(color: c.textMuted),
-            )
-          : Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Icon(
-                      check.valid
-                          ? Icons.check_circle_outline_rounded
-                          : Icons.error_outline_rounded,
-                      size: 20,
-                      color: check.valid ? c.success : c.danger,
-                    ),
-                    const SizedBox(width: OSpace.s),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            check.fileName,
-                            style: OType.bodySm.copyWith(
-                              color: c.text,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          const SizedBox(height: OSpace.xs),
-                          Text(
-                            check.message,
-                            style: OType.caption.copyWith(
-                              color: check.valid ? c.textMuted : c.danger,
-                            ),
-                          ),
-                          const SizedBox(height: OSpace.xs),
-                          Text(
-                            check.checkedLabel,
-                            style: OType.caption.copyWith(color: c.textFaint),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: OSpace.s),
-                Container(
-                  key: const ValueKey('import-plan-quota'),
-                  padding: const EdgeInsets.all(OSpace.s),
-                  decoration: BoxDecoration(
-                    color: check.fitsPlan
-                        ? c.success.withValues(alpha: 0.10)
-                        : c.danger.withValues(alpha: 0.10),
-                    borderRadius: BorderRadius.circular(ORadius.s),
-                  ),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Icon(
-                        check.fitsPlan
-                            ? Icons.cloud_done_outlined
-                            : Icons.cloud_off_outlined,
-                        size: 18,
-                        color: check.fitsPlan ? c.success : c.danger,
-                      ),
-                      const SizedBox(width: OSpace.s),
-                      Expanded(
-                        child: Text(
-                          check.planQuotaLabel.isNotEmpty
-                              ? check.planQuotaLabel
-                              : check.fitsPlan
-                              ? 'Fits your plan storage.'
-                              : 'Not enough plan storage for this archive.',
-                          style: OType.caption.copyWith(
-                            color: check.fitsPlan ? c.textMuted : c.danger,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: OSpace.s),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: check.canImport
-                      ? OButton(
-                          label: 'Import now',
-                          icon: Icons.file_download_outlined,
-                          variant: OButtonVariant.ghost,
-                          onPressed: data.onImport,
-                        )
-                      : check.valid && !check.fitsPlan
-                      ? OButton(
-                          label: 'Manage storage',
-                          icon: Icons.cloud_outlined,
-                          variant: OButtonVariant.ghost,
-                          onPressed: data.onStorage,
-                        )
-                      : OButton(
-                          label: 'Choose another file',
-                          icon: Icons.refresh_rounded,
-                          variant: OButtonVariant.ghost,
-                          onPressed: data.onChooseImport,
-                        ),
-                ),
-              ],
-            ),
-    );
-  }
-
-  Widget _generalControls(BuildContext context) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          OSectionHeader(
-            label: 'General controls',
-            padding: const EdgeInsets.only(bottom: OSpace.s),
-          ),
-          OCard(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                OListRow(
-                  icon: Icons.swap_vert_rounded,
-                  title: 'Export or import',
-                  subtitle: data.exportLimitLabel,
-                  onTap: data.onExportImport,
-                ),
-                Divider(color: c.hairline, height: 1),
-                OListRow(
-                  icon: Icons.verified_user_outlined,
-                  title: 'Permissions',
-                  subtitle: data.permissionSummary,
-                  onTap: data.onPermissions,
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: OSpace.m),
-          OCard(
-            padding: EdgeInsets.zero,
-            child: OListRow(
-              icon: Icons.bug_report_outlined,
-              title: 'Crash reports',
-              subtitle:
-                  'Anonymous diagnostics and usage. Never includes chats, '
-                  'prompts or files.',
-              showChevron: false,
-              onTap: data.onCrashReportsChanged == null
-                  ? null
-                  : () => data.onCrashReportsChanged!(!data.crashReports),
-              trailing: Semantics(
-                label: 'Crash reports',
-                toggled: data.crashReports,
-                button: true,
-                enabled: data.onCrashReportsChanged != null,
-                onTap: data.onCrashReportsChanged == null
-                    ? null
-                    : () => data.onCrashReportsChanged!(!data.crashReports),
-                child: ExcludeSemantics(
-                  child: Switch(
-                    value: data.crashReports,
-                    onChanged: data.onCrashReportsChanged,
-                    activeThumbColor: c.onAccent,
-                    activeTrackColor: c.accentFill,
-                    inactiveThumbColor: c.textFaint,
-                    inactiveTrackColor: c.surfaceRaised,
-                    trackOutlineColor: WidgetStatePropertyAll(c.hairlineStrong),
-                  ),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: OSpace.m),
-          _storageCard(context),
-        ],
-      ),
-    );
-  }
-
-  Widget _storageCard(BuildContext context) {
-    final c = OColors.of(context);
-    final percent = (data.storageFraction.clamp(0, 1) * 100).round();
-    return OCard(
-      onTap: data.onStorage,
-      semanticLabel: 'Storage, ${data.storageUsedLabel}',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: c.surfaceAlt,
-                  borderRadius: BorderRadius.circular(ORadius.m),
-                ),
-                child: Icon(Icons.cloud_outlined, size: 19, color: c.textMuted),
-              ),
-              const SizedBox(width: OSpace.m),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Storage',
-                      style: OType.body.copyWith(
-                        color: c.text,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    const SizedBox(height: OSpace.xs),
-                    if (data.storageUsedLabel.isNotEmpty)
-                      Text(
-                        '${data.storageUsedLabel} ($percent%)',
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                  ],
-                ),
-              ),
-              Icon(Icons.chevron_right_rounded, size: 20, color: c.textFaint),
-            ],
-          ),
-          const SizedBox(height: OSpace.m),
-          OProgressBar(value: data.storageFraction),
-          const SizedBox(height: OSpace.s),
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  'Cloud storage for your plan',
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ),
-              const SizedBox(width: OSpace.s),
-              Flexible(
-                child: Text(
-                  data.storageFreeLabel,
-                  textAlign: TextAlign.end,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _dangerZone(BuildContext context) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(top: OSpace.s),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          OSectionHeader(
-            label: 'Danger zone',
-            padding: const EdgeInsets.only(bottom: OSpace.s),
-            trailing: Text(
-              'Irreversible actions',
-              style: OType.caption.copyWith(color: c.danger),
-            ),
-          ),
-          OCard(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                OListRow(
-                  key: const ValueKey('delete-data-row'),
-                  icon: Icons.delete_forever_outlined,
-                  title: 'Delete your data',
-                  subtitle:
-                      'Permanently delete chats, workspace files, artifacts, '
-                      'memory, drafts and shared links',
-                  danger: true,
-                  enabled: data.onDeleteData != null,
-                  onTap: data.onDeleteData == null
-                      ? null
-                      : () => _confirmDelete(context),
-                ),
-                Divider(color: c.hairline, height: 1),
-                OListRow(
-                  key: const ValueKey('reset-memory-row'),
-                  icon: Icons.history_rounded,
-                  title: 'Reset memory',
-                  subtitle:
-                      'Erase global memory and the memory file for every session',
-                  danger: true,
-                  enabled: data.onResetMemory != null,
-                  onTap: data.onResetMemory == null
-                      ? null
-                      : () => _confirmResetMemory(context),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
   }
 
   void _snack(BuildContext context, String message) {
@@ -950,13 +491,6 @@ class DataControlPage extends StatelessWidget {
       data: V2ConfirmTypedSheetData(
         contact: data.accountContact,
         title: 'Delete all your data?',
-        intro:
-            'Your account, plan and billing history are kept. Everything '
-            'else is removed now.',
-        graceNote:
-            'Chats, files, artifacts, memory, connectors and shared links are '
-            'deleted immediately. This cannot be undone.',
-        playNote: '',
         confirmLabel: 'Delete everything',
         cancelLabel: 'Cancel',
       ),
@@ -972,8 +506,6 @@ class DataControlPage extends StatelessWidget {
     if (confirmed == true) data.onResetMemory?.call();
   }
 }
-
-String _mb(int bytes) => '${(bytes / (1024 * 1024)).toStringAsFixed(0)} MB';
 
 /// Extracts `42` from `42 messages` for the picker's message total. The page
 /// does not carry a separate count, and a missing number simply contributes 0.
@@ -995,15 +527,6 @@ class _ResetMemoryDialog extends StatelessWidget {
     return AlertDialog(
       scrollable: true,
       backgroundColor: c.surface,
-      icon: Container(
-        width: 44,
-        height: 44,
-        decoration: BoxDecoration(
-          color: c.danger.withValues(alpha: 0.12),
-          shape: BoxShape.circle,
-        ),
-        child: Icon(Icons.history_rounded, color: c.danger),
-      ),
       title: Text('Reset all memory?', style: OType.h2.copyWith(color: c.text)),
       content: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1011,23 +534,13 @@ class _ResetMemoryDialog extends StatelessWidget {
         children: [
           Text(
             summary.isEmpty
-                ? 'Ovid forgets everything it learned about you:'
+                ? 'Ovid forgets everything it learned about you.'
                 : summary,
-            style: OType.bodySm.copyWith(
-              color: c.text,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: OSpace.s),
-          Text(
-            '• Global memory\n'
-            '• Project memory for every project\n'
-            '• The memory file for every session',
-            style: OType.bodySm.copyWith(color: c.textMuted),
+            style: OType.bodySm.copyWith(color: c.text),
           ),
           const SizedBox(height: OSpace.m),
           Text(
-            'Chats, files and artifacts stay. This cannot be undone.',
+            'Chats and files stay. This cannot be undone.',
             style: OType.bodySm.copyWith(color: c.textMuted),
           ),
         ],

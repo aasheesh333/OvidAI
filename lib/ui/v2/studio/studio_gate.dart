@@ -17,8 +17,7 @@ class V2StudioGate extends StatelessWidget {
     this.onPickFolder,
     this.onPickRepo,
     this.title = 'Pick a folder to start coding',
-    this.message =
-        'Studio messages are paused until you choose a repository and branch.',
+    this.message = '',
     this.actionLabel = 'Pick a folder',
   });
 
@@ -29,6 +28,9 @@ class V2StudioGate extends StatelessWidget {
   /// Alias for [onPickFolder] matching the workspace page's `onPickRepo` name.
   final VoidCallback? onPickRepo;
   final String title;
+
+  /// Kept for wiring compatibility. The gate is a composer block, not a
+  /// screen: it shows one line and one action, never an explanation.
   final String message;
   final String actionLabel;
 
@@ -70,19 +72,11 @@ class V2StudioGate extends StatelessWidget {
                 ),
                 const SizedBox(width: OSpace.m),
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: OType.bodyStrong.copyWith(color: c.text),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        message,
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ],
+                  child: Text(
+                    title,
+                    style: OType.bodyStrong.copyWith(color: c.text),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
               ],
@@ -95,14 +89,7 @@ class V2StudioGate extends StatelessWidget {
               expand: true,
               onPressed: _onPick,
             ),
-            if (_onPick == null) ...[
-              const SizedBox(height: OSpace.xs),
-              Text(
-                'Repository setup is not available yet.',
-                textAlign: TextAlign.center,
-                style: OType.caption.copyWith(color: c.textMuted),
-              ),
-            ],
+            if (_onPick == null) ...[const SizedBox(height: OSpace.xs)],
           ],
         ),
       ),

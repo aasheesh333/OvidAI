@@ -19,6 +19,9 @@ enum V2ShareStatus { loading, ready, error }
 enum V2ShareMode { collab, readOnly }
 
 /// Where a shared link can be sent from the share sheet.
+///
+/// The sheet no longer renders a target grid: the operating system's share
+/// sheet owns that list. The enum stays so existing hosts keep compiling.
 enum V2ShareTarget { whatsApp, gmail, slack, more }
 
 /// Hard cap on people in a Collab room, including the creator.
@@ -67,7 +70,8 @@ class V2ShareSheetData {
   /// member who joined someone else's room).
   final bool canChangeMode;
 
-  /// Whether anyone with the link can open it.
+  /// Whether anyone with the link can open it. Kept for hosts that still own
+  /// the value; the sheet does not render a toggle for it.
   final bool anyoneCanView;
 
   /// Whether the creator's name is shown on the shared page.
@@ -77,7 +81,7 @@ class V2ShareSheetData {
   final bool active;
 
   /// Whether the link was just copied. The owner of the state flips this for
-  /// the short "Copied" confirmation.
+  /// the short confirmation on the copy control.
   final bool copied;
 
   /// Name shown in the "Show my name" subtitle. Injected: the sheet never
@@ -97,6 +101,10 @@ class V2ShareSheetData {
 }
 
 /// Generic share sheet. Presentational: all state and actions are injected.
+///
+/// Minimal layout: a title row with close, two one-line mode cards, the link
+/// row with copy, then the revoke action. Sharing to an app is the operating
+/// system's job.
 class ShareSheet extends StatelessWidget {
   const ShareSheet({
     super.key,
@@ -131,10 +139,13 @@ class ShareSheet extends StatelessWidget {
   final VoidCallback? onClose;
 
   final String title;
+
+  /// Retained for hosts that used to pass a second header line. The minimal
+  /// header is one line; the mode cards explain the two options instead.
   final String? subtitle;
 
-  /// Extra explanation shown above the share targets. The chat variant uses
-  /// this for the fork-into-your-own-account note.
+  /// Retained for the chat variant. Forking is explained by the card's action,
+  /// so the sheet does not render a paragraph.
   final String? forkNote;
 
   @override
@@ -146,11 +157,11 @@ class ShareSheet extends StatelessWidget {
         constraints: const BoxConstraints(maxWidth: 560),
         child: switch (data.status) {
           V2ShareStatus.loading => const SizedBox(
-            height: 420,
+            height: 320,
             child: OSkeletonList(rows: 4),
           ),
           V2ShareStatus.error => SizedBox(
-            height: 380,
+            height: 320,
             child: OErrorState(message: data.errorMessage, onRetry: onRetry),
           ),
           V2ShareStatus.ready =>
@@ -159,6 +170,9 @@ class ShareSheet extends StatelessWidget {
       ),
     );
   }
+
+  bool get _canPickMode =>
+      data.canChangeMode && !data.viewerCanFork && onModeChanged != null;
 
   /// Revoking is irreversible for everyone holding the link, so the sheet owns
   /// the confirmation even when the host's callback is a bare service call.
@@ -194,11 +208,6 @@ class ShareSheet extends StatelessWidget {
 
   Widget _empty(BuildContext context) {
     final c = OColors.of(context);
-    final message = data.isCollab
-        ? 'Create a live room for up to ${data.capacity} people. One person '
-              'sends at a time and you pay for storage.'
-        : 'Create a read-only link anyone can open and fork. Your files and '
-              'connectors stay private.';
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(
         OSpace.l,
@@ -209,44 +218,27 @@ class ShareSheet extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _header(context, c),
-          if (data.canChangeMode &&
-              !data.viewerCanFork &&
-              onModeChanged != null) ...[
-            const SizedBox(height: OSpace.l),
-            _modeSelector(context, c, showCurrent: false),
+          _header(),
+          if (_canPickMode) ...[
+            _modeCard(V2ShareMode.collab),
+            const SizedBox(height: OSpace.s),
+            _modeCard(V2ShareMode.readOnly),
           ],
           const SizedBox(height: OSpace.l),
           OCard(
             child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Container(
-                  width: 72,
-                  height: 72,
-                  decoration: BoxDecoration(
-                    color: c.accentSoft,
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(
-                    Icons.link_off_rounded,
-                    size: 32,
-                    color: c.accent,
-                  ),
-                ),
-                const SizedBox(height: OSpace.l),
                 Text(
-                  'This chat is not shared yet',
-                  textAlign: TextAlign.center,
-                  style: OType.h2.copyWith(color: c.text),
+                  'Not shared yet',
+                  style: OType.h3.copyWith(color: c.text),
                 ),
-                const SizedBox(height: OSpace.s),
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 320),
-                  child: Text(
-                    message,
-                    textAlign: TextAlign.center,
-                    style: OType.bodySm.copyWith(color: c.textMuted),
-                  ),
+                const SizedBox(height: OSpace.xs),
+                Text(
+                  data.isCollab
+                      ? 'A live room for up to ${data.capacity} people.'
+                      : 'A read-only link anyone can open.',
+                  style: OType.caption.copyWith(color: c.textMuted),
                 ),
                 const SizedBox(height: OSpace.l),
                 if (onCreateLink != null)
@@ -258,8 +250,7 @@ class ShareSheet extends StatelessWidget {
                   )
                 else
                   Text(
-                    'A link can only be created from a signed-in account.',
-                    textAlign: TextAlign.center,
+                    'Sign in to create a link.',
                     style: OType.caption.copyWith(color: c.textMuted),
                   ),
               ],
@@ -271,7 +262,7 @@ class ShareSheet extends StatelessWidget {
   }
 
   Widget _content(BuildContext context) {
-    final c = OColors.of(context);
+    final viewer = data.viewerCanFork;
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(
         OSpace.l,
@@ -279,402 +270,76 @@ class ShareSheet extends StatelessWidget {
         OSpace.l,
         OSpace.l,
       ),
-      child: OFadeSlide(
-        child: OStagger(
-          children: [
-            _header(context, c),
-            const SizedBox(height: OSpace.l),
-            _linkBlock(context),
-            if (data.canChangeMode &&
-                !data.viewerCanFork &&
-                onModeChanged != null) ...[
-              const SizedBox(height: OSpace.m),
-              _modeSelector(context, c, showCurrent: true),
-            ],
-            if (!data.viewerCanFork) ...[
-              const SizedBox(height: OSpace.m),
-              _permissions(context, c),
-            ],
-            if (forkNote != null) ...[
-              const SizedBox(height: OSpace.m),
-              _forkNoteCard(c),
-            ],
-            if (onShareTarget != null) ...[
-              const SizedBox(height: OSpace.l),
-              OSectionHeader(
-                label: 'Share directly',
-                padding: const EdgeInsets.only(bottom: OSpace.s),
-              ),
-              _targets(context, c),
-            ],
-            if (!data.viewerCanFork && onStopSharing != null) ...[
-              const SizedBox(height: OSpace.l),
-              OButton(
-                label: 'Stop sharing',
-                icon: Icons.link_off_rounded,
-                variant: OButtonVariant.danger,
-                expand: true,
-                onPressed: () => _confirmRevoke(context),
-              ),
-            ],
-            const SizedBox(height: OSpace.l),
-            _privacyNote(c),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _header(),
+          if (_canPickMode) ...[
+            const SizedBox(height: OSpace.s),
+            _modeCard(V2ShareMode.collab),
+            const SizedBox(height: OSpace.s),
+            _modeCard(V2ShareMode.readOnly),
           ],
-        ),
+          const SizedBox(height: OSpace.l),
+          _linkBlock(context),
+          if (!viewer && onStopSharing != null) ...[
+            const SizedBox(height: OSpace.l),
+            OButton(
+              label: 'Revoke link',
+              icon: Icons.link_off_rounded,
+              variant: OButtonVariant.danger,
+              expand: true,
+              onPressed: () => _confirmRevoke(context),
+            ),
+          ],
+        ],
       ),
     );
   }
 
-  Widget _header(BuildContext context, OColors c) {
-    final explanation = _subtitleFor(data);
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Semantics(
-                container: true,
-                header: true,
-                child: Text(
-                  title,
-                  style: OType.h2.copyWith(color: c.text),
-                ),
-              ),
-              if (explanation != null) ...[
-                const SizedBox(height: OSpace.xs),
-                Text(
-                  explanation,
-                  style: OType.bodySm.copyWith(color: c.textMuted),
-                ),
-              ],
-            ],
-          ),
-        ),
-        if (onClose != null)
-          OIconButton(
-            icon: Icons.close_rounded,
-            semanticLabel: 'Close share sheet',
-            onPressed: onClose,
-          ),
-      ],
+  /// One header row, shared with every other sheet: title on the left, close
+  /// on the right. The scroll view already supplies the outer gutter, so the
+  /// header only adds the gap under itself.
+  Widget _header() {
+    return OSheetHeader(
+      title: title,
+      closeLabel: 'Close share sheet',
+      onClose: onClose,
+      padding: const EdgeInsets.only(bottom: OSpace.s),
     );
   }
 
-  /// Collab and read-only links explain themselves differently. An explicit
-  /// [subtitle] only refines the read-only copy; Collab always states its own
-  /// rules so the cap and the storage owner are never hidden.
-  String? _subtitleFor(V2ShareSheetData data) {
-    if (data.isCollab) {
-      final people = data.capacity == 1 ? '1 person' : '${data.capacity} people';
-      return 'Up to $people can join. One person sends at a time, and you pay '
-          'for storage.';
-    }
-    return subtitle;
-  }
-
-  Widget _modeSelector(
-    BuildContext context,
-    OColors c, {
-    required bool showCurrent,
-  }) {
-    if (showCurrent) return _modeSwitch(context, c);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        OSectionHeader(
-          label: 'Share mode',
-          padding: const EdgeInsets.only(bottom: OSpace.s),
-          trailing: Text(
-            data.isCollab ? 'Live room' : 'Snapshot',
-            style: OType.caption.copyWith(color: c.textMuted),
-          ),
-        ),
-        _modeOption(V2ShareMode.collab),
-        const SizedBox(height: OSpace.s),
-        _modeOption(V2ShareMode.readOnly),
-      ],
-    );
-  }
-
-  /// Compact mode switch shown under the active link.
-  ///
-  /// [V2ShareLinkCard] already states the current mode as a badge, so repeating
-  /// both mode cards here would announce the same mode twice. The switch offers
-  /// only the other mode, which is the one action left to take.
-  Widget _modeSwitch(BuildContext context, OColors c) {
-    final target = data.isCollab ? V2ShareMode.readOnly : V2ShareMode.collab;
-    final title = data.isCollab ? 'Read only' : 'Collab';
-    final body = data.isCollab
-        ? 'A read-only snapshot people can fork into their own account.'
-        : 'A live room for up to ${data.capacity} people, one sender at a '
-              'time.';
-    final icon = data.isCollab
-        ? Icons.visibility_rounded
-        : Icons.groups_rounded;
-    final card = ExcludeSemantics(
-      child: Container(
-        constraints: const BoxConstraints(minHeight: OSpace.touch),
-        padding: const EdgeInsets.all(OSpace.m),
-        decoration: BoxDecoration(
-          color: c.surface,
-          borderRadius: BorderRadius.circular(ORadius.m),
-          border: Border.all(color: c.hairline),
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 36,
-              height: 36,
-              decoration: BoxDecoration(
-                color: c.accentSoft,
-                borderRadius: BorderRadius.circular(ORadius.s),
-              ),
-              child: Icon(icon, size: 19, color: c.accent),
-            ),
-            const SizedBox(width: OSpace.m),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    'SHARE MODE',
-                    style: OType.overline.copyWith(color: c.textMuted),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    title,
-                    style: OType.bodySm.copyWith(
-                      color: c.text,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: OSpace.s),
-            Text(
-              'Switch',
-              style: OType.caption.copyWith(
-                color: c.accent,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            Icon(Icons.swap_horiz_rounded, size: 16, color: c.accent),
-          ],
-        ),
-      ),
-    );
-    return OPressable(
-      onTap: () => onModeChanged!(target),
-      semanticLabel: 'Share mode. Switch to $title. $body',
-      child: card,
-    );
-  }
-
-  Widget _modeOption(V2ShareMode mode) {
+  /// One line per mode. The selected card carries the check and the accent.
+  Widget _modeCard(V2ShareMode mode) {
     final collab = mode == V2ShareMode.collab;
-    return _ModeOption(
-      title: collab ? 'Collab' : 'Read only',
+    final selected = data.isCollab == collab;
+    final title = collab ? 'Collab' : 'Read only';
+    final body = collab
+        ? 'Up to ${data.capacity} people, one sender at a time.'
+        : 'Anyone with the link can read and fork.';
+    return _ModeCard(
+      title: title,
+      body: body,
       icon: collab ? Icons.groups_rounded : Icons.visibility_rounded,
-      body: collab
-          ? 'Up to ${data.capacity} people join one live chat. One person '
-                'sends at a time, and you pay for storage.'
-          : 'Anyone with the link can read this chat and fork a copy into '
-                'their own account.',
-      selected: data.isCollab == collab,
+      selected: selected,
       onTap: onModeChanged == null ? null : () => onModeChanged!(mode),
     );
   }
 
-  /// The active-link block. [V2ShareLinkCard] owns the URL, the mode badge, the
-  /// member count, copying, revoking and forking, so the sheet only maps its
-  /// state onto the card.
+  /// The active-link block. [V2ShareLinkCard] owns the URL and its copy
+  /// control; the sheet owns revoking, so the card never repeats it here.
   Widget _linkBlock(BuildContext context) {
-    // The card names its copy control "Copy share link". The sheet's copy
-    // action has always been announced as "Copy link", so the block keeps that
-    // name for assistive tech (and for callers that look the control up by it).
-    return Semantics(
-      label: 'Copy link',
-      child: V2ShareLinkCard(
-        data: V2ShareLinkCardData(
-          url: data.link,
-          mode: data.mode,
-          memberCount: data.memberCount,
-          capacity: data.capacity,
-          copied: data.copied,
-          viewer: data.viewerCanFork,
-        ),
-        onCopy: data.link.trim().isEmpty ? null : onCopyLink,
-        // A viewer can never revoke someone else's link; the card shows the
-        // fork action for them instead.
-        onRevoke: data.viewerCanFork || onStopSharing == null
-            ? null
-            : () => _confirmRevoke(context),
-        onFork: onFork,
+    return V2ShareLinkCard(
+      data: V2ShareLinkCardData(
+        url: data.link,
+        mode: data.mode,
+        memberCount: data.memberCount,
+        capacity: data.capacity,
+        copied: data.copied,
+        viewer: data.viewerCanFork,
       ),
-    );
-  }
-
-  Widget _permissions(BuildContext context, OColors c) {
-    if (data.isCollab) return _collabRules(context, c);
-    final rows = <Widget>[
-      if (onToggleAnyoneCanView != null)
-        _ToggleRow(
-          title: 'Anyone with the link can read this chat',
-          subtitle: 'Read-only. They can fork a copy into their own account.',
-          value: data.anyoneCanView,
-          onChanged: onToggleAnyoneCanView,
-        ),
-      if (onToggleShowName != null)
-        _ToggleRow(
-          title: 'Show my name',
-          subtitle: 'Displays ${data.creatorName} as creator',
-          value: data.showName,
-          onChanged: onToggleShowName,
-        ),
-    ];
-    if (rows.isEmpty) return const SizedBox.shrink();
-    return OCard(
-      padding: EdgeInsets.zero,
-      child: Column(
-        children: [
-          for (var i = 0; i < rows.length; i++) ...[
-            rows[i],
-            if (i < rows.length - 1)
-              Divider(
-                height: 1,
-                color: c.hairline,
-                indent: OSpace.l,
-                endIndent: OSpace.l,
-              ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  /// Collab rules replace the read-only visibility switch: the room is live,
-  /// cap and occupancy are shown on the link card above, and this block keeps
-  /// the turn and storage rules plus the name switch.
-  Widget _collabRules(BuildContext context, OColors c) {
-    return OCard(
-      padding: EdgeInsets.zero,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(OSpace.l),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _InfoRow(
-                  icon: Icons.pan_tool_alt_rounded,
-                  title: 'One person sends at a time',
-                  body:
-                      'Everyone else waits for the turn. Drafts are never '
-                      'dropped.',
-                ),
-                const SizedBox(height: OSpace.s),
-                _InfoRow(
-                  icon: Icons.workspace_premium_rounded,
-                  title: data.creatorPaysStorage
-                      ? 'You pay for storage'
-                      : 'Storage is shared',
-                  body: data.creatorPaysStorage
-                      ? 'Members use your plan and storage, not their own.'
-                      : 'Members use their own plan and storage.',
-                ),
-              ],
-            ),
-          ),
-          if (onToggleShowName != null) ...[
-            Divider(
-              height: 1,
-              color: c.hairline,
-              indent: OSpace.l,
-              endIndent: OSpace.l,
-            ),
-            _ToggleRow(
-              title: 'Show my name',
-              subtitle: 'Displays ${data.creatorName} as creator',
-              value: data.showName,
-              onChanged: onToggleShowName,
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _forkNoteCard(OColors c) {
-    return Container(
-      padding: const EdgeInsets.all(OSpace.m),
-      decoration: BoxDecoration(
-        color: c.accentSoft,
-        borderRadius: BorderRadius.circular(ORadius.m),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.account_tree_rounded, size: 20, color: c.accent),
-          const SizedBox(width: OSpace.s),
-          Expanded(
-            child: Text(
-              forkNote!,
-              style: OType.caption.copyWith(color: c.textMuted),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _targets(BuildContext context, OColors c) {
-    return LayoutBuilder(
-      builder: (context, constraints) => Wrap(
-        alignment: WrapAlignment.spaceEvenly,
-        spacing: OSpace.s,
-        runSpacing: OSpace.m,
-        children: [
-          for (final target in V2ShareTarget.values)
-            ConstrainedBox(
-              constraints: BoxConstraints(
-                minWidth: 72,
-                maxWidth: constraints.maxWidth,
-              ),
-              child: _ShareTargetButton(
-                target: target,
-                onTap: onShareTarget == null
-                    ? null
-                    : () => onShareTarget!(target),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _privacyNote(OColors c) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.only(top: OSpace.xs),
-          child: Icon(Icons.lock_outline_rounded, size: 14, color: c.textFaint),
-        ),
-        const SizedBox(width: OSpace.xs),
-        Flexible(
-          child: Text(
-            'Shared chats never include your files or connectors.',
-            textAlign: TextAlign.center,
-            style: OType.caption.copyWith(color: c.textMuted),
-          ),
-        ),
-      ],
+      onCopy: data.link.trim().isEmpty ? null : onCopyLink,
+      onFork: onFork,
     );
   }
 }
@@ -713,8 +378,8 @@ Future<void> showShareSheet(
 
 /// One selectable share mode. The whole card is the 48 dp target and reports
 /// its selected state to accessibility.
-class _ModeOption extends StatelessWidget {
-  const _ModeOption({
+class _ModeCard extends StatelessWidget {
+  const _ModeCard({
     required this.title,
     required this.body,
     required this.icon,
@@ -738,7 +403,6 @@ class _ModeOption extends StatelessWidget {
       child: ExcludeSemantics(
         child: AnimatedContainer(
           duration: OMotion.fast,
-          curve: OMotion.standard,
           constraints: const BoxConstraints(minHeight: OSpace.touch),
           padding: const EdgeInsets.all(OSpace.m),
           decoration: BoxDecoration(
@@ -752,25 +416,17 @@ class _ModeOption extends StatelessWidget {
             ),
           ),
           child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: selected ? c.accentFill : c.surfaceRaised,
-                  borderRadius: BorderRadius.circular(ORadius.s),
-                ),
-                child: Icon(
-                  icon,
-                  size: 19,
-                  color: selected ? c.onAccent : c.textMuted,
-                ),
+              Icon(
+                icon,
+                size: 20,
+                color: selected ? c.accent : c.textMuted,
               ),
               const SizedBox(width: OSpace.m),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(
                       title,
@@ -779,175 +435,20 @@ class _ModeOption extends StatelessWidget {
                         fontWeight: FontWeight.w600,
                       ),
                     ),
-                    const SizedBox(height: OSpace.xs),
+                    const SizedBox(height: OSpace.xxs),
                     Text(
                       body,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: OType.caption.copyWith(color: c.textMuted),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(width: OSpace.s),
-              Icon(
-                selected
-                    ? Icons.check_circle_rounded
-                    : Icons.radio_button_unchecked_rounded,
-                size: 20,
-                color: selected ? c.accent : c.textFaint,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _InfoRow extends StatelessWidget {
-  const _InfoRow({
-    required this.icon,
-    required this.title,
-    required this.body,
-  });
-
-  final IconData icon;
-  final String title;
-  final String body;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Icon(icon, size: 18, color: c.accent),
-        const SizedBox(width: OSpace.s),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: OType.caption.copyWith(
-                  color: c.text,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(height: 2),
-              Text(body, style: OType.caption.copyWith(color: c.textMuted)),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _ToggleRow extends StatelessWidget {
-  const _ToggleRow({
-    required this.title,
-    required this.subtitle,
-    required this.value,
-    this.onChanged,
-  });
-
-  final String title;
-  final String subtitle;
-  final bool value;
-  final ValueChanged<bool>? onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return MergeSemantics(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: OSpace.l,
-          vertical: OSpace.m,
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: OType.bodySm.copyWith(
-                      color: c.text,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(height: OSpace.xs),
-                  Text(
-                    subtitle,
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: OSpace.m),
-            Switch(
-              value: value,
-              onChanged: onChanged,
-              activeTrackColor: c.accentFill,
-              activeThumbColor: c.onAccent,
-              inactiveTrackColor: c.surfaceRaised,
-              inactiveThumbColor: c.textFaint,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _ShareTargetButton extends StatelessWidget {
-  const _ShareTargetButton({required this.target, this.onTap});
-
-  final V2ShareTarget target;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final (label, icon, tint) = switch (target) {
-      V2ShareTarget.whatsApp => ('WhatsApp', Icons.chat_rounded, c.success),
-      V2ShareTarget.gmail => ('Gmail', Icons.mail_rounded, c.danger),
-      V2ShareTarget.slack => ('Slack', Icons.forum_rounded, c.accent),
-      V2ShareTarget.more => ('More', Icons.more_horiz_rounded, c.textMuted),
-    };
-    return Semantics(
-      label: 'Share on $label',
-      button: true,
-      enabled: onTap != null,
-      onTap: onTap,
-      excludeSemantics: true,
-      child: OPressable(
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: OSpace.xs,
-            vertical: OSpace.s,
-          ),
-          child: Column(
-            children: [
-              Container(
-                width: 56,
-                height: 56,
-                decoration: BoxDecoration(
-                  color: tint.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(ORadius.l),
-                ),
-                child: Icon(icon, size: 26, color: tint),
-              ),
-              const SizedBox(height: OSpace.s),
-              Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: OType.caption.copyWith(color: c.textMuted),
-              ),
+              if (selected) ...[
+                const SizedBox(width: OSpace.s),
+                Icon(Icons.check_rounded, size: 20, color: c.accent),
+              ],
             ],
           ),
         ),

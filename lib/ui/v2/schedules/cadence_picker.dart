@@ -137,18 +137,6 @@ class V2CadenceDraft {
     return null;
   }
 
-  /// Rejects an end date that lands before the first run of this cadence.
-  String? endValidationError(DateTime? endsAt, DateTime now) {
-    if (endsAt == null) return null;
-    final firstRun = nextRunAfter(now);
-    if (firstRun == null) return null;
-    if (endsAt.isBefore(firstRun)) {
-      final label = describeNextRun(this, now) ?? formatCadenceTime(hour, minute);
-      return 'The end date must be after the first run ($label).';
-    }
-    return null;
-  }
-
   _CadenceRule? get _rule {
     switch (frequency) {
       case V2CadenceFrequency.daily:
@@ -712,7 +700,6 @@ _CadenceRule? _customRuleSchedule(String rule) {
   return null;
 }
 
-
 /// 1 = Monday … 7 = Sunday.
 String cadenceDayName(int day) => switch (day) {
   1 => 'Monday',
@@ -820,13 +807,12 @@ String _frequencyLabel(V2CadenceFrequency frequency) => switch (frequency) {
   V2CadenceFrequency.custom => 'Custom',
 };
 
-/// Daily / weekly / custom cadence control with a time row, weekday chips, a
-/// timezone note, a plain-English next-run preview and inline validation.
+/// Daily / weekly / custom cadence control with a time row, weekday chips and
+/// inline validation.
 ///
 /// Host it inside a schedule editor (or any scrollable form) and pass every
-/// change up through [onChanged]. When [onTimeTap] or
-/// [onTimezoneTap] is set the host owns that picker; otherwise the time row
-/// opens the standard Material time picker itself.
+/// change up through [onChanged]. When [onTimeTap] is set the host owns that
+/// picker; otherwise the time row opens the standard Material time picker.
 class CadencePicker extends StatefulWidget {
   const CadencePicker({
     super.key,
@@ -834,7 +820,6 @@ class CadencePicker extends StatefulWidget {
     required this.now,
     this.onChanged,
     this.onTimeTap,
-    this.onTimezoneTap,
     this.enabled = true,
   });
 
@@ -846,7 +831,6 @@ class CadencePicker extends StatefulWidget {
 
   /// Host-owned time picker. When null the picker opens its own dialog.
   final VoidCallback? onTimeTap;
-  final VoidCallback? onTimezoneTap;
 
   /// False announces the whole control as read only and blocks every change.
   final bool enabled;
@@ -915,15 +899,6 @@ class _CadencePickerState extends State<CadencePicker> {
     _update(_draft.copyWith(customRule: value));
   }
 
-  void _applyRule(String value) {
-    if (!widget.enabled) return;
-    _rule.value = TextEditingValue(
-      text: value,
-      selection: TextSelection.collapsed(offset: value.length),
-    );
-    _setRule(value);
-  }
-
   Future<void> _pickTime() async {
     if (!widget.enabled) return;
     final external = widget.onTimeTap;
@@ -949,7 +924,6 @@ class _CadencePickerState extends State<CadencePicker> {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     final draft = _draft;
-    final error = draft.validationError;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -963,25 +937,6 @@ class _CadencePickerState extends State<CadencePicker> {
         if (draft.frequency == V2CadenceFrequency.custom) ...[
           const SizedBox(height: OSpace.m),
           _customCard(c),
-        ],
-        const SizedBox(height: OSpace.m),
-        _timezoneCard(c),
-        const SizedBox(height: OSpace.m),
-        _preview(c, error),
-        if (!widget.enabled) ...[
-          const SizedBox(height: OSpace.s),
-          Row(
-            children: [
-              Icon(Icons.lock_outline_rounded, size: 15, color: c.textFaint),
-              const SizedBox(width: OSpace.xs),
-              Expanded(
-                child: Text(
-                  'Cadence is read only.',
-                  style: OType.caption.copyWith(color: c.textFaint),
-                ),
-              ),
-            ],
-          ),
         ],
       ],
     );
@@ -1091,22 +1046,12 @@ class _CadencePickerState extends State<CadencePicker> {
                   _rowIcon(c, Icons.schedule_rounded),
                   const SizedBox(width: OSpace.m),
                   Flexible(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          'Run time',
-                          style: OType.bodySm.copyWith(
-                            color: enabled ? c.text : c.textFaint,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        Text(
-                          'When it starts',
-                          style: OType.caption.copyWith(color: c.textMuted),
-                        ),
-                      ],
+                    child: Text(
+                      'Run time',
+                      style: OType.bodySm.copyWith(
+                        color: enabled ? c.text : c.textFaint,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ),
                 ],
@@ -1196,30 +1141,10 @@ class _CadencePickerState extends State<CadencePicker> {
               for (final day in const [1, 2, 3, 4, 5, 6, 7]) _dayChip(c, day),
             ],
           ),
-          const SizedBox(height: OSpace.m),
-          if (error != null)
-            _errorLine(c, error)
-          else
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.only(top: 1),
-                  child: Icon(
-                    Icons.info_outline_rounded,
-                    size: 15,
-                    color: c.accent,
-                  ),
-                ),
-                const SizedBox(width: OSpace.xs),
-                Expanded(
-                  child: Text(
-                    _daysSummary(),
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                ),
-              ],
-            ),
+          if (error != null) ...[
+            const SizedBox(height: OSpace.m),
+            _errorLine(c, error),
+          ],
         ],
       ),
     );
@@ -1230,15 +1155,8 @@ class _CadencePickerState extends State<CadencePicker> {
     if (_isWeekdays(_draft.days)) return 'Runs Mon – Fri';
     if (_isWeekend(_draft.days)) return 'Runs Sat – Sun';
     if (_draft.days.length == 7) return 'Runs every day';
+    if (_draft.days.length == 1) return 'Runs 1 day a week';
     return 'Runs ${_draft.days.length} days a week';
-  }
-
-  String _daysSummary() {
-    final days = _draft.days;
-    if (_isWeekdays(days)) return 'Runs on weekdays (Mon – Fri).';
-    if (_isWeekend(days)) return 'Runs on weekends (Sat – Sun).';
-    if (days.length == 7) return 'Runs every day of the week.';
-    return 'Runs on ${_joinDayNames(days)}.';
   }
 
   Widget _dayChip(OColors c, int day) {
@@ -1299,12 +1217,6 @@ class _CadencePickerState extends State<CadencePicker> {
             'CUSTOM CADENCE',
             style: OType.overline.copyWith(color: c.textMuted),
           ),
-          const SizedBox(height: OSpace.xs),
-          Text(
-            'Paste a five-field cron expression or an RRULE. Ovid checks it '
-            'before saving.',
-            style: OType.caption.copyWith(color: c.textMuted),
-          ),
           const SizedBox(height: OSpace.s),
           Semantics(
             container: true,
@@ -1338,158 +1250,6 @@ class _CadencePickerState extends State<CadencePicker> {
             const SizedBox(height: OSpace.s),
             _errorLine(c, error),
           ],
-          const SizedBox(height: OSpace.m),
-          Wrap(
-            spacing: OSpace.s,
-            runSpacing: OSpace.s,
-            children: [
-              OChip(
-                label: 'Every Monday',
-                onTap: widget.enabled ? () => _applyRule('0 18 * * 1') : null,
-              ),
-              OChip(
-                label: '1st of the month',
-                onTap: widget.enabled ? () => _applyRule('0 8 1 * *') : null,
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _timezoneCard(OColors c) {
-    final tappable = widget.enabled && widget.onTimezoneTap != null;
-    final label = tappable
-        ? 'Timezone, ${_draft.timezoneLabel}. Change.'
-        : 'Timezone, ${_draft.timezoneLabel}.';
-    return Semantics(
-      label: label,
-      button: tappable,
-      enabled: widget.enabled,
-      onTap: tappable ? widget.onTimezoneTap : null,
-      child: ExcludeSemantics(
-        child: OCard(
-          onTap: tappable ? widget.onTimezoneTap : null,
-          padding: const EdgeInsets.all(OSpace.m),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _rowIcon(c, Icons.public_rounded, color: c.success),
-              const SizedBox(width: OSpace.m),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Timezone',
-                      style: OType.bodySm.copyWith(
-                        color: widget.enabled ? c.text : c.textFaint,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    Text(
-                      _draft.timezoneLabel,
-                      style: OType.caption.copyWith(color: c.textMuted),
-                    ),
-                    const SizedBox(height: OSpace.xs),
-                    Text(
-                      'Times use ${_draft.timezoneShort}. Ovid handles daylight '
-                      'saving changes.',
-                      style: OType.caption.copyWith(color: c.textFaint),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: OSpace.xs),
-              if (tappable) ...[
-                Text(
-                  'Change',
-                  style: OType.caption.copyWith(
-                    color: c.accent,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                Icon(Icons.chevron_right_rounded, size: 20, color: c.textFaint),
-              ] else if (widget.onTimezoneTap != null)
-                Icon(Icons.lock_outline_rounded, size: 16, color: c.textFaint),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _preview(OColors c, String? error) {
-    final draft = _draft;
-    final next = error == null ? describeNextRun(draft, widget.now) : null;
-    final tone = error != null ? c.warn : c.accent;
-    final title = error != null
-        ? 'Add the missing details'
-        : next ?? 'Set by your custom rule';
-    final detail = error != null
-        ? 'The next run appears once the cadence is complete.'
-        : next != null
-            ? '${describeCadence(draft)} · ${draft.timezoneShort}'
-            : draft.customRule.trim();
-
-    return OCard(
-      accent: true,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 32,
-            height: 32,
-            decoration: BoxDecoration(
-              color: c.accentSoft,
-              shape: BoxShape.circle,
-            ),
-            child: Icon(
-              error != null ? Icons.info_outline_rounded : Icons.auto_awesome_rounded,
-              size: 17,
-              color: tone,
-            ),
-          ),
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'NEXT RUN',
-                  style: OType.overline.copyWith(color: tone),
-                ),
-                const SizedBox(height: OSpace.xs),
-                Text(
-                  title,
-                  style: OType.bodyStrong.copyWith(
-                    color: error != null ? c.text : c.accent,
-                  ),
-                ),
-                if (detail.isNotEmpty) ...[
-                  const SizedBox(height: OSpace.xs),
-                  Text(
-                    detail,
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                ],
-                if (draft.scheduleExpression.isNotEmpty) ...[
-                  const SizedBox(height: OSpace.xs),
-                  Text(
-                    'Sends ${draft.scheduleExpression}',
-                    key: const ValueKey('cadence-expression'),
-                    style: OType.mono.copyWith(color: c.textMuted),
-                  ),
-                ],
-                const SizedBox(height: OSpace.s),
-                Text(
-                  'Runs in the cloud, even when your phone is off.',
-                  style: OType.caption.copyWith(color: c.textFaint),
-                ),
-              ],
-            ),
-          ),
         ],
       ),
     );
@@ -1506,7 +1266,11 @@ class _CadencePickerState extends State<CadencePicker> {
           children: [
             Padding(
               padding: const EdgeInsets.only(top: 1),
-              child: Icon(Icons.error_outline_rounded, size: 15, color: c.danger),
+              child: Icon(
+                Icons.error_outline_rounded,
+                size: 15,
+                color: c.danger,
+              ),
             ),
             const SizedBox(width: OSpace.xs),
             Expanded(

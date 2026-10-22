@@ -3,11 +3,20 @@ import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'project_detail_page.dart';
 import 'sidebar_footer.dart';
 
 // TODO(l10n): route all user-facing copy through the ARB pass.
+
+/// How the sidebar is mounted.
+///
+/// [drawer] is the phone default: the widget paints inside a [Drawer].
+/// [rail] is the tablet/desktop form — a fixed column beside the content,
+/// 280 dp at 600 dp+ and 300 dp at 900 dp+. The shell decides which one to
+/// pass; the widget never changes mode on its own.
+enum SidebarLayout { drawer, rail }
 
 enum V2SidebarStatus { loading, content, error }
 
@@ -71,6 +80,15 @@ class V2SidebarSession {
   /// Project the chat belongs to, when it has one.
   final String? projectName;
 
+  /// The one meta line a row is allowed. Time wins over project so a row never
+  /// stacks two lines of secondary text.
+  String? get rowMeta {
+    if (timeLabel.isNotEmpty) return timeLabel;
+    final project = projectName?.trim();
+    if (project != null && project.isNotEmpty) return project;
+    return null;
+  }
+
   String get meta {
     final parts = <String>[
       if (modelLabel.isNotEmpty) modelLabel,
@@ -103,6 +121,15 @@ class V2SidebarProject {
 
   String get chatLabel => chatCount == 1 ? '1 chat' : '$chatCount chats';
 
+  /// The single line under a project name: chat count, then memory when it
+  /// exists. Zero memory is omitted rather than spelled out.
+  String get metaLabel {
+    final chats = chatCount == 0 ? 'No chats' : chatLabel;
+    if (memoryFileCount <= 0) return chats;
+    final files = memoryFileCount == 1 ? '1 file' : '$memoryFileCount files';
+    return '$chats · $files';
+  }
+
   String get memoryLabel => switch (memoryFileCount) {
     0 => 'No memory',
     1 => '1 file',
@@ -123,6 +150,7 @@ class Sidebar extends StatefulWidget {
   const Sidebar({
     super.key,
     required this.data,
+    this.layout = SidebarLayout.drawer,
     this.onProfile,
     this.onNewChat,
     this.onNewProject,
@@ -139,13 +167,30 @@ class Sidebar extends StatefulWidget {
   });
 
   final V2SidebarData data;
+
+  /// Defaults to [SidebarLayout.drawer] so the phone shell is unchanged.
+  final SidebarLayout layout;
+
+  /// Phone drawer width. Kept below the 360 dp compact breakpoint so the
+  /// drawer never covers the whole narrow screen.
+  static const double drawerWidth = 340;
+
+  /// Fixed column widths for [SidebarLayout.rail].
+  static const double railWidthTablet = 280;
+  static const double railWidthWide = 300;
+
+  /// Rail width for the current window: 280 dp from 600 dp, 300 dp from 900 dp.
+  static double railWidth(double screenWidth) =>
+      screenWidth >= OBreakpoints.wide ? railWidthWide : railWidthTablet;
+
   final VoidCallback? onProfile;
   final VoidCallback? onNewChat;
   final VoidCallback? onNewProject;
   final ValueChanged<V2SidebarProject>? onProjectTap;
 
-  /// Fired when the memory chip on a project row is tapped. When null and the
-  /// project carries [V2SidebarProject.detail], the detail sheet opens inline.
+  /// Fired when the memory control on a project row is tapped. When null and
+  /// the project carries [V2SidebarProject.detail], the detail sheet opens
+  /// inline.
   final ValueChanged<V2SidebarProject>? onProjectMemory;
   final ValueChanged<V2SidebarSession>? onSessionTap;
 
@@ -180,70 +225,85 @@ class _SidebarState extends State<Sidebar> {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    final isRail = widget.layout == SidebarLayout.rail;
+    final width = isRail
+        ? Sidebar.railWidth(MediaQuery.sizeOf(context).width)
+        : Sidebar.drawerWidth;
     return Align(
       alignment: Alignment.topLeft,
       child: SizedBox(
-        width: 340,
+        key: const Key('v2-sidebar-surface'),
+        width: width,
         child: Material(
           color: c.surface,
-          child: SafeArea(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                _ProfileHeader(data: _w.data, onTap: _w.onProfile),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: OSpace.m),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      OButton(
-                        label: 'New session',
-                        icon: Icons.add_rounded,
-                        expand: true,
-                        onPressed: _w.onNewChat,
-                      ),
-                      // Search filters the drawer index, so it only exists when
-                      // there is an index to filter. Showing it over the
-                      // loading or error state would be a field that ignores
-                      // every keystroke.
-                      if (_w.data.status == V2SidebarStatus.content) ...[
-                        const SizedBox(height: OSpace.s),
-                        OSearchField(
-                          key: const Key('v2-sidebar-search'),
-                          controller: _search,
-                          hint: 'Search',
-                          onChanged: (value) =>
-                              setState(() => _query = value.trim()),
-                          trailing: _query.isEmpty
-                              ? null
-                              : OIconButton(
-                                  icon: Icons.close_rounded,
-                                  semanticLabel: 'Clear search',
-                                  tooltip: 'Clear search',
-                                  onPressed: () {
-                                    _search.clear();
-                                    setState(() => _query = '');
-                                  },
-                                ),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              border: isRail
+                  ? Border(right: BorderSide(color: c.hairline))
+                  : null,
+            ),
+            child: SafeArea(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _ProfileHeader(data: _w.data, onTap: _w.onProfile),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: OSpace.m),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        OButton(
+                          label: 'New session',
+                          icon: Icons.add_rounded,
+                          expand: true,
+                          onPressed: _w.onNewChat,
                         ),
+                        // Search filters the drawer index, so it only exists
+                        // when there is an index to filter. Showing it over the
+                        // loading or error state would be a field that ignores
+                        // every keystroke.
+                        if (_w.data.status == V2SidebarStatus.content) ...[
+                          const SizedBox(height: OSpace.s),
+                          OSearchField(
+                            key: const Key('v2-sidebar-search'),
+                            controller: _search,
+                            hint: 'Search',
+                            onChanged: (value) =>
+                                setState(() => _query = value.trim()),
+                            trailing: _query.isEmpty
+                                ? null
+                                : OIconButton(
+                                    icon: Icons.close_rounded,
+                                    semanticLabel: 'Clear search',
+                                    tooltip: 'Clear search',
+                                    onPressed: _clearSearch,
+                                  ),
+                          ),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
-                ),
-                const SizedBox(height: OSpace.xs),
-                Expanded(child: _buildBody(context)),
-                SidebarFooter(
-                  onSchedule: _w.onSchedule,
-                  onArtifacts: _w.onArtifacts,
-                  onSettings: _w.onSettings,
-                  scheduleNextRun: _w.data.scheduleNextRun,
-                ),
-              ],
+                  const SizedBox(height: OSpace.xs),
+                  Expanded(child: _buildBody(context)),
+                  SidebarFooter(
+                    onSchedule: _w.onSchedule,
+                    onArtifacts: _w.onArtifacts,
+                    onSettings: _w.onSettings,
+                    scheduleNextRun: _w.data.scheduleNextRun,
+                  ),
+                ],
+              ),
             ),
           ),
         ),
       ),
     );
+  }
+
+  void _clearSearch() {
+    _search.clear();
+    FocusScope.of(context).unfocus();
+    setState(() => _query = '');
   }
 
   Widget _buildBody(BuildContext context) {
@@ -259,16 +319,13 @@ class _SidebarState extends State<Sidebar> {
     }
     if (_query.isNotEmpty) return _searchResults(context);
     if (_w.data.isEmpty) {
-      return OEmptyState(
+      // One line. The New session button above is the only action this zone
+      // needs, so the empty state does not repeat it.
+      return const OEmptyState(
         compact: true,
         icon: Icons.chat_bubble_outline_rounded,
         title: 'No chats yet',
-        message: 'Start a new session and it will show up here.',
-        action: OButton(
-          label: 'New session',
-          icon: Icons.add_rounded,
-          onPressed: _w.onNewChat,
-        ),
+        message: '',
       );
     }
 
@@ -276,8 +333,6 @@ class _SidebarState extends State<Sidebar> {
     // Flatten sections into one lazy list: a drawer with hundreds of chats
     // builds only the rows near the viewport instead of every row.
     final entries = <_SidebarEntry>[
-      if (data.pinned.isNotEmpty) const _SectionEntry('Pinned'),
-      for (final session in data.pinned) _SessionEntry(session),
       if (data.projects.isNotEmpty)
         _SectionEntry(
           'Projects',
@@ -289,6 +344,8 @@ class _SidebarState extends State<Sidebar> {
           ),
         ),
       for (final project in data.projects) _ProjectEntry(project),
+      if (data.pinned.isNotEmpty) const _SectionEntry('Pinned'),
+      for (final session in data.pinned) _SessionEntry(session),
       if (data.today.isNotEmpty) const _SectionEntry('Today'),
       for (final session in data.today) _SessionEntry(session),
       if (data.yesterday.isNotEmpty) const _SectionEntry('Yesterday'),
@@ -296,9 +353,7 @@ class _SidebarState extends State<Sidebar> {
       if (data.earlier.isNotEmpty) const _SectionEntry('Earlier'),
       for (final session in data.earlier) _SessionEntry(session),
     ];
-    return OFadeSlide(
-      child: _sidebarList(entries),
-    );
+    return OFadeSlide(child: _sidebarList(entries));
   }
 
   Widget _sidebarList(List<_SidebarEntry> entries) {
@@ -377,14 +432,11 @@ class _SidebarState extends State<Sidebar> {
         compact: true,
         icon: Icons.search_off_rounded,
         title: 'No matches',
-        message: 'Try a different word from the chat title or project name.',
+        message: '',
         action: OButton(
           label: 'Clear search',
           variant: OButtonVariant.ghost,
-          onPressed: () {
-            _search.clear();
-            setState(() => _query = '');
-          },
+          onPressed: _clearSearch,
         ),
       );
     }
@@ -423,98 +475,65 @@ class _ProfileHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     return Padding(
-      padding: const EdgeInsets.all(OSpace.m),
+      padding: const EdgeInsets.fromLTRB(
+        OSpace.m,
+        OSpace.s,
+        OSpace.m,
+        OSpace.xs,
+      ),
       child: OPressable(
         onTap: onTap,
         semanticLabel: 'Profile, ${data.name}, ${data.planLabel}',
         child: ConstrainedBox(
           constraints: const BoxConstraints(minHeight: OSpace.listRow),
-          child: Padding(
-            padding: const EdgeInsets.all(OSpace.s),
-            child: Row(
-              children: [
-                Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    OAvatar(
-                      initials: data.initials ?? data.name,
-                      size: 40,
-                      semanticLabel: data.name,
-                    ),
-                    Positioned(
-                      right: 0,
-                      bottom: 0,
-                      child: Container(
-                        width: 10,
-                        height: 10,
-                        decoration: BoxDecoration(
-                          color: c.success,
-                          shape: BoxShape.circle,
-                          border: Border.all(color: c.surface, width: 2),
-                        ),
+          child: Row(
+            children: [
+              Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  OAvatar(
+                    initials: data.initials ?? data.name,
+                    size: 40,
+                    semanticLabel: data.name,
+                  ),
+                  Positioned(
+                    right: 0,
+                    bottom: 0,
+                    child: Container(
+                      width: 10,
+                      height: 10,
+                      decoration: BoxDecoration(
+                        color: c.success,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: c.surface, width: 2),
                       ),
                     ),
-                  ],
-                ),
-                const SizedBox(width: OSpace.m),
-                Expanded(
-                  child: ExcludeSemantics(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          data.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: OType.bodyStrong.copyWith(color: c.text),
-                        ),
-                        const SizedBox(height: OSpace.xs),
-                        _PlanPill(label: data.planLabel),
-                      ],
-                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(width: OSpace.m),
+              Expanded(
+                child: ExcludeSemantics(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        data.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: OType.bodyStrong.copyWith(color: c.text),
+                      ),
+                      const SizedBox(height: OSpace.xs),
+                      OPill(label: data.planLabel, tone: OPillTone.accent),
+                    ],
                   ),
                 ),
-                Icon(Icons.expand_more_rounded, size: 20, color: c.textMuted),
-              ],
-            ),
+              ),
+              Icon(Icons.expand_more_rounded, size: 20, color: c.textMuted),
+            ],
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _PlanPill extends StatelessWidget {
-  const _PlanPill({required this.label});
-
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      constraints: const BoxConstraints(minHeight: 24),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-      decoration: BoxDecoration(
-        color: c.accentSoft,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Flexible(
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: OType.caption.copyWith(
-                color: c.accent,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -562,10 +581,8 @@ class _SessionRow extends StatelessWidget {
   String get _semanticLabel {
     final parts = <String>[
       session.title,
-      if (session.projectName != null && session.projectName!.isNotEmpty)
-        session.projectName!,
       if (session.pinned) 'Pinned',
-      if (session.meta.isNotEmpty) session.meta,
+      if (session.rowMeta != null) session.rowMeta!,
     ];
     return parts.join(', ');
   }
@@ -574,7 +591,7 @@ class _SessionRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     final longPress = onLongPress ?? onActions;
-    final projectName = session.projectName;
+    final meta = session.rowMeta;
     return Row(
       children: [
         Expanded(
@@ -606,48 +623,28 @@ class _SessionRow extends StatelessWidget {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                          Text(
-                            session.title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: OType.bodySm.copyWith(
-                              color: c.text,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                          if (projectName != null &&
-                              projectName.isNotEmpty) ...[
-                            const SizedBox(height: 2),
-                            Row(
-                              children: [
-                                Icon(
-                                  Icons.folder_rounded,
-                                  size: 13,
-                                  color: c.textFaint,
-                                ),
-                                const SizedBox(width: OSpace.xs),
-                                Flexible(
-                                  child: Text(
-                                    projectName,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: OType.caption.copyWith(
-                                      color: c.textMuted,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                          if (session.meta.isNotEmpty) ...[
-                            const SizedBox(height: 2),
                             Text(
-                              session.meta,
+                              session.title,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: OType.caption.copyWith(color: c.textMuted),
+                              style: OType.bodySm.copyWith(
+                                color: c.text,
+                                fontWeight: FontWeight.w500,
+                              ),
                             ),
-                          ],
+                            // One meta line only: time when there is one,
+                            // otherwise the project. Never both.
+                            if (meta != null) ...[
+                              const SizedBox(height: OSpace.xxs),
+                              Text(
+                                meta,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: OType.caption.copyWith(
+                                  color: c.textMuted,
+                                ),
+                              ),
+                            ],
                           ],
                         ),
                       ),
@@ -712,12 +709,12 @@ class _ProjectRow extends StatelessWidget {
               Icon(Icons.folder_rounded, size: 20, color: c.accent),
               const SizedBox(width: OSpace.s),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    ExcludeSemantics(
-                      child: Text(
+                child: ExcludeSemantics(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
                         project.name,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -726,24 +723,23 @@ class _ProjectRow extends StatelessWidget {
                           fontWeight: FontWeight.w500,
                         ),
                       ),
-                    ),
-                    const SizedBox(height: 2),
-                    _MemoryChip(
-                      project: project,
-                      onTap: canOpenMemory ? () => _openMemory(context) : null,
-                    ),
-                  ],
+                      const SizedBox(height: OSpace.xxs),
+                      // One line: chats, plus memory when it exists.
+                      Text(
+                        project.metaLabel,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: OType.caption.copyWith(color: c.textMuted),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-              const SizedBox(width: OSpace.s),
-              ExcludeSemantics(
-                child: Text(
-                  project.chatLabel,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.caption.copyWith(color: c.textFaint),
+              if (canOpenMemory)
+                _ProjectMemoryButton(
+                  project: project,
+                  onTap: () => _openMemory(context),
                 ),
-              ),
             ],
           ),
         ),
@@ -752,57 +748,24 @@ class _ProjectRow extends StatelessWidget {
   }
 }
 
-/// Small "memory files" affordance under a project name. Grows with the text
-/// scale so the count is never clipped at 200 %.
-///
-/// It is only a control when a handler exists (either the injected callback or
-/// a detail payload). Without one it stays an information label instead of
-/// rendering a chip that looks tappable but goes nowhere.
-class _MemoryChip extends StatelessWidget {
-  const _MemoryChip({required this.project, this.onTap});
+/// The only memory affordance on a project row: a trailing icon, not a second
+/// line of chip. It exists only when a handler can actually open something.
+class _ProjectMemoryButton extends StatelessWidget {
+  const _ProjectMemoryButton({required this.project, required this.onTap});
 
   final V2SidebarProject project;
-  final VoidCallback? onTap;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final hasMemory = project.memoryFileCount > 0;
-    final fg = hasMemory ? c.accent : c.textFaint;
-    final label = 'Memory for ${project.name}, ${project.memorySemanticLabel}';
-    final chip = Container(
+    return OIconButton(
       key: ValueKey<String>('v2-sidebar-memory-${project.id}'),
-      constraints: const BoxConstraints(minHeight: 22),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(
-        color: hasMemory ? c.accentSoft : c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.memory_rounded, size: 13, color: fg),
-          const SizedBox(width: OSpace.xs),
-          Flexible(
-            child: Text(
-              project.memoryLabel,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: OType.caption.copyWith(
-                color: fg,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ],
-      ),
+      icon: Icons.memory_rounded,
+      semanticLabel:
+          'Memory for ${project.name}, ${project.memorySemanticLabel}',
+      tooltip: 'Memory',
+      size: 18,
+      onPressed: onTap,
     );
-    final onTap = this.onTap;
-    if (onTap == null) {
-      // The project row's own label already carries the memory count, so the
-      // chip only needs to stay out of the semantics tree and offer no tap.
-      return ExcludeSemantics(child: chip);
-    }
-    return OPressable(onTap: onTap, semanticLabel: label, child: chip);
   }
 }

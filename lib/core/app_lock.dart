@@ -211,10 +211,46 @@ class AppLock extends ChangeNotifier {
     return ms <= 0 ? 0 : (ms / 1000).ceil();
   }
 
-  /// Reads persisted state. Safe to call repeatedly; the work happens once.
-  Future<void> load() => _loadFuture ??= _load();
+  /// How long the gate waits for persisted state before it stops blocking the
+  /// UI. A hung SharedPreferences or Keystore read must never leave the app on
+  /// a blank surface: that is indistinguishable from a frozen app.
+  static const Duration loadTimeout = Duration(seconds: 3);
+
+  bool _timedOut = false;
+
+  /// True when the first read did not finish in [loadTimeout]. The gate uses
+  /// this to offer a retry instead of pretending the lock is off.
+  bool get loadTimedOut => _timedOut;
+
+  /// Reads persisted state. Safe to call repeatedly; the work happens once,
+  /// unless the first attempt timed out, in which case a retry is allowed.
+  Future<void> load() {
+    final existing = _loadFuture;
+    if (existing != null && !_timedOut) return existing;
+    _timedOut = false;
+    return _loadFuture = _load();
+  }
 
   Future<void> _load() async {
+    // The body is bounded: if the platform never answers, the UI is released
+    // in a recoverable state rather than staying blank forever.
+    try {
+      await _loadState().timeout(loadTimeout);
+    } on TimeoutException {
+      _timedOut = true;
+      Diag.swallow(
+        'app_lock.load',
+        StateError('lock state read timed out after ${loadTimeout.inSeconds}s'),
+      );
+      // We could not prove a PIN exists, so do not lock the user out of their
+      // own app. A retry re-reads the real state and locks if a PIN is found.
+      _locked = false;
+      _loaded = true;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _loadState() async {
     try {
       final prefs = await _prefsFactory();
       final wanted = prefs.getBool(_enabledKey) ?? false;

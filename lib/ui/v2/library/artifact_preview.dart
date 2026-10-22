@@ -121,10 +121,25 @@ class V2ArtifactPreview extends StatelessWidget {
     super.key,
     required this.data,
     this.onOpenExternally,
+    this.showName = true,
+    this.showHeader = true,
+    this.showFooter = true,
   });
 
   final V2ArtifactPreviewData data;
   final VoidCallback? onOpenExternally;
+
+  /// False when the page header already carries the file name, so the preview
+  /// never repeats the title in the body.
+  final bool showName;
+
+  /// False when the host already shows the type and size, so the stage is the
+  /// only thing the preview adds.
+  final bool showHeader;
+
+  /// False when the host owns the open action and the note, so the preview is
+  /// just the stage.
+  final bool showFooter;
 
   @override
   Widget build(BuildContext context) {
@@ -139,11 +154,12 @@ class V2ArtifactPreview extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _header(c),
-          const SizedBox(height: OSpace.m),
+          if (showHeader) ...[_header(c), const SizedBox(height: OSpace.m)],
           if (data.heavy) _heavyStage(c) else _stage(context, c),
-          const SizedBox(height: OSpace.m),
-          _footer(context, c),
+          if (showFooter) ...[
+            const SizedBox(height: OSpace.m),
+            _footer(context, c),
+          ],
         ],
       ),
     );
@@ -175,12 +191,13 @@ class V2ArtifactPreview extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                data.name,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: OType.bodyStrong.copyWith(color: c.text),
-              ),
+              if (showName)
+                Text(
+                  data.name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.bodyStrong.copyWith(color: c.text),
+                ),
               if (meta.isNotEmpty) ...[
                 const SizedBox(height: 2),
                 Text(
@@ -227,53 +244,34 @@ class V2ArtifactPreview extends StatelessWidget {
   /// Decode images at the width the preview draws them, not the camera's
   /// full resolution.
   int _cacheWidth(BuildContext context) =>
-      (MediaQuery.sizeOf(context).width * MediaQuery.devicePixelRatioOf(context))
+      (MediaQuery.sizeOf(context).width *
+              MediaQuery.devicePixelRatioOf(context))
           .round();
 
   Widget _imageStage(BuildContext context, OColors c) {
     final image =
         data.image ??
         (data.imageUrl.isEmpty ? null : NetworkImage(data.imageUrl));
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        ClipRRect(
-          borderRadius: BorderRadius.circular(ORadius.m),
-          child: AspectRatio(
-            aspectRatio: 16 / 10,
-            child: Container(
-              color: c.codeBg,
-              child: image == null
-                  ? _imagePlaceholder(c)
-                  : Image(
-                      image: ResizeImage.resizeIfNeeded(
-                        _cacheWidth(context),
-                        null,
-                        image,
-                      ),
-                      fit: BoxFit.contain,
-                      semanticLabel: 'Preview of ${data.name}',
-                      errorBuilder: (_, _, _) => _imagePlaceholder(c),
-                    ),
-            ),
-          ),
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(ORadius.m),
+      child: AspectRatio(
+        aspectRatio: 16 / 10,
+        child: Container(
+          color: c.codeBg,
+          child: image == null
+              ? _imagePlaceholder(c)
+              : Image(
+                  image: ResizeImage.resizeIfNeeded(
+                    _cacheWidth(context),
+                    null,
+                    image,
+                  ),
+                  fit: BoxFit.contain,
+                  semanticLabel: 'Preview of ${data.name}',
+                  errorBuilder: (_, _, _) => _imagePlaceholder(c),
+                ),
         ),
-        const SizedBox(height: OSpace.s),
-        Row(
-          children: [
-            Icon(Icons.image_rounded, size: 13, color: c.accent),
-            const SizedBox(width: OSpace.xs),
-            Expanded(
-              child: Text(
-                'Image preview',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: OType.caption.copyWith(color: c.textMuted),
-              ),
-            ),
-          ],
-        ),
-      ],
+      ),
     );
   }
 
@@ -296,7 +294,7 @@ class V2ArtifactPreview extends StatelessWidget {
             ),
             const SizedBox(height: OSpace.s),
             Text(
-              'Image preview unavailable',
+              'No image preview',
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
               textAlign: TextAlign.center,
@@ -354,7 +352,7 @@ class V2ArtifactPreview extends StatelessWidget {
           const SizedBox(height: OSpace.s),
           if (code.isEmpty)
             Text(
-              'No preview lines were sent with this artifact.',
+              'No preview.',
               style: OType.bodySm.copyWith(color: c.textMuted),
             )
           else
@@ -362,8 +360,7 @@ class V2ArtifactPreview extends StatelessWidget {
           if (total > shown) ...[
             const SizedBox(height: OSpace.s),
             Text(
-              'Showing first $shown of $total lines. Open the file externally '
-              'for the rest.',
+              '$shown of $total lines',
               style: OType.caption.copyWith(color: c.textMuted),
             ),
           ],
@@ -441,23 +438,9 @@ class V2ArtifactPreview extends StatelessWidget {
               Icon(Icons.description_rounded, size: 22, color: c.accent),
               const SizedBox(width: OSpace.s),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      body.isEmpty ? 'Metadata only' : 'Document preview',
-                      style: OType.bodyStrong.copyWith(color: c.text),
-                    ),
-                    const SizedBox(height: OSpace.xs),
-                    Text(
-                      body.isEmpty
-                          ? 'The file text was not available for preview. '
-                                'Open it externally to read the full file.'
-                          : 'The text of the file, read-only. Open it '
-                                'externally for the original layout.',
-                      style: OType.bodySm.copyWith(color: c.textMuted),
-                    ),
-                  ],
+                child: Text(
+                  body.isEmpty ? 'Metadata only' : 'Document preview',
+                  style: OType.bodyStrong.copyWith(color: c.text),
                 ),
               ),
             ],
@@ -481,8 +464,7 @@ class V2ArtifactPreview extends StatelessWidget {
             if (lines.length > shown.length) ...[
               const SizedBox(height: OSpace.s),
               Text(
-                'Showing first ${shown.length} of ${lines.length} lines. Open '
-                'the file externally for the rest.',
+                '${shown.length} of ${lines.length} lines',
                 style: OType.caption.copyWith(color: c.textMuted),
               ),
             ],
@@ -621,21 +603,6 @@ class V2ArtifactPreview extends StatelessWidget {
                 _placeholderBar(c, 0.9),
                 const SizedBox(height: 6),
                 _placeholderBar(c, 0.72),
-                const Spacer(),
-                Row(
-                  children: [
-                    Icon(Icons.public_rounded, size: 15, color: c.textFaint),
-                    const SizedBox(width: OSpace.xs),
-                    Expanded(
-                      child: Text(
-                        'Page thumbnail',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.caption.copyWith(color: c.textFaint),
-                      ),
-                    ),
-                  ],
-                ),
               ],
             ),
           ),
@@ -687,12 +654,6 @@ class V2ArtifactPreview extends StatelessWidget {
                 Text(
                   'Too large to preview',
                   style: OType.bodyStrong.copyWith(color: c.text),
-                ),
-                const SizedBox(height: OSpace.xs),
-                Text(
-                  'Nothing is rendered in the app for large files. Open it '
-                  'externally to view the whole thing.',
-                  style: OType.bodySm.copyWith(color: c.textMuted),
                 ),
               ],
             ),
@@ -752,23 +713,8 @@ class V2ArtifactPreview extends StatelessWidget {
 
   String _note() {
     if (data.note.isNotEmpty) return data.note;
-    if (data.heavy) {
-      return 'Large files are not rendered in the app. Open it externally to '
-          'use the full file.';
-    }
-    return switch (data.type) {
-      V2ArtifactPreviewType.image =>
-        'Read-only preview. Open the image externally for the full resolution.',
-      V2ArtifactPreviewType.code =>
-        'Read-only preview. Open the file externally to edit it.',
-      V2ArtifactPreviewType.document => data.documentText.trim().isEmpty
-          ? 'Preview only. Download or open the document externally to read it.'
-          : 'Read-only preview of the document text. Download or open it to '
-                'read the original.',
-      V2ArtifactPreviewType.page =>
-        'This thumbnail is static. Open the page externally to interact with '
-            'it.',
-    };
+    if (data.heavy) return 'Not previewed.';
+    return 'Read-only preview.';
   }
 
   // ---------------------------------------------------------------------------

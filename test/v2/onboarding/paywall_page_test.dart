@@ -14,7 +14,6 @@ Future<void> _pump(
   ValueChanged<V2Currency>? onCurrencyChanged,
   ValueChanged<String>? onStartTrial,
   VoidCallback? onContinueFree,
-  VoidCallback? onComparePlans,
   VoidCallback? onRetry,
   VoidCallback? onManageSubscription,
   double width = 400,
@@ -39,7 +38,6 @@ Future<void> _pump(
         onCurrencyChanged: onCurrencyChanged,
         onStartTrial: onStartTrial,
         onContinueFree: onContinueFree,
-        onComparePlans: onComparePlans,
         onRetry: onRetry,
         onManageSubscription: onManageSubscription,
       ),
@@ -53,9 +51,7 @@ Future<void> _pump(
 }
 
 void main() {
-  testWidgets('paywall renders every plan in USD in light', (
-    tester,
-  ) async {
+  testWidgets('paywall renders every plan in USD in light', (tester) async {
     await _pump(tester);
 
     expect(find.text('Ovid Free'), findsOneWidget);
@@ -66,12 +62,10 @@ void main() {
     expect(find.text('\$5'), findsOneWidget);
     expect(find.text('\$18'), findsOneWidget);
     expect(find.text('\$99'), findsOneWidget);
-    expect(find.text('Most popular'), findsOneWidget);
-    expect(find.text('Start 7-day free trial'), findsOneWidget);
-    expect(
-      find.text('Cancel anytime. Billed securely through Google Play.'),
-      findsOneWidget,
-    );
+    expect(find.text('Start free trial'), findsOneWidget);
+    expect(find.text('Cancel anytime. Billed by Google Play.'), findsOneWidget);
+    // Every plan is already on this screen; a second compare destination
+    // would only repeat it.
     expect(find.text('Compare all plans'), findsNothing);
     // A tour step, not a pushed route: no dead back arrow.
     expect(find.byIcon(Icons.arrow_back_rounded), findsNothing);
@@ -82,9 +76,9 @@ void main() {
     // introductory offer yet. The CTA must not invent a 7-day trial.
     await _pump(tester, data: const V2PaywallData());
 
-    expect(find.text('Start 7-day free trial'), findsNothing);
+    expect(find.text('Start free trial'), findsNothing);
     expect(find.textContaining('free trial'), findsNothing);
-    expect(find.text('Subscribe to Ovid Plus'), findsOneWidget);
+    expect(find.text('Subscribe'), findsOneWidget);
   });
 
   testWidgets('Free and Go say they are Auto-only', (tester) async {
@@ -145,7 +139,7 @@ void main() {
     expect(find.text('Ovid Go'), findsOneWidget);
     expect(find.text('Ovid Plus'), findsOneWidget);
     expect(find.text('Ovid Pro'), findsOneWidget);
-    expect(find.text('Start 7-day free trial'), findsOneWidget);
+    expect(find.text('Start free trial'), findsOneWidget);
   });
 
   testWidgets('320 dp wide at 200 % text lays out without overflow', (
@@ -157,8 +151,7 @@ void main() {
     expect(find.text('Ovid Go'), findsOneWidget);
     expect(find.text('Ovid Plus'), findsOneWidget);
     expect(find.text('Ovid Pro'), findsOneWidget);
-    expect(find.text('Start 7-day free trial'), findsOneWidget);
-    // Compare is hidden because no destination is wired.
+    expect(find.text('Start free trial'), findsOneWidget);
     expect(find.text('Compare all plans'), findsNothing);
 
     // Scroll the whole body to force every off-screen section to lay out.
@@ -175,7 +168,7 @@ void main() {
     await _pump(tester, width: 320, textScale: 2, dark: true);
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Most popular'), findsOneWidget);
+    expect(find.text('Ovid Plus'), findsOneWidget);
 
     await tester.drag(
       find.byType(SingleChildScrollView),
@@ -188,8 +181,8 @@ void main() {
   testWidgets('reduced motion keeps every section visible', (tester) async {
     await _pump(tester, disableAnimations: true);
 
-    expect(find.text('Do more with Ovid Plus'), findsOneWidget);
-    expect(find.text('Most popular'), findsOneWidget);
+    expect(find.text('Upgrade'), findsOneWidget);
+    expect(find.text('Ovid Plus'), findsOneWidget);
     expect(find.byKey(const Key('paywall-trial')), findsOneWidget);
   });
 
@@ -227,17 +220,6 @@ void main() {
     await tester.tap(find.byKey(const Key('paywall-trial')));
     await tester.pump();
     expect(trialPlan, 'go');
-  });
-
-  testWidgets('compare all plans calls back', (tester) async {
-    var taps = 0;
-    await _pump(tester, onComparePlans: () => taps++);
-
-    await tester.ensureVisible(find.text('Compare all plans'));
-    await tester.tap(find.text('Compare all plans'));
-    await tester.pump();
-
-    expect(taps, 1);
   });
 
   testWidgets('loading shows skeletons and no trial button', (tester) async {

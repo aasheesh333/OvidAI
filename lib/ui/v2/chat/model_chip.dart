@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
 
@@ -10,9 +11,8 @@ import '../../design/o_tokens.dart';
 /// whole chip keeps the title readable at 320 dp.
 const double v2ModelChipMaxWidth = 132;
 
-/// The model selector in a chat app bar: model icon, current model name, a
-/// chevron, an optional lock while the plan is Auto-only and an optional badge
-/// with the number of subagents in the session.
+/// The model selector in a chat app bar: model icon, current model name and a
+/// chevron. An optional badge counts the subagents in the session.
 ///
 /// The chip is presentational. [onTap] opens the caller's model menu; passing
 /// null (or [enabled] false) renders and announces a disabled chip. The tap
@@ -42,8 +42,8 @@ class V2ModelChip extends StatelessWidget {
   /// a model switch is in flight.
   final bool enabled;
 
-  /// Free and Go are Auto-only. Shows a lock and adds "Auto only" to the
-  /// spoken label. The chip stays tappable so the upgrade menu can open.
+  /// Free and Go are Auto-only. Adds "Auto only" to the spoken label; the
+  /// chip stays tappable so the upgrade menu can open.
   final bool autoOnly;
 
   /// Subagents launched in this session. When greater than zero, a small
@@ -98,8 +98,8 @@ class V2ModelChip extends StatelessWidget {
                   minHeight: 32,
                 ),
                 padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 4,
+                  horizontal: OSpace.pillPad,
+                  vertical: OSpace.xs,
                 ),
                 decoration: BoxDecoration(
                   color: active ? c.surfaceAlt : c.surface,
@@ -112,31 +112,20 @@ class V2ModelChip extends StatelessWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Icon(icon, size: 15, color: accent),
-                    const SizedBox(width: 4),
+                    const SizedBox(width: OSpace.xs),
                     Flexible(
                       child: Text(
                         label,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: OType.label.copyWith(
-                          color: foreground,
-                          fontSize: 13,
-                        ),
+                        style: OType.label.copyWith(color: foreground),
                       ),
                     ),
-                    if (autoOnly) ...[
-                      const SizedBox(width: 3),
-                      Icon(
-                        Icons.lock_outline_rounded,
-                        size: 13,
-                        color: active ? c.textMuted : c.textFaint,
-                      ),
-                    ],
                     if (subagentCount > 0) ...[
-                      const SizedBox(width: 4),
-                      _SubagentCountBadge(count: subagentCount, active: active),
+                      const SizedBox(width: OSpace.xs),
+                      OCountBadge(count: subagentCount, active: active),
                     ],
-                    const SizedBox(width: 2),
+                    const SizedBox(width: OSpace.xxs),
                     Icon(Icons.expand_more_rounded, size: 16, color: chevron),
                   ],
                 ),
@@ -149,40 +138,3 @@ class V2ModelChip extends StatelessWidget {
   }
 }
 
-/// Compact count of the subagents in the session. Grows with the text scale
-/// instead of clipping a two-digit count.
-class _SubagentCountBadge extends StatelessWidget {
-  const _SubagentCountBadge({required this.count, required this.active});
-
-  final int count;
-  final bool active;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
-      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        color: active ? c.accentSoft : c.surfaceRaised,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-      ),
-      child: Text(
-        count > 99 ? '99+' : '$count',
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        // The count is already spoken by the chip's semantic label. Keeping
-        // the visual badge fixed avoids squeezing the model name off a
-        // 120 dp chip at 200 % text.
-        textScaler: TextScaler.noScaling,
-        style: OType.overline.copyWith(
-          color: active ? c.accent : c.textFaint,
-          fontSize: 10,
-          height: 1.2,
-          letterSpacing: 0,
-        ),
-      ),
-    );
-  }
-}

@@ -89,12 +89,33 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Changes'), findsOneWidget);
-      expect(find.text('3 changed · +48 −12'), findsOneWidget);
-      expect(find.text('3 changed files'), findsOneWidget);
-      expect(find.text('index.html'), findsOneWidget);
-      expect(find.text('styles.css'), findsOneWidget);
+      expect(find.text('src/pages/index.html'), findsOneWidget);
+      expect(find.text('src/theme/styles.css'), findsOneWidget);
+      expect(find.text('src/core/app.js'), findsOneWidget);
+      expect(find.text('+32'), findsOneWidget);
+      expect(find.text('−4'), findsOneWidget);
       expect(find.text('@@ -42,6 +42,7 @@'), findsOneWidget);
+
+      // No summary card, no pills: the rows are the page.
+      expect(find.textContaining('changed ·'), findsNothing);
+      expect(find.text('Working tree'), findsNothing);
+      expect(find.textContaining('Ready to review'), findsNothing);
     }
+  });
+
+  testWidgets('the commit action lives in the header, not a bottom bar', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_app(const V2ChangesPage(data: _data)));
+    await tester.pumpAndSettle();
+
+    final header = tester.widget<OAppBar>(find.byType(OAppBar));
+    expect(header.actions, hasLength(1));
+    expect(header.actions.single.key, _openSheetKey);
+    // No second, full-width primary button in the body.
+    expect(find.text('Commit & push'), findsNothing);
+    // The branch is not repeated under the header; the workspace chip owns it.
+    expect(find.text('main ← feature/hero-revamp'), findsNothing);
   });
 
   testWidgets('empty state goes back to the workspace', (tester) async {
@@ -146,7 +167,7 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.text('Changes'), findsOneWidget);
-    expect(find.text('Behind remote'), findsOneWidget);
+    expect(find.text('src/pages/index.html'), findsOneWidget);
   });
 
   testWidgets('loading state shows skeletons', (tester) async {
@@ -183,25 +204,10 @@ void main() {
     expect(retries, 1);
   });
 
-  testWidgets('sync row asks to pull upstream commits', (tester) async {
-    var syncs = 0;
-    await tester.pumpWidget(
-      _app(V2ChangesPage(data: _data, onSync: () => syncs++)),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.ensureVisible(find.text('Sync latest first'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Sync latest first'));
-    expect(syncs, 1);
-  });
-
   testWidgets('commit stays disabled until a message is typed', (tester) async {
     final handle = tester.ensureSemantics();
 
-    await tester.pumpWidget(
-      _app(V2ChangesPage(data: _data, onCommit: (_) {})),
-    );
+    await tester.pumpWidget(_app(V2ChangesPage(data: _data, onCommit: (_) {})));
     await tester.pumpAndSettle();
     await _openCommitSheet(tester);
 
@@ -220,25 +226,18 @@ void main() {
     handle.dispose();
   });
 
-  testWidgets('a file without hunks is not expandable and says so', (
-    tester,
-  ) async {
+  testWidgets('a file without hunks is not expandable', (tester) async {
     await tester.pumpWidget(_app(const V2ChangesPage(data: _data)));
     await tester.pumpAndSettle();
 
-    expect(
-      find.byKey(const ValueKey('v2-diff-unavailable-app.js')),
-      findsOneWidget,
-    );
-    expect(find.text('No diff available'), findsOneWidget);
-
-    await tester.ensureVisible(find.text('app.js'));
+    await tester.ensureVisible(find.text('src/core/app.js'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('app.js'));
+    await tester.tap(find.text('src/core/app.js'));
     await tester.pumpAndSettle();
 
     // No chevron means no empty diff body appears.
-    expect(find.text('No diff available'), findsOneWidget);
+    expect(find.textContaining('No diff'), findsNothing);
+    expect(find.text('src/core/app.js'), findsOneWidget);
   });
 
   testWidgets('the diff shows the real before and after lines', (tester) async {
@@ -281,9 +280,9 @@ void main() {
 
     expect(find.text('@@ -1,4 +1,6 @@'), findsNothing);
 
-    await tester.ensureVisible(find.text('styles.css'));
+    await tester.ensureVisible(find.text('src/theme/styles.css'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('styles.css'));
+    await tester.tap(find.text('src/theme/styles.css'));
     await tester.pumpAndSettle();
 
     expect(find.text('@@ -1,4 +1,6 @@'), findsOneWidget);
@@ -299,7 +298,7 @@ void main() {
 
     expect(find.byType(V2CommitSheet), findsOneWidget);
     expect(find.text('Commit changes'), findsOneWidget);
-    expect(find.text('3 changed files'), findsWidgets);
+    expect(find.text('3 changed files'), findsOneWidget);
   });
 
   testWidgets('the sheet maps changed files, branch and sync state', (
@@ -310,12 +309,30 @@ void main() {
     await _openCommitSheet(tester);
 
     // Directory + name are joined into the full path the sheet lists.
-    expect(find.text('src/pages/index.html'), findsOneWidget);
-    expect(find.text('src/theme/styles.css'), findsOneWidget);
-    expect(find.text('src/core/app.js'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(V2CommitSheet),
+        matching: find.text('src/pages/index.html'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byType(V2CommitSheet),
+        matching: find.text('src/theme/styles.css'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byType(V2CommitSheet),
+        matching: find.text('src/core/app.js'),
+      ),
+      findsOneWidget,
+    );
     // The page's branch and behind count seed the sheet.
     expect(find.text('main ← feature/hero-revamp'), findsWidgets);
-    expect(find.text('Sync first'), findsOneWidget);
+    expect(find.text('3 commits behind'), findsOneWidget);
     expect(
       find.descendant(
         of: find.byType(V2CommitSheet),
@@ -342,7 +359,7 @@ void main() {
     await tester.pumpAndSettle();
     await _openCommitSheet(tester);
 
-    await tester.tap(find.byTooltip('Close'));
+    await tester.tap(find.byKey(const Key('commit-sheet-close')));
     await tester.pumpAndSettle();
 
     expect(find.byType(V2CommitSheet), findsNothing);

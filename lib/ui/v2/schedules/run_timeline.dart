@@ -62,7 +62,8 @@ class V2TimelineRun {
   bool get succeeded => outcome == V2RunOutcome.succeeded;
   bool get running => outcome == V2RunOutcome.running;
 
-  String get outcomeLabel => statusLabel ??
+  String get outcomeLabel =>
+      statusLabel ??
       switch (outcome) {
         V2RunOutcome.succeeded => 'Completed',
         V2RunOutcome.failed => 'Failed',
@@ -83,8 +84,9 @@ class V2TimelineRun {
     };
   }
 
-  String get durationText =>
-      durationLabel?.trim().isNotEmpty == true ? durationLabel! : 'Not recorded';
+  String get durationText => durationLabel?.trim().isNotEmpty == true
+      ? durationLabel!
+      : 'Not recorded';
 }
 
 /// A consecutive set of runs that share a [V2TimelineRun.dayLabel].
@@ -187,8 +189,7 @@ class RunTimeline extends StatelessWidget {
     return OEmptyState(
       icon: Icons.history_rounded,
       title: 'No runs yet',
-      message:
-          'When this schedule runs, you will see the result and any files it made right here.',
+      message: 'Results and files appear here after a run.',
       action: OButton(
         label: 'Back to schedule',
         icon: Icons.arrow_back_rounded,
@@ -328,7 +329,8 @@ class _RunRow extends StatelessWidget {
                           Text(
                             run.summaryLabel,
                             style: OType.bodySm.copyWith(
-                              color: run.outcome == V2RunOutcome.unknown ||
+                              color:
+                                  run.outcome == V2RunOutcome.unknown ||
                                       run.outcome == V2RunOutcome.skipped
                                   ? c.textMuted
                                   : c.text,

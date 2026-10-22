@@ -114,6 +114,10 @@ void main() {
   testWidgets('the bottom bar is mounted and the Settings tab navigates', (
     tester,
   ) async {
+    tester.view.physicalSize = const Size(400, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
     liveSession();
     await tester.pumpWidget(
       MaterialApp(theme: OTheme.light(), home: const V2AppShell()),

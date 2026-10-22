@@ -35,13 +35,11 @@ Future<void> _pump(
 }
 
 void main() {
-  testWidgets('splash renders the mark, name and tagline in light', (
-    tester,
-  ) async {
+  testWidgets('splash renders the mark and name in light', (tester) async {
     await _pump(tester);
 
     expect(find.text('Ovid Si'), findsOneWidget);
-    expect(find.text('CHAT. CODE. CREATE.'), findsOneWidget);
+    expect(find.bySemanticsLabel('Ovid Si logo'), findsOneWidget);
     expect(find.byType(OProgressBar), findsOneWidget);
   });
 
@@ -49,7 +47,6 @@ void main() {
     await _pump(tester, dark: true);
 
     expect(find.text('Ovid Si'), findsOneWidget);
-    expect(find.text('CHAT. CODE. CREATE.'), findsOneWidget);
     expect(find.byType(OProgressBar), findsOneWidget);
   });
 
@@ -78,9 +75,7 @@ void main() {
 
     // The bar and its label are one node: a screen reader hears the sentence
     // once, with the percentage attached.
-    final node = tester.getSemantics(
-      find.bySemanticsLabel('Almost ready'),
-    );
+    final node = tester.getSemantics(find.bySemanticsLabel('Almost ready'));
     expect(node.value, '75 percent');
     expect(find.bySemanticsLabel('Ovid Si logo'), findsOneWidget);
 
@@ -113,7 +108,10 @@ void main() {
     expect(find.text('Try again'), findsOneWidget);
 
     // The retry control meets the 48 dp touch target.
-    expect(tester.getSize(find.byType(OButton)).height, greaterThanOrEqualTo(48));
+    expect(
+      tester.getSize(find.byType(OButton)).height,
+      greaterThanOrEqualTo(48),
+    );
 
     await tester.tap(find.text('Try again'));
     await tester.pump();
@@ -157,15 +155,14 @@ void main() {
 
         expect(tester.takeException(), isNull);
         expect(find.text('Ovid Si'), findsOneWidget);
-        expect(find.text('CHAT. CODE. CREATE.'), findsOneWidget);
 
         // The identity block must fit above the footer instead of scrolling
-        // under it: no clipped wordmark or tagline.
-        final tagline = tester.getRect(find.text('CHAT. CODE. CREATE.'));
+        // under it: no clipped wordmark.
+        final wordmark = tester.getRect(find.text('Ovid Si'));
         final footerTop = data.hasError
             ? tester.getRect(find.text(data.errorLabel!)).top
             : tester.getRect(find.byType(OProgressBar)).top;
-        expect(tagline.bottom, lessThan(footerTop));
+        expect(wordmark.bottom, lessThan(footerTop));
       }
     }
   });
@@ -176,6 +173,5 @@ void main() {
     // Motion is bypassed rather than hiding the content behind a delay.
     expect(find.byType(AnimatedOpacity), findsNothing);
     expect(find.text('Ovid Si'), findsOneWidget);
-    expect(find.text('CHAT. CODE. CREATE.'), findsOneWidget);
   });
 }

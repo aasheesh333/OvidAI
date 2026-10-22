@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/settings/credentials_page.dart';
 
@@ -88,7 +89,6 @@ const _browser = V2BrowserCredential(
 );
 
 V2CredentialsPageData _data({
-  VoidCallback? onAddToken,
   VoidCallback? onRevokeAll,
   VoidCallback? onManageCloudKey,
   ValueChanged<String>? onCredentialTap,
@@ -113,8 +113,7 @@ V2CredentialsPageData _data({
     githubOAuthConnected: githubOAuthConnected,
     githubPatAdded: githubPatAdded,
     cloudKeyActive: cloudKeyActive,
-    onAddToken: onAddToken,
-    onRevokeAll: onRevokeAll,
+    onRevokeAll: onRevokeAll ?? () {},
     onManageCloudKey: onManageCloudKey,
     onCredentialTap: onCredentialTap,
     onAddBrowserCredential: onAddBrowserCredential,
@@ -139,49 +138,43 @@ void main() {
     expect(await store.read('personal'), isNull);
   });
 
-  testWidgets('renders connected credentials in light mode', (tester) async {
-    await tester.pumpWidget(
-      _app(_page(_data()), theme: OTheme.light()),
-    );
+  testWidgets('renders one list with masked values in light mode', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_app(_page(_data()), theme: OTheme.light()));
     await tester.pumpAndSettle();
 
     expect(find.text('Credentials'), findsOneWidget);
     expect(find.text('Google'), findsOneWidget);
+    expect(find.text('aarav@gmail.com'), findsOneWidget);
     expect(find.text('GitHub'), findsOneWidget);
-    expect(find.text('Personal access token'), findsOneWidget);
+    expect(find.text('Connected'), findsOneWidget);
+    expect(find.text('GitHub token'), findsOneWidget);
+    expect(find.text('Provider key'), findsOneWidget);
     expect(find.text('pat_live_••••••9x4q'), findsOneWidget);
-    expect(find.text('Cloud key active'), findsOneWidget);
-    expect(find.text('Revoke all credentials'), findsOneWidget);
-    expect(find.text('BROWSER LOGINS'), findsOneWidget);
+    expect(find.text('Cloud key'), findsOneWidget);
+    expect(find.text('Active'), findsOneWidget);
     expect(find.text('example.com'), findsOneWidget);
     expect(find.text('aarav@example.com · ••••••••'), findsOneWidget);
-    expect(
-      find.textContaining('never shown to the agent in plain text'),
-      findsWidgets,
-    );
-    expect(find.text('GITHUB ACCESS'), findsOneWidget);
-    expect(find.text('OAuth (browser sign-in)'), findsOneWidget);
-    expect(find.text('GitHub personal access token'), findsOneWidget);
+    expect(find.text('Revoke all credentials'), findsOneWidget);
     expect(find.text('hunter2'), findsNothing);
+    // No status pills: a row is title plus its value.
+    expect(find.byType(OPill), findsNothing);
   });
 
   testWidgets('renders in dark mode', (tester) async {
-    await tester.pumpWidget(
-      _app(_page(_data()), theme: OTheme.dark()),
-    );
+    await tester.pumpWidget(_app(_page(_data()), theme: OTheme.dark()));
     await tester.pumpAndSettle();
 
     expect(find.text('Credentials'), findsOneWidget);
-    expect(find.text('3 stored'), findsOneWidget);
+    expect(find.text('Active'), findsOneWidget);
   });
 
   testWidgets('empty state offers to connect Google', (tester) async {
     var connected = false;
     await tester.pumpWidget(
       _app(
-        _page(
-          V2CredentialsPageData(onConnectGoogle: () => connected = true),
-        ),
+        _page(V2CredentialsPageData(onConnectGoogle: () => connected = true)),
         theme: OTheme.light(),
       ),
     );
@@ -250,9 +243,9 @@ void main() {
     final store = _FakeStore();
     await _pump(tester, data: _data(githubPatAdded: false), store: store);
 
-    final add = find.text('Add token');
-    await tester.ensureVisible(add);
-    await tester.tap(add);
+    final row = find.text('GitHub token');
+    await tester.ensureVisible(row);
+    await tester.tap(row);
     await tester.pumpAndSettle();
 
     await tester.enterText(
@@ -264,7 +257,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(store.values['github'], 'ghp_1234567890');
-    expect(find.text('Added · ••••••7890'), findsOneWidget);
+    expect(find.text('••••••7890'), findsOneWidget);
     expect(find.textContaining('ghp_'), findsNothing);
   });
 
@@ -275,8 +268,7 @@ void main() {
       data: _data(onAddBrowserCredential: (credential) => added = credential),
     );
 
-    await tester.ensureVisible(find.text('Add login').first);
-    await tester.tap(find.text('Add login').first);
+    await tester.tap(find.byTooltip('Add login'));
     await tester.pumpAndSettle();
 
     expect(find.text('Add browser login'), findsOneWidget);
@@ -311,8 +303,8 @@ void main() {
       data: _data(onEditBrowserCredential: (credential) => edited = credential),
     );
 
-    await tester.ensureVisible(find.byTooltip('Edit example.com'));
-    await tester.tap(find.byTooltip('Edit example.com'));
+    await tester.ensureVisible(find.text('example.com'));
+    await tester.tap(find.text('example.com'));
     await tester.pumpAndSettle();
 
     expect(find.text('Edit browser login'), findsOneWidget);
@@ -382,17 +374,15 @@ void main() {
       ),
     );
 
-    expect(find.text('OAuth (browser sign-in)'), findsOneWidget);
     expect(find.text('Not connected'), findsOneWidget);
-    expect(find.text('GitHub personal access token'), findsOneWidget);
-    expect(find.text('Added · used for git clone and push'), findsOneWidget);
+    expect(find.text('••••'), findsOneWidget);
 
-    await tester.ensureVisible(find.text('Connect'));
-    await tester.tap(find.text('Connect'));
+    await tester.ensureVisible(find.text('GitHub'));
+    await tester.tap(find.text('GitHub'));
     expect(connected, isTrue);
 
-    await tester.ensureVisible(find.text('Remove'));
-    await tester.tap(find.text('Remove'));
+    await tester.ensureVisible(find.byTooltip('Remove GitHub token'));
+    await tester.tap(find.byTooltip('Remove GitHub token'));
     expect(removed, isTrue);
   });
 
@@ -404,8 +394,7 @@ void main() {
       data: _data(onAddBrowserCredential: (_) {}),
     );
 
-    await tester.ensureVisible(find.text('Add login').first);
-    await tester.tap(find.text('Add login').first);
+    await tester.tap(find.byTooltip('Add login'));
     await tester.pumpAndSettle();
 
     expect(tester.takeException(), isNull);
@@ -428,7 +417,6 @@ void main() {
       ),
     );
 
-    expect(find.text('2 stored'), findsOneWidget);
     expect(find.text('Not added yet'), findsOneWidget);
     expect(find.textContaining('custom providers'), findsNothing);
   });
@@ -519,8 +507,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.text('Manage'));
-    await tester.tap(find.text('Manage'));
+    await tester.ensureVisible(find.byTooltip('Manage'));
+    await tester.tap(find.byTooltip('Manage'));
     expect(managed, isTrue);
   });
 
@@ -553,8 +541,7 @@ void main() {
       settle: false,
     );
 
-    expect(find.byType(ListView), findsOneWidget);
-    expect(find.text('Cloud key active'), findsNothing);
+    expect(find.byType(OSkeletonList), findsOneWidget);
     expect(find.text('Revoke all credentials'), findsNothing);
   });
 
@@ -562,17 +549,17 @@ void main() {
     String? tapped;
     await _pump(tester, data: _data(onCredentialTap: (id) => tapped = id));
 
-    await tester.ensureVisible(find.text('GitHub'));
-    await tester.tap(find.text('GitHub'));
+    await tester.ensureVisible(find.text('Google'));
+    await tester.tap(find.text('Google'));
     await tester.pumpAndSettle();
 
-    expect(tapped, 'github');
+    expect(tapped, 'google');
   });
 
   testWidgets('a missing token opens the real key form', (tester) async {
     await _pump(tester, data: _data(token: null));
 
-    expect(find.text('Personal access token'), findsOneWidget);
+    expect(find.text('Provider key'), findsOneWidget);
     expect(find.text('Not added yet'), findsOneWidget);
 
     final add = find.byKey(const ValueKey<String>('provider-key-add'));
@@ -598,13 +585,11 @@ void main() {
     );
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Protected & Encrypted'), findsOneWidget);
-    expect(find.text('Manage'), findsOneWidget);
     expect(
       find.byKey(const ValueKey<String>('provider-key-replace')),
       findsOneWidget,
     );
-    expect(find.text('Active'), findsNWidgets(3));
+    expect(find.text('Active'), findsOneWidget);
     expect(find.text('Revoke all credentials'), findsOneWidget);
   });
 
@@ -614,7 +599,7 @@ void main() {
     await _pump(tester, width: 320, textScale: 2, dark: true);
 
     expect(tester.takeException(), isNull);
-    expect(find.text('3 stored'), findsOneWidget);
+    expect(find.text('Credentials'), findsOneWidget);
   });
 
   testWidgets('stacked rows stay tappable at 320 dp and 200% text', (
@@ -628,11 +613,11 @@ void main() {
       data: _data(onCredentialTap: (id) => tapped = id),
     );
 
-    await tester.ensureVisible(find.text('GitHub'));
-    await tester.tap(find.text('GitHub'));
+    await tester.ensureVisible(find.text('Google'));
+    await tester.tap(find.text('Google'));
     await tester.pumpAndSettle();
 
-    expect(tapped, 'github');
+    expect(tapped, 'google');
   });
 
   testWidgets('long injected values stay inside the card at 320 dp', (
@@ -711,9 +696,8 @@ void main() {
       data: _data(onManageCloudKey: () {}),
     );
 
-    expect(find.text('Protected & Encrypted'), findsOneWidget);
     expect(find.text('Google'), findsOneWidget);
-    expect(find.text('Manage'), findsOneWidget);
+    expect(find.byTooltip('Manage'), findsOneWidget);
     expect(find.text('Revoke all credentials'), findsOneWidget);
   });
 
@@ -725,18 +709,12 @@ void main() {
     expect(find.byIcon(Icons.chevron_right_rounded), findsNothing);
   });
 
-  testWidgets('rows with a tap callback show the chevron', (tester) async {
-    await _pump(tester, data: _data(onCredentialTap: (_) {}));
-
-    expect(find.byIcon(Icons.chevron_right_rounded), findsNWidgets(2));
-  });
-
   testWidgets('a cloud key without a Manage callback has no dead button', (
     tester,
   ) async {
     await _pump(tester);
 
-    expect(find.text('Cloud key active'), findsOneWidget);
-    expect(find.text('Manage'), findsNothing);
+    expect(find.text('Cloud key'), findsOneWidget);
+    expect(find.byTooltip('Manage'), findsNothing);
   });
 }

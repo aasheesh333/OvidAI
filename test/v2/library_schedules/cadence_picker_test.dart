@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/schedules/cadence_picker.dart';
 
@@ -46,7 +45,9 @@ Finder _label(String label) => find.bySemanticsLabel(label).first;
 
 void main() {
   group('rendering', () {
-    testWidgets('renders the weekly cadence in light mode', (tester) async {
+    testWidgets('shows three cadence chips, the time and the days', (
+      tester,
+    ) async {
       _phone(tester);
       await tester.pumpWidget(_app(CadencePicker(draft: _draft, now: _now)));
       await tester.pumpAndSettle();
@@ -60,22 +61,17 @@ void main() {
 
       expect(find.text('REPEAT DAYS'), findsOneWidget);
       expect(find.text('Runs Mon – Fri'), findsOneWidget);
-      expect(find.text('Runs on weekdays (Mon – Fri).'), findsOneWidget);
 
-      expect(find.text('Timezone'), findsOneWidget);
-      expect(find.text('Asia/Kolkata (GMT +5:30)'), findsOneWidget);
-      expect(find.textContaining('Times use IST.'), findsOneWidget);
-
-      expect(find.text('NEXT RUN'), findsOneWidget);
-      expect(find.text('Tomorrow at 9:00 AM'), findsOneWidget);
-      expect(find.text('Every weekday at 9:00 AM · IST'), findsOneWidget);
+      // The helper paragraphs and the timezone card were removed.
+      expect(find.text('Timezone'), findsNothing);
+      expect(find.text('NEXT RUN'), findsNothing);
       expect(
         find.text('Runs in the cloud, even when your phone is off.'),
-        findsOneWidget,
+        findsNothing,
       );
     });
 
-    testWidgets('renders the weekly cadence in dark mode', (tester) async {
+    testWidgets('renders in dark mode', (tester) async {
       _phone(tester);
       await tester.pumpWidget(
         _app(CadencePicker(draft: _draft, now: _now), dark: true),
@@ -83,23 +79,15 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('REPEAT DAYS'), findsOneWidget);
-      expect(find.text('Tomorrow at 9:00 AM'), findsOneWidget);
+      expect(find.text('9:00 AM'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('daily hides weekday chips and updates the preview', (
-      tester,
-    ) async {
+    testWidgets('daily hides the weekday chips', (tester) async {
       _phone(tester);
       final changes = <V2CadenceDraft>[];
       await tester.pumpWidget(
-        _app(
-          CadencePicker(
-            draft: _draft,
-            now: _now,
-            onChanged: changes.add,
-          ),
-        ),
+        _app(CadencePicker(draft: _draft, now: _now, onChanged: changes.add)),
       );
       await tester.pumpAndSettle();
 
@@ -108,8 +96,6 @@ void main() {
 
       expect(changes.single.frequency, V2CadenceFrequency.daily);
       expect(find.text('REPEAT DAYS'), findsNothing);
-      expect(find.text('Every day at 9:00 AM · IST'), findsOneWidget);
-      expect(find.text('Tomorrow at 9:00 AM'), findsOneWidget);
     });
 
     testWidgets('an external draft reset updates the picker', (tester) async {
@@ -135,7 +121,6 @@ void main() {
         find.byKey(const ValueKey('cadence-custom-rule')),
       );
       expect(field.controller?.text, '0 17 * * 5');
-      expect(find.text('Friday, 23 Oct at 5:00 PM'), findsOneWidget);
       expect(find.text('REPEAT DAYS'), findsNothing);
     });
   });
@@ -148,13 +133,7 @@ void main() {
       final semantics = tester.ensureSemantics();
       final changes = <V2CadenceDraft>[];
       await tester.pumpWidget(
-        _app(
-          CadencePicker(
-            draft: _draft,
-            now: _now,
-            onChanged: changes.add,
-          ),
-        ),
+        _app(CadencePicker(draft: _draft, now: _now, onChanged: changes.add)),
       );
       await tester.pumpAndSettle();
 
@@ -163,14 +142,7 @@ void main() {
 
       expect(changes.single.days, <int>{1, 2, 3, 4, 5, 6});
       expect(find.text('Runs 6 days a week'), findsOneWidget);
-      expect(
-        find.text(
-          'Runs on Monday, Tuesday, Wednesday, Thursday, Friday and Saturday.',
-        ),
-        findsOneWidget,
-      );
 
-      // Sunday-only is the weekend.
       await tester.tap(find.bySemanticsLabel('Monday'));
       await tester.tap(find.bySemanticsLabel('Tuesday'));
       await tester.tap(find.bySemanticsLabel('Wednesday'));
@@ -181,8 +153,6 @@ void main() {
 
       expect(changes.last.days, <int>{6, 7});
       expect(find.text('Runs Sat – Sun'), findsOneWidget);
-      expect(find.text('Every weekend at 9:00 AM · IST'), findsOneWidget);
-      expect(find.text('Saturday, 24 Oct at 9:00 AM'), findsOneWidget);
 
       semantics.dispose();
     });
@@ -202,21 +172,18 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Pick at least one day for this to run.'), findsOneWidget);
-      expect(find.text('Pick at least one day'), findsOneWidget);
-      expect(find.text('Add the missing details'), findsOneWidget);
       expect(
-        find.text('The next run appears once the cadence is complete.'),
+        find.text('Pick at least one day for this to run.'),
         findsOneWidget,
       );
+      expect(find.text('Pick at least one day'), findsOneWidget);
       expect(_isEnabled(tester, _label('Monday')), isTrue);
 
       await tester.tap(find.bySemanticsLabel('Monday'));
       await tester.pumpAndSettle();
 
       expect(find.text('Pick at least one day for this to run.'), findsNothing);
-      expect(find.text('Every Monday at 9:00 AM · IST'), findsOneWidget);
-      expect(find.text('Monday, 26 Oct at 9:00 AM'), findsOneWidget);
+      expect(find.text('Runs 1 day a week'), findsOneWidget);
 
       semantics.dispose();
     });
@@ -228,13 +195,7 @@ void main() {
       final semantics = tester.ensureSemantics();
       final changes = <V2CadenceDraft>[];
       await tester.pumpWidget(
-        _app(
-          CadencePicker(
-            draft: _draft,
-            now: _now,
-            onChanged: changes.add,
-          ),
-        ),
+        _app(CadencePicker(draft: _draft, now: _now, onChanged: changes.add)),
       );
       await tester.pumpAndSettle();
 
@@ -258,8 +219,6 @@ void main() {
 
       expect(find.text('Describe when this should run.'), findsNothing);
       expect(changes.last.customRule, '0 18 * * 1');
-      expect(find.text('Monday, 26 Oct at 6:00 PM'), findsOneWidget);
-      expect(find.text('Sends cron 0 18 * * 1'), findsOneWidget);
 
       semantics.dispose();
     });
@@ -285,7 +244,6 @@ void main() {
         find.text('Use a cron expression or RRULE, for example 0 9 * * 1-5.'),
         findsOneWidget,
       );
-      expect(find.text('Add the missing details'), findsOneWidget);
     });
 
     testWidgets('an out-of-range cron field is rejected', (tester) async {
@@ -309,7 +267,7 @@ void main() {
       );
     });
 
-    testWidgets('a valid RRULE produces its cron equivalent', (tester) async {
+    testWidgets('a valid RRULE is accepted', (tester) async {
       _phone(tester);
       await tester.pumpWidget(
         _app(
@@ -324,13 +282,11 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(
-        find.text(
-          'Sends RRULE:FREQ=WEEKLY;BYDAY=MO,WE;BYHOUR=7;BYMINUTE=30',
-        ),
-        findsOneWidget,
+      final field = tester.widget<TextField>(
+        find.byKey(const ValueKey('cadence-custom-rule')),
       );
-      expect(find.text('Add the missing details'), findsNothing);
+      expect(field.controller?.text, contains('FREQ=WEEKLY'));
+      expect(find.byKey(const ValueKey('cadence-error')), findsNothing);
     });
 
     testWidgets('a too-short custom rule is rejected', (tester) async {
@@ -348,42 +304,19 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Add a little more detail to the rule.'), findsOneWidget);
-    });
-
-    testWidgets('a sample chip fills the custom rule', (tester) async {
-      _phone(tester);
-      final changes = <V2CadenceDraft>[];
-      await tester.pumpWidget(
-        _app(
-          CadencePicker(
-            draft: _draft.copyWith(frequency: V2CadenceFrequency.custom),
-            now: _now,
-            onChanged: changes.add,
-          ),
-        ),
+      expect(
+        find.text('Add a little more detail to the rule.'),
+        findsOneWidget,
       );
-      await tester.pumpAndSettle();
-
-      await tester.tap(find.text('Every Monday'));
-      await tester.pumpAndSettle();
-
-      expect(changes.last.customRule, '0 18 * * 1');
-      final field = tester.widget<TextField>(
-        find.byKey(const ValueKey('cadence-custom-rule')),
-      );
-      expect(field.controller?.text, '0 18 * * 1');
     });
   });
 
-  group('time and timezone', () {
+  group('time', () {
     testWidgets('the host can own the time picker', (tester) async {
       _phone(tester);
       var taps = 0;
       await tester.pumpWidget(
-        _app(
-          CadencePicker(draft: _draft, now: _now, onTimeTap: () => taps++),
-        ),
+        _app(CadencePicker(draft: _draft, now: _now, onTimeTap: () => taps++)),
       );
       await tester.pumpAndSettle();
 
@@ -411,42 +344,6 @@ void main() {
 
       expect(find.byType(TimePickerDialog), findsNothing);
     });
-
-    testWidgets('the timezone note opens the timezone picker', (tester) async {
-      _phone(tester);
-      var taps = 0;
-      await tester.pumpWidget(
-        _app(
-          CadencePicker(
-            draft: _draft,
-            now: _now,
-            onTimezoneTap: () => taps++,
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      await tester.tap(find.text('Change'));
-      await tester.pumpAndSettle();
-
-      expect(taps, 1);
-    });
-
-    testWidgets('a static timezone note is not announced as a button', (
-      tester,
-    ) async {
-      _phone(tester);
-      final semantics = tester.ensureSemantics();
-      await tester.pumpWidget(_app(CadencePicker(draft: _draft, now: _now)));
-      await tester.pumpAndSettle();
-
-      final note = _label('Timezone, Asia/Kolkata (GMT +5:30).');
-      expect(note, findsWidgets);
-      final data = tester.getSemantics(note).getSemanticsData();
-      expect(data.hasAction(SemanticsAction.tap), isFalse);
-
-      semantics.dispose();
-    });
   });
 
   group('read only', () {
@@ -454,7 +351,6 @@ void main() {
       _phone(tester);
       final semantics = tester.ensureSemantics();
       var timeTaps = 0;
-      var timezoneTaps = 0;
       final changes = <V2CadenceDraft>[];
       await tester.pumpWidget(
         _app(
@@ -464,13 +360,11 @@ void main() {
             enabled: false,
             onChanged: changes.add,
             onTimeTap: () => timeTaps++,
-            onTimezoneTap: () => timezoneTaps++,
           ),
         ),
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Cadence is read only.'), findsOneWidget);
       expect(
         _isEnabled(tester, _label('Run time, 9:00 AM. Read only.')),
         isFalse,
@@ -480,11 +374,9 @@ void main() {
 
       await tester.tap(find.text('Run time'));
       await tester.tap(find.text('Daily'));
-      await tester.tap(find.text('Timezone'));
       await tester.pumpAndSettle();
 
       expect(timeTaps, 0);
-      expect(timezoneTaps, 0);
       expect(changes, isEmpty);
       expect(find.byType(TimePickerDialog), findsNothing);
 
@@ -493,69 +385,59 @@ void main() {
   });
 
   for (final dark in [false, true]) {
-    testWidgets(
-      'fits 320 dp at 200% text (${dark ? 'dark' : 'light'})',
-      (tester) async {
-        tester.view.physicalSize = const Size(320, 640);
-        tester.view.devicePixelRatio = 1;
-        addTearDown(tester.view.resetPhysicalSize);
-        addTearDown(tester.view.resetDevicePixelRatio);
+    testWidgets('fits 320 dp at 200% text (${dark ? 'dark' : 'light'})', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(320, 640);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
 
-        await tester.pumpWidget(
-          MaterialApp(
-            theme: dark ? OTheme.dark() : OTheme.light(),
-            home: MediaQuery(
-              data: const MediaQueryData(
-                size: Size(320, 640),
-                textScaler: TextScaler.linear(2),
-              ),
-              child: Scaffold(
-                body: SingleChildScrollView(
-                  padding: const EdgeInsets.all(16),
-                  child: CadencePicker(
-                    draft: _draft,
-                    now: _now,
-                    onTimezoneTap: () {},
-                  ),
-                ),
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: dark ? OTheme.dark() : OTheme.light(),
+          home: MediaQuery(
+            data: const MediaQueryData(
+              size: Size(320, 640),
+              textScaler: TextScaler.linear(2),
+            ),
+            child: Scaffold(
+              body: SingleChildScrollView(
+                padding: const EdgeInsets.all(16),
+                child: CadencePicker(draft: _draft, now: _now),
               ),
             ),
           ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+
+      // The segmented control stacks, so no label is truncated.
+      for (final label in ['Daily', 'Weekly', 'Custom']) {
+        final paragraph = tester.renderObject<RenderParagraph>(
+          find.text(label),
         );
-        await tester.pumpAndSettle();
-        expect(tester.takeException(), isNull);
-
-        // The segmented control stacks, so no label is truncated.
-        for (final label in ['Daily', 'Weekly', 'Custom']) {
-          final paragraph = tester.renderObject<RenderParagraph>(find.text(label));
-          expect(
-            paragraph.didExceedMaxLines,
-            isFalse,
-            reason: '$label must stay readable at 320 dp / 200% text',
-          );
-        }
-
-        // Weekday chips wrap instead of scrolling off screen.
-        for (var day = 1; day <= 7; day++) {
-          final chip = find.byKey(ValueKey('cadence-day-$day'));
-          expect(chip, findsOneWidget);
-          expect(tester.getSize(chip).height, greaterThanOrEqualTo(48));
-        }
-
-        expect(find.text('Tomorrow at 9:00 AM'), findsOneWidget);
-        expect(find.text('Runs in the cloud, even when your phone is off.'), findsOneWidget);
-
-        // The custom card holds a field and sample chips; both must lay out.
-        await tester.tap(find.text('Custom'));
-        await tester.pumpAndSettle();
-        expect(tester.takeException(), isNull);
-        expect(find.text('CUSTOM CADENCE'), findsOneWidget);
-        final sample = find.byWidgetPredicate(
-          (widget) => widget is OChip && widget.label == 'Every Monday',
+        expect(
+          paragraph.didExceedMaxLines,
+          isFalse,
+          reason: '$label must stay readable at 320 dp / 200% text',
         );
-        expect(tester.getSize(sample).height, greaterThanOrEqualTo(48));
-      },
-    );
+      }
+
+      // Weekday chips wrap instead of scrolling off screen.
+      for (var day = 1; day <= 7; day++) {
+        final chip = find.byKey(ValueKey('cadence-day-$day'));
+        expect(chip, findsOneWidget);
+        expect(tester.getSize(chip).height, greaterThanOrEqualTo(48));
+      }
+
+      // The custom card holds a field; it must lay out at this size too.
+      await tester.tap(find.text('Custom'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(find.text('CUSTOM CADENCE'), findsOneWidget);
+    });
   }
 
   group('cadence helpers', () {
@@ -591,12 +473,10 @@ void main() {
         hour: 9,
         days: <int>{1, 2, 3, 4, 5},
       );
-      // Wednesday 10:00 → Thursday.
       expect(
         weekdays.nextRunAfter(DateTime(2026, 10, 21, 10, 0)),
         DateTime(2026, 10, 22, 9, 0),
       );
-      // Friday after 9:00 → Monday.
       expect(
         weekdays.nextRunAfter(DateTime(2026, 10, 23, 10, 0)),
         DateTime(2026, 10, 26, 9, 0),
@@ -696,10 +576,7 @@ void main() {
       );
       expect(
         _draft
-            .copyWith(
-              frequency: V2CadenceFrequency.custom,
-              customRule: 'ab',
-            )
+            .copyWith(frequency: V2CadenceFrequency.custom, customRule: 'ab')
             .validationError,
         'Add a little more detail to the rule.',
       );

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import '../chat/transcript_actions.dart';
 import 'artifact_actions.dart';
@@ -93,23 +94,15 @@ class ArtifactsPage extends StatefulWidget {
     required this.data,
     this.onArtifactTap,
     this.onArtifactMenu,
-    this.onNewArtifact,
-    this.onSeeIdeas,
     this.onRetry,
-    this.onOpenMenu,
     this.onSearch,
-    this.onNotifications,
   });
 
   final V2ArtifactsData data;
   final ValueChanged<V2ArtifactItem>? onArtifactTap;
   final ValueChanged<V2ArtifactItem>? onArtifactMenu;
-  final VoidCallback? onNewArtifact;
-  final VoidCallback? onSeeIdeas;
   final VoidCallback? onRetry;
-  final VoidCallback? onOpenMenu;
   final VoidCallback? onSearch;
-  final VoidCallback? onNotifications;
 
   @override
   State<ArtifactsPage> createState() => _ArtifactsPageState();
@@ -117,12 +110,14 @@ class ArtifactsPage extends StatefulWidget {
 
 class _ArtifactsPageState extends State<ArtifactsPage> {
   final TextEditingController _searchController = TextEditingController();
+  final FocusNode _searchFocus = FocusNode();
   V2ArtifactFilters _filters = const V2ArtifactFilters();
   String _query = '';
 
   @override
   void dispose() {
     _searchController.dispose();
+    _searchFocus.dispose();
     super.dispose();
   }
 
@@ -253,51 +248,17 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final showFab =
-        widget.onNewArtifact != null &&
-        (widget.data.status == V2ArtifactsStatus.content ||
-            widget.data.status == V2ArtifactsStatus.empty);
-
-    return OScaffold(
-      appBar: OAppBar(
-        title: 'Ovid Si',
-        subtitle: 'Artifacts Library',
-        showBack: false,
-        // Host-level chrome is only drawn when the host can actually handle it:
-        // a visible icon with a null handler is a dead control.
-        leading: widget.onOpenMenu == null
-            ? null
-            : OIconButton(
-                icon: Icons.menu_rounded,
-                semanticLabel: 'Open menu',
-                onPressed: widget.onOpenMenu,
-              ),
-        actions: [
-          if (widget.onSearch != null)
-            OIconButton(
-              icon: Icons.search_rounded,
-              semanticLabel: 'Search artifacts',
-              onPressed: widget.onSearch,
-            ),
-          if (widget.onNotifications != null)
-            OIconButton(
-              icon: Icons.notifications_none_rounded,
-              semanticLabel: 'Notifications',
-              onPressed: widget.onNotifications,
-            ),
-        ],
-      ),
-      floatingActionButton: showFab
-          ? Padding(
-              padding: const EdgeInsets.only(bottom: OSpace.s),
-              child: OButton(
-                label: 'New artifact',
-                icon: Icons.add_rounded,
-                onPressed: widget.onNewArtifact,
-              ),
-            )
-          : null,
-      body: OFadeSlide(
+    return OScreen(
+      title: 'Artifacts',
+      showBack: true,
+      actions: [
+        OIconButton(
+          icon: Icons.search_rounded,
+          semanticLabel: 'Search artifacts',
+          onPressed: widget.onSearch ?? _focusSearch,
+        ),
+      ],
+      child: OFadeSlide(
         child: OAnimatedSwap(
           child: switch (widget.data.status) {
             V2ArtifactsStatus.loading => const OSkeletonList(rows: 6),
@@ -313,120 +274,101 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
     );
   }
 
+  void _focusSearch() => _searchFocus.requestFocus();
+
   /// Shown when the library itself is empty (status empty). Distinct from
   /// "No matches", which means artifacts exist but none pass the filters.
   Widget _empty() {
     return OEmptyState(
       icon: Icons.auto_awesome_rounded,
       title: 'No artifacts yet',
-      message:
-          'Files Ovid makes in any chat, plus files you upload, show up here. '
-          'Studio drafts stay in Studio. Deleting an artifact frees its '
-          'storage right away.',
-      action: widget.onSeeIdeas == null
-          ? null
-          : OButton(
-              label: 'See what Ovid can make',
-              icon: Icons.arrow_forward_rounded,
-              onPressed: widget.onSeeIdeas,
-            ),
+      message: 'Files you make and upload appear here.',
     );
   }
 
   Widget _content(OColors c) {
     final items = _visible;
     final sessions = _sessionsFor(widget.data.artifacts);
-    final rowCount = (items.length + 1) ~/ 2;
-    // The header and footer are fixed; the grid itself is lazy, so a library
-    // with thousands of artifacts only builds the visible rows.
-    final header = <Widget>[
-      _librarySummary(c),
-      const SizedBox(height: OSpace.m),
-      OSearchField(
-        controller: _searchController,
-        hint: 'Search files and chats',
-        onChanged: _setQuery,
-        trailing: _query.isEmpty
-            ? null
-            : OIconButton(
-                icon: Icons.close_rounded,
-                semanticLabel: 'Clear search',
-                size: 18,
-                onPressed: () {
-                  _searchController.clear();
-                  _setQuery('');
-                },
-              ),
-      ),
-      const SizedBox(height: OSpace.m),
-      ArtifactFilterBar(
-        filters: _filters,
-        summary: _sizeSummary(items),
-        sessions: sessions,
-        onChanged: (next) => setState(() => _filters = next),
-      ),
-      const SizedBox(height: OSpace.l),
-      Row(
-        children: [
-          Expanded(
-            child: OSectionHeader(
-              label: _filtering ? 'Matching artifacts' : 'Recent artifacts',
-              padding: EdgeInsets.zero,
-            ),
-          ),
-          Text(
-            '${items.length} ${items.length == 1 ? 'item' : 'items'}',
-            style: OType.caption.copyWith(color: c.accent),
-          ),
-        ],
-      ),
-      const SizedBox(height: OSpace.m),
-    ];
-    final bodyCount = items.isEmpty ? 1 : rowCount;
+    final columns = OResponsive.of(context).cardColumns;
 
-    return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.screen,
-        OSpace.s,
-        OSpace.screen,
-        OSpace.huge + OSpace.huge,
-      ),
-      itemCount: header.length + bodyCount + 2,
-      itemBuilder: (context, index) {
-        if (index < header.length) return header[index];
-        final body = index - header.length;
-        if (body < bodyCount) {
-          if (items.isEmpty) return _emptyResults(c);
-          final left = items[body * 2];
-          final rightIndex = body * 2 + 1;
-          final right = rightIndex < items.length ? items[rightIndex] : null;
-          final row = IntrinsicHeight(
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Expanded(child: _card(context, c, left)),
-                const SizedBox(width: OSpace.m),
-                Expanded(
-                  child: right == null
-                      ? const SizedBox.shrink()
-                      : _card(context, c, right),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth;
+        final cardWidth = (width - OSpace.m * (columns - 1)) / columns;
+        final thumbHeight = cardWidth * 3 / 4;
+        final textScale = MediaQuery.textScalerOf(context).scale(1);
+        // Three single lines plus the card's vertical padding. Sized from the
+        // text scale so 320 dp at 200 % never squeezes a line out of the card.
+        final textBlock = OSpace.m * 2 + textScale * 3 * 16 * 1.4;
+
+        return CustomScrollView(
+          slivers: [
+            SliverPadding(
+              padding: const EdgeInsets.only(top: OSpace.s),
+              sliver: SliverToBoxAdapter(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    TextField(
+                      controller: _searchController,
+                      focusNode: _searchFocus,
+                      onChanged: _setQuery,
+                      textInputAction: TextInputAction.search,
+                      style: OType.bodySm.copyWith(color: c.text),
+                      decoration: InputDecoration(
+                        hintText: 'Search',
+                        hintStyle: OType.bodySm.copyWith(color: c.textFaint),
+                        prefixIcon: Icon(
+                          Icons.search_rounded,
+                          size: 20,
+                          color: c.textFaint,
+                        ),
+                        suffixIcon: _query.isEmpty
+                            ? null
+                            : OIconButton(
+                                icon: Icons.close_rounded,
+                                semanticLabel: 'Clear search',
+                                size: 18,
+                                onPressed: () {
+                                  _searchController.clear();
+                                  _setQuery('');
+                                },
+                              ),
+                        contentPadding: const EdgeInsets.symmetric(
+                          vertical: OSpace.m,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: OSpace.m),
+                    ArtifactFilterBar(
+                      filters: _filters,
+                      summary: _sizeSummary(items),
+                      sessions: sessions,
+                      onChanged: (next) => setState(() => _filters = next),
+                    ),
+                    const SizedBox(height: OSpace.l),
+                  ],
                 ),
-              ],
+              ),
             ),
-          );
-          // Only the first screenful animates; lazily-built rows must not
-          // each schedule an entrance timer.
-          if (body >= 8) return row;
-          final delay = OMotion.stagger * body;
-          return OFadeSlide(
-            delay: delay > const Duration(milliseconds: 400)
-                ? const Duration(milliseconds: 400)
-                : delay,
-            child: row,
-          );
-        }
-        if (body == bodyCount) return const SizedBox(height: OSpace.xl);
-        return _callout(c);
+            if (items.isEmpty)
+              SliverToBoxAdapter(child: _emptyResults(c))
+            else
+              SliverGrid(
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: columns,
+                  mainAxisSpacing: OSpace.m,
+                  crossAxisSpacing: OSpace.m,
+                  mainAxisExtent: thumbHeight + textBlock,
+                ),
+                delegate: SliverChildBuilderDelegate(
+                  (context, index) => _card(context, c, items[index]),
+                  childCount: items.length,
+                ),
+              ),
+            const SliverPadding(padding: EdgeInsets.only(bottom: OSpace.xxl)),
+          ],
+        );
       },
     );
   }
@@ -437,75 +379,18 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
         compact: true,
         icon: Icons.auto_awesome_rounded,
         title: 'No artifacts yet',
-        message:
-            'Files from every chat and every upload show up here. '
-            'Deleting an artifact frees its storage right away.',
-        action: widget.onNewArtifact == null
-            ? null
-            : OButton(
-                label: 'New artifact',
-                icon: Icons.add_rounded,
-                onPressed: widget.onNewArtifact,
-              ),
+        message: 'Files you make and upload appear here.',
       );
     }
     return OEmptyState(
       compact: true,
       icon: Icons.search_off_rounded,
       title: 'No matches',
-      message:
-          'No artifacts match these filters. Try another search '
-          'or clear them.',
+      message: 'Try another search or clear the filters.',
       action: OButton(
         label: 'Clear filters',
         variant: OButtonVariant.secondary,
         onPressed: _clearFilters,
-      ),
-    );
-  }
-
-  Widget _librarySummary(OColors c) {
-    final all = widget.data.artifacts;
-    final total = widget.data.totalSizeLabel ?? _totalSize(all);
-    final count = '${all.length} ${all.length == 1 ? 'file' : 'files'}';
-    return OCard(
-      padding: const EdgeInsets.all(OSpace.m),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: c.accentSoft,
-              borderRadius: BorderRadius.circular(ORadius.m),
-            ),
-            child: Icon(Icons.folder_copy_outlined, size: 20, color: c.accent),
-          ),
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Your lifetime library',
-                  style: OType.bodyStrong.copyWith(color: c.text),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  total.isEmpty ? count : '$count · $total stored',
-                  style: OType.bodySm.copyWith(color: c.textMuted),
-                ),
-                const SizedBox(height: OSpace.xs),
-                Text(
-                  'Every chat file and upload, in one place. Studio drafts '
-                  'stay in Studio.',
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ],
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -523,69 +408,27 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
 
   Widget _card(BuildContext context, OColors c, V2ArtifactItem item) {
     final ext = _extension(item.name);
-    final sourceLabel = item.source == V2ArtifactSource.uploaded
-        ? 'Uploaded'
-        : 'Generated';
+    final type = '${_typeName(item.kind)} · $ext';
+    final time = _dateLabel(item.createdAt, widget.data.now ?? DateTime.now());
     return OCard(
       padding: EdgeInsets.zero,
       onTap: () => _open(item),
-      semanticLabel:
-          '${item.name}, $sourceLabel, ${_filterLabel(item.kind)}, '
-          '${item.sizeLabel}, ${_dateLabel(item.createdAt, widget.data.now ?? DateTime.now())}'
-          '${item.sessionTitle.isEmpty ? '' : ', from ${item.sessionTitle}'}',
+      semanticLabel: '${item.name}, $type, $time',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          AspectRatio(
-            aspectRatio: 4 / 3,
+          Expanded(
             child: ClipRRect(
               borderRadius: const BorderRadius.vertical(
                 top: Radius.circular(ORadius.l),
               ),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  _thumb(context, c, item),
-                  if (item.live || item.badge != null)
-                    Positioned(
-                      top: OSpace.s,
-                      left: OSpace.s,
-                      right: OSpace.s,
-                      child: Wrap(
-                        spacing: OSpace.xs,
-                        runSpacing: OSpace.xs,
-                        children: [
-                          if (item.live)
-                            _previewPill(
-                              c,
-                              label: 'Live',
-                              icon: null,
-                              dotColor: c.success,
-                            ),
-                          if (item.badge != null)
-                            _previewPill(
-                              c,
-                              label: item.badge!,
-                              icon: _filterIcon(item.kind),
-                              dotColor: null,
-                            ),
-                        ],
-                      ),
-                    ),
-                  if (item.badge == null && !item.live)
-                    Positioned(
-                      bottom: OSpace.s,
-                      right: OSpace.s,
-                      child: _extensionPill(c, ext),
-                    ),
-                ],
-              ),
+              child: _thumb(context, c, item),
             ),
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(
               OSpace.m,
-              0,
+              OSpace.xs,
               OSpace.xs,
               OSpace.m,
             ),
@@ -613,43 +456,18 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
                     ),
                   ],
                 ),
-                Row(
-                  children: [
-                    Icon(_filterIcon(item.kind), size: 14, color: c.accent),
-                    const SizedBox(width: OSpace.xs),
-                    Expanded(
-                      child: Text(
-                        '${item.source == V2ArtifactSource.uploaded ? 'Uploaded · ' : ''}'
-                        '$ext · ${item.sizeLabel} · '
-                        '${_dateLabel(item.createdAt, widget.data.now ?? DateTime.now())}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ),
-                  ],
+                Text(
+                  type,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.caption.copyWith(color: c.textMuted),
                 ),
-                if (item.sessionTitle.isNotEmpty) ...[
-                  const SizedBox(height: 2),
-                  Row(
-                    children: [
-                      Icon(
-                        Icons.chat_bubble_outline_rounded,
-                        size: 13,
-                        color: c.textFaint,
-                      ),
-                      const SizedBox(width: OSpace.xs),
-                      Expanded(
-                        child: Text(
-                          'From ${item.sessionTitle}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: OType.caption.copyWith(color: c.textMuted),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
+                Text(
+                  time,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
               ],
             ),
           ),
@@ -657,6 +475,13 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
       ),
     );
   }
+
+  String _typeName(V2ArtifactKind kind) => switch (kind) {
+    V2ArtifactKind.image => 'Image',
+    V2ArtifactKind.document => 'Document',
+    V2ArtifactKind.code => 'Code',
+    V2ArtifactKind.data => 'Data',
+  };
 
   /// Opening a card always goes somewhere real: the host callback when it has
   /// one, otherwise the library's own detail route built from the item.
@@ -679,7 +504,8 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
             name: item.name,
             typeLabel: _filterLabel(item.kind),
             sizeLabel: item.sizeLabel,
-            createdLabel: 'Created ${_dateLabel(item.createdAt, now).toLowerCase()}',
+            createdLabel:
+                'Created ${_dateLabel(item.createdAt, now).toLowerCase()}',
             sourceChatTitle: item.sessionTitle,
             previewKind: _previewKindFor(item),
             previewCodeFile: item.name,
@@ -696,14 +522,6 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
                 label: 'Added',
                 value: _dateLabel(item.createdAt, now),
               ),
-              V2ArtifactDetailRow(
-                label: 'Source',
-                value: item.source == V2ArtifactSource.uploaded
-                    ? 'Uploaded'
-                    : 'Made by Ovid',
-              ),
-              if (item.sessionTitle.isNotEmpty)
-                V2ArtifactDetailRow(label: 'Chat', value: item.sessionTitle),
             ],
           ),
         ),
@@ -715,9 +533,10 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
       switch (item.kind) {
         V2ArtifactKind.image => V2ArtifactPreviewKind.image,
         V2ArtifactKind.code => V2ArtifactPreviewKind.code,
-        V2ArtifactKind.document => _isPage(item)
-            ? V2ArtifactPreviewKind.code
-            : V2ArtifactPreviewKind.document,
+        V2ArtifactKind.document =>
+          _isPage(item)
+              ? V2ArtifactPreviewKind.code
+              : V2ArtifactPreviewKind.document,
         V2ArtifactKind.data => V2ArtifactPreviewKind.data,
       };
 
@@ -780,9 +599,7 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
         {
           final copied = await v2CopyArtifactText(item.name);
           if (!mounted) return;
-          _notify(
-            copied ? 'File name copied' : 'Could not copy the file name',
-          );
+          _notify(copied ? 'File name copied' : 'Could not copy the file name');
         }
       case 'copy-link':
         {
@@ -794,11 +611,7 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
       case 'download':
         {
           if (link == null) return;
-          await v2SaveTranscriptLink(
-            context,
-            link,
-            suggestedName: item.name,
-          );
+          await v2SaveTranscriptLink(context, link, suggestedName: item.name);
         }
     }
   }
@@ -813,10 +626,17 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
   Widget _thumb(BuildContext context, OColors c, V2ArtifactItem item) {
     // Decode at roughly the width the card is drawn at instead of full
     // resolution: a 12 MP upload no longer decodes 48 MB into memory.
-    final cardWidth =
-        (MediaQuery.sizeOf(context).width - OSpace.screen * 2 - OSpace.m) / 2;
-    final cacheWidth =
-        (cardWidth * MediaQuery.devicePixelRatioOf(context)).round();
+    final responsive = OResponsive.of(context);
+    final window = MediaQuery.sizeOf(context).width;
+    final contentWidth =
+        (window < responsive.maxContentWidth
+            ? window
+            : responsive.maxContentWidth) -
+        responsive.gutter * 2;
+    final columns = responsive.cardColumns;
+    final cardWidth = (contentWidth - OSpace.m * (columns - 1)) / columns;
+    final cacheWidth = (cardWidth * MediaQuery.devicePixelRatioOf(context))
+        .round();
     final thumbnail = item.thumbnail;
     if (thumbnail != null) {
       return Image(
@@ -964,150 +784,12 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
     );
   }
 
-  Widget _previewPill(
-    OColors c, {
-    required String label,
-    required IconData? icon,
-    required Color? dotColor,
-  }) {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: OSpace.s,
-        vertical: OSpace.xs,
-      ),
-      decoration: BoxDecoration(
-        color: c.surfaceRaised,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-        border: Border.all(color: c.hairline),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (dotColor != null)
-            Container(
-              width: 6,
-              height: 6,
-              decoration: BoxDecoration(
-                color: dotColor,
-                shape: BoxShape.circle,
-              ),
-            )
-          else if (icon != null)
-            Icon(icon, size: 11, color: c.textMuted),
-          const SizedBox(width: OSpace.xs),
-          Flexible(
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: OType.overline.copyWith(color: c.text),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _extensionPill(OColors c, String ext) {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: OSpace.s,
-        vertical: OSpace.xs,
-      ),
-      decoration: BoxDecoration(
-        color: c.surfaceRaised,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-        border: Border.all(color: c.hairline),
-      ),
-      child: Text(ext, style: OType.overline.copyWith(color: c.textMuted)),
-    );
-  }
-
-  Widget _callout(OColors c) {
-    return OCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  color: c.accentSoft,
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(
-                  Icons.auto_awesome_rounded,
-                  size: 20,
-                  color: c.accent,
-                ),
-              ),
-              const SizedBox(width: OSpace.m),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Every output, in one library',
-                      style: OType.bodyStrong.copyWith(color: c.text),
-                    ),
-                    const SizedBox(height: OSpace.xs),
-                    Text(
-                      'Files from every chat and every upload live here. '
-                      'Studio drafts stay in Studio. Deleting an artifact '
-                      'frees its storage right away.',
-                      style: OType.bodySm.copyWith(color: c.textMuted),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: OSpace.m),
-          if (widget.onSeeIdeas != null)
-            OButton(
-              label: 'See what Ovid can make',
-              variant: OButtonVariant.ghost,
-              icon: Icons.arrow_forward_rounded,
-              onPressed: widget.onSeeIdeas,
-            ),
-        ],
-      ),
-    );
-  }
-
-  String _totalSize(List<V2ArtifactItem> items) {
-    final bytes = items.fold<int>(0, (sum, item) => sum + item.sizeBytes);
-    if (bytes <= 0) return '';
-    return _formatBytes(bytes);
-  }
-
-  String _formatBytes(int bytes) {
-    const kilo = 1024;
-    if (bytes < kilo) return '$bytes B';
-    final kb = bytes / kilo;
-    if (kb < kilo) return '${kb.toStringAsFixed(kb < 10 ? 1 : 0)} KB';
-    final mb = kb / kilo;
-    if (mb < kilo) return '${mb.toStringAsFixed(mb < 10 ? 1 : 0)} MB';
-    final gb = mb / kilo;
-    return '${gb.toStringAsFixed(1)} GB';
-  }
-
   String _filterLabel(V2ArtifactKind? kind) => switch (kind) {
     null => 'All',
     V2ArtifactKind.image => 'Images',
     V2ArtifactKind.document => 'Documents',
     V2ArtifactKind.code => 'Code',
     V2ArtifactKind.data => 'Data',
-  };
-
-  IconData _filterIcon(V2ArtifactKind kind) => switch (kind) {
-    V2ArtifactKind.image => Icons.image_rounded,
-    V2ArtifactKind.document => Icons.description_rounded,
-    V2ArtifactKind.code => Icons.code_rounded,
-    V2ArtifactKind.data => Icons.table_chart_rounded,
   };
 
   String _extension(String name) {

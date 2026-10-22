@@ -134,4 +134,45 @@ void main() {
       expect(size.height, greaterThan(0), reason: '$label rendered');
     }
   });
+
+  testWidgets('the five-tab work bar fits 320 dp at 200% text', (tester) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: OTheme.light(),
+        home: MediaQuery(
+          data: const MediaQueryData(
+            size: Size(320, 640),
+            textScaler: TextScaler.linear(2),
+          ),
+          child: Scaffold(
+            bottomNavigationBar: V2BottomNav(
+              current: V2NavTab.chat,
+              items: v2WorkNavItems,
+              onSelect: (_) {},
+            ),
+            body: const SizedBox.shrink(),
+          ),
+        ),
+      ),
+    );
+
+    // This is the bar the shell mounts, so all five tabs must survive the
+    // narrowest window at the largest text scale.
+    expect(tester.takeException(), isNull);
+    expect(
+      tester.getSize(find.byType(V2BottomNav)).height,
+      greaterThanOrEqualTo(48),
+    );
+    for (final item in v2WorkNavItems) {
+      expect(
+        find.byKey(ValueKey<String>('v2-nav-${item.tab.name}')),
+        findsOneWidget,
+        reason: item.label,
+      );
+    }
+  });
 }

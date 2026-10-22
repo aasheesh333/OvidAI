@@ -27,21 +27,27 @@ Future<void> _pump(
 }
 
 void main() {
-  testWidgets('welcome renders the headline and both actions in light', (
-    tester,
-  ) async {
+  testWidgets(
+    'welcome renders the header, identity and both actions in light',
+    (tester) async {
+      await _pump(tester);
+
+      expect(find.text('Welcome'), findsOneWidget);
+      expect(find.text('Your always-on personal agent.'), findsOneWidget);
+      expect(find.text('STEP 1 OF 4'), findsOneWidget);
+      expect(find.text('Get started'), findsOneWidget);
+      expect(find.text('Sign in'), findsOneWidget);
+      expect(find.byKey(const Key('welcome-language')), findsOneWidget);
+    },
+  );
+
+  testWidgets('no hardcoded version pill is shown', (tester) async {
     await _pump(tester);
 
-    expect(find.text('Your always-on personal agent.'), findsOneWidget);
-    expect(
-      find.text(
-        'Chat. Code. Create. Ovid keeps working while you live your life.',
-      ),
-      findsOneWidget,
-    );
-    expect(find.text('Get started'), findsOneWidget);
-    expect(find.text('I already have an account'), findsOneWidget);
-    expect(find.text('Ovid 2.4'), findsOneWidget);
+    // The version belongs to the build (kAppVersion), not to a string that
+    // goes stale; the welcome step shows identity only.
+    expect(find.text('Ovid 2.4'), findsNothing);
+    expect(find.textContaining('Ovid 2.'), findsNothing);
   });
 
   testWidgets('welcome renders correctly in dark', (tester) async {
@@ -49,7 +55,7 @@ void main() {
 
     expect(find.text('Your always-on personal agent.'), findsOneWidget);
     expect(find.text('Get started'), findsOneWidget);
-    expect(find.text('I already have an account'), findsOneWidget);
+    expect(find.text('Sign in'), findsOneWidget);
   });
 
   testWidgets('get started and sign in call their callbacks', (tester) async {
@@ -117,15 +123,17 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.text('Your always-on personal agent.'), findsOneWidget);
-    // The version and engine pills must grow with the text, not clip it.
-    expect(
-      tester.getSize(find.text('Autonomous Engine')).height,
-      greaterThan(28),
-    );
-    expect(tester.getSize(find.text('Ovid 2.4')).height, greaterThan(24));
+    // The language pill keeps its 48 dp target and grows with the text
+    // instead of clipping the label.
+    final pill = tester.getSize(find.byKey(const Key('welcome-language')));
+    expect(pill.height, greaterThanOrEqualTo(48));
+    expect(tester.getSize(find.text('English')).height, greaterThan(24));
+    expect(find.byKey(const Key('welcome-get-started')), findsOneWidget);
   });
 
-  testWidgets('controls meet the 48 dp target and carry labels', (tester) async {
+  testWidgets('controls meet the 48 dp target and carry labels', (
+    tester,
+  ) async {
     final semantics = tester.ensureSemantics();
     await _pump(
       tester,
@@ -150,7 +158,7 @@ void main() {
     expect(find.bySemanticsLabel('Close'), findsOneWidget);
     expect(find.bySemanticsLabel('Language, English'), findsOneWidget);
     expect(find.bySemanticsLabel('Get started'), findsWidgets);
-    expect(find.bySemanticsLabel('I already have an account'), findsWidgets);
+    expect(find.bySemanticsLabel('Sign in'), findsWidgets);
     semantics.dispose();
   });
 
@@ -162,7 +170,6 @@ void main() {
       find.byKey(const Key('welcome-get-started')),
     );
     expect(started.flagsCollection.isEnabled, Tristate.isFalse);
-    
 
     semantics.dispose();
   });

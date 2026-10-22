@@ -55,7 +55,7 @@ void main() {
       find.text('Today at 10:24 AM · 14 messages · Auto model'),
       findsOneWidget,
     );
-    expect(find.text('Pin to top of drawer'), findsOneWidget);
+    expect(find.text('Pin to top'), findsOneWidget);
     expect(find.text('Rename chat'), findsOneWidget);
     expect(find.text('Move to project'), findsOneWidget);
     expect(find.text('Share chat'), findsOneWidget);
@@ -64,7 +64,7 @@ void main() {
     expect(find.text('Delete chat'), findsOneWidget);
     expect(
       find.text(
-        "Deleting removes this chat's files, artifacts, and learned memory from your cloud account. This cannot be undone.",
+        'Deletes this chat, its files and memory. Cannot be undone.',
       ),
       findsOneWidget,
     );
@@ -76,7 +76,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Pin to top of drawer'), findsOneWidget);
+    expect(find.text('Pin to top'), findsOneWidget);
     expect(find.text('Delete chat'), findsOneWidget);
   });
 
@@ -151,12 +151,12 @@ void main() {
 
     await tester.tap(find.text('Open'));
     await tester.pumpAndSettle();
-    expect(find.text('Pin to top of drawer'), findsOneWidget);
+    expect(find.text('Pin to top'), findsOneWidget);
 
     await tester.tap(find.byIcon(Icons.close_rounded));
     await tester.pumpAndSettle();
     expect(closes, 1);
-    expect(find.text('Pin to top of drawer'), findsNothing);
+    expect(find.text('Pin to top'), findsNothing);
   });
 
   testWidgets('loading state shows skeleton rows', (tester) async {
@@ -171,7 +171,7 @@ void main() {
     await tester.pump();
 
     expect(find.byType(OSkeletonList), findsOneWidget);
-    expect(find.text('Pin to top of drawer'), findsNothing);
+    expect(find.text('Pin to top'), findsNothing);
   });
 
   testWidgets('error state retries', (tester) async {
@@ -189,7 +189,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Chat actions did not load'), findsOneWidget);
+    expect(find.text('Chat actions failed'), findsOneWidget);
     await tester.tap(find.text('Try again'));
     expect(retries, 1);
   });
@@ -283,7 +283,7 @@ void main() {
     expect(toggles, <bool>[true]);
 
     // The row itself flips the same optimistic state back.
-    await tester.tap(find.text('Pin to top of drawer'));
+    await tester.tap(find.text('Pin to top'));
     await tester.pumpAndSettle();
     expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
     expect(toggles, <bool>[true, false]);

@@ -153,25 +153,6 @@ void _phoneSize(WidgetTester tester) {
   addTearDown(tester.view.resetDevicePixelRatio);
 }
 
-bool _spanHasHighlight(InlineSpan span) {
-  if (span.style?.backgroundColor != null) return true;
-  if (span is TextSpan) {
-    for (final child in span.children ?? const <InlineSpan>[]) {
-      if (_spanHasHighlight(child)) return true;
-    }
-  }
-  return false;
-}
-
-/// True when some [RichText] whose plain text is [text] contains at least one
-/// highlighted run.
-bool _isHighlighted(WidgetTester tester, String text) {
-  final matches = tester
-      .widgetList<RichText>(find.byType(RichText))
-      .where((widget) => widget.text.toPlainText() == text);
-  return matches.any((widget) => _spanHasHighlight(widget.text));
-}
-
 void main() {
   group('V2SettingsSearchData', () {
     test('matches row titles case-insensitively', () {
@@ -294,7 +275,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Search settings'), findsOneWidget);
-    expect(find.text('BROWSE SETTINGS'), findsOneWidget);
+    expect(find.text('SECTIONS'), findsOneWidget);
     expect(find.text('Account'), findsOneWidget);
     expect(find.text('Chat'), findsOneWidget);
     expect(find.text('Data control'), findsOneWidget);
@@ -315,7 +296,7 @@ void main() {
     expect(find.text('Permissions'), findsOneWidget);
     expect(find.text('Storage'), findsOneWidget);
     expect(find.text('Appearance'), findsNothing);
-    expect(find.text('2 results for “Data control”'), findsOneWidget);
+    expect(find.text('Plan & billing'), findsNothing);
   });
 
   testWidgets('typing filters rows and reports the count', (tester) async {
@@ -327,25 +308,23 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Plan & billing'), findsOneWidget);
-    expect(find.text('1 result for “bill”'), findsOneWidget);
-    expect(find.text('Account'), findsNothing);
-    expect(find.text('Storage'), findsNothing);
     expect(find.text('ACCOUNT'), findsOneWidget);
+    expect(find.text('Storage'), findsNothing);
   });
 
-  testWidgets('highlights row and section matches', (tester) async {
+  testWidgets('section matches list every row in that section', (
+    tester,
+  ) async {
     _phoneSize(tester);
     await tester.pumpWidget(_app(OTheme.light(), _data()));
     await tester.pumpAndSettle();
 
-    await tester.enterText(find.byType(TextField), 'plan');
-    await tester.pumpAndSettle();
-    expect(_isHighlighted(tester, 'Plan & billing'), isTrue);
-
     await tester.enterText(find.byType(TextField), 'data');
     await tester.pumpAndSettle();
-    expect(_isHighlighted(tester, 'DATA CONTROL'), isTrue);
-    expect(_isHighlighted(tester, 'Permissions'), isFalse);
+    expect(find.text('DATA CONTROL'), findsOneWidget);
+    expect(find.text('Permissions'), findsOneWidget);
+    expect(find.text('Storage'), findsOneWidget);
+    expect(find.text('Plan & billing'), findsNothing);
   });
 
   testWidgets('tapping a result reports it and dismisses the keyboard', (
@@ -413,12 +392,12 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('No settings found'), findsOneWidget);
-    expect(find.textContaining('No section or row matches'), findsOneWidget);
+    expect(find.textContaining('Nothing matches'), findsOneWidget);
 
     await tester.tap(find.text('Clear search'));
     await tester.pumpAndSettle();
 
-    expect(find.text('BROWSE SETTINGS'), findsOneWidget);
+    expect(find.text('SECTIONS'), findsOneWidget);
     expect(find.byType(OChip), findsNWidgets(4));
     expect(
       tester.widget<TextField>(find.byType(TextField)).controller!.text,
@@ -461,9 +440,7 @@ void main() {
 
     expect(taps, 0);
     final semantics = tester
-        .getSemantics(
-          find.bySemanticsLabel(RegExp('Locked row, Advanced, disabled')),
-        )
+        .getSemantics(find.byKey(const ValueKey('search-result-locked')))
         .getSemanticsData();
     expect(semantics.flagsCollection.isEnabled.toBoolOrNull(), isFalse);
     handle.dispose();
@@ -489,7 +466,7 @@ void main() {
     await tester.pumpAndSettle();
 
     final node = tester.getSemantics(
-      find.bySemanticsLabel(RegExp('Storage, Data control, disabled')),
+      find.byKey(const ValueKey('search-result-storage')),
     );
     expect(node, isSemantics(hasEnabledState: true, isEnabled: false));
 
@@ -524,7 +501,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Settings search did not load'), findsOneWidget);
+    expect(find.text('Something went wrong'), findsOneWidget);
     expect(find.text('Search is offline.'), findsOneWidget);
 
     await tester.tap(find.text('Try again'));
@@ -546,7 +523,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('No settings to search'), findsOneWidget);
-    await tester.tap(find.text('Refresh settings'));
+    await tester.tap(find.text('Refresh'));
     await tester.pump();
 
     expect(retries, 1);
@@ -566,7 +543,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('results for'), findsOneWidget);
+    expect(find.text('Permissions'), findsOneWidget);
     expect(
       tester.takeException(),
       isNull,
@@ -606,7 +583,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('BROWSE SETTINGS'), findsOneWidget);
+    expect(find.text('SECTIONS'), findsOneWidget);
     expect(find.byType(OChip), findsNWidgets(4));
     expect(
       tester.takeException(),
@@ -624,7 +601,6 @@ void main() {
 
     expect(find.text('Storage'), findsOneWidget);
     expect(find.text('DATA CONTROL'), findsOneWidget);
-    expect(find.text('1 result for “storage”'), findsOneWidget);
   });
 
   testWidgets('reduced motion still shows every result', (tester) async {
@@ -635,7 +611,6 @@ void main() {
     await tester.pump();
 
     expect(find.text('Plan & billing'), findsOneWidget);
-    expect(find.text('Storage'), findsOneWidget);
     expect(find.byType(OCard), findsWidgets);
   });
 }

@@ -4,7 +4,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../../../core/diag.dart';
 import '../../../core/secure_store.dart';
 import '../../design/o_components.dart';
-import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the localization pass.
@@ -246,8 +246,7 @@ class _CredentialsPageState extends State<CredentialsPage> {
   bool get _tokenSaved =>
       _tokenMask != null || (data.token?.connected ?? false);
 
-  bool get _githubPatSaved =>
-      _githubPatMask != null || data.githubPatAdded;
+  bool get _githubPatSaved => _githubPatMask != null || data.githubPatAdded;
 
   String get _tokenSubtitle {
     if (_tokenMask != null) return _tokenMask!;
@@ -263,16 +262,7 @@ class _CredentialsPageState extends State<CredentialsPage> {
       data.browserCredentials.isNotEmpty ||
       _githubPatSaved;
 
-  int get _storedCount => data.credentials
-      .where(
-        (c) => c.kind == V2CredentialKind.token ? _tokenSaved : c.connected,
-      )
-      .length;
-
-  Future<void> _saveSecret({
-    required String id,
-    required String value,
-  }) async {
+  Future<void> _saveSecret({required String id, required String value}) async {
     await _store.write(id, value);
     await _loadSecrets();
   }
@@ -283,9 +273,7 @@ class _CredentialsPageState extends State<CredentialsPage> {
       title: _tokenSaved ? 'Replace provider key' : 'Add provider key',
       builder: (_) => _SecretForm(
         fieldLabel: 'Provider API key',
-        helper:
-            'Stored in encrypted secure storage on this device. The full key '
-            'is never shown again.',
+        helper: 'Encrypted on this device. Never shown again.',
         replacing: _tokenSaved,
       ),
     );
@@ -334,14 +322,10 @@ class _CredentialsPageState extends State<CredentialsPage> {
     }
     final token = await showOSheet<String>(
       context,
-      title: _githubPatSaved
-          ? 'Replace GitHub token'
-          : 'Add GitHub token',
+      title: _githubPatSaved ? 'Replace GitHub token' : 'Add GitHub token',
       builder: (_) => _SecretForm(
         fieldLabel: 'GitHub personal access token',
-        helper:
-            'Used for git clone and push. Stored in encrypted secure storage '
-            'and never shown again.',
+        helper: 'Used for git clone and push. Never shown again.',
         replacing: _githubPatSaved,
       ),
     );
@@ -430,16 +414,24 @@ class _CredentialsPageState extends State<CredentialsPage> {
 
   @override
   Widget build(BuildContext context) {
-    return OScaffold(
-      appBar: const OAppBar(title: 'Credentials'),
-      body: _body(context),
+    return OScreen(
+      title: 'Credentials',
+      actions: [
+        if (data.onAddBrowserCredential != null)
+          OIconButton(
+            key: const ValueKey<String>('credential-add-login'),
+            icon: Icons.add_rounded,
+            semanticLabel: 'Add login',
+            tooltip: 'Add login',
+            onPressed: () => _editBrowserCredential(context),
+          ),
+      ],
+      child: _body(context),
     );
   }
 
   Widget _body(BuildContext context) {
-    if (data.loading) {
-      return const OFadeSlide(child: OSkeletonList(rows: 6));
-    }
+    if (data.loading) return const OSkeletonList(rows: 6);
     if (data.errorMessage != null) {
       return OErrorState(message: data.errorMessage!, onRetry: data.onRetry);
     }
@@ -447,7 +439,7 @@ class _CredentialsPageState extends State<CredentialsPage> {
       return OEmptyState(
         icon: Icons.key_off_outlined,
         title: 'No credentials yet',
-        message: 'Connect Google or GitHub so Ovid can work for you.',
+        message: 'Connect Google or GitHub to continue.',
         action: data.onConnectGoogle == null
             ? null
             : OButton(
@@ -455,280 +447,151 @@ class _CredentialsPageState extends State<CredentialsPage> {
                 icon: Icons.mail_outline_rounded,
                 onPressed: data.onConnectGoogle,
               ),
-        secondaryAction: data.onConnectGithub == null
-            ? null
-            : OButton(
-                label: 'Connect GitHub',
-                variant: OButtonVariant.secondary,
-                onPressed: data.onConnectGithub,
-              ),
       );
     }
-    return OFadeSlide(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(
-          OSpace.screen,
-          OSpace.l,
-          OSpace.screen,
-          OSpace.xxl,
-        ),
-        child: OStagger(
-          children: [
-            _intro(context),
-            _browserLogins(context),
-            _credentialList(context),
-            _githubAccess(context),
-            _cloudKey(context),
-            _revoke(context),
-          ],
-        ),
-      ),
-    );
-  }
 
-  Widget _intro(BuildContext context) {
     final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: OCard(
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                color: c.accentSoft,
-                borderRadius: BorderRadius.circular(ORadius.m),
-              ),
-              child: Icon(
-                Icons.verified_user_outlined,
-                size: 24,
-                color: c.accent,
-              ),
-            ),
-            const SizedBox(width: OSpace.m),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Protected & Encrypted',
-                        style: OType.h2.copyWith(color: c.text),
-                      ),
-                      const SizedBox(height: OSpace.xs),
-                      const OPill(
-                        label: 'Encrypted',
-                        tone: OPillTone.accent,
-                        dot: true,
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: OSpace.xs),
-                  Text(
-                    'Your keys and browser logins are encrypted on this '
-                    'device. Passwords are never shown to the agent in plain '
-                    'text.',
-                    style: OType.bodySm.copyWith(color: c.textMuted),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// Site logins the browser can use. Passwords are write-only: the screen
-  /// shows a fixed mask and never the stored value.
-  Widget _browserLogins(BuildContext context) {
-    final c = OColors.of(context);
-    final count = data.browserCredentials.length;
-    final canAdd = data.onAddBrowserCredential != null;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
+    final rows = _rows(context);
+    return SingleChildScrollView(
+      padding: const EdgeInsets.only(top: OSpace.l, bottom: OSpace.xxl),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          OSectionHeader(
-            label: 'Browser logins',
-            padding: const EdgeInsets.only(bottom: OSpace.s),
-            trailing: canAdd
-                ? OButton(
-                    label: 'Add login',
-                    variant: OButtonVariant.ghost,
-                    size: OButtonSize.compact,
-                    onPressed: () => _editBrowserCredential(context),
-                  )
-                : null,
-          ),
-          if (data.browserCredentials.isEmpty)
-            OCard(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'No browser logins yet',
-                    style: OType.body.copyWith(
-                      color: c.text,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    'Add a site so Ovid can sign in for you during a task.',
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                  if (canAdd) ...[
-                    const SizedBox(height: OSpace.m),
-                    OButton(
-                      label: 'Add login',
-                      icon: Icons.add_rounded,
-                      variant: OButtonVariant.secondary,
-                      onPressed: () => _editBrowserCredential(context),
-                    ),
-                  ],
+          OCard(
+            padding: EdgeInsets.zero,
+            child: Column(
+              children: [
+                for (var index = 0; index < rows.length; index++) ...[
+                  if (index > 0) Divider(height: 1, color: c.hairline),
+                  rows[index],
                 ],
-              ),
-            )
-          else
-            LayoutBuilder(
-              builder: (context, constraints) {
-                final stacked = _stacksAt(
-                  context,
-                  constraints.maxWidth - 2 * OSpace.l,
-                );
-                return OCard(
-                  padding: EdgeInsets.zero,
-                  child: Column(
-                    children: [
-                      for (
-                        var i = 0;
-                        i < data.browserCredentials.length;
-                        i++
-                      ) ...[
-                        if (i > 0) Divider(color: c.hairline, height: 1),
-                        _browserRow(
-                          context,
-                          data.browserCredentials[i],
-                          stacked: stacked,
-                        ),
-                      ],
-                    ],
-                  ),
-                );
-              },
+              ],
             ),
-          const SizedBox(height: OSpace.s),
-          Text(
-            '$count saved · Passwords are stored encrypted on this device and '
-            'never shown to the agent in plain text.',
-            style: OType.caption.copyWith(color: c.textFaint),
           ),
+          if (data.onRevokeAll != null) ...[
+            const SizedBox(height: OSpace.l),
+            OButton(
+              label: 'Revoke all credentials',
+              icon: Icons.warning_amber_rounded,
+              variant: OButtonVariant.danger,
+              expand: true,
+              onPressed: _hasAnyCredential
+                  ? () => _confirmRevoke(context)
+                  : null,
+            ),
+          ],
         ],
       ),
     );
   }
 
-  Widget _browserRow(
-    BuildContext context,
-    V2BrowserCredential credential, {
-    required bool stacked,
-  }) {
-    final c = OColors.of(context);
-    final edit = data.onEditBrowserCredential == null
-        ? null
-        : () => _editBrowserCredential(context, existing: credential);
-    final delete = data.onDeleteBrowserCredential == null
-        ? null
-        : () => _deleteBrowserCredential(context, credential);
-    final leading = Container(
-      width: 36,
-      height: 36,
-      decoration: BoxDecoration(
-        color: c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.m),
-      ),
-      child: Icon(Icons.language_rounded, size: 19, color: c.textMuted),
-    );
-    final subtitle =
-        '${credential.username} · ${_maskedPassword(credential.password)}';
-    final actions = Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        OIconButton(
-          icon: Icons.edit_rounded,
-          semanticLabel: 'Edit ${credential.site}',
-          tooltip: 'Edit ${credential.site}',
-          onPressed: edit,
-        ),
-        OIconButton(
-          icon: Icons.delete_outline_rounded,
-          semanticLabel: 'Delete ${credential.site}',
-          tooltip: 'Delete ${credential.site}',
-          onPressed: delete,
-        ),
-      ],
-    );
-    if (!stacked) {
-      return OListRow(
-        leading: leading,
-        title: credential.site,
-        subtitle: subtitle,
+  /// Every credential is one row: name, masked value, one control. Secrets are
+  /// only ever rendered as a mask.
+  List<Widget> _rows(BuildContext context) {
+    final rows = <Widget>[];
+
+    void add(Widget row) => rows.add(row);
+
+    final google = data.google;
+    final googleOn = google?.connected ?? false;
+    add(
+      OListRow(
+        icon: Icons.mail_outline_rounded,
+        title: 'Google',
+        subtitle: googleOn ? google!.subtitle : 'Not connected',
         showChevron: false,
-        trailing: actions,
-        onTap: edit,
+        onTap: googleOn
+            ? (data.onCredentialTap == null
+                  ? null
+                  : () => data.onCredentialTap!(google!.id))
+            : data.onConnectGoogle,
+      ),
+    );
+
+    final oauth = data.githubOAuthActive;
+    add(
+      OListRow(
+        icon: Icons.terminal_rounded,
+        title: 'GitHub',
+        subtitle: oauth ? 'Connected' : 'Not connected',
+        showChevron: false,
+        onTap: oauth ? data.onDisconnectGithubOAuth : data.onConnectGithubOAuth,
+      ),
+    );
+
+    add(
+      OListRow(
+        icon: Icons.key_rounded,
+        title: 'GitHub token',
+        subtitle: _githubPatSaved
+            ? (_githubPatMask ?? _maskedToken(''))
+            : 'Not added',
+        showChevron: false,
+        onTap: _editGithubPat,
+        trailing: _githubPatSaved
+            ? OIconButton(
+                icon: Icons.delete_outline_rounded,
+                semanticLabel: 'Remove GitHub token',
+                tooltip: 'Remove GitHub token',
+                onPressed: _removeGithubPat,
+              )
+            : null,
+      ),
+    );
+
+    add(
+      OListRow(
+        icon: Icons.vpn_key_outlined,
+        title: 'Provider key',
+        subtitle: _tokenSubtitle,
+        showChevron: false,
+        trailing: _tokenActions(context),
+      ),
+    );
+
+    add(
+      OListRow(
+        icon: Icons.cloud_outlined,
+        title: 'Cloud key',
+        subtitle: data.cloudKeyActive ? 'Active' : 'Off',
+        showChevron: false,
+        trailing: data.onManageCloudKey == null
+            ? null
+            : OIconButton(
+                icon: Icons.settings_outlined,
+                semanticLabel: 'Manage cloud key',
+                tooltip: 'Manage',
+                onPressed: data.onManageCloudKey,
+              ),
+      ),
+    );
+
+    for (final credential in data.browserCredentials) {
+      final edit = data.onEditBrowserCredential == null
+          ? null
+          : () => _editBrowserCredential(context, existing: credential);
+      add(
+        OListRow(
+          icon: Icons.language_rounded,
+          title: credential.site,
+          subtitle:
+              '${credential.username} · ${_maskedPassword(credential.password)}',
+          showChevron: false,
+          onTap: edit,
+          trailing: data.onDeleteBrowserCredential == null
+              ? null
+              : OIconButton(
+                  icon: Icons.delete_outline_rounded,
+                  semanticLabel: 'Delete ${credential.site}',
+                  tooltip: 'Delete ${credential.site}',
+                  onPressed: () =>
+                      _deleteBrowserCredential(context, credential),
+                ),
+        ),
       );
     }
-    final content = Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: OSpace.l,
-        vertical: OSpace.m,
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          leading,
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  credential.site,
-                  style: OType.body.copyWith(
-                    color: c.text,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  subtitle,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-                const SizedBox(height: OSpace.xs),
-                actions,
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-    final label = '${credential.site}, $subtitle';
-    if (edit == null) {
-      return Semantics(label: label, child: content);
-    }
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: edit,
-        child: Semantics(label: label, button: true, child: content),
-      ),
-    );
+
+    return rows;
   }
 
   Future<void> _editBrowserCredential(
@@ -764,9 +627,7 @@ class _CredentialsPageState extends State<CredentialsPage> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Text(
-                'Ovid will no longer be able to sign in to '
-                '${credential.site}. The saved password is removed from this '
-                'device.',
+                'Ovid will no longer be able to sign in to ${credential.site}.',
                 style: OType.bodySm.copyWith(color: c.textMuted),
               ),
               const SizedBox(height: OSpace.l),
@@ -789,406 +650,6 @@ class _CredentialsPageState extends State<CredentialsPage> {
       },
     );
     if (confirmed == true) data.onDeleteBrowserCredential?.call(credential);
-  }
-
-  /// GitHub can authenticate with OAuth (browser sign-in) or a personal
-  /// access token. Both states are shown so the user knows what git will use.
-  Widget _githubAccess(BuildContext context) {
-    final c = OColors.of(context);
-    final oauth = data.githubOAuthActive;
-    final pat = _githubPatSaved;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          OSectionHeader(
-            label: 'GitHub access',
-            padding: const EdgeInsets.only(bottom: OSpace.s),
-          ),
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final stacked =
-                  constraints.maxWidth <
-                  380 * MediaQuery.textScalerOf(context).scale(1);
-              return OCard(
-                child: Column(
-                  children: [
-                    _accessRow(
-                      context,
-                      title: 'OAuth (browser sign-in)',
-                      detail: oauth
-                          ? 'Connected with your GitHub account'
-                          : 'Connect GitHub to clone and push',
-                      active: oauth,
-                      activeLabel: 'Connected',
-                      inactiveLabel: 'Not connected',
-                      actionLabel: oauth ? 'Disconnect' : 'Connect',
-                      onAction: oauth
-                          ? data.onDisconnectGithubOAuth
-                          : data.onConnectGithubOAuth,
-                      stacked: stacked,
-                    ),
-                    Divider(color: c.hairline, height: 1),
-                    _accessRow(
-                      context,
-                      title: 'GitHub personal access token',
-                      detail: pat
-                          ? (_githubPatMask != null
-                                ? 'Added · $_githubPatMask'
-                                : 'Added · used for git clone and push')
-                          : 'Not added',
-                      active: pat,
-                      activeLabel: 'Added',
-                      inactiveLabel: 'Not added',
-                      actionLabel: pat ? 'Replace token' : 'Add token',
-                      onAction: _editGithubPat,
-                      secondaryLabel: pat ? 'Remove' : null,
-                      onSecondary: pat ? _removeGithubPat : null,
-                      stacked: stacked,
-                    ),
-                  ],
-                ),
-              );
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _accessRow(
-    BuildContext context, {
-    required String title,
-    required String detail,
-    required bool active,
-    required String activeLabel,
-    required String inactiveLabel,
-    required String actionLabel,
-    required VoidCallback? onAction,
-    String? secondaryLabel,
-    VoidCallback? onSecondary,
-    required bool stacked,
-  }) {
-    final c = OColors.of(context);
-    final pill = OPill(
-      label: active ? activeLabel : inactiveLabel,
-      tone: active ? OPillTone.success : OPillTone.neutral,
-      dot: true,
-    );
-    final buttons = <Widget>[
-      if (onAction != null)
-        OButton(
-          label: actionLabel,
-          variant: OButtonVariant.ghost,
-          size: OButtonSize.compact,
-          onPressed: onAction,
-        ),
-      if (secondaryLabel != null)
-        OButton(
-          label: secondaryLabel,
-          variant: OButtonVariant.ghost,
-          size: OButtonSize.compact,
-          onPressed: onSecondary,
-        ),
-    ];
-    final text = Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          title,
-          style: OType.body.copyWith(
-            color: c.text,
-            fontWeight: FontWeight.w500,
-          ),
-        ),
-        const SizedBox(height: 2),
-        Text(detail, style: OType.caption.copyWith(color: c.textMuted)),
-      ],
-    );
-    if (!stacked) {
-      return Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(child: text),
-          const SizedBox(width: OSpace.s),
-          pill,
-          const SizedBox(width: OSpace.xs),
-          ...buttons,
-        ],
-      );
-    }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        text,
-        const SizedBox(height: OSpace.xs),
-        pill,
-        const SizedBox(height: OSpace.xs),
-        Wrap(spacing: OSpace.s, runSpacing: OSpace.xs, children: buttons),
-      ],
-    );
-  }
-
-  Widget _cloudKey(BuildContext context) {
-    final c = OColors.of(context);
-    final icon = Container(
-      width: 36,
-      height: 36,
-      decoration: BoxDecoration(
-        color: data.cloudKeyActive
-            ? c.success.withValues(alpha: 0.12)
-            : c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.m),
-      ),
-      child: Icon(
-        Icons.vpn_key_outlined,
-        size: 19,
-        color: data.cloudKeyActive ? c.success : c.textMuted,
-      ),
-    );
-    final pill = OPill(
-      label: data.cloudKeyActive ? 'Active' : 'Off',
-      tone: data.cloudKeyActive ? OPillTone.success : OPillTone.neutral,
-      dot: true,
-    );
-    final button = data.onManageCloudKey == null
-        ? null
-        : OButton(
-            label: 'Manage',
-            variant: OButtonVariant.ghost,
-            onPressed: data.onManageCloudKey,
-          );
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: OCard(
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final stacked = _stacksAt(context, constraints.maxWidth);
-            final label = Text(
-              data.cloudKeyStatusLabel,
-              style: OType.body.copyWith(
-                color: c.text,
-                fontWeight: FontWeight.w500,
-              ),
-            );
-            final text = Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (stacked) ...[
-                  label,
-                  const SizedBox(height: OSpace.xs),
-                  pill,
-                ] else
-                  Row(
-                    children: [
-                      Expanded(child: label),
-                      pill,
-                    ],
-                  ),
-                const SizedBox(height: OSpace.xs),
-                Text(
-                  data.cloudKeyStatusDetail,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ],
-            );
-            if (!stacked) {
-              return Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  icon,
-                  const SizedBox(width: OSpace.m),
-                  Expanded(child: text),
-                  if (button != null) ...[
-                    const SizedBox(width: OSpace.s),
-                    button,
-                  ],
-                ],
-              );
-            }
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    icon,
-                    const SizedBox(width: OSpace.m),
-                    Expanded(child: text),
-                  ],
-                ),
-                if (button != null) ...[
-                  const SizedBox(height: OSpace.s),
-                  Align(
-                    alignment: AlignmentDirectional.centerEnd,
-                    child: button,
-                  ),
-                ],
-              ],
-            );
-          },
-        ),
-      ),
-    );
-  }
-
-  Widget _credentialList(BuildContext context) {
-    final c = OColors.of(context);
-    final count = _storedCount;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          OSectionHeader(
-            label: 'Sign-in methods',
-            padding: const EdgeInsets.only(bottom: OSpace.s),
-            trailing: Text(
-              '$count stored',
-              style: OType.caption.copyWith(color: c.textMuted),
-            ),
-          ),
-          LayoutBuilder(
-            builder: (context, constraints) {
-              // The status pill and the "Add" button cannot share a line with
-              // the account name at 320 dp / 200 % text, so the rows reflow.
-              final stacked = _stacksAt(
-                context,
-                constraints.maxWidth - 2 * OSpace.l,
-              );
-              return OCard(
-                padding: EdgeInsets.zero,
-                child: Column(
-                  children: [
-                    for (var i = 0; i < data.credentials.length; i++) ...[
-                      if (i > 0) Divider(color: c.hairline, height: 1),
-                      _credentialRow(
-                        context,
-                        data.credentials[i],
-                        stacked: stacked,
-                      ),
-                    ],
-                    if (data.token == null) ...[
-                      Divider(color: c.hairline, height: 1),
-                      _credentialRow(
-                        context,
-                        const V2Credential(
-                          id: 'token',
-                          kind: V2CredentialKind.token,
-                          title: 'Personal access token',
-                          subtitle: '',
-                          connected: false,
-                        ),
-                        stacked: stacked,
-                      ),
-                    ],
-                  ],
-                ),
-              );
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _credentialRow(
-    BuildContext context,
-    V2Credential credential, {
-    required bool stacked,
-  }) {
-    final c = OColors.of(context);
-    final isToken = credential.kind == V2CredentialKind.token;
-    final subtitle = isToken ? _tokenSubtitle : credential.subtitle;
-    final connected = isToken ? _tokenSaved : credential.connected;
-    final onTap = data.onCredentialTap == null
-        ? null
-        : () => data.onCredentialTap!(credential.id);
-    final leading = Container(
-      width: 36,
-      height: 36,
-      decoration: BoxDecoration(
-        color: c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.m),
-      ),
-      child: Icon(_kindIcon(credential.kind), size: 19, color: c.textMuted),
-    );
-    final pill = OPill(
-      label: connected ? 'Active' : 'Off',
-      tone: connected ? OPillTone.success : OPillTone.neutral,
-      dot: true,
-    );
-    if (!stacked) {
-      return OListRow(
-        leading: leading,
-        title: credential.title,
-        subtitle: subtitle,
-        showChevron: false,
-        onTap: onTap,
-        trailing: isToken
-            ? _tokenActions(context)
-            : Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  pill,
-                  if (onTap != null) ...[
-                    const SizedBox(width: OSpace.xs),
-                    Icon(
-                      Icons.chevron_right_rounded,
-                      size: 20,
-                      color: c.textFaint,
-                    ),
-                  ],
-                ],
-              ),
-      );
-    }
-    final content = Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: OSpace.l,
-        vertical: OSpace.m,
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          leading,
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  credential.title,
-                  style: OType.body.copyWith(
-                    color: c.text,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  subtitle,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-                const SizedBox(height: OSpace.xs),
-                if (isToken) _tokenActions(context) else pill,
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-    final label = '${credential.title}, $subtitle';
-    if (onTap == null) {
-      return Semantics(label: label, child: content);
-    }
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        child: Semantics(label: label, button: true, child: content),
-      ),
-    );
   }
 
   /// Add/Replace/Remove for the provider key row. Icons keep the trailing
@@ -1220,33 +681,6 @@ class _CredentialsPageState extends State<CredentialsPage> {
           onPressed: _removeToken,
         ),
       ],
-    );
-  }
-
-  Widget _revoke(BuildContext context) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(top: OSpace.s),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          OButton(
-            label: 'Revoke all credentials',
-            icon: Icons.warning_amber_rounded,
-            variant: OButtonVariant.danger,
-            expand: true,
-            onPressed: _hasAnyCredential
-                ? () => _confirmRevoke(context)
-                : null,
-          ),
-          const SizedBox(height: OSpace.s),
-          Text(
-            'Revoking disconnects every account and token. You will need to sign in again.',
-            textAlign: TextAlign.center,
-            style: OType.caption.copyWith(color: c.textFaint),
-          ),
-        ],
-      ),
     );
   }
 
@@ -1343,7 +777,6 @@ class _BrowserCredentialFormState extends State<_BrowserCredentialForm> {
 
   @override
   Widget build(BuildContext context) {
-    final c = OColors.of(context);
     final existing = widget.existing;
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.l),
@@ -1388,12 +821,6 @@ class _BrowserCredentialFormState extends State<_BrowserCredentialForm> {
                   : 'Leave blank to keep the saved password',
             ),
           ),
-          const SizedBox(height: OSpace.xs),
-          Text(
-            'Ovid fills this login for you. The password is never shown to '
-            'the agent in plain text.',
-            style: OType.caption.copyWith(color: c.textMuted),
-          ),
           const SizedBox(height: OSpace.l),
           OButton(
             label: existing == null ? 'Save login' : 'Save changes',
@@ -1411,14 +838,6 @@ class _BrowserCredentialFormState extends State<_BrowserCredentialForm> {
       ),
     );
   }
-}
-
-/// At 320 dp with 200 % text a pill or a button no longer fits beside the
-/// label it belongs to. Cards and rows fall back to a stacked layout instead of
-/// squeezing the text to nothing.
-bool _stacksAt(BuildContext context, double width) {
-  final scale = MediaQuery.textScalerOf(context).scale(1);
-  return width < 190 * scale;
 }
 
 /// A stored secret is only ever represented by its mask. Null means "nothing
@@ -1462,7 +881,6 @@ class _SecretFormState extends State<_SecretForm> {
 
   @override
   Widget build(BuildContext context) {
-    final c = OColors.of(context);
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.l),
       child: Column(
@@ -1482,14 +900,8 @@ class _SecretFormState extends State<_SecretForm> {
             decoration: InputDecoration(
               labelText: widget.fieldLabel,
               helperText: widget.helper,
-              helperMaxLines: 3,
+              helperMaxLines: 2,
             ),
-          ),
-          const SizedBox(height: OSpace.s),
-          Text(
-            'The key is encrypted on this device. Ovid never shows it again, '
-            'not even here.',
-            style: OType.caption.copyWith(color: c.textMuted),
           ),
           const SizedBox(height: OSpace.l),
           OButton(
@@ -1525,11 +937,3 @@ String _maskedToken(String value) {
 /// value are rendered, so a screenshot or shoulder-surfer learns nothing.
 String _maskedPassword(String value) =>
     value.trim().isEmpty ? 'No password saved' : '••••••••';
-
-IconData _kindIcon(V2CredentialKind kind) {
-  return switch (kind) {
-    V2CredentialKind.google => Icons.mail_outline_rounded,
-    V2CredentialKind.github => Icons.terminal_rounded,
-    V2CredentialKind.token => Icons.key_rounded,
-  };
-}

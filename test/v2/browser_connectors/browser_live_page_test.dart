@@ -44,7 +44,12 @@ Map<String, dynamic> _state({
     'viewport': {'width': 1280, 'height': 800},
     'tabs': [
       {'index': 0, 'url': url, 'title': title, 'active': true},
-      {'index': 1, 'url': 'https://docs.test/start', 'title': 'Docs', 'active': false},
+      {
+        'index': 1,
+        'url': 'https://docs.test/start',
+        'title': 'Docs',
+        'active': false,
+      },
     ],
     'activeTabIndex': 0,
   };
@@ -147,43 +152,31 @@ void main() {
     expect(find.text('Example page'), findsOneWidget);
     expect(find.text('Docs'), findsOneWidget);
     expect(find.text('https://example.test/page'), findsOneWidget);
-    expect(find.text('1280×800'), findsOneWidget);
 
     // The viewport paints the decoded frame through an ImageProvider.
     final images = tester.widgetList<Image>(find.byType(Image)).toList();
     expect(images, isNotEmpty);
     expect(images.first.image, isA<MemoryImage>());
-    expect(find.text('Live · 3–5 fps'), findsOneWidget);
+    expect(find.text('Live'), findsOneWidget);
+    // No stream size and no frame-rate explainer.
+    expect(find.text('1280×800'), findsNothing);
+    expect(find.textContaining('fps'), findsNothing);
   });
 
-  testWidgets('the agent owns tabs: no tap, long-press or key can add one', (
+  testWidgets('the agent owns tabs: there is no way to add one', (
     tester,
   ) async {
-    final semantics = tester.ensureSemantics();
     await pumpPage(tester);
     await emitState(tester);
     await emitFrame(tester);
 
-    final plus = find.byKey(const ValueKey('v2-browser-tab-add'));
-    expect(plus, findsOneWidget);
-    final button = tester.widget<IconButton>(
-      find.descendant(of: plus, matching: find.byType(IconButton)),
-    );
-    expect(button.onPressed, isNull);
-    expect(button.onLongPress, isNull);
-
-    await tester.longPress(plus);
-    await tester.tap(plus, warnIfMissed: false);
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pump(const Duration(milliseconds: 300));
-
-    // Still exactly the two tabs the agent opened, and no tab was switched.
+    expect(find.byKey(const ValueKey('v2-browser-tab-add')), findsNothing);
+    expect(find.byIcon(Icons.add_rounded), findsNothing);
     expect(find.byKey(const ValueKey('v2-browser-tab-0')), findsOneWidget);
     expect(find.byKey(const ValueKey('v2-browser-tab-1')), findsOneWidget);
     expect(find.text('New tab'), findsNothing);
     expect(opsOf('browser_switch_tab'), isEmpty);
     expect(opsOf('browser_new_tab'), isEmpty);
-    semantics.dispose();
   });
 
   testWidgets('selecting an agent tab asks the server to switch', (
@@ -228,11 +221,9 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
-    // Controlled state: badge in the picture, return control in the bar.
-    expect(find.text('You are controlling'), findsOneWidget);
+    // Controlled state: the bar offers the way back and the pill stays Live.
+    expect(find.text('Live'), findsOneWidget);
     expect(find.byTooltip('Return control'), findsOneWidget);
-    expect(find.text('Can edit'), findsOneWidget);
-    expect(find.text('You are driving'), findsOneWidget);
 
     // A tap on the picture reaches the page in CSS pixels.
     await tester.tapAt(
@@ -241,9 +232,7 @@ void main() {
     await tester.pump();
     final inputs = opsOf('browser_input');
     expect(inputs, hasLength(1));
-    final input = Map<String, Object?>.from(
-      inputs.single['input']! as Map,
-    );
+    final input = Map<String, Object?>.from(inputs.single['input']! as Map);
     expect(input['type'], 'tap');
     expect(input['x'], closeTo(640, 1));
     expect(input['y'], closeTo(400, 1));
@@ -257,7 +246,7 @@ void main() {
     await emitState(tester);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
-    expect(find.text('Ovid is driving'), findsOneWidget);
+    expect(find.byTooltip('Take control'), findsOneWidget);
   });
 
   testWidgets('the keyboard tool sends real page input', (tester) async {
@@ -278,9 +267,8 @@ void main() {
       findsOneWidget,
     );
 
-    Map<String, Object?> lastInput() => Map<String, Object?>.from(
-      opsOf('browser_input').last['input']! as Map,
-    );
+    Map<String, Object?> lastInput() =>
+        Map<String, Object?>.from(opsOf('browser_input').last['input']! as Map);
 
     await tester.enterText(find.byType(TextField), 'hi');
     await tester.pump();
@@ -296,10 +284,7 @@ void main() {
 
     await tester.enterText(find.byType(TextField), '');
     await tester.pump();
-    expect(lastInput(), <String, Object?>{
-      'type': 'key',
-      'key': 'Backspace',
-    });
+    expect(lastInput(), <String, Object?>{'type': 'key', 'key': 'Backspace'});
 
     await tester.tap(find.byKey(BrowserControlBar.keyboardKey));
     await tester.pump();
@@ -330,7 +315,7 @@ void main() {
 
     await tester.pump(const Duration(seconds: 6));
 
-    expect(find.text('Ovid has not opened the browser'), findsOneWidget);
+    expect(find.text('Browser not open'), findsOneWidget);
     expect(find.byType(OSkeletonList), findsNothing);
 
     final attachesBefore = opsOf('browser_attach').length;
@@ -347,14 +332,15 @@ void main() {
     await emitState(tester);
 
     // Attached, no picture: loading first…
-    expect(find.text('Waiting for the first frame…'), findsOneWidget);
+    expect(find.text('Connecting…'), findsOneWidget);
 
     await tester.pump(const Duration(seconds: 6));
 
     // …then the honest waiting state, not a spinner forever.
     expect(find.text('No picture yet'), findsWidgets);
+    expect(find.text('Waiting'), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsNothing);
-    expect(find.text('Live · 3–5 fps'), findsNothing);
+    expect(find.text('Live'), findsNothing);
 
     final attachesBefore = opsOf('browser_attach').length;
     await tester.tap(find.byKey(BrowserViewport.waitingRetryKey));
@@ -369,11 +355,12 @@ void main() {
     await pumpPage(tester);
     await emitState(tester);
     await emitFrame(tester);
-    expect(find.text('Live · 3–5 fps'), findsOneWidget);
+    expect(find.text('Live'), findsOneWidget);
 
     await tester.pump(const Duration(seconds: 8));
 
-    expect(find.text('Stream lost'), findsWidgets);
+    expect(find.text('Stream lost'), findsOneWidget);
+    expect(find.text('Lost'), findsOneWidget);
     expect(find.byKey(BrowserViewport.retryKey), findsOneWidget);
   });
 
@@ -405,10 +392,7 @@ void main() {
 
     final copy = calls.where((call) => call.method == 'Clipboard.setData');
     expect(copy, isNotEmpty);
-    expect(
-      (copy.first.arguments as Map)['text'],
-      'https://example.test/page',
-    );
+    expect((copy.first.arguments as Map)['text'], 'https://example.test/page');
     expect(find.text('Address copied'), findsOneWidget);
   });
 
@@ -428,9 +412,8 @@ void main() {
       await emitFrame(tester);
 
       expect(tester.takeException(), isNull);
-      expect(find.text('You are controlling'), findsOneWidget);
+      expect(find.text('Live'), findsOneWidget);
       expect(find.byTooltip('Return control'), findsOneWidget);
-      expect(find.text('You are driving'), findsOneWidget);
     });
   }
 }

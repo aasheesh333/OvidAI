@@ -231,7 +231,7 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
         compact: true,
         icon: Icons.compare_arrows_rounded,
         title: 'No plans to compare',
-        message: 'Plan details will appear here when they load.',
+        message: 'Plan details appear here.',
         action: widget.data.onRetry == null
             ? null
             : OButton(
@@ -268,7 +268,6 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
               final maxOffset = contentWidth > viewport
                   ? contentWidth - viewport
                   : 0.0;
-              final canScroll = maxOffset > 0.5;
 
               return Column(
                 mainAxisSize: MainAxisSize.min,
@@ -420,7 +419,6 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
                       ),
                     ),
                   ),
-                  if (canScroll) _scrollHint(context),
                 ],
               );
             },
@@ -762,34 +760,6 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
           style: OType.caption.copyWith(color: c.textMuted),
         ),
       ],
-    );
-  }
-
-  Widget _scrollHint(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      key: const ValueKey<String>('plan-compare-hint'),
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.m,
-        OSpace.s,
-        OSpace.m,
-        OSpace.m,
-      ),
-      decoration: BoxDecoration(
-        border: Border(top: BorderSide(color: c.hairline)),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.swipe_rounded, size: 16, color: c.textFaint),
-          const SizedBox(width: OSpace.s),
-          Expanded(
-            child: Text(
-              'Swipe to compare all plans',
-              style: OType.caption.copyWith(color: c.textMuted),
-            ),
-          ),
-        ],
-      ),
     );
   }
 

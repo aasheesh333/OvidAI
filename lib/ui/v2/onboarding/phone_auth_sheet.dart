@@ -275,27 +275,34 @@ class _V2PhoneAuthSheetState extends State<V2PhoneAuthSheet> {
 
   bool get _busy => widget.data.loading;
 
+  bool get _isCode => widget.data.step == V2PhoneAuthStep.code;
+
+  bool get _canSend => widget.onSendCode != null && !_busy;
+  bool get _canVerify => widget.onVerify != null && !_busy;
+  bool get _canRetry =>
+      widget.onRetry != null || (_isCode ? _canVerify : _canSend);
+
   void _send() {
-    if (_busy) return;
+    if (_busy || widget.onSendCode == null) return;
     final phone = _phone.text.trim();
     if (phone.isEmpty) return;
-    widget.onSendCode?.call(phone);
+    widget.onSendCode!(phone);
   }
 
   void _verify() {
-    if (_busy) return;
+    if (_busy || widget.onVerify == null) return;
     final code = _code.text.trim();
     if (code.length != 6) return;
-    widget.onVerify?.call(code);
+    widget.onVerify!(code);
   }
 
   void _retry() {
     final retry = widget.onRetry;
     if (retry != null) {
       retry();
-    } else if (widget.data.step == V2PhoneAuthStep.code) {
+    } else if (_isCode && _canVerify) {
       _verify();
-    } else {
+    } else if (!_isCode && _canSend) {
       _send();
     }
   }
@@ -350,12 +357,36 @@ class _V2PhoneAuthSheetState extends State<V2PhoneAuthSheet> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      _Header(
-                        isCode: isCode,
-                        onBack: isCode && !_busy
-                            ? (widget.onChangeNumber ?? widget.onClose)
-                            : null,
+                      OSheetHeader(
+                        leading: isCode
+                            ? OIconButton(
+                                key: const Key('phone-auth-back'),
+                                icon: Icons.arrow_back_rounded,
+                                semanticLabel: 'Change number',
+                                tooltip: 'Change number',
+                                onPressed: isCode && !_busy
+                                    ? (widget.onChangeNumber ?? widget.onClose)
+                                    : null,
+                              )
+                            : Container(
+                                width: 40,
+                                height: 40,
+                                decoration: BoxDecoration(
+                                  color: c.accentSoft,
+                                  borderRadius: BorderRadius.circular(
+                                    ORadius.m,
+                                  ),
+                                ),
+                                child: Icon(
+                                  Icons.phone_iphone_rounded,
+                                  size: 20,
+                                  color: c.accent,
+                                ),
+                              ),
                         onClose: widget.onClose,
+                        closeLabel: 'Close',
+                        closeKey: const Key('phone-auth-close'),
+                        padding: EdgeInsets.zero,
                       ),
                       const SizedBox(height: OSpace.l),
                       Text(
@@ -403,7 +434,7 @@ class _V2PhoneAuthSheetState extends State<V2PhoneAuthSheet> {
                         const SizedBox(height: OSpace.l),
                         _SheetError(
                           message: data.error!,
-                          onRetry: _busy ? null : _retry,
+                          onRetry: _busy || !_canRetry ? null : _retry,
                         ),
                       ],
                       if (isCode) ...[
@@ -431,12 +462,14 @@ class _V2PhoneAuthSheetState extends State<V2PhoneAuthSheet> {
                         onPressed: _busy
                             ? null
                             : (isCode
-                                  ? (_code.text.trim().length == 6
+                                  ? (_code.text.trim().length == 6 &&
+                                            _canVerify
                                         ? _verify
                                         : null)
-                                  : (_phone.text.trim().isEmpty
-                                        ? null
-                                        : _send)),
+                                  : (_phone.text.trim().isNotEmpty &&
+                                            _canSend
+                                        ? _send
+                                        : null)),
                       ),
                       if (!isCode) ...[
                         const SizedBox(height: OSpace.l),
@@ -459,53 +492,6 @@ class _V2PhoneAuthSheetState extends State<V2PhoneAuthSheet> {
               ),
             ),
           ),
-        ),
-      ],
-    );
-  }
-}
-
-class _Header extends StatelessWidget {
-  const _Header({
-    required this.isCode,
-    required this.onBack,
-    required this.onClose,
-  });
-
-  final bool isCode;
-  final VoidCallback? onBack;
-  final VoidCallback? onClose;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Row(
-      children: [
-        if (isCode)
-          OIconButton(
-            key: const Key('phone-auth-back'),
-            icon: Icons.arrow_back_rounded,
-            semanticLabel: 'Change number',
-            tooltip: 'Change number',
-            onPressed: onBack,
-          )
-        else
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: c.accentSoft,
-              borderRadius: BorderRadius.circular(ORadius.m),
-            ),
-            child: Icon(Icons.phone_iphone_rounded, size: 20, color: c.accent),
-          ),
-        const Spacer(),
-        OIconButton(
-          key: const Key('phone-auth-close'),
-          icon: Icons.close_rounded,
-          semanticLabel: 'Close',
-          tooltip: 'Close',
-          onPressed: onClose,
         ),
       ],
     );
@@ -845,7 +831,7 @@ class _ResendRow extends StatelessWidget {
           child: Text(
             data.resendSeconds > 0
                 ? 'Resend code in ${_format(data.resendSeconds)}'
-                : 'Please wait…',
+                : 'One moment…',
             key: const Key('phone-auth-resend-timer'),
             style: OType.caption.copyWith(color: c.textMuted),
           ),
@@ -1067,8 +1053,8 @@ class _CountryPickerSheetState extends State<_CountryPickerSheet> {
                 icon: Icons.public_off_rounded,
                 title: 'No countries found',
                 message:
-                    'Nothing matches "${_query.trim()}". Try a country '
-                    'name or a calling code.',
+                    'Nothing matches "${_query.trim()}". Try a country or '
+                    'code.',
                 action: OButton(
                   label: 'Clear search',
                   variant: OButtonVariant.secondary,

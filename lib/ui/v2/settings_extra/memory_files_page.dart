@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
-import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
+import '../settings/memory_page.dart';
 
 // TODO(l10n): move the English copy in this screen to the ARB files.
 
@@ -88,7 +89,8 @@ class V2MemoryFilesPageData {
   final String errorMessage;
 }
 
-/// Memory files grouped by scope, with open, delete and export actions.
+/// Memory files: one list, one scope filter and one delete per row — the same
+/// shape as Memory and Shared memory.
 class MemoryFilesPage extends StatefulWidget {
   const MemoryFilesPage({super.key, required this.data});
 
@@ -99,7 +101,7 @@ class MemoryFilesPage extends StatefulWidget {
 }
 
 class _MemoryFilesPageState extends State<MemoryFilesPage> {
-  /// null means "All". Selecting a group really filters the sections below.
+  /// null means "All". Selecting a group really filters the list below.
   V2MemoryFileGroup? _filter;
 
   V2MemoryFilesPageData get data => widget.data;
@@ -110,20 +112,14 @@ class _MemoryFilesPageState extends State<MemoryFilesPage> {
 
   @override
   Widget build(BuildContext context) {
-    return OScaffold(
-      appBar: const OAppBar(title: 'Memory files'),
-      body: _body(context),
-    );
+    // Title-only header: Memory, Memory files and Shared memory share one
+    // chrome, with the single action at the bottom.
+    return OScreen(title: 'Memory files', child: _body(context));
   }
 
   Widget _body(BuildContext context) {
     if (data.status == V2MemoryFilesStatus.loading) {
-      return OFadeSlide(
-        child: Semantics(
-          label: 'Loading your memory files',
-          child: const OSkeletonList(rows: 7),
-        ),
-      );
+      return const OSkeletonList(rows: 7);
     }
     if (data.status == V2MemoryFilesStatus.error) {
       return OErrorState(message: data.errorMessage, onRetry: data.onRetry);
@@ -132,259 +128,97 @@ class _MemoryFilesPageState extends State<MemoryFilesPage> {
       return OEmptyState(
         icon: Icons.folder_open_rounded,
         title: 'No memory files yet',
-        message: 'Ovid will save notes here as you chat.',
-        action: OButton(
-          label: 'Refresh',
-          icon: Icons.refresh_rounded,
-          onPressed: data.onRetry,
-        ),
+        message: 'Ovid saves notes here as you chat.',
+        action: data.onRetry == null
+            ? null
+            : OButton(
+                label: 'Refresh',
+                icon: Icons.refresh_rounded,
+                onPressed: data.onRetry,
+              ),
       );
     }
-    return OFadeSlide(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(
-          OSpace.screen,
-          OSpace.l,
-          OSpace.screen,
-          OSpace.xxl,
-        ),
-        child: OStagger(
-          children: [
-            _explainer(context),
-            _scopeFilter(context),
-            for (final group in V2MemoryFileGroup.values)
-              if (_visibleFiles.any((file) => file.group == group))
-                _groupSection(context, group),
-            if (_visibleFiles.isEmpty) _filteredEmpty(context),
-            _export(context),
-          ],
-        ),
-      ),
-    );
-  }
 
-  /// Filter chips for the three scopes. `All` clears the filter. The chips
-  /// operate on the same list the sections render, so a scope with no files
-  /// shows an honest empty card instead of the other scopes' rows.
-  Widget _scopeFilter(BuildContext context) {
     final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('SHOW', style: OType.overline.copyWith(color: c.textMuted)),
-          const SizedBox(height: OSpace.s),
-          Wrap(
-            spacing: OSpace.s,
-            runSpacing: OSpace.s,
-            children: [
-              OChip(
-                key: const ValueKey<String>('memory-files-filter-all'),
-                label: 'All',
-                selected: _filter == null,
-                onTap: () => setState(() => _filter = null),
-              ),
-              for (final group in V2MemoryFileGroup.values)
-                OChip(
-                  key: ValueKey<String>('memory-files-filter-${group.name}'),
-                  label: group.label,
-                  selected: _filter == group,
-                  onTap: () => setState(() => _filter = group),
-                ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _filteredEmpty(BuildContext context) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.xl),
-      child: OCard(
-        child: Text(
-          'No ${_filter?.label.toLowerCase() ?? ''} memory files yet.',
-          style: OType.bodySm.copyWith(color: c.textMuted),
-        ),
-      ),
-    );
-  }
-
-  Widget _explainer(BuildContext context) {
-    final c = OColors.of(context);
-    final count = data.files.length;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.xl),
-      child: OCard(
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                color: c.accentSoft,
-                borderRadius: BorderRadius.circular(ORadius.m),
-              ),
-              child: Icon(
-                Icons.description_outlined,
-                size: 21,
-                color: c.accent,
-              ),
-            ),
-            const SizedBox(width: OSpace.m),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'What Ovid remembers',
-                    style: OType.bodyStrong.copyWith(color: c.text),
-                  ),
-                  const SizedBox(height: OSpace.xs),
-                  Text(
-                    'Ovid saves small notes while it works. Tap a file to edit '
-                    'what it remembers, or remove one you no longer need.',
-                    style: OType.bodySm.copyWith(color: c.textMuted),
-                  ),
-                  const SizedBox(height: OSpace.s),
-                  Wrap(
-                    spacing: OSpace.s,
-                    runSpacing: OSpace.s,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      _pill(
-                        context,
-                        label: '$count ${count == 1 ? 'file' : 'files'}',
-                        foreground: c.accent,
-                        background: c.accentSoft,
-                      ),
-                      Text(
-                        'Total ${data.totalSizeLabel}',
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _groupSection(BuildContext context, V2MemoryFileGroup group) {
-    final c = OColors.of(context);
-    final files = _visibleFiles.where((file) => file.group == group).toList();
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.xl),
+    final files = _visibleFiles;
+    return SingleChildScrollView(
+      padding: const EdgeInsets.only(top: OSpace.l, bottom: OSpace.xxl),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          OSectionHeader(
-            label: '${group.label} files',
-            padding: const EdgeInsets.only(bottom: OSpace.s),
-            trailing: Text(
-              '${files.length} ${files.length == 1 ? 'file' : 'files'}',
-              style: OType.caption.copyWith(color: c.textMuted),
-            ),
-          ),
-          OCard(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                for (var i = 0; i < files.length; i++) ...[
-                  if (i > 0) Divider(color: c.hairline, height: 1),
-                  _fileRow(context, files[i]),
+          _scopeFilter(),
+          const SizedBox(height: OSpace.s),
+          if (files.isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: OSpace.m),
+              child: Text(
+                'No files in this scope',
+                style: OType.bodySm.copyWith(color: c.textMuted),
+              ),
+            )
+          else
+            OCard(
+              padding: EdgeInsets.zero,
+              child: Column(
+                children: [
+                  for (var i = 0; i < files.length; i++) ...[
+                    if (i > 0) Divider(color: c.hairline, height: 1),
+                    _fileRow(context, files[i]),
+                  ],
                 ],
-              ],
+              ),
             ),
-          ),
+          if (data.onExportAll != null) ...[
+            const SizedBox(height: OSpace.l),
+            OButton(
+              key: const ValueKey<String>('memory-files-export'),
+              label: 'Export all',
+              icon: Icons.download_rounded,
+              variant: OButtonVariant.secondary,
+              expand: true,
+              onPressed: data.onExportAll,
+            ),
+          ],
         ],
+      ),
+    );
+  }
+
+  /// Filter chips for the three scopes. `All` clears the filter.
+  Widget _scopeFilter() {
+    return V2MemoryScopeBar(
+      keyPrefix: 'memory-files-filter',
+      labels: [
+        'All',
+        for (final group in V2MemoryFileGroup.values) group.label,
+      ],
+      selected: _filter == null ? 0 : _filter!.index + 1,
+      onSelected: (index) => setState(
+        () => _filter = index == 0 ? null : V2MemoryFileGroup.values[index - 1],
       ),
     );
   }
 
   Widget _fileRow(BuildContext context, V2MemoryFileEntry file) {
-    final c = OColors.of(context);
     final canActivate =
         data.onSave != null || data.onOpen != null || _hasContent(file);
-    return Semantics(
-      label: file.semanticsLabel,
-      button: canActivate,
+    return OListRow(
+      key: ValueKey<String>('memory-file-${file.id}'),
+      icon: _groupIcon(file.group),
+      title: file.name,
+      subtitle: file.metaLabel,
+      showChevron: false,
       enabled: canActivate,
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: canActivate ? () => _activate(context, file) : null,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: OSpace.l,
-              vertical: OSpace.m,
+      onTap: canActivate ? () => _activate(context, file) : null,
+      trailing: data.onDelete == null
+          ? null
+          : OIconButton(
+              key: ValueKey<String>('memory-file-delete-${file.id}'),
+              icon: Icons.delete_outline_rounded,
+              semanticLabel: 'Delete ${file.name}',
+              tooltip: 'Delete',
+              onPressed: () => _confirmDelete(context, file),
             ),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // The label above already carries this text, so the visual
-                // copy is hidden from screen readers to avoid reading it twice.
-                ExcludeSemantics(
-                  child: Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      color: c.surfaceAlt,
-                      borderRadius: BorderRadius.circular(ORadius.m),
-                    ),
-                    child: Icon(
-                      _groupIcon(file.group),
-                      size: 19,
-                      color: c.textMuted,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: OSpace.m),
-                Expanded(
-                  child: ExcludeSemantics(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          file.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: OType.body.copyWith(
-                            color: c.text,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          file.metaLabel,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: OType.caption.copyWith(color: c.textMuted),
-                        ),
-                        const SizedBox(height: OSpace.xs),
-                        Text(
-                          file.preview,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: OType.bodySm.copyWith(color: c.textFaint),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(width: OSpace.xs),
-                _fileMenu(context, file),
-              ],
-            ),
-          ),
-        ),
-      ),
     );
   }
 
@@ -403,9 +237,7 @@ class _MemoryFilesPageState extends State<MemoryFilesPage> {
   bool _hasContent(V2MemoryFileEntry file) =>
       file.content.trim().isNotEmpty || file.preview.trim().isNotEmpty;
 
-  /// Read-only viewer for a file the caller did not route elsewhere. It shows
-  /// the file body, not just the one-line preview, and offers Delete so a
-  /// memory can be removed without leaving the screen.
+  /// Read-only viewer for a file the caller did not route elsewhere.
   Future<void> _openViewer(BuildContext context, V2MemoryFileEntry file) async {
     final action = await showModalBottomSheet<String>(
       context: context,
@@ -435,61 +267,6 @@ class _MemoryFilesPageState extends State<MemoryFilesPage> {
     if (content != null) {
       data.onSave?.call(file.id, content);
     }
-  }
-
-  Widget _fileMenu(BuildContext context, V2MemoryFileEntry file) {
-    final c = OColors.of(context);
-    final canEdit = data.onSave != null;
-    final canView = data.onOpen != null || _hasContent(file);
-    final canActivate = canEdit || canView;
-    final canDelete = data.onDelete != null;
-    return SizedBox(
-      width: OSpace.touch,
-      height: OSpace.touch,
-      child: PopupMenuButton<String>(
-        enabled: canActivate || canDelete,
-        tooltip: 'File options for ${file.name}',
-        icon: Icon(Icons.more_vert_rounded, color: c.textMuted),
-        onSelected: (value) {
-          if (value == 'edit') {
-            _activate(context, file);
-          } else if (value == 'delete') {
-            _confirmDelete(context, file);
-          }
-        },
-        itemBuilder: (context) => [
-          PopupMenuItem<String>(
-            value: 'edit',
-            enabled: canActivate,
-            child: Row(
-              children: [
-                Icon(
-                  canEdit ? Icons.edit_rounded : Icons.visibility_outlined,
-                  size: 18,
-                  color: c.textMuted,
-                ),
-                const SizedBox(width: OSpace.m),
-                Text(
-                  canEdit ? 'Edit' : (data.onOpen != null ? 'Open' : 'View'),
-                  style: OType.bodySm.copyWith(color: c.text),
-                ),
-              ],
-            ),
-          ),
-          PopupMenuItem<String>(
-            value: 'delete',
-            enabled: canDelete,
-            child: Row(
-              children: [
-                Icon(Icons.delete_outline_rounded, size: 18, color: c.danger),
-                const SizedBox(width: OSpace.m),
-                Text('Delete', style: OType.bodySm.copyWith(color: c.danger)),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
   }
 
   Future<void> _confirmDelete(
@@ -528,52 +305,6 @@ class _MemoryFilesPageState extends State<MemoryFilesPage> {
     if (confirmed == true) {
       data.onDelete?.call(file.id);
     }
-  }
-
-  Widget _export(BuildContext context) {
-    final c = OColors.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        OButton(
-          label: 'Export all',
-          icon: Icons.download_rounded,
-          variant: OButtonVariant.secondary,
-          expand: true,
-          onPressed: data.onExportAll,
-        ),
-        const SizedBox(height: OSpace.s),
-        Text(
-          'Exports every memory file in one zip.',
-          textAlign: TextAlign.center,
-          style: OType.caption.copyWith(color: c.textFaint),
-        ),
-      ],
-    );
-  }
-
-  Widget _pill(
-    BuildContext context, {
-    required String label,
-    required Color foreground,
-    required Color background,
-  }) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: OSpace.xs),
-      decoration: BoxDecoration(
-        color: background,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-      ),
-      child: Text(
-        label,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: OType.caption.copyWith(
-          color: foreground,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-    );
   }
 
   IconData _groupIcon(V2MemoryFileGroup group) {

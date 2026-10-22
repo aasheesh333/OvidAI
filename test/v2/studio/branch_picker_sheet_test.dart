@@ -43,7 +43,10 @@ void main() {
       expect(find.text('main'), findsOneWidget);
       expect(find.text('develop'), findsOneWidget);
       expect(find.text('12m ago by Priya'), findsOneWidget);
-      expect(find.textContaining('Nothing will be lost'), findsOneWidget);
+      // No explanatory subtitle, no stash paragraph, no section counters.
+      expect(find.text('Your current work stays safe.'), findsNothing);
+      expect(find.textContaining('Nothing will be lost'), findsNothing);
+      expect(find.textContaining('RECENT BRANCHES'), findsNothing);
     }
   });
 
@@ -168,7 +171,7 @@ void main() {
     await tester.drag(find.byType(ListView), const Offset(0, -900));
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
-    expect(find.textContaining('Nothing will be lost'), findsOneWidget);
+    expect(find.text('fix/nav'), findsOneWidget);
   });
 
   testWidgets('every state fits 320 dp at 200% text', (tester) async {

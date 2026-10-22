@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
-import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
+import '../settings/memory_page.dart';
 
 // TODO(l10n): move the English copy in this screen to the ARB files.
 
@@ -104,7 +105,7 @@ class V2SharedMemoryPageData {
   int get sharedScopeCount => scopes.where((scope) => scope.shared).length;
 }
 
-/// Shared memory: what leaves this chat, who sees it, and how to forget it.
+/// Shared memory: one list, one scope filter, one switch per row.
 class SharedMemoryPage extends StatefulWidget {
   const SharedMemoryPage({super.key, required this.data});
 
@@ -118,13 +119,15 @@ class _SharedMemoryPageState extends State<SharedMemoryPage> {
   late bool _enabled = widget.data.enabled;
   late List<V2SharedMemoryScope> _scopeList = widget.data.scopes;
   late int _factCount = widget.data.factCount;
+  V2SharedMemoryScopeKind? _kindFilter;
 
   V2SharedMemoryPageData get data => widget.data;
 
   bool get _hasSharedFacts => _factCount > 0;
 
-  int get _sharedScopeCount =>
-      _scopeList.where((scope) => scope.shared).length;
+  List<V2SharedMemoryScope> get _visibleScopes => _kindFilter == null
+      ? _scopeList
+      : _scopeList.where((scope) => scope.kind == _kindFilter).toList();
 
   @override
   void didUpdateWidget(covariant SharedMemoryPage oldWidget) {
@@ -164,380 +167,166 @@ class _SharedMemoryPageState extends State<SharedMemoryPage> {
 
   @override
   Widget build(BuildContext context) {
-    return OScaffold(
-      appBar: const OAppBar(title: 'Shared memory'),
-      body: _body(context),
-    );
+    return OScreen(title: 'Shared memory', child: _body(context));
   }
 
   Widget _body(BuildContext context) {
     switch (data.status) {
       case V2SharedMemoryStatus.loading:
-        return OFadeSlide(
-          child: Semantics(
-            label: 'Loading shared memory',
-            child: const OSkeletonList(rows: 6),
-          ),
-        );
+        return const OSkeletonList(rows: 6);
       case V2SharedMemoryStatus.error:
         return OErrorState(message: data.errorMessage, onRetry: data.onRetry);
       case V2SharedMemoryStatus.empty:
-        return _empty(context);
+        return _empty();
       case V2SharedMemoryStatus.ready:
-        return OFadeSlide(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(
-              OSpace.screen,
-              OSpace.l,
-              OSpace.screen,
-              OSpace.xxl,
-            ),
-            child: OStagger(
-              children: [
-                _explainer(context),
-                _masterCard(context),
-                _scopes(context),
-                _retention(context),
-                _danger(context),
-              ],
-            ),
-          ),
-        );
+        return _content(context);
     }
   }
 
-  Widget _empty(BuildContext context) {
+  Widget _empty() {
     final canTurnOn = !_enabled && data.onEnabledChanged != null;
+    final Widget? action;
+    if (canTurnOn) {
+      action = OButton(
+        label: 'Turn on sharing',
+        icon: Icons.share_rounded,
+        onPressed: () => _setEnabled(true),
+      );
+    } else if (data.onRetry != null) {
+      action = OButton(
+        label: 'Refresh',
+        icon: Icons.refresh_rounded,
+        onPressed: data.onRetry,
+      );
+    } else {
+      action = null;
+    }
     return OEmptyState(
       icon: Icons.share_outlined,
       title: 'Nothing is shared yet',
-      message:
-          'Facts from your chats stay private until you choose a scope to '
-          'share them with.',
-      action: canTurnOn
-          ? OButton(
-              label: 'Turn on sharing',
-              icon: Icons.share_rounded,
-              onPressed: () => _setEnabled(true),
-            )
-          : OButton(
-              label: 'Refresh',
-              icon: Icons.refresh_rounded,
-              onPressed: data.onRetry,
-            ),
+      message: 'Facts stay here until shared.',
+      action: action,
     );
   }
 
-  Widget _explainer(BuildContext context) {
+  Widget _content(BuildContext context) {
     final c = OColors.of(context);
-    final count = _factCount;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: OCard(
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                color: c.accentSoft,
-                borderRadius: BorderRadius.circular(ORadius.m),
-              ),
-              child: Icon(Icons.share_rounded, size: 21, color: c.accent),
-            ),
-            const SizedBox(width: OSpace.m),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'What shared memory does',
-                    style: OType.bodyStrong.copyWith(color: c.text),
-                  ),
-                  const SizedBox(height: OSpace.xs),
-                  Text(
-                    'Facts from this chat can be reused by project members, so '
-                    'nobody has to repeat the same context.',
-                    style: OType.bodySm.copyWith(color: c.textMuted),
-                  ),
-                  const SizedBox(height: OSpace.s),
-                  Wrap(
-                    spacing: OSpace.m,
-                    runSpacing: OSpace.xs,
-                    children: [
-                      Text(
-                        '$count ${count == 1 ? 'fact' : 'facts'} shared',
-                        style: OType.caption.copyWith(
-                          color: count == 0 ? c.textMuted : c.accent,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      Text(
-                        _enabled ? 'Sharing on' : 'Sharing off',
-                        style: OType.caption.copyWith(
-                          color: _enabled ? c.success : c.textMuted,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _masterCard(BuildContext context) {
-    final c = OColors.of(context);
-    final enabled = _enabled;
+    final scopes = _visibleScopes;
     final canToggle = data.onEnabledChanged != null;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.xl),
-      child: OCard(
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Container(
-                        width: 8,
-                        height: 8,
-                        decoration: BoxDecoration(
-                          color: enabled ? c.success : c.textFaint,
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                      const SizedBox(width: OSpace.s),
-                      Flexible(
-                        child: Text(
-                          enabled ? 'Sharing on' : 'Sharing off',
-                          style: OType.h2.copyWith(color: c.text),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: OSpace.xs),
-                  Text(
-                    enabled
-                        ? 'Facts you mark below can leave this chat.'
-                        : 'Facts stay inside this chat.',
-                    style: OType.bodySm.copyWith(color: c.textMuted),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: OSpace.m),
-            Semantics(
-              key: const ValueKey<String>('shared-memory-master-toggle'),
-              label: 'Share memory',
-              toggled: enabled,
-              button: true,
-              enabled: canToggle,
-              onTap: canToggle ? () => _setEnabled(!enabled) : null,
-              child: ExcludeSemantics(
-                child: Switch(
-                  key: const ValueKey<String>('shared-memory-master-switch'),
-                  value: enabled,
-                  onChanged: canToggle ? _setEnabled : null,
-                  activeThumbColor: canToggle ? c.onAccent : c.textFaint,
-                  activeTrackColor: canToggle ? c.accentFill : c.surfaceRaised,
-                  inactiveThumbColor: c.textFaint,
-                  inactiveTrackColor: c.surfaceRaised,
-                  trackOutlineColor: WidgetStatePropertyAll(c.hairlineStrong),
-                  materialTapTargetSize: MaterialTapTargetSize.padded,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _scopes(BuildContext context) {
-    final c = OColors.of(context);
-    final total = _scopeList.length;
-    final shared = _sharedScopeCount;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
+    return SingleChildScrollView(
+      padding: const EdgeInsets.only(top: OSpace.l, bottom: OSpace.xxl),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          OSectionHeader(
-            label: 'Scopes',
-            padding: const EdgeInsets.only(bottom: OSpace.s),
-            trailing: Text(
-              '$shared of $total shared',
-              style: OType.caption.copyWith(color: c.textMuted),
-            ),
-          ),
+          _scopeFilter(),
+          const SizedBox(height: OSpace.s),
           OCard(
             padding: EdgeInsets.zero,
             child: Column(
               children: [
-                for (var i = 0; i < _scopeList.length; i++) ...[
-                  if (i > 0) Divider(color: c.hairline, height: 1),
-                  _scopeRow(context, _scopeList[i]),
+                OListRow(
+                  icon: Icons.share_rounded,
+                  title: 'Share memory',
+                  showChevron: false,
+                  onTap: canToggle ? () => _setEnabled(!_enabled) : null,
+                  enabled: canToggle,
+                  trailing: _switch(
+                    key: const ValueKey<String>('shared-memory-master-switch'),
+                    label: 'Share memory',
+                    value: _enabled,
+                    onChanged: canToggle ? _setEnabled : null,
+                  ),
+                ),
+                for (final scope in scopes) ...[
+                  Divider(color: c.hairline, height: 1),
+                  OListRow(
+                    icon: _scopeIcon(scope.kind),
+                    title: scope.title,
+                    subtitle: scope.audience,
+                    showChevron: false,
+                    enabled: _enabled,
+                    onTap: data.onScopeChanged == null || !_enabled
+                        ? null
+                        : () => _setScope(scope.id, !scope.shared),
+                    trailing: _switch(
+                      key: ValueKey<String>(
+                        'shared-memory-scope-${scope.id}-switch',
+                      ),
+                      label: scope.title,
+                      value: scope.shared,
+                      onChanged: data.onScopeChanged == null || !_enabled
+                          ? null
+                          : (next) => _setScope(scope.id, next),
+                    ),
+                  ),
                 ],
               ],
             ),
           ),
+          if (data.onForget != null) ...[
+            const SizedBox(height: OSpace.l),
+            OButton(
+              key: const ValueKey<String>('forget-shared-facts'),
+              label: 'Forget shared facts',
+              icon: Icons.delete_sweep_outlined,
+              variant: OButtonVariant.danger,
+              expand: true,
+              onPressed: _hasSharedFacts ? () => _confirmForget(context) : null,
+            ),
+          ],
         ],
       ),
     );
   }
 
-  Widget _scopeRow(BuildContext context, V2SharedMemoryScope scope) {
-    final c = OColors.of(context);
-    final canToggle = data.onScopeChanged != null && _enabled;
-    return ConstrainedBox(
-      constraints: const BoxConstraints(minHeight: OSpace.listRow),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: OSpace.l,
-          vertical: OSpace.m,
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              width: 36,
-              height: 36,
-              decoration: BoxDecoration(
-                color: c.surfaceAlt,
-                borderRadius: BorderRadius.circular(ORadius.m),
-              ),
-              child: Icon(
-                _scopeIcon(scope.kind),
-                size: 19,
-                color: canToggle ? c.textMuted : c.textFaint,
-              ),
-            ),
-            const SizedBox(width: OSpace.m),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    scope.title,
-                    style: OType.body.copyWith(
-                      color: canToggle ? c.text : c.textMuted,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    scope.description,
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                  const SizedBox(height: OSpace.xs),
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Icon(
-                        Icons.visibility_outlined,
-                        size: 14,
-                        color: c.textFaint,
-                      ),
-                      const SizedBox(width: OSpace.xs),
-                      Flexible(
-                        child: Text(
-                          'Who can see it: ${scope.audience}',
-                          style: OType.caption.copyWith(color: c.textFaint),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: OSpace.s),
-            Semantics(
-              label: scope.title,
-              toggled: scope.shared,
-              button: true,
-              enabled: canToggle,
-              onTap: canToggle
-                  ? () => _setScope(scope.id, !scope.shared)
-                  : null,
-              child: ExcludeSemantics(
-                child: Switch(
-                  key: ValueKey<String>(
-                    'shared-memory-scope-${scope.id}-switch',
-                  ),
-                  value: scope.shared,
-                  onChanged: canToggle
-                      ? (next) => _setScope(scope.id, next)
-                      : null,
-                  activeThumbColor: canToggle ? c.onAccent : c.textFaint,
-                  activeTrackColor: canToggle ? c.accentFill : c.surfaceRaised,
-                  inactiveThumbColor: c.textFaint,
-                  inactiveTrackColor: c.surfaceRaised,
-                  trackOutlineColor: WidgetStatePropertyAll(c.hairlineStrong),
-                  materialTapTargetSize: MaterialTapTargetSize.padded,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _retention(BuildContext context) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.xl),
-      child: OCard(
-        padding: const EdgeInsets.all(OSpace.m),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(Icons.schedule_rounded, size: 20, color: c.textMuted),
-            const SizedBox(width: OSpace.s),
-            Expanded(
-              child: Text(
-                data.retentionLabel,
-                style: OType.caption.copyWith(color: c.textMuted),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _danger(BuildContext context) {
-    final c = OColors.of(context);
-    final canForget = data.onForget != null && _hasSharedFacts;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        OButton(
-          key: const ValueKey<String>('forget-shared-facts'),
-          label: 'Forget shared facts',
-          icon: Icons.delete_sweep_outlined,
-          variant: OButtonVariant.danger,
-          expand: true,
-          onPressed: canForget ? () => _confirmForget(context) : null,
-        ),
-        const SizedBox(height: OSpace.s),
-        Text(
-          _hasSharedFacts
-              ? 'Removes every shared fact for everyone it was shared with. '
-                    'This cannot be undone.'
-              : 'There are no shared facts to forget.',
-          textAlign: TextAlign.center,
-          style: OType.caption.copyWith(color: c.textFaint),
-        ),
+  Widget _scopeFilter() {
+    return V2MemoryScopeBar(
+      keyPrefix: 'shared-memory-filter',
+      labels: [
+        'All',
+        for (final kind in V2SharedMemoryScopeKind.values)
+          switch (kind) {
+            V2SharedMemoryScopeKind.chat => 'Chat',
+            V2SharedMemoryScopeKind.project => 'Project',
+            V2SharedMemoryScopeKind.global => 'Global',
+          },
       ],
+      selected: _kindFilter == null ? 0 : _kindFilter!.index + 1,
+      onSelected: (index) => setState(
+        () => _kindFilter = index == 0
+            ? null
+            : V2SharedMemoryScopeKind.values[index - 1],
+      ),
+    );
+  }
+
+  Widget _switch({
+    required Key key,
+    required String label,
+    required bool value,
+    required ValueChanged<bool>? onChanged,
+  }) {
+    final c = OColors.of(context);
+    final enabled = onChanged != null;
+    return Semantics(
+      label: label,
+      toggled: value,
+      button: true,
+      enabled: enabled,
+      onTap: enabled ? () => onChanged(!value) : null,
+      child: ExcludeSemantics(
+        child: Switch(
+          key: key,
+          value: value,
+          onChanged: onChanged,
+          activeThumbColor: enabled ? c.onAccent : c.textFaint,
+          activeTrackColor: enabled ? c.accentFill : c.surfaceRaised,
+          inactiveThumbColor: c.textFaint,
+          inactiveTrackColor: c.surfaceRaised,
+          trackOutlineColor: WidgetStatePropertyAll(c.hairlineStrong),
+          materialTapTargetSize: MaterialTapTargetSize.padded,
+        ),
+      ),
     );
   }
 
@@ -555,7 +344,6 @@ class _SharedMemoryPageState extends State<SharedMemoryPage> {
           ),
           content: Text(
             'This removes $count shared ${count == 1 ? 'fact' : 'facts'}. '
-            'Project members will no longer be able to reuse them. '
             'This cannot be undone.',
             style: OType.bodySm.copyWith(color: c.textMuted),
           ),

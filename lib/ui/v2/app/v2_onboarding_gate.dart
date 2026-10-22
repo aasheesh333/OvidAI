@@ -11,6 +11,7 @@ import '../../../core/revenuecat_billing.dart';
 import '../../../core/state.dart';
 import '../../auth_methods.dart' show AuthPhoneDialog;
 import '../../design/o_components.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import '../onboarding/language_goal_page.dart';
 import '../onboarding/onboarding_prefs.dart';
@@ -54,6 +55,9 @@ abstract class V2OnboardingAuth implements Listenable {
 
   Future<void> retryAccountLogin();
 
+  /// Signs the current account out, so a rejected account can be replaced.
+  Future<void> signOut();
+
   /// Returns null on success, `'cancelled'` when the user dismissed the
   /// provider, otherwise a human-readable error.
   Future<String?> authenticateSocial(String providerId, AuthIntent intent);
@@ -89,6 +93,9 @@ class _FirebaseOnboardingAuth implements V2OnboardingAuth {
   Future<void> retryAccountLogin() => _service.retryAccountLogin();
 
   @override
+  Future<void> signOut() => _service.signOut();
+
+  @override
   Future<String?> authenticateSocial(String providerId, AuthIntent intent) =>
       _service.authenticateSocial(providerId, intent);
 
@@ -113,12 +120,12 @@ class _FirebaseOnboardingAuth implements V2OnboardingAuth {
 const Map<String, String> _languageNames = {
   'en': 'English',
   'hi': 'Hindi',
+  'hinglish': 'Hinglish',
   'pa': 'Punjabi',
   'ta': 'Tamil',
 };
 
-const String _emailUnavailableMessage =
-    'Email sign-in is not available yet. Use Google or phone.';
+const String _emailUnavailableMessage = 'Use Google or phone to sign in.';
 
 enum _Step { welcome, language, signIn, done }
 
@@ -223,7 +230,11 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
   String? _paywallError;
   String _selectedPlanId = 'plus';
 
+  /// Paywall currency id (`usd` / `inr`). Persisted by [V2OnboardingStore].
+  String _currencyId = 'usd';
+
   bool _accountRetrying = false;
+  bool _accountSigningOut = false;
   String? _accountRetryError;
 
   @override
@@ -282,6 +293,7 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
           : 'Ovid could not start. Check your connection and try again.';
       _languageId = language ?? 'en';
       _goalIds = goals.isEmpty ? {'build'} : goals;
+      _currencyId = snapshot?.currencyId ?? 'usd';
       if (_auth.isSignedIn) {
         _step = _Step.done;
       } else if (snapshot == null || !snapshot.welcomeSeen) {
@@ -353,71 +365,83 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
     final c = OColors.of(context);
     final error = _accountRetryError ?? _auth.accountError;
     return OScaffold(
-      body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(OSpace.screen),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 420),
-              child: OCard(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(vertical: OSpace.xl),
+          child: OContent(
+            maxWidth: 420,
+            child: OCard(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Semantics(
+                    header: true,
+                    liveRegion: true,
+                    child: Text(
+                      'Confirming your account',
+                      style: OType.h2.copyWith(color: c.text),
+                    ),
+                  ),
+                  const SizedBox(height: OSpace.m),
+                  if (error == null)
+                    Row(
+                      children: [
+                        SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            semanticsLabel: 'Confirming your account',
+                            valueColor: AlwaysStoppedAnimation<Color>(c.accent),
+                          ),
+                        ),
+                        const SizedBox(width: OSpace.m),
+                        Expanded(
+                          child: Text(
+                            'This usually takes a moment.',
+                            style: OType.bodySm.copyWith(color: c.textMuted),
+                          ),
+                        ),
+                      ],
+                    )
+                  else
                     Semantics(
-                      header: true,
                       liveRegion: true,
                       child: Text(
-                        'Confirming your account',
-                        style: OType.h2.copyWith(color: c.text),
+                        error,
+                        style: OType.bodySm.copyWith(color: c.danger),
                       ),
                     ),
-                    const SizedBox(height: OSpace.m),
-                    if (error == null)
-                      Row(
-                        children: [
-                          SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              semanticsLabel: 'Confirming your account',
-                              valueColor: AlwaysStoppedAnimation<Color>(
-                                c.accent,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: OSpace.m),
-                          Expanded(
-                            child: Text(
-                              'This usually takes a moment.',
-                              style: OType.bodySm.copyWith(color: c.textMuted),
-                            ),
-                          ),
-                        ],
-                      )
-                    else
-                      Semantics(
-                        liveRegion: true,
-                        child: Text(
-                          error,
-                          style: OType.bodySm.copyWith(color: c.danger),
-                        ),
-                      ),
-                    const SizedBox(height: OSpace.l),
-                    OButton(
-                      label: _accountRetrying ? 'Checking…' : 'Try again',
-                      loading: _accountRetrying,
-                      onPressed: _accountRetrying ? null : _retryAccount,
+                  const SizedBox(height: OSpace.l),
+                  OButton(
+                    label: _accountRetrying ? 'Checking…' : 'Try again',
+                    loading: _accountRetrying,
+                    onPressed: _accountRetrying || _accountSigningOut
+                        ? null
+                        : _retryAccount,
+                  ),
+                  const SizedBox(height: OSpace.xs),
+                  // A rejected account is not a dead end: this is the only way
+                  // to replace it without reinstalling the app.
+                  Center(
+                    child: OTextAction(
+                      key: const Key('account-use-another'),
+                      label: _accountSigningOut
+                          ? 'Signing out…'
+                          : 'Use another account',
+                      onPressed: _accountRetrying || _accountSigningOut
+                          ? null
+                          : _signOutAccount,
                     ),
-                    const SizedBox(height: OSpace.s),
-                    Text(
-                      'Signed in as ${_auth.accountLabel}',
-                      textAlign: TextAlign.center,
-                      style: OType.caption.copyWith(color: c.textFaint),
-                    ),
-                  ],
-                ),
+                  ),
+                  const SizedBox(height: OSpace.s),
+                  Text(
+                    'Signed in as ${_auth.accountLabel}',
+                    textAlign: TextAlign.center,
+                    style: OType.caption.copyWith(color: c.textFaint),
+                  ),
+                ],
               ),
             ),
           ),
@@ -444,6 +468,36 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
     } finally {
       if (mounted) setState(() => _accountRetrying = false);
     }
+  }
+
+  /// Leaves a rejected account and returns to sign-in, where another provider
+  /// or account can be used. The session is only dropped after the auth layer
+  /// confirms it, so a failed sign-out never looks like a success.
+  Future<void> _signOutAccount() async {
+    if (_accountSigningOut || _accountRetrying) return;
+    setState(() {
+      _accountSigningOut = true;
+      _accountRetryError = null;
+    });
+    try {
+      await _auth.signOut();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _accountSigningOut = false;
+        _accountRetryError =
+            'Could not sign out. Check your connection and retry.';
+      });
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _accountSigningOut = false;
+      _paywallSeen = false;
+      _signInError = null;
+      _lastSignInAction = null;
+      _step = _Step.signIn;
+    });
   }
 
   // ── Welcome ──────────────────────────────────────────────────────────────
@@ -707,6 +761,7 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
     return PaywallPage(
       data: V2PaywallData(
         selectedPlanId: _selectedPlanId,
+        currency: _currencyId == 'inr' ? V2Currency.inr : V2Currency.usd,
         purchasing: _purchasing,
         error: _paywallError,
         testModeNote: _testStore
@@ -716,6 +771,7 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
       onPlanSelected: _purchasing
           ? null
           : (id) => setState(() => _selectedPlanId = id),
+      onCurrencyChanged: _purchasing ? null : _setCurrency,
       onStartTrial: _purchasing ? null : _startTrial,
       onContinueFree: _purchasing ? null : _finishPaywall,
       onRetry: _purchasing || _paywallError == null
@@ -723,6 +779,23 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
           : () => _startTrial(_selectedPlanId),
       onClose: _purchasing ? null : _finishPaywall,
     );
+  }
+
+  /// Switches the displayed currency and writes the choice to disk. The view
+  /// changes immediately; a failed write is reported instead of pretending the
+  /// preference will survive a restart.
+  Future<void> _setCurrency(V2Currency currency) async {
+    final id = currency.name;
+    if (id == _currencyId) return;
+    setState(() => _currencyId = id);
+    try {
+      await _store.saveCurrency(id);
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text('Could not save your currency choice.')),
+      );
+    }
   }
 
   Future<void> _startTrial(String planId) async {

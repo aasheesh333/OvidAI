@@ -25,24 +25,19 @@ Widget _app(
 );
 
 V2StoragePageData _data({
-  String? offlineLabel =
-      'Cached offline data uses 142 MB on this device. Cloud sync runs automatically.',
   String planName = 'Free plan',
-  String quotaLabel = '3 GB included',
   bool showCache = true,
   VoidCallback? onClearPreviews,
   VoidCallback? onClearCache,
   Future<int> Function()? onClearCacheAndReport,
   VoidCallback? onDeleteOldChats,
   VoidCallback? onEmptyTrash,
-  ValueChanged<String>? onLargestItemTap,
   VoidCallback? onGoUpgrade,
 }) {
   return V2StoragePageData(
     usedGb: 1.2,
     totalGb: 3,
     planName: planName,
-    quotaLabel: quotaLabel,
     slices: const [
       V2StorageSlice(label: 'Artifacts', sizeLabel: '410 MB', valueGb: 0.41),
       V2StorageSlice(label: 'Sessions', sizeLabel: '620 MB', valueGb: 0.62),
@@ -54,21 +49,11 @@ V2StoragePageData _data({
     previewSizeLabel: '80 MB',
     trashItems: 12,
     trashSizeLabel: '140 MB',
-    largestItems: const [
-      V2StorageItem(
-        id: 'chat-1',
-        name: 'Q3 launch plan',
-        detail: 'Chat · 42 files',
-        sizeLabel: '180 MB',
-      ),
-    ],
-    offlineLabel: offlineLabel,
     onClearPreviews: onClearPreviews,
     onClearCache: onClearCache,
     onClearCacheAndReport: onClearCacheAndReport,
     onDeleteOldChats: onDeleteOldChats,
     onEmptyTrash: onEmptyTrash,
-    onLargestItemTap: onLargestItemTap,
     onGoUpgrade: onGoUpgrade,
   );
 }
@@ -96,7 +81,7 @@ Future<void> _pumpAt320(
 }
 
 void main() {
-  testWidgets('renders the plan quota, breakdown and items in light mode', (
+  testWidgets('renders one bar, its legend and the clean-up list', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -105,22 +90,11 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Storage'), findsOneWidget);
-    expect(find.text('1.2 GB'), findsOneWidget);
-    expect(
-      find.text('1.2 GB of 3.0 GB cloud storage used · 1.8 GB free'),
-      findsOneWidget,
-    );
     expect(find.text('Free plan'), findsOneWidget);
-    expect(find.text('3 GB included'), findsOneWidget);
-    expect(find.byKey(const ValueKey('storage-quota-bar')), findsOneWidget);
-    expect(
-      tester
-          .widget<OProgressBar>(find.byKey(const ValueKey('storage-quota-bar')))
-          .value,
-      closeTo(0.4, 0.001),
-    );
-
     expect(find.text('WHAT USES SPACE'), findsOneWidget);
+    expect(find.text('1.2 GB'), findsOneWidget);
+    expect(find.text('of 3.0 GB'), findsOneWidget);
+
     expect(find.text('Artifacts'), findsOneWidget);
     expect(find.text('Chats'), findsOneWidget);
     expect(find.text('Cache'), findsOneWidget);
@@ -128,17 +102,25 @@ void main() {
     expect(find.text('620 MB'), findsOneWidget);
     expect(find.text('170 MB'), findsWidgets);
 
-    expect(find.text('ITEMS BY SIZE'), findsOneWidget);
-    expect(find.text('Q3 launch plan'), findsOneWidget);
-    expect(find.text('180 MB'), findsOneWidget);
-    expect(find.text('Need more room?'), findsOneWidget);
-    expect(find.text('Trash · 12 items'), findsOneWidget);
-    expect(
-      find.text(
-        'Cached offline data uses 142 MB on this device. Cloud sync runs automatically.',
-      ),
-      findsOneWidget,
+    expect(find.text('Clear previews'), findsOneWidget);
+    expect(find.text('Clear cache'), findsOneWidget);
+    expect(find.text('Delete old chats'), findsOneWidget);
+    expect(find.text('Trash'), findsOneWidget);
+    expect(find.text('140 MB'), findsOneWidget);
+  });
+
+  testWidgets('deleted dashboard sections are gone', (tester) async {
+    await tester.pumpWidget(
+      _app(StoragePage(data: _data()), theme: OTheme.light()),
     );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Need more room?'), findsNothing);
+    expect(find.text('ITEMS BY SIZE'), findsNothing);
+    expect(find.text('Q3 launch plan'), findsNothing);
+    expect(find.byKey(const ValueKey('storage-quota-bar')), findsNothing);
+    expect(find.textContaining('Cached offline data'), findsNothing);
+    expect(find.text('3 GB included'), findsNothing);
   });
 
   testWidgets('renders the shared breakdown with the page slices', (
@@ -166,14 +148,6 @@ void main() {
       '170 MB',
     ]);
     expect(
-      breakdown.data.entries.first.bytes,
-      closeTo(0.41 * 1024 * 1024 * 1024, 1),
-    );
-    expect(
-      find.byKey(const ValueKey('storage-breakdown-bar-chats')),
-      findsOneWidget,
-    );
-    expect(
       find.byKey(const ValueKey('storage-breakdown-chart')),
       findsOneWidget,
     );
@@ -187,7 +161,6 @@ void main() {
 
     expect(find.text('Storage'), findsOneWidget);
     expect(find.text('Clear previews'), findsOneWidget);
-    expect(find.text('See plans'), findsOneWidget);
     expect(find.text('Chats'), findsOneWidget);
   });
 
@@ -226,7 +199,7 @@ void main() {
     expect(opened, isTrue);
   });
 
-  testWidgets('a known plan shows its quota and clean-up with no usage yet', (
+  testWidgets('a known plan with no usage keeps the clean-up list', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -243,12 +216,10 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(
-      find.text('0.0 GB of 3.0 GB cloud storage used · 3.0 GB free'),
-      findsOneWidget,
-    );
-    expect(find.byKey(const ValueKey('clear-cache-row')), findsOneWidget);
     expect(find.text('Storage is empty'), findsNothing);
+    expect(find.text('Nothing stored yet'), findsOneWidget);
+    expect(find.text('Clear previews'), findsOneWidget);
+    expect(find.text('Clear cache'), findsOneWidget);
   });
 
   testWidgets('clear previews falls back to the real image cache', (
@@ -259,8 +230,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.text('Clear'));
-    await tester.tap(find.text('Clear'));
+    await tester.ensureVisible(find.text('Clear').first);
+    await tester.tap(find.text('Clear').first);
     await tester.pump();
 
     expect(find.text('Previews cleared.'), findsOneWidget);
@@ -273,7 +244,6 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Storage is empty'), findsOneWidget);
-    expect(find.text('40%'), findsNothing);
   });
 
   testWidgets('clear previews fires the primary callback', (tester) async {
@@ -286,8 +256,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.text('Clear'));
-    await tester.tap(find.text('Clear'));
+    await tester.ensureVisible(find.text('Clear').first);
+    await tester.tap(find.text('Clear').first);
     expect(cleared, isTrue);
   });
 
@@ -306,9 +276,7 @@ void main() {
     expect(emptied, isTrue);
   });
 
-  testWidgets('clear cache is available on mobile and fires its callback', (
-    tester,
-  ) async {
+  testWidgets('clear cache fires its callback', (tester) async {
     var cleared = false;
     await tester.pumpWidget(
       _app(
@@ -318,14 +286,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const ValueKey('clear-cache-row')), findsOneWidget);
-    expect(
-      find.textContaining('Temporary files on this phone'),
-      findsOneWidget,
-    );
-
-    await tester.ensureVisible(find.text('Clear cache'));
-    await tester.tap(find.text('Clear cache'));
+    await tester.ensureVisible(find.text('Clear').at(1));
+    await tester.tap(find.text('Clear').at(1));
     expect(cleared, isTrue);
   });
 
@@ -337,8 +299,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const ValueKey('clear-cache-row')), findsNothing);
     expect(find.text('Clear cache'), findsNothing);
+    expect(find.text('Clear'), findsOneWidget);
     // The cache category still explains where the space went.
     expect(find.text('Cache'), findsOneWidget);
   });
@@ -356,30 +318,6 @@ void main() {
     await tester.ensureVisible(find.text('Delete old chats'));
     await tester.tap(find.text('Delete old chats'));
     expect(tapped, isTrue);
-  });
-
-  testWidgets('tapping an item reports its id', (tester) async {
-    String? tapped;
-    await tester.pumpWidget(
-      _app(
-        StoragePage(data: _data(onLargestItemTap: (id) => tapped = id)),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.ensureVisible(find.text('Q3 launch plan'));
-    await tester.tap(find.text('Q3 launch plan'));
-    expect(tapped, 'chat-1');
-  });
-
-  testWidgets('hides the sync note when no label is supplied', (tester) async {
-    await tester.pumpWidget(
-      _app(StoragePage(data: _data(offlineLabel: null)), theme: OTheme.light()),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.textContaining('Cached offline data'), findsNothing);
   });
 
   testWidgets('a missing callback leaves the action disabled and announced', (
@@ -410,7 +348,6 @@ void main() {
           onClearCache: () {},
           onDeleteOldChats: () {},
           onEmptyTrash: () {},
-          onLargestItemTap: (_) {},
           onGoUpgrade: () {},
         ),
         theme: dark ? OTheme.dark() : OTheme.light(),
@@ -418,9 +355,8 @@ void main() {
 
       expect(tester.takeException(), isNull);
       expect(find.text('Storage'), findsOneWidget);
-      expect(find.text('Clear'), findsOneWidget);
+      expect(find.text('Clear previews'), findsOneWidget);
       expect(find.text('Empty'), findsOneWidget);
-      expect(find.text('See plans'), findsOneWidget);
       expect(find.text('Artifacts'), findsOneWidget);
       expect(find.text('Chats'), findsOneWidget);
       expect(find.text('Cache'), findsOneWidget);
@@ -431,24 +367,16 @@ void main() {
       (tester) async {
         await _pumpAt320(
           tester,
-          _data(
-            onClearPreviews: () {},
-            onEmptyTrash: () {},
-            onGoUpgrade: () {},
-          ),
+          _data(onClearPreviews: () {}, onEmptyTrash: () {}),
           theme: dark ? OTheme.dark() : OTheme.light(),
         );
 
         // Before the responsive row the trailing button took almost the whole
         // row and these labels were squeezed to a couple of pixels wide.
         final trash = tester.renderObject<RenderParagraph>(
-          find.text('Trash · 12 items'),
+          find.text('Delete old chats'),
         );
         expect(trash.size.width, greaterThan(80));
-        final heading = tester.renderObject<RenderParagraph>(
-          find.text('Need more room?'),
-        );
-        expect(heading.size.width, greaterThan(80));
       },
     );
   }
@@ -491,7 +419,6 @@ void main() {
     expect(find.text('1.2 GB'), findsOneWidget);
     expect(find.text('Clear previews'), findsOneWidget);
     expect(find.text('Delete old chats'), findsOneWidget);
-    expect(find.text('Need more room?'), findsOneWidget);
     expect(find.text('WHAT USES SPACE'), findsOneWidget);
   });
 
@@ -554,14 +481,8 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(
-        find.text(
-          '1.0 GB of ${entry.value} GB cloud storage used · '
-          '${(double.parse(entry.value) - 1).toStringAsFixed(1)} GB free',
-        ),
-        findsOneWidget,
-        reason: entry.key,
-      );
+      expect(find.text('of ${entry.value} GB'), findsOneWidget);
+      expect(find.text('1 GB'), findsWidgets);
     }
   });
 
@@ -646,13 +567,11 @@ void main() {
 
     // The detail sums to 1.2 GB, so the heading uses 1.2 GB too instead of
     // contradicting the legend with the stale 1.0 GB total.
-    expect(
-      find.text('1.2 GB of 3.0 GB cloud storage used · 1.8 GB free'),
-      findsOneWidget,
-    );
     expect(find.text('1.2 GB'), findsOneWidget);
+    expect(find.text('of 3.0 GB'), findsOneWidget);
     expect(find.text('Other'), findsNothing);
   });
+
   testWidgets('clear cache reports the bytes actually freed', (tester) async {
     const freedBytes = 142 * 1024 * 1024;
     await tester.pumpWidget(
@@ -663,8 +582,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.text('Clear cache'));
-    await tester.tap(find.text('Clear cache'));
+    await tester.ensureVisible(find.text('Clear').at(1));
+    await tester.tap(find.text('Clear').at(1));
     await tester.pump();
 
     expect(find.text('Freed 142 MB of cache.'), findsOneWidget);
@@ -681,8 +600,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.text('Clear cache'));
-    await tester.tap(find.text('Clear cache'));
+    await tester.ensureVisible(find.text('Clear').at(1));
+    await tester.tap(find.text('Clear').at(1));
     await tester.pump();
 
     expect(find.text('Cache is already empty.'), findsOneWidget);

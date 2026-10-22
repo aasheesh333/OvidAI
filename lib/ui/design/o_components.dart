@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 
 import 'o_motion.dart';
+import 'o_screen.dart' show OBreakpoints;
 import 'o_tokens.dart';
 
 enum OButtonVariant { primary, secondary, ghost, danger, dangerFill }
@@ -289,6 +290,37 @@ class OCard extends StatelessWidget {
   }
 }
 
+/// The one horizontal rule. [label] centres a word between two hairlines
+/// (the "OR" divider on sign-in); [indent] lines it up with row content.
+class ODivider extends StatelessWidget {
+  const ODivider({super.key, this.label, this.indent = 0});
+
+  final String? label;
+  final double indent;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final rule = Divider(height: 1, thickness: 1, color: c.hairline);
+    if (label == null) {
+      return Padding(padding: EdgeInsets.only(left: indent), child: rule);
+    }
+    return Row(
+      children: [
+        Expanded(child: rule),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: OSpace.m),
+          child: Text(
+            label!,
+            style: OType.overline.copyWith(color: c.textFaint),
+          ),
+        ),
+        Expanded(child: rule),
+      ],
+    );
+  }
+}
+
 /// Settings/list row. Icon + title + optional subtitle + trailing affordance.
 class OListRow extends StatelessWidget {
   const OListRow({
@@ -475,6 +507,7 @@ class OChip extends StatelessWidget {
     this.onTap,
     this.icon,
     this.danger = false,
+    this.semanticLabel,
   });
 
   final String label;
@@ -482,6 +515,10 @@ class OChip extends StatelessWidget {
   final VoidCallback? onTap;
   final IconData? icon;
   final bool danger;
+
+  /// Overrides the spoken label when the visible text needs context
+  /// ("Open file Hero.tsx"). Defaults to [label].
+  final String? semanticLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -531,14 +568,14 @@ class OChip extends StatelessWidget {
     );
     if (onTap == null) {
       return Semantics(
-        label: label,
+        label: semanticLabel ?? label,
         selected: selected,
         child: ExcludeSemantics(child: body),
       );
     }
     return OPressable(
       onTap: onTap,
-      semanticLabel: label,
+      semanticLabel: semanticLabel ?? label,
       selected: selected,
       child: ExcludeSemantics(child: body),
     );
@@ -546,6 +583,52 @@ class OChip extends StatelessWidget {
 }
 
 enum OPillTone { neutral, accent, success, warn, danger }
+
+/// A fixed-scale numeric badge: a count that sits inside another control and
+/// must not reflow it.
+///
+/// This is the one allowed `fontSize` exception in the contract (§4): the
+/// label never scales, so a 99+ badge stays inside a 120 dp model chip at
+/// 200 % text. Its floor is still 11 sp. Any other status label uses [OPill].
+class OCountBadge extends StatelessWidget {
+  const OCountBadge({
+    super.key,
+    required this.count,
+    this.active = false,
+    this.maxCount = 99,
+  });
+
+  final int count;
+  final bool active;
+  final int maxCount;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Container(
+      constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
+      padding: const EdgeInsets.symmetric(horizontal: OSpace.xs),
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: active ? c.accentSoft : c.surfaceRaised,
+        borderRadius: BorderRadius.circular(ORadius.pill),
+      ),
+      child: Text(
+        count > maxCount ? '$maxCount+' : '$count',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        // See the class comment: a fixed scale is the point of this badge.
+        textScaler: TextScaler.noScaling,
+        style: OType.overline.copyWith(
+          color: active ? c.accent : c.textFaint,
+          fontSize: 11,
+          height: 1.2,
+          letterSpacing: 0,
+        ),
+      ),
+    );
+  }
+}
 
 /// The one pill/tag in the rebuilt UI: a 24 dp status label with an optional
 /// leading dot or icon.
@@ -1085,7 +1168,160 @@ class OScaffold extends StatelessWidget {
   }
 }
 
+/// The one header row inside a bottom sheet: optional leading control or icon
+/// tile, a title with one optional line of context, and a close control.
+///
+/// [showOSheet] draws the grabber and uses this widget for its own title, so a
+/// sheet that needs a subtitle, a leading control or a close button keeps the
+/// same rhythm instead of hand-rolling a `_Header` in its body.
+class OSheetHeader extends StatelessWidget {
+  const OSheetHeader({
+    super.key,
+    this.title,
+    this.subtitle,
+    this.icon,
+    this.leading,
+    this.titleTrailing,
+    this.body,
+    this.onClose,
+    this.closeLabel = 'Close',
+    this.closeKey,
+    this.padding = const EdgeInsets.fromLTRB(
+      OSpace.l,
+      OSpace.l,
+      OSpace.s,
+      OSpace.s,
+    ),
+  });
+
+  /// Null for a navigation-only row (for example back + close).
+  final String? title;
+
+  /// One line of context under the title.
+  final String? subtitle;
+
+  /// A 40 dp accent tile before the title.
+  final IconData? icon;
+
+  /// Replaces [icon] when the leading element is a control.
+  final Widget? leading;
+
+  /// A status glyph beside the title (a dot, a pill).
+  final Widget? titleTrailing;
+
+  /// A full-width line under the title row, for a sheet's intro copy.
+  final String? body;
+
+  /// Defaults to popping the route, because a sheet is always dismissible.
+  /// Pass a handler to do extra work first (discard a draft, abort a request).
+  final VoidCallback? onClose;
+  final String closeLabel;
+  final Key? closeKey;
+  final EdgeInsetsGeometry padding;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final lead =
+        leading ??
+        (icon == null
+            ? null
+            : Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: c.accentSoft,
+                  borderRadius: BorderRadius.circular(ORadius.m),
+                ),
+                child: Icon(icon, size: 21, color: c.accent),
+              ));
+    final hasTitle = title != null;
+    // A sheet always has a way out. Without a default the header silently
+    // dropped its close whenever a caller forgot the callback, which left the
+    // user with no visible dismiss affordance.
+    final close = onClose ??
+        (Navigator.of(context).canPop()
+            ? () => Navigator.maybePop(context)
+            : null);
+    return Padding(
+      padding: padding,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (lead != null) ...[
+                lead,
+                if (hasTitle) const SizedBox(width: OSpace.m),
+              ],
+              if (hasTitle)
+                Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Semantics(
+                              container: true,
+                              header: true,
+                              child: Text(
+                                title!,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: OType.h2.copyWith(color: c.text),
+                              ),
+                            ),
+                          ),
+                          if (titleTrailing != null) ...[
+                            const SizedBox(width: OSpace.s),
+                            titleTrailing!,
+                          ],
+                        ],
+                      ),
+                      if (subtitle != null) ...[
+                        const SizedBox(height: OSpace.xxs),
+                        Text(
+                          subtitle!,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: OType.caption.copyWith(color: c.textMuted),
+                        ),
+                      ],
+                    ],
+                  ),
+                )
+              else
+                const Spacer(),
+              if (close != null) ...[
+                const SizedBox(width: OSpace.s),
+                OIconButton(
+                  key: closeKey,
+                  icon: Icons.close_rounded,
+                  semanticLabel: closeLabel,
+                  onPressed: close,
+                ),
+              ],
+            ],
+          ),
+          if (body != null) ...[
+            const SizedBox(height: OSpace.s),
+            Text(body!, style: OType.bodySm.copyWith(color: c.textMuted)),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
 /// Bottom sheet with the shared grabber, title and motion.
+///
+/// From [OBreakpoints.tablet] up a sheet is a centred dialog capped at 560 dp:
+/// a full-width bottom sheet on a desktop reads as a page that forgot to end.
+/// Below the breakpoint it stays the phone bottom sheet.
 Future<T?> showOSheet<T>(
   BuildContext context, {
   required WidgetBuilder builder,
@@ -1093,6 +1329,53 @@ Future<T?> showOSheet<T>(
   bool isScrollControlled = true,
   bool useSafeArea = true,
 }) {
+  final c = OColors.of(context);
+  if (MediaQuery.sizeOf(context).width >= OBreakpoints.tablet) {
+    return showDialog<T>(
+      context: context,
+      barrierColor: c.scrim,
+      builder: (context) {
+        final media = MediaQuery.of(context);
+        return AnimatedPadding(
+          duration: OMotion.fast,
+          curve: OMotion.standard,
+          padding: EdgeInsets.only(bottom: media.viewInsets.bottom),
+          child: Dialog(
+            backgroundColor: Colors.transparent,
+            insetPadding: const EdgeInsets.all(OSpace.xl),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: 560,
+                maxHeight: media.size.height * 0.9,
+              ),
+              child: Material(
+                key: const ValueKey<String>('o-sheet-surface'),
+                color: c.surface,
+                clipBehavior: Clip.antiAlias,
+                borderRadius: BorderRadius.circular(ORadius.xl),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (title != null)
+                      OSheetHeader(
+                        title: title,
+                        padding: const EdgeInsets.fromLTRB(
+                          OSpace.l,
+                          OSpace.l,
+                          OSpace.s,
+                          OSpace.s,
+                        ),
+                      ),
+                    Flexible(child: builder(context)),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
   return showModalBottomSheet<T>(
     context: context,
     isScrollControlled: isScrollControlled,
@@ -1118,22 +1401,13 @@ Future<T?> showOSheet<T>(
               ),
             ),
             if (title != null)
-              Padding(
+              OSheetHeader(
+                title: title,
                 padding: const EdgeInsets.fromLTRB(
                   OSpace.l,
                   OSpace.m,
                   OSpace.l,
                   OSpace.s,
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        title,
-                        style: OType.h2.copyWith(color: c.text),
-                      ),
-                    ),
-                  ],
                 ),
               ),
             Flexible(child: builder(context)),

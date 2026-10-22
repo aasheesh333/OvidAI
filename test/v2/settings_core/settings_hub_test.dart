@@ -8,7 +8,6 @@ import 'package:ovid_ai/ui/v2/settings/settings_search.dart';
 V2SettingsHubData _hubData({
   required List<String> taps,
   ValueChanged<bool>? onReasoningChanged,
-  VoidCallback? onAddConnector,
   VoidCallback? onRetry,
   VoidCallback? onProfileTap,
   VoidCallback? onSignOut,
@@ -18,13 +17,15 @@ V2SettingsHubData _hubData({
     String id,
     String label,
     IconData icon, {
+    String? value,
     String? subtitle,
   }) {
     return V2SettingsItem(
       id: id,
       label: label,
-      subtitle: subtitle,
       icon: icon,
+      value: value,
+      subtitle: subtitle,
       onTap: () => taps.add(id),
     );
   }
@@ -49,13 +50,13 @@ V2SettingsHubData _hubData({
           'usage',
           'Usage',
           Icons.data_usage_rounded,
-          subtitle: '12.4M of 50M tokens today',
+          value: '12.4M tokens',
         ),
         row(
           'plan_billing',
           'Plan & billing',
           Icons.credit_card_rounded,
-          subtitle: 'Free plan · 3 GB storage',
+          value: 'Free plan · 3 GB',
         ),
         row(
           'account',
@@ -108,7 +109,7 @@ V2SettingsHubData _hubData({
           'response_wait_limit',
           'Response wait limit',
           Icons.timer_outlined,
-          subtitle: '30 seconds',
+          value: '30 s',
         ),
         row(
           'agent_presets',
@@ -120,7 +121,7 @@ V2SettingsHubData _hubData({
           'connectors',
           'Connectors',
           Icons.extension_outlined,
-          subtitle: '3 connected · Add or manage',
+          value: '3',
         ),
       ],
     ),
@@ -149,7 +150,7 @@ V2SettingsHubData _hubData({
           'storage',
           'Storage',
           Icons.cloud_outlined,
-          subtitle: '1.2 GB of 3 GB used',
+          value: '1.2 of 3 GB',
         ),
         V2SettingsItem(
           id: 'delete_data',
@@ -194,7 +195,6 @@ V2SettingsHubData _hubData({
     ),
     showReasoning: showReasoning,
     onReasoningChanged: onReasoningChanged,
-    onAddConnector: onAddConnector,
     onProfileTap: onProfileTap,
     onSignOut: onSignOut,
     onRetry: onRetry,
@@ -230,21 +230,40 @@ void _phoneSize(WidgetTester tester) {
   addTearDown(tester.view.resetDevicePixelRatio);
 }
 
+/// Tall enough that every section is mounted at once, so order assertions do
+/// not depend on scroll position.
+void _tallSize(WidgetTester tester, {double width = 390}) {
+  tester.view.physicalSize = Size(width, 2600);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+}
+
 void main() {
-  testWidgets('renders the profile and every section in light', (tester) async {
-    _phoneSize(tester);
+  testWidgets('one header, profile row and five sections in light', (
+    tester,
+  ) async {
+    _tallSize(tester);
     await tester.pumpWidget(_app(OTheme.light(), _hubData(taps: <String>[])));
     await tester.pumpAndSettle();
 
     expect(find.text('Settings'), findsOneWidget);
+    expect(find.byKey(const ValueKey('settings-search')), findsOneWidget);
+
+    // The profile row replaces the separate "Account" destination.
     expect(find.text('Aarav Sharma'), findsOneWidget);
     expect(find.text('Free plan'), findsOneWidget);
-    expect(find.text('aarav@gmail.com'), findsOneWidget);
-    expect(find.text('ACCOUNT'), findsOneWidget);
-    expect(find.text('CHAT'), findsOneWidget);
-    expect(find.text('MODELS'), findsOneWidget);
-    expect(find.text('DATA CONTROL'), findsOneWidget);
-    expect(find.text('ADVANCED'), findsOneWidget);
+    expect(find.text('aarav@gmail.com'), findsNothing);
+
+    for (final title in const [
+      'ACCOUNT',
+      'CHAT',
+      'MODELS',
+      'DATA CONTROL',
+      'ADVANCED',
+    ]) {
+      expect(find.text(title), findsOneWidget);
+    }
     expect(find.text('Show reasoning'), findsOneWidget);
     expect(find.text('About'), findsOneWidget);
   });
@@ -257,7 +276,42 @@ void main() {
     expect(find.text('Settings'), findsOneWidget);
     expect(find.text('Aarav Sharma'), findsOneWidget);
     expect(find.text('Credentials'), findsOneWidget);
-    expect(find.text('Response wait limit'), findsOneWidget);
+  });
+
+  testWidgets('rows carry a value, never a descriptive subtitle', (
+    tester,
+  ) async {
+    _tallSize(tester);
+    await tester.pumpWidget(_app(OTheme.light(), _hubData(taps: <String>[])));
+    await tester.pumpAndSettle();
+
+    // Real values stay.
+    expect(find.text('Free plan · 3 GB'), findsOneWidget);
+    expect(find.text('12.4M tokens'), findsOneWidget);
+    expect(find.text('1.2 of 3 GB'), findsOneWidget);
+
+    // Explanations are deleted.
+    expect(find.text('Theme, text size and motion'), findsNothing);
+    expect(find.text('Keys and access tokens'), findsNothing);
+    expect(find.text('Profile, email and region'), findsNothing);
+    expect(find.text('Push and background alerts'), findsNothing);
+  });
+
+  testWidgets('memory rows collapse into one Memory row', (tester) async {
+    final taps = <String>[];
+    await tester.pumpWidget(_app(OTheme.light(), _hubData(taps: taps)));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Memory'), findsOneWidget);
+    expect(find.text('Shared memory'), findsNothing);
+    expect(find.text('Memory files'), findsNothing);
+
+    await tester.ensureVisible(find.text('Memory'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Memory'));
+    await tester.pump();
+
+    expect(taps, contains('memory'));
   });
 
   testWidgets('search opens over the hub sections and runs the row callback', (
@@ -278,8 +332,6 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('DATA CONTROL'), findsOneWidget);
-    // The search field itself holds the query, so the result row is the last
-    // `Storage` text on screen.
     expect(find.text('Storage'), findsNWidgets(2));
 
     await tester.tap(find.text('Storage').last);
@@ -376,7 +428,9 @@ void main() {
     await tester.pumpAndSettle();
 
     // On the hub the dead row is visibly disabled and carries no chevron.
-    final rowNode = tester.getSemantics(find.text('Ghost row'));
+    final rowNode = tester.getSemantics(
+      find.byKey(const ValueKey('settings-row-ghost')),
+    );
     expect(rowNode, isSemantics(hasEnabledState: true, isEnabled: false));
 
     await tester.tap(find.byKey(const ValueKey('settings-search')));
@@ -384,9 +438,7 @@ void main() {
     await tester.enterText(find.byType(TextField), 'ghost');
     await tester.pumpAndSettle();
 
-    final result = tester.getSemantics(
-      find.bySemanticsLabel(RegExp('Ghost row, Advanced, disabled')),
-    );
+    final result = tester.getSemantics(find.text('Ghost row'));
     expect(result, isSemantics(hasEnabledState: true, isEnabled: false));
 
     await tester.tap(find.text('Ghost row'));
@@ -397,18 +449,16 @@ void main() {
   });
 
   testWidgets('keeps the canonical row order', (tester) async {
+    _tallSize(tester);
     await tester.pumpWidget(_app(OTheme.light(), _hubData(taps: <String>[])));
     await tester.pumpAndSettle();
 
     const titles = [
-      'Account',
       'Plan & billing',
       'Usage',
       'Credentials',
       'Appearance',
       'Memory',
-      'Shared memory',
-      'Memory files',
       'Show reasoning',
       'Connectors',
       'Agent presets',
@@ -435,6 +485,7 @@ void main() {
   testWidgets('restores the personalization order from any input order', (
     tester,
   ) async {
+    _tallSize(tester);
     V2SettingsItem row(String id, String label, IconData icon) =>
         V2SettingsItem(id: id, label: label, icon: icon);
 
@@ -461,19 +512,15 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    const order = [
-      'Appearance',
-      'Memory',
-      'Shared memory',
-      'Memory files',
-      'Show reasoning',
-    ];
+    const order = ['Appearance', 'Memory', 'Show reasoning'];
     var previous = -1.0;
     for (final label in order) {
       final top = tester.getTopLeft(find.text(label)).dy;
       expect(top, greaterThan(previous), reason: '$label should come next');
       previous = top;
     }
+    expect(find.text('Shared memory'), findsNothing);
+    expect(find.text('Memory files'), findsNothing);
   });
 
   testWidgets('show reasoning is on by default', (tester) async {
@@ -488,6 +535,7 @@ void main() {
   testWidgets(
     'models card sits above data control and starts with connectors',
     (tester) async {
+      _tallSize(tester);
       await tester.pumpWidget(_app(OTheme.light(), _hubData(taps: <String>[])));
       await tester.pumpAndSettle();
 
@@ -568,7 +616,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('No settings yet'), findsOneWidget);
-    await tester.tap(find.text('Refresh settings'));
+    await tester.tap(find.text('Refresh'));
     await tester.pump();
 
     expect(retried, 1);
@@ -586,7 +634,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('No settings yet'), findsOneWidget);
-    expect(find.text('Refresh settings'), findsNothing);
+    expect(find.text('Refresh'), findsNothing);
   });
 
   testWidgets('row tap calls the injected callback', (tester) async {
@@ -620,27 +668,23 @@ void main() {
     expect(changes, [false]);
   });
 
-  testWidgets('connector add action calls the injected callback', (
+  testWidgets('the connectors row keeps one action: open connectors', (
     tester,
   ) async {
-    var added = 0;
     final taps = <String>[];
-    await tester.pumpWidget(
-      _app(OTheme.light(), _hubData(taps: taps, onAddConnector: () => added++)),
-    );
+    await tester.pumpWidget(_app(OTheme.light(), _hubData(taps: taps)));
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.byIcon(Icons.add_rounded));
+    await tester.ensureVisible(find.text('Connectors'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byIcon(Icons.add_rounded));
+    // Adding a connector lives on the Connectors page, not as a second action
+    // inside a settings row.
+    expect(find.byIcon(Icons.add_rounded), findsNothing);
+
+    await tester.tap(find.text('Connectors'));
     await tester.pump();
 
-    expect(added, 1);
-    expect(
-      taps,
-      isNot(contains('connectors')),
-      reason: 'the add button must not also open the row',
-    );
+    expect(taps, contains('connectors'));
   });
 
   for (final dark in <bool>[false, true]) {
@@ -706,7 +750,7 @@ void main() {
     }
   });
 
-  testWidgets('profile card and log out call the injected callbacks', (
+  testWidgets('profile row and sign out call the injected callbacks', (
     tester,
   ) async {
     var profileTaps = 0;
@@ -727,9 +771,9 @@ void main() {
     await tester.pump();
     expect(profileTaps, 1);
 
-    await tester.ensureVisible(find.text('Log out of Aarav Sharma'));
+    await tester.ensureVisible(find.text('Sign out'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Log out of Aarav Sharma'));
+    await tester.tap(find.text('Sign out'));
     await tester.pump();
     expect(signOuts, 1);
   });
@@ -751,10 +795,9 @@ void main() {
             title: 'Account',
             items: [
               V2SettingsItem(
-                id: 'account',
-                label: 'Account',
-                subtitle: 'Profile, email and region',
-                icon: Icons.manage_accounts_rounded,
+                id: 'plan_billing',
+                label: 'Plan & billing',
+                icon: Icons.credit_card_rounded,
                 enabled: false,
                 onTap: () => taps++,
               ),
@@ -765,14 +808,12 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Account'));
+    await tester.tap(find.text('Plan & billing'));
     await tester.pump();
     expect(taps, 0);
 
     final data = tester
-        .getSemantics(
-          find.bySemanticsLabel(RegExp('Account, Profile, email and region')),
-        )
+        .getSemantics(find.byKey(const ValueKey('settings-row-plan_billing')))
         .getSemanticsData();
     expect(data.flagsCollection.isEnabled.toBoolOrNull(), isFalse);
     handle.dispose();
@@ -823,4 +864,23 @@ void main() {
 
     expect(retried, 1);
   });
+
+  for (final width in <double>[600, 900]) {
+    testWidgets('content is centred and capped at $width dp', (tester) async {
+      _tallSize(tester, width: width);
+      await tester.pumpWidget(_app(OTheme.light(), _hubData(taps: <String>[])));
+      await tester.pumpAndSettle();
+
+      final card = tester.getRect(find.byType(OCard).first);
+      final limit = width >= 900 ? 720.0 : 640.0;
+
+      expect(card.width, lessThanOrEqualTo(limit));
+      expect(card.width, lessThan(width), reason: 'rows must not stretch');
+      expect(
+        card.center.dx,
+        moreOrLessEquals(width / 2, epsilon: 1),
+        reason: 'content must be centred, not left aligned',
+      );
+    });
+  }
 }

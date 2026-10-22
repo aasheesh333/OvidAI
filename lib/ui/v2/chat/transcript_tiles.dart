@@ -40,7 +40,9 @@ V2ToolState v2ToolStateOf(String status, {double? progress}) {
     case 'unknown':
       return V2ToolState.unknown;
   }
-  if (progress != null) return progress >= 1 ? V2ToolState.done : V2ToolState.running;
+  if (progress != null) {
+    return progress >= 1 ? V2ToolState.done : V2ToolState.running;
+  }
   return V2ToolState.running;
 }
 
@@ -86,7 +88,8 @@ Color _toolTone(OColors c, V2ToolState state) => switch (state) {
 
 /// One collapsible "thinking" row. The host owns [expanded]; tapping the row
 /// asks for the opposite state, so the row never looks interactive while the
-/// handler is missing.
+/// handler is missing. Collapsed it is a single line with a chevron; the
+/// chevron is the only affordance.
 class V2ThinkingTile extends StatelessWidget {
   const V2ThinkingTile({
     super.key,
@@ -104,34 +107,32 @@ class V2ThinkingTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final canToggle = onToggle != null;
+    final canToggle = onToggle != null && details.isNotEmpty;
+    // A thinking row is a status line, not a card: no fill, no border.
     return Material(
-      color: c.surfaceAlt,
-      borderRadius: BorderRadius.circular(ORadius.m),
+      color: Colors.transparent,
       child: Semantics(
         button: canToggle,
         expanded: expanded,
         child: InkWell(
-          onTap: onToggle,
-          borderRadius: BorderRadius.circular(ORadius.m),
+          onTap: canToggle ? onToggle : null,
+          borderRadius: BorderRadius.circular(ORadius.s),
           child: ConstrainedBox(
             constraints: const BoxConstraints(minHeight: OSpace.touch),
             child: Padding(
-              padding: const EdgeInsets.all(OSpace.m),
+              padding: const EdgeInsets.symmetric(horizontal: OSpace.xs),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Row(
                     children: [
-                      Icon(
-                        Icons.psychology_rounded,
-                        size: 18,
-                        color: c.accent,
-                      ),
+                      Icon(Icons.psychology_rounded, size: 18, color: c.accent),
                       const SizedBox(width: OSpace.s),
                       Expanded(
                         child: Text(
                           label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                           style: OType.caption.copyWith(
                             color: c.textMuted,
                             fontWeight: FontWeight.w500,
@@ -150,22 +151,16 @@ class V2ThinkingTile extends StatelessWidget {
                         ),
                     ],
                   ),
-                  if (expanded) ...[
+                  if (expanded && details.isNotEmpty) ...[
                     const SizedBox(height: OSpace.s),
-                    if (details.isEmpty)
-                      Text(
-                        'No further detail was recorded for this step.',
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      )
-                    else
-                      for (final detail in details)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 4),
-                          child: Text(
-                            detail,
-                            style: OType.caption.copyWith(color: c.textMuted),
-                          ),
+                    for (var i = 0; i < details.length; i++)
+                      Padding(
+                        padding: EdgeInsets.only(top: i == 0 ? 0 : OSpace.xs),
+                        child: Text(
+                          details[i],
+                          style: OType.caption.copyWith(color: c.textMuted),
                         ),
+                      ),
                   ],
                 ],
               ),
@@ -177,9 +172,10 @@ class V2ThinkingTile extends StatelessWidget {
   }
 }
 
-/// A tool row with a real status badge, an expandable detail area and a
+/// A tool row with a real status glyph, an expandable detail area and a
 /// progress bar that only exists while the tool is running. A finished tool
-/// has no indeterminate animation left on screen.
+/// has no indeterminate animation left on screen. Collapsed it is one line;
+/// the chevron is the only affordance.
 class V2ToolTile extends StatelessWidget {
   const V2ToolTile({
     super.key,
@@ -206,113 +202,85 @@ class V2ToolTile extends StatelessWidget {
     final state = v2ToolStateOf(status, progress: progress);
     final tone = _toolTone(c, state);
     final label = v2ToolStatusLabel(status, state);
-    final canToggle = onToggle != null;
+    final canToggle = onToggle != null && details.isNotEmpty;
     final value = progress.clamp(0.0, 1.0).toDouble();
 
     return Material(
       color: c.surface,
       borderRadius: BorderRadius.circular(ORadius.l),
-      child: InkWell(
-        onTap: onToggle,
-        borderRadius: BorderRadius.circular(ORadius.l),
-        child: Container(
-          padding: const EdgeInsets.all(OSpace.m),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(ORadius.l),
-            border: Border.all(color: c.hairline),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    width: 30,
-                    height: 30,
-                    decoration: BoxDecoration(
-                      color: tone.withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(ORadius.s),
-                    ),
-                    child: Icon(icon, size: 17, color: tone),
-                  ),
-                  const SizedBox(width: OSpace.s),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
+      child: Semantics(
+        button: canToggle,
+        expanded: expanded,
+        child: InkWell(
+          onTap: canToggle ? onToggle : null,
+          borderRadius: BorderRadius.circular(ORadius.l),
+          child: Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: OSpace.m,
+              vertical: OSpace.s,
+            ),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(ORadius.l),
+              border: Border.all(color: c.hairline),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                ConstrainedBox(
+                  constraints: const BoxConstraints(minHeight: 32),
+                  child: Row(
+                    children: [
+                      // The state glyph replaces the tool-type icon: one icon
+                      // carries the outcome, so the row stays one line.
+                      _ToolStateGlyph(
+                        state: state,
+                        tone: tone,
+                        label: label,
+                        fallbackIcon: icon,
+                      ),
+                      const SizedBox(width: OSpace.s),
+                      Expanded(
+                        child: Text(
                           title,
-                          maxLines: 2,
+                          maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: OType.bodySm.copyWith(
-                            color: c.text,
-                            fontWeight: FontWeight.w600,
+                          style: OType.bodySmStrong.copyWith(color: c.text),
+                        ),
+                      ),
+                      if (canToggle)
+                        AnimatedRotation(
+                          turns: expanded ? 0.25 : 0,
+                          duration: OMotion.fast,
+                          child: Icon(
+                            Icons.chevron_right_rounded,
+                            size: 18,
+                            color: c.textFaint,
                           ),
                         ),
-                        const SizedBox(height: 2),
-                        Row(
-                          children: [
-                            _ToolStateGlyph(state: state, tone: tone),
-                            const SizedBox(width: 6),
-                            Expanded(
-                              child: Text(
-                                label,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: OType.caption.copyWith(color: tone),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
+                    ],
                   ),
-                  if (canToggle)
-                    AnimatedRotation(
-                      turns: expanded ? 0.25 : 0,
-                      duration: OMotion.fast,
-                      child: Icon(
-                        Icons.chevron_right_rounded,
-                        size: 18,
-                        color: c.textFaint,
-                      ),
-                    ),
-                ],
-              ),
-              if (state == V2ToolState.running) ...[
-                const SizedBox(height: OSpace.m),
-                OProgressBar(value: value),
-              ],
-              if (expanded) ...[
-                const SizedBox(height: OSpace.s),
-                Divider(height: 1, color: c.hairline),
-                const SizedBox(height: OSpace.s),
-                Text(
-                  'Status: $label',
-                  style: OType.caption.copyWith(color: c.textMuted),
                 ),
-                if (details.isEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 4),
-                    child: Text(
-                      state == V2ToolState.running
-                          ? 'Ovid is still working on this step.'
-                          : 'This step has no extra output.',
-                      style: OType.caption.copyWith(color: c.textMuted),
-                    ),
-                  )
-                else
-                  for (final detail in details)
+                if (state == V2ToolState.running) ...[
+                  const SizedBox(height: OSpace.s),
+                  OProgressBar(value: value),
+                ],
+                if (expanded && details.isNotEmpty) ...[
+                  const SizedBox(height: OSpace.s),
+                  Divider(height: 1, color: c.hairline),
+                  const SizedBox(height: OSpace.s),
+                  // The glyph already carries the outcome; repeating it as
+                  // "Status: Done" only adds a line.
+                  for (var i = 0; i < details.length; i++)
                     Padding(
-                      padding: const EdgeInsets.only(top: 4),
+                      padding: EdgeInsets.only(top: i == 0 ? 0 : OSpace.xs),
                       child: Text(
-                        detail,
+                        details[i],
                         style: OType.caption.copyWith(color: c.textMuted),
                       ),
                     ),
+                ],
               ],
-            ],
+            ),
           ),
         ),
       ),
@@ -323,20 +291,35 @@ class V2ToolTile extends StatelessWidget {
 /// Static terminal glyph. Running shows a dot (no endless spin); every other
 /// state shows a fixed icon, so a finished row is visually still.
 class _ToolStateGlyph extends StatelessWidget {
-  const _ToolStateGlyph({required this.state, required this.tone});
+  const _ToolStateGlyph({
+    required this.state,
+    required this.tone,
+    required this.label,
+    required this.fallbackIcon,
+  });
 
   final V2ToolState state;
   final Color tone;
+  final String label;
+
+  /// Shown when the host gave no recognisable state token.
+  final IconData fallbackIcon;
 
   @override
   Widget build(BuildContext context) {
     if (state == V2ToolState.running) {
       return Semantics(
-        label: 'Running',
-        child: Container(
-          width: 7,
-          height: 7,
-          decoration: BoxDecoration(color: tone, shape: BoxShape.circle),
+        label: label,
+        child: SizedBox(
+          width: 16,
+          height: 16,
+          child: Center(
+            child: Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(color: tone, shape: BoxShape.circle),
+            ),
+          ),
         ),
       );
     }
@@ -344,9 +327,16 @@ class _ToolStateGlyph extends StatelessWidget {
       V2ToolState.done => Icons.check_rounded,
       V2ToolState.failed => Icons.close_rounded,
       V2ToolState.stopped => Icons.stop_rounded,
-      _ => Icons.help_outline_rounded,
+      _ => fallbackIcon,
     };
-    return Icon(icon, size: 13, color: tone);
+    return Semantics(
+      label: label,
+      child: SizedBox(
+        width: 16,
+        height: 16,
+        child: Icon(icon, size: 16, color: tone),
+      ),
+    );
   }
 }
 
@@ -377,9 +367,9 @@ V2ArtifactState v2ArtifactStateOf(String statusLabel) {
   return V2ArtifactState.unknown;
 }
 
-/// A generated file in the transcript. Tapping it opens the artifact detail
-/// route; the status pill uses the state the data actually carries instead of
-/// claiming success for every card.
+/// A generated file in the transcript. One row: file name, meta and a
+/// download control. Tapping the row opens the artifact detail route; the
+/// status pill only appears while the file is not ready.
 class V2ArtifactTile extends StatelessWidget {
   const V2ArtifactTile({
     super.key,
@@ -417,103 +407,70 @@ class V2ArtifactTile extends StatelessWidget {
         borderRadius: BorderRadius.circular(ORadius.l),
         border: Border.all(color: c.hairline),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          OPressable(
-            onTap: onOpen,
-            semanticLabel: 'Open $fileName',
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(OSpace.m),
-                  color: c.surfaceAlt,
-                  child: Row(
-                    children: [
-                      Container(
-                        width: 32,
-                        height: 32,
-                        decoration: BoxDecoration(
-                          color: c.accentSoft,
-                          borderRadius: BorderRadius.circular(ORadius.s),
-                        ),
-                        child: Icon(icon, size: 17, color: c.accent),
-                      ),
-                      const SizedBox(width: OSpace.s),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              fileName,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: OType.bodySm.copyWith(
-                                color: c.text,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            Text(
-                              meta,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: OType.caption.copyWith(color: c.textMuted),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(width: OSpace.s),
-                      Flexible(
-                        child: OPill(
-                          label: statusLabel,
-                          tone: tone,
-                          dot: true,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                Container(
-                  constraints: const BoxConstraints(minHeight: 148),
-                  color: c.codeBg,
-                  alignment: Alignment.center,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: OSpace.m,
-                    vertical: OSpace.l,
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(icon, size: 34, color: c.accent),
-                      const SizedBox(height: OSpace.s),
-                      Text(
-                        previewLabel,
-                        textAlign: TextAlign.center,
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
+      child: OPressable(
+        onTap: onOpen,
+        semanticLabel: 'Open $fileName',
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(
+            OSpace.m,
+            OSpace.s,
+            OSpace.xs,
+            OSpace.s,
           ),
-          if (onDownload != null)
-            Padding(
-              padding: const EdgeInsets.all(OSpace.m),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: OButton(
-                      label: 'Download',
-                      icon: Icons.download_rounded,
-                      onPressed: onDownload,
+          child: Row(
+            children: [
+              Icon(icon, size: 20, color: c.accent),
+              const SizedBox(width: OSpace.s),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      fileName,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: OType.bodySmStrong.copyWith(color: c.text),
                     ),
-                  ),
-                ],
+                    const SizedBox(height: OSpace.xxs),
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            meta,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: OType.caption.copyWith(color: c.textMuted),
+                          ),
+                        ),
+                        // "Ready" is the default and repeats the row itself;
+                        // only a state the user must act on gets a pill.
+                        if (state != V2ArtifactState.ready) ...[
+                          const SizedBox(width: OSpace.s),
+                          Flexible(
+                            child: OPill(
+                              label: statusLabel,
+                              tone: tone,
+                              dot: true,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ],
+                ),
               ),
-            ),
-        ],
+              if (onDownload != null)
+                OIconButton(
+                  icon: Icons.download_rounded,
+                  semanticLabel: 'Download $fileName',
+                  size: 20,
+                  onPressed: onDownload,
+                ),
+              Icon(Icons.chevron_right_rounded, size: 18, color: c.textFaint),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -534,9 +491,17 @@ Future<void> openV2ArtifactDetail(
   final previewKind = icon == Icons.image_outlined
       ? V2ArtifactPreviewKind.image
       : switch (extension) {
-          'png' || 'jpg' || 'jpeg' || 'gif' || 'webp' || 'svg' =>
-            V2ArtifactPreviewKind.image,
-          'pdf' || 'doc' || 'docx' || 'txt' || 'md' => V2ArtifactPreviewKind.data,
+          'png' ||
+          'jpg' ||
+          'jpeg' ||
+          'gif' ||
+          'webp' ||
+          'svg' => V2ArtifactPreviewKind.image,
+          'pdf' ||
+          'doc' ||
+          'docx' ||
+          'txt' ||
+          'md' => V2ArtifactPreviewKind.data,
           'dart' ||
           'js' ||
           'ts' ||

@@ -9,11 +9,8 @@ import '../../design/o_tokens.dart';
 /// One open tab in Ovid's browser.
 ///
 /// Ovid opens every tab. The person can switch between tabs, and can close one
-/// only when the wiring layer supplies a close handler (the gateway has no
-/// close op today). There is deliberately no way to create a tab by hand. A
-/// tab whose live view was left closed long enough is [headless]: Ovid still
-/// owns the page and can keep working on it, but there is no picture until it
-/// is opened again.
+/// only when the wiring layer supplies a close handler. There is deliberately
+/// no way to create a tab by hand.
 @immutable
 class V2BrowserTabItem {
   const V2BrowserTabItem({
@@ -40,7 +37,7 @@ class V2BrowserTabItem {
   /// A real favicon, supplied by the wiring layer. Never fetched from here.
   final ImageProvider? favicon;
 
-  /// True when the live view was closed for 45 seconds or more. Ovid keeps
+  /// True when the live view was closed long enough to go headless. Ovid keeps
   /// the page alive in the background.
   final bool headless;
 
@@ -50,20 +47,16 @@ class V2BrowserTabItem {
     final name = title.trim();
     if (name.isNotEmpty) return name;
     final address = host.trim();
-    // Never "New tab": the person cannot open one, so a blank tab is an
-    // untitled page Ovid opened, not an invitation to create.
+    // Never "New tab": the person cannot open one.
     return address.isEmpty ? 'Untitled page' : address;
   }
 }
 
 /// The tab strip above the live browser view.
 ///
-/// It is presentational: the page supplies the tabs, the active id and the
-/// callbacks. The strip keeps its shape in every page state (loading, empty,
-/// error, content) so the user can always see what Ovid has open.
-///
-/// There is no plus button: a disabled plus is shown with a tooltip and a
-/// screen-reader label so the rule is explained rather than silently missing.
+/// The page only mounts it when there is more than one tab, so a single-tab
+/// session reads as one clean window. It is presentational: the page supplies
+/// the tabs, the active id and the callbacks.
 class BrowserTabStrip extends StatelessWidget {
   const BrowserTabStrip({
     super.key,
@@ -71,11 +64,6 @@ class BrowserTabStrip extends StatelessWidget {
     this.activeTabId = '',
     this.onSelectTab,
     this.onCloseTab,
-    this.noteLabel = 'Ovid opens tabs',
-    this.emptyLabel = 'No tabs yet. Ovid opens the first one.',
-    this.headlessLabel = 'Headless',
-    this.headlessHint = 'Headless · the live view paused',
-    this.plusSemanticLabel = 'New tab unavailable. Ovid opens tabs.',
   });
 
   final List<V2BrowserTabItem> tabs;
@@ -87,13 +75,6 @@ class BrowserTabStrip extends StatelessWidget {
   final ValueChanged<String>? onSelectTab;
   final ValueChanged<String>? onCloseTab;
 
-  /// The header note that explains who owns the tabs.
-  final String noteLabel;
-  final String emptyLabel;
-  final String headlessLabel;
-  final String headlessHint;
-  final String plusSemanticLabel;
-
   String get _activeId {
     if (tabs.isEmpty) return '';
     for (final tab in tabs) {
@@ -104,91 +85,27 @@ class BrowserTabStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = OColors.of(context);
+    if (tabs.isEmpty) return const SizedBox.shrink();
     final activeId = _activeId;
     return OFadeSlide(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _HeaderNote(label: noteLabel, plusSemanticLabel: plusSemanticLabel),
-          if (tabs.isEmpty)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                OSpace.l,
-                OSpace.xs,
-                OSpace.l,
-                OSpace.s,
+      child: SingleChildScrollView(
+        key: const ValueKey('v2-browser-tab-strip-scroll'),
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.fromLTRB(OSpace.l, OSpace.s, OSpace.l, 0),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            for (var i = 0; i < tabs.length; i++) ...[
+              if (i > 0) const SizedBox(width: OSpace.s),
+              _Tab(
+                tab: tabs[i],
+                selected: tabs[i].id == activeId,
+                onSelect: onSelectTab,
+                onClose: onCloseTab,
               ),
-              child: Text(
-                emptyLabel,
-                style: OType.caption.copyWith(color: c.textMuted),
-              ),
-            )
-          else
-            SingleChildScrollView(
-              key: const ValueKey('v2-browser-tab-strip-scroll'),
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.fromLTRB(
-                OSpace.l,
-                OSpace.xs,
-                OSpace.l,
-                OSpace.s,
-              ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  for (var i = 0; i < tabs.length; i++) ...[
-                    if (i > 0) const SizedBox(width: OSpace.s),
-                    _Tab(
-                      tab: tabs[i],
-                      selected: tabs[i].id == activeId,
-                      headlessLabel: headlessLabel,
-                      headlessHint: headlessHint,
-                      onSelect: onSelectTab,
-                      onClose: onCloseTab,
-                    ),
-                  ],
-                ],
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _HeaderNote extends StatelessWidget {
-  const _HeaderNote({required this.label, required this.plusSemanticLabel});
-
-  final String label;
-  final String plusSemanticLabel;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(OSpace.l, OSpace.s, OSpace.s, 0),
-      child: Row(
-        children: [
-          Icon(Icons.smart_toy_outlined, size: 15, color: c.textMuted),
-          const SizedBox(width: OSpace.xs),
-          Expanded(
-            child: Text(
-              label,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: OType.caption.copyWith(color: c.textMuted),
-            ),
-          ),
-          OIconButton(
-            key: const ValueKey('v2-browser-tab-add'),
-            icon: Icons.add_rounded,
-            semanticLabel: plusSemanticLabel,
-            tooltip: label,
-            onPressed: null,
-          ),
-        ],
+            ],
+          ],
+        ),
       ),
     );
   }
@@ -198,16 +115,12 @@ class _Tab extends StatelessWidget {
   const _Tab({
     required this.tab,
     required this.selected,
-    required this.headlessLabel,
-    required this.headlessHint,
     this.onSelect,
     this.onClose,
   });
 
   final V2BrowserTabItem tab;
   final bool selected;
-  final String headlessLabel;
-  final String headlessHint;
   final ValueChanged<String>? onSelect;
   final ValueChanged<String>? onClose;
 
@@ -216,8 +129,7 @@ class _Tab extends StatelessWidget {
     final c = OColors.of(context);
     final foreground = selected ? c.text : c.textMuted;
     // A tab is a switch target and a close target. The whole body selects;
-    // the close control keeps its own 48 dp target and callbacks, so closing
-    // one never also switches to it.
+    // the close control keeps its own 48 dp target and callbacks.
     return OPressable(
       key: ValueKey('v2-browser-tab-${tab.id}'),
       onTap: onSelect == null ? null : () => onSelect!(tab.id),
@@ -270,19 +182,13 @@ class _Tab extends StatelessWidget {
                           ),
                         ),
                         if (tab.headless) ...[
-                          const SizedBox(width: OSpace.s),
-                          _HeadlessBadge(
-                            tabId: tab.id,
-                            label: headlessLabel,
-                            hint: headlessHint,
-                          ),
+                          const SizedBox(width: OSpace.xs),
+                          _HeadlessMark(tabId: tab.id),
                         ],
                       ],
                     ),
                   ),
-                  // Only a wired close control is shown. Tabs are agent-owned
-                  // and there is no server close op, so an un-wired page must
-                  // not show an X that cannot do anything.
+                  // Only a wired close control is shown.
                   if (tab.closable && onClose != null)
                     OIconButton(
                       key: ValueKey('v2-browser-tab-close-${tab.id}'),
@@ -303,13 +209,11 @@ class _Tab extends StatelessWidget {
   }
 
   /// One clean label for the whole tab: name, host and the headless state.
-  /// The visible title and badge are excluded from semantics so a screen
-  /// reader does not read the same words twice.
   String get _semanticsLabel {
     final parts = <String>[tab.label];
     final address = tab.host.trim();
     if (address.isNotEmpty && address != tab.label) parts.add(address);
-    if (tab.headless) parts.add(headlessLabel);
+    if (tab.headless) parts.add('Headless');
     return parts.join(', ');
   }
 }
@@ -355,51 +259,27 @@ class _Favicon extends StatelessWidget {
   }
 }
 
-/// Marks a tab Ovid kept open after the live view was closed. The page is
-/// still running for Ovid; only the picture is gone.
-class _HeadlessBadge extends StatelessWidget {
-  const _HeadlessBadge({
-    required this.tabId,
-    required this.label,
-    required this.hint,
-  });
+/// Marks a tab Ovid kept open after the live view was closed. An icon, not a
+/// word: the tooltip and the tab's own label carry the meaning.
+class _HeadlessMark extends StatelessWidget {
+  const _HeadlessMark({required this.tabId});
 
   final String tabId;
-  final String label;
-  final String hint;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     return Tooltip(
-      message: hint,
+      message: 'Headless',
       child: Container(
         key: ValueKey('v2-browser-tab-headless-$tabId'),
         constraints: const BoxConstraints(minHeight: 20),
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+        padding: const EdgeInsets.symmetric(horizontal: OSpace.xs, vertical: 1),
         decoration: BoxDecoration(
           color: c.warn.withValues(alpha: 0.12),
           borderRadius: BorderRadius.circular(ORadius.pill),
         ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.timer_outlined, size: 12, color: c.warn),
-            const SizedBox(width: OSpace.xs),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 120),
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: OType.caption.copyWith(
-                  color: c.warn,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-          ],
-        ),
+        child: Icon(Icons.timer_outlined, size: 12, color: c.warn),
       ),
     );
   }

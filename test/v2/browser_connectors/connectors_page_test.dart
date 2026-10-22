@@ -120,21 +120,6 @@ void _expectNoTextOutsideScreen(WidgetTester tester) {
       in tester.allRenderObjects.whereType<RenderParagraph>()) {
     if (!paragraph.attached || !paragraph.hasSize) continue;
     final box = paragraph.localToGlobal(Offset.zero) & paragraph.size;
-    // Text inside a horizontal list is meant to sit off-screen until scrolled,
-    // so only its vertical fit inside that strip matters; everything else must
-    // stay inside the screen width (the vertical list may extend below the
-    // fold).
-    final strip = _horizontalViewportRect(paragraph);
-    if (strip != null) {
-      expect(
-        box.top >= strip.top - 0.5 && box.bottom <= strip.bottom + 0.5,
-        isTrue,
-        reason:
-            '"${paragraph.text.toPlainText()}" paints at $box, taller '
-            'than its ${strip.height} dp horizontal strip',
-      );
-      continue;
-    }
     expect(
       box.left >= -0.5 && box.right <= screen.width + 0.5,
       isTrue,
@@ -145,21 +130,6 @@ void _expectNoTextOutsideScreen(WidgetTester tester) {
   }
 }
 
-/// Screen rect of the nearest horizontal strip that clips [node], if any.
-Rect? _horizontalViewportRect(RenderObject node) {
-  RenderObject? parent = node.parent;
-  while (parent != null) {
-    if (parent is RenderViewport) {
-      final axis = parent.axisDirection;
-      if (axis == AxisDirection.left || axis == AxisDirection.right) {
-        return parent.localToGlobal(Offset.zero) & parent.size;
-      }
-    }
-    parent = parent.parent;
-  }
-  return null;
-}
-
 Future<void> _scrollThrough(WidgetTester tester) async {
   final scrollable = find.byType(Scrollable).first;
   for (var i = 0; i < 12; i++) {
@@ -167,6 +137,11 @@ Future<void> _scrollThrough(WidgetTester tester) async {
     await tester.pump(const Duration(milliseconds: 120));
   }
   await tester.pump(const Duration(milliseconds: 400));
+}
+
+Future<void> _openFilter(WidgetTester tester) async {
+  await tester.tap(find.byKey(const Key('connector-filter')));
+  await tester.pumpAndSettle();
 }
 
 void main() {
@@ -192,33 +167,28 @@ void main() {
     }
   });
 
-  testWidgets('renders the full 168-entry catalog in two labelled sections', (
+  testWidgets('renders one flat catalog list with no kind or category chips', (
     tester,
   ) async {
     final data = const V2ConnectorsData();
     expect(data.catalog.length, 168);
-    expect(data.apps.length, greaterThanOrEqualTo(100));
-    expect(data.plugins.length, greaterThanOrEqualTo(20));
-    expect(data.mcpServers.length, greaterThanOrEqualTo(20));
-    expect(
-      data.pluginsAndMcp.length,
-      data.plugins.length + data.mcpServers.length,
+
+    await _pump(
+      tester,
+      ConnectorsPage(data: data, plan: V2ConnectorPlan.plus),
     );
 
-    await _pump(tester, ConnectorsPage(data: data));
-
-    // The app bar says "Connectors"; the section header is uppercased.
+    // One header, no repeated section heading in the body.
     expect(find.text('Connectors'), findsOneWidget);
-    expect(find.text('CONNECTORS'), findsOneWidget);
+    expect(find.text('CONNECTORS'), findsNothing);
+    expect(find.text('PLUGINS & MCP'), findsNothing);
     expect(find.text('GitHub'), findsOneWidget);
 
-    final connectorsCount = tester.widget<Text>(
-      find.descendant(
-        of: find.byKey(const Key('connectors-count')),
-        matching: find.byType(Text),
-      ),
-    );
-    expect(int.parse(connectorsCount.data!), data.apps.length);
+    // The chips are gone: kinds and categories live in the filter menu only.
+    expect(find.byKey(const Key('kind-mcp')), findsNothing);
+    expect(find.byKey(const Key('kind-apps')), findsNothing);
+    expect(find.text('All'), findsNothing);
+    expect(find.text('Mail'), findsNothing);
 
     await tester.scrollUntilVisible(
       find.text('Gmail'),
@@ -228,20 +198,6 @@ void main() {
     expect(find.text('Gmail'), findsOneWidget);
 
     await tester.scrollUntilVisible(
-      find.text('PLUGINS & MCP'),
-      400,
-      scrollable: find.byType(Scrollable).first,
-    );
-    final pluginsCount = tester.widget<Text>(
-      find.descendant(
-        of: find.byKey(const Key('plugins-count')),
-        matching: find.byType(Text),
-      ),
-    );
-    // Plugins and MCP servers share the section count, as the contract says.
-    expect(int.parse(pluginsCount.data!), data.pluginsAndMcp.length);
-
-    await tester.scrollUntilVisible(
       find.text('Context7'),
       400,
       scrollable: find.byType(Scrollable).first,
@@ -249,130 +205,143 @@ void main() {
     expect(find.text('Context7'), findsOneWidget);
   });
 
-  testWidgets('the MCP tab narrows the catalog to MCP servers', (tester) async {
+  testWidgets('the one filter menu narrows the list to a kind', (tester) async {
     final data = const V2ConnectorsData();
-    await _pump(tester, ConnectorsPage(data: data));
-
-    expect(find.byKey(const Key('kind-mcp')), findsOneWidget);
-    await tester.tap(find.byKey(const Key('kind-mcp')));
-    await tester.pump(const Duration(milliseconds: 400));
-
-    // Only the Plugins & MCP section remains, and its count is MCP-only.
-    expect(find.text('CONNECTORS'), findsNothing);
-    expect(find.text('PLUGINS & MCP'), findsOneWidget);
-    final count = tester.widget<Text>(
-      find.descendant(
-        of: find.byKey(const Key('plugins-count')),
-        matching: find.byType(Text),
-      ),
+    await _pump(
+      tester,
+      ConnectorsPage(data: data, plan: V2ConnectorPlan.plus),
     );
-    expect(int.parse(count.data!), data.mcpServers.length);
+
+    await _openFilter(tester);
+    await tester.tap(find.text('MCP'));
+    await tester.pumpAndSettle();
+
     expect(find.text('Context7'), findsOneWidget);
     expect(find.text('GitHub'), findsNothing);
 
-    await tester.tap(find.byKey(const Key('kind-plugins')));
-    await tester.pump(const Duration(milliseconds: 400));
+    await _openFilter(tester);
+    await tester.tap(find.text('Plugins'));
+    await tester.pumpAndSettle();
     expect(find.text('Context7'), findsNothing);
     expect(find.text('Superpowers'), findsOneWidget);
 
-    await tester.tap(find.byKey(const Key('kind-all')));
-    await tester.pump(const Duration(milliseconds: 400));
-    expect(find.text('CONNECTORS'), findsOneWidget);
+    await _openFilter(tester);
+    await tester.tap(find.text('All'));
+    await tester.pumpAndSettle();
     expect(find.text('GitHub'), findsOneWidget);
   });
 
-  testWidgets('the plan note keeps the custom-connector limits', (
-    tester,
-  ) async {
-    await _pump(tester, ConnectorsPage(data: _data()));
-
-    await tester.scrollUntilVisible(
-      find.textContaining('Free: 0'),
-      300,
-      scrollable: find.byType(Scrollable).first,
+  testWidgets('the filter menu can show only connected rows', (tester) async {
+    await _pump(
+      tester,
+      ConnectorsPage(data: _data(), plan: V2ConnectorPlan.plus),
     );
-    expect(find.textContaining('Go: 5'), findsOneWidget);
-    expect(find.textContaining('Plus & Pro: 20'), findsOneWidget);
+
+    await _openFilter(tester);
+    await tester.tap(find.text('Connected'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('GitHub'), findsOneWidget);
+    expect(find.text('Notion'), findsOneWidget);
+    expect(find.text('Gmail'), findsNothing);
+    expect(find.text('context7'), findsNothing);
+  });
+
+  testWidgets('the cap is one line with a real upgrade action', (tester) async {
+    var upgrades = 0;
+    await _pump(
+      tester,
+      ConnectorsPage(
+        data: _data(),
+        plan: V2ConnectorPlan.free,
+        onUpgrade: () => upgrades++,
+      ),
+    );
+
+    expect(find.byKey(const Key('connector-cap-banner')), findsOneWidget);
+    expect(find.text('No custom connectors on Free.'), findsOneWidget);
+    expect(find.textContaining('Free: 0'), findsNothing);
+
+    await tester.tap(find.text('Upgrade'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(upgrades, 1);
+  });
+
+  testWidgets('Go at the cap says so with the 5-slot allowance', (tester) async {
+    final store = V2MemoryConnectorStore([
+      for (var i = 0; i < 5; i++)
+        V2ConnectorConnection(
+          id: 'custom-$i',
+          name: 'Custom $i',
+          endpoint: 'https://api$i.test',
+          custom: true,
+        ),
+    ]);
+    await _pump(
+      tester,
+      ConnectorsPage(
+        data: const V2ConnectorsData(),
+        plan: V2ConnectorPlan.go,
+        store: store,
+      ),
+    );
+
+    expect(find.text('All 5 custom slots used on Go.'), findsOneWidget);
   });
 
   testWidgets('an empty injected list still shows the built-in catalog', (
     tester,
   ) async {
-    // The route placeholder passes an empty list until wiring lands; the
-    // built-ins must still be there.
-    await _pump(tester, const ConnectorsPage(data: V2ConnectorsData()));
+    await _pump(
+      tester,
+      const ConnectorsPage(
+        data: V2ConnectorsData(),
+        plan: V2ConnectorPlan.plus,
+      ),
+    );
 
-    expect(find.text('CONNECTORS'), findsOneWidget);
     expect(find.text('GitHub'), findsOneWidget);
-    expect(find.text('No connectors available'), findsNothing);
+    expect(find.text('No connectors'), findsNothing);
   });
 
   testWidgets('connectors page renders in dark theme', (tester) async {
-    await _pump(tester, ConnectorsPage(data: _data()), theme: OTheme.dark());
+    await _pump(
+      tester,
+      ConnectorsPage(data: _data(), plan: V2ConnectorPlan.plus),
+      theme: OTheme.dark(),
+    );
 
     expect(find.text('Connectors'), findsOneWidget);
-    expect(find.text('CONNECTORS'), findsOneWidget);
     expect(find.text('GitHub'), findsOneWidget);
-
-    await tester.scrollUntilVisible(
-      find.text('PLUGINS & MCP'),
-      400,
-      scrollable: find.byType(Scrollable).first,
-    );
-    expect(find.text('PLUGINS & MCP'), findsOneWidget);
   });
 
-  testWidgets('search filters both sections', (tester) async {
-    await _pump(tester, ConnectorsPage(data: _data()));
+  testWidgets('search filters the list', (tester) async {
+    await _pump(
+      tester,
+      ConnectorsPage(data: _data(), plan: V2ConnectorPlan.plus),
+    );
 
     await tester.enterText(find.byType(TextField).first, 'context7');
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('context7'), findsWidgets);
-    await tester.scrollUntilVisible(
-      find.text('PLUGINS & MCP'),
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
-    expect(find.text('PLUGINS & MCP'), findsOneWidget);
     expect(find.text('GitHub'), findsNothing);
-    expect(find.text('CONNECTORS'), findsNothing);
 
     await tester.enterText(find.byType(TextField).first, 'github');
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('GitHub'), findsOneWidget);
     expect(find.text('context7'), findsNothing);
-    expect(find.text('CONNECTORS'), findsOneWidget);
-    expect(find.text('PLUGINS & MCP'), findsNothing);
   });
 
-  testWidgets('a category chip filters the catalog', (tester) async {
-    String? category;
-    await _pump(
-      tester,
-      ConnectorsPage(
-        data: _data(),
-        onCategoryChanged: (value) => category = value,
-      ),
-    );
-
-    await tester.tap(find.text('Mail'));
-    await tester.pump(const Duration(milliseconds: 400));
-
-    expect(category, 'Mail');
-    expect(find.text('Gmail'), findsOneWidget);
-    expect(find.text('GitHub'), findsNothing);
-    expect(find.text('context7'), findsNothing);
-  });
-
-  testWidgets('the installed switch reports the new value', (tester) async {
+  testWidgets('the row switch reports the new value', (tester) async {
     String? toggledId;
     bool? toggledValue;
     await _pump(
       tester,
       ConnectorsPage(
         data: _data(),
+        plan: V2ConnectorPlan.plus,
         onToggle: (id, value) {
           toggledId = id;
           toggledValue = value;
@@ -380,7 +349,7 @@ void main() {
       ),
     );
 
-    await tester.tap(find.byType(Switch).first);
+    await tester.tap(find.byKey(const ValueKey('connector-switch-github')));
     await tester.pump(const Duration(milliseconds: 300));
     expect(toggledId, 'github');
     expect(toggledValue, isFalse);
@@ -390,7 +359,11 @@ void main() {
     String? opened;
     await _pump(
       tester,
-      ConnectorsPage(data: _data(), onOpen: (id) => opened = id),
+      ConnectorsPage(
+        data: _data(),
+        plan: V2ConnectorPlan.plus,
+        onOpen: (id) => opened = id,
+      ),
     );
 
     await tester.tap(find.text('GitHub'));
@@ -398,7 +371,7 @@ void main() {
     expect(opened, 'github');
   });
 
-  testWidgets('the connect action fires for an available row', (tester) async {
+  testWidgets('the switch on an unconnected row opens setup', (tester) async {
     String? connected;
     await _pump(
       tester,
@@ -408,25 +381,29 @@ void main() {
               .where((connector) => !connector.connected)
               .toList(),
         ),
+        plan: V2ConnectorPlan.plus,
         onConnect: (id) => connected = id,
       ),
     );
 
-    await tester.tap(find.text('Connect').first);
+    await tester.tap(find.byKey(const ValueKey('connector-switch-gmail')));
     await tester.pump(const Duration(milliseconds: 300));
     expect(connected, 'gmail');
   });
 
-  testWidgets('an empty search offers clear filters', (tester) async {
-    await _pump(tester, ConnectorsPage(data: _data()));
+  testWidgets('an empty search offers clear search', (tester) async {
+    await _pump(
+      tester,
+      ConnectorsPage(data: _data(), plan: V2ConnectorPlan.plus),
+    );
 
     await tester.enterText(find.byType(TextField).first, 'zzz');
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('No matches'), findsOneWidget);
-    expect(find.text('Clear filters'), findsOneWidget);
+    expect(find.text('Clear search'), findsOneWidget);
 
-    await tester.tap(find.text('Clear filters'));
+    await tester.tap(find.text('Clear search'));
     await tester.pump(const Duration(milliseconds: 400));
     expect(find.text('GitHub'), findsOneWidget);
   });
@@ -434,29 +411,13 @@ void main() {
   testWidgets('loading state shows skeleton rows', (tester) async {
     await _pump(
       tester,
-      ConnectorsPage(data: _data(status: V2ConnectorsStatus.loading)),
+      ConnectorsPage(
+        data: _data(status: V2ConnectorsStatus.loading),
+        plan: V2ConnectorPlan.plus,
+      ),
     );
 
     expect(find.byType(OSkeletonList), findsOneWidget);
-  });
-
-  testWidgets('plan note can open the upgrade path', (tester) async {
-    var upgrades = 0;
-    await _pump(
-      tester,
-      ConnectorsPage(data: _data(), onUpgrade: () => upgrades++),
-    );
-
-    await tester.scrollUntilVisible(
-      find.text('Upgrade'),
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
-    await tester.ensureVisible(find.text('Upgrade'));
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.tap(find.text('Upgrade'));
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(upgrades, 1);
   });
 
   testWidgets('error state offers a retry', (tester) async {
@@ -465,6 +426,7 @@ void main() {
       tester,
       ConnectorsPage(
         data: _data(status: V2ConnectorsStatus.error),
+        plan: V2ConnectorPlan.plus,
         onRetry: () => retries++,
       ),
     );
@@ -475,9 +437,7 @@ void main() {
     expect(retries, 1);
   });
 
-  testWidgets('an empty catalog explains itself and offers add custom', (
-    tester,
-  ) async {
+  testWidgets('an empty catalog offers add connector', (tester) async {
     var added = 0;
     await _pump(
       tester,
@@ -486,12 +446,13 @@ void main() {
           connectors: <V2Connector>[],
           useBuiltInCatalog: false,
         ),
+        plan: V2ConnectorPlan.plus,
         onAddCustom: () => added++,
       ),
     );
 
-    expect(find.text('No connectors available'), findsOneWidget);
-    await tester.tap(find.text('Add custom').last);
+    expect(find.text('No connectors'), findsOneWidget);
+    await tester.tap(find.text('Add connector').last);
     await tester.pump(const Duration(milliseconds: 300));
     expect(added, 1);
   });
@@ -502,7 +463,10 @@ void main() {
     ) async {
       await _pumpNarrow(
         tester,
-        ConnectorsPage(data: const V2ConnectorsData()),
+        ConnectorsPage(
+          data: const V2ConnectorsData(),
+          plan: V2ConnectorPlan.plus,
+        ),
         theme: dark ? OTheme.dark() : OTheme.light(),
       );
       _expectNoTextOutsideScreen(tester);
@@ -512,6 +476,20 @@ void main() {
     });
   }
 
+  testWidgets('the cap line fits 320 dp at 200% text', (tester) async {
+    await _pumpNarrow(
+      tester,
+      ConnectorsPage(
+        data: _data(),
+        plan: V2ConnectorPlan.free,
+        onUpgrade: () {},
+      ),
+    );
+    expect(find.text('No custom connectors on Free.'), findsOneWidget);
+    _expectNoTextOutsideScreen(tester);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('empty and error states fit 320 dp at 200% text', (tester) async {
     await _pumpNarrow(
       tester,
@@ -520,14 +498,18 @@ void main() {
           connectors: <V2Connector>[],
           useBuiltInCatalog: false,
         ),
+        plan: V2ConnectorPlan.plus,
       ),
     );
-    expect(find.text('No connectors available'), findsOneWidget);
+    expect(find.text('No connectors'), findsOneWidget);
     _expectNoTextOutsideScreen(tester);
 
     await _pumpNarrow(
       tester,
-      ConnectorsPage(data: _data(status: V2ConnectorsStatus.error)),
+      ConnectorsPage(
+        data: _data(status: V2ConnectorsStatus.error),
+        plan: V2ConnectorPlan.plus,
+      ),
     );
     expect(find.text('Something went wrong'), findsOneWidget);
     _expectNoTextOutsideScreen(tester);
@@ -544,7 +526,10 @@ void main() {
           data: MediaQuery.of(context).copyWith(disableAnimations: true),
           child: inner!,
         ),
-        home: ConnectorsPage(data: _data()),
+        home: ConnectorsPage(
+          data: _data(),
+          plan: V2ConnectorPlan.plus,
+        ),
       ),
     );
     await tester.pump();
@@ -560,19 +545,22 @@ void main() {
     final handle = tester.ensureSemantics();
     await _pump(
       tester,
-      ConnectorsPage(data: _data(), onOpen: (_) {}, onToggle: (_, _) {}),
+      ConnectorsPage(
+        data: _data(),
+        plan: V2ConnectorPlan.plus,
+        onOpen: (_) {},
+        onToggle: (_, _) {},
+      ),
     );
 
     final data = tester
-        .getSemantics(find.byType(Switch).first)
+        .getSemantics(find.byKey(const ValueKey('connector-switch-github')))
         .getSemanticsData();
     expect(data.label, contains('GitHub'));
     expect(data.flagsCollection.isToggled.toBoolOrNull(), isTrue);
     expect(data.flagsCollection.isEnabled.toBoolOrNull(), isTrue);
 
-    final row = find.bySemanticsLabel(
-      'GitHub, Sync repositories, branches, and pull requests',
-    );
+    final row = find.bySemanticsLabel('GitHub, On');
     expect(row, findsOneWidget);
     expect(
       tester.getSemantics(row).getSemanticsData().flagsCollection.isButton,
@@ -581,11 +569,9 @@ void main() {
     handle.dispose();
   });
 
-  testWidgets('the installed switch is wired even without a host callback', (
+  testWidgets('the row switch is wired even without a host callback', (
     tester,
   ) async {
-    // The page persists the change itself, so the switch must never be
-    // announced as disabled on a real screen.
     final handle = tester.ensureSemantics();
     final store = V2MemoryConnectorStore(const [
       V2ConnectorConnection(
@@ -597,34 +583,53 @@ void main() {
     ]);
     await _pump(
       tester,
-      ConnectorsPage(data: _data(), store: store),
+      ConnectorsPage(
+        data: _data(),
+        plan: V2ConnectorPlan.plus,
+        store: store,
+      ),
     );
 
     final data = tester
-        .getSemantics(find.byType(Switch).first)
+        .getSemantics(find.byKey(const ValueKey('connector-switch-github')))
         .getSemanticsData();
     expect(data.flagsCollection.isEnabled.toBoolOrNull(), isNot(false));
 
-    await tester.tap(find.byType(Switch).first);
+    await tester.tap(find.byKey(const ValueKey('connector-switch-github')));
     await tester.pump(const Duration(milliseconds: 300));
     expect((await store.find('github'))!.enabled, isFalse);
     handle.dispose();
   });
 
-  testWidgets('the app bar keeps the labelled action on a wide screen', (
-    tester,
-  ) async {
-    await _pump(tester, ConnectorsPage(data: _data()));
-    expect(find.text('Add custom'), findsOneWidget);
+  testWidgets('the header keeps one add action at any width', (tester) async {
+    await _pump(
+      tester,
+      ConnectorsPage(data: _data(), plan: V2ConnectorPlan.plus),
+    );
+    expect(find.bySemanticsLabel('Add connector'), findsOneWidget);
+    expect(find.text('Add custom'), findsNothing);
+
+    await _pumpNarrow(
+      tester,
+      ConnectorsPage(data: _data(), plan: V2ConnectorPlan.plus),
+      scale: 1,
+    );
+    expect(find.bySemanticsLabel('Add connector'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
-  testWidgets('a 320 dp phone falls back to the icon add action', (
-    tester,
-  ) async {
-    await _pumpNarrow(tester, ConnectorsPage(data: _data()), scale: 1);
-    _expectNoTextOutsideScreen(tester);
-    expect(find.text('Add custom'), findsNothing);
-    expect(find.bySemanticsLabel('Add custom connector'), findsOneWidget);
+  testWidgets('at 600 dp the list centres in a 640 max width', (tester) async {
+    tester.view.physicalSize = const Size(600, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await _pump(
+      tester,
+      ConnectorsPage(data: _data(), plan: V2ConnectorPlan.plus),
+    );
+
+    final list = tester.getRect(find.byType(CustomScrollView));
+    expect(list.width, lessThanOrEqualTo(640));
+    expect(list.center.dx, closeTo(300, 0.5));
     expect(tester.takeException(), isNull);
   });
 }

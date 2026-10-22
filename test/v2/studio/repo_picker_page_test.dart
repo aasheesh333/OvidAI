@@ -36,10 +36,7 @@ const _repos = <V2Repo>[
     branches: <V2RepoBranch>[
       V2RepoBranch(name: 'main', isDefault: true, lastCommitLabel: '2h ago'),
       V2RepoBranch(name: 'develop', lastCommitLabel: 'Yesterday'),
-      V2RepoBranch(
-        name: 'feature/hero-revamp',
-        lastCommitLabel: '3 days ago',
-      ),
+      V2RepoBranch(name: 'feature/hero-revamp', lastCommitLabel: '3 days ago'),
     ],
   ),
   V2Repo(
@@ -73,11 +70,14 @@ void main() {
       expect(find.text('Studio'), findsOneWidget);
       expect(find.text('acme/landing-page'), findsOneWidget);
       expect(find.text('acme/api-server'), findsOneWidget);
-      expect(find.text('Connected as Priya'), findsOneWidget);
+      // One meta line, never the description paragraph.
+      expect(find.text('TypeScript · Updated 2h ago'), findsOneWidget);
+      expect(find.text('Marketing site for Acme Cloud'), findsNothing);
+      expect(find.textContaining('Connected as'), findsNothing);
     }
   });
 
-  testWidgets('empty state connects GitHub', (tester) async {
+  testWidgets('disconnected state connects GitHub', (tester) async {
     var connected = 0;
     await tester.pumpWidget(
       _app(
@@ -92,11 +92,31 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Pick a repository to start'), findsOneWidget);
-    expect(find.text('Enter a personal access token'), findsOneWidget);
+    expect(find.text('Connect GitHub'), findsOneWidget);
 
     await tester.tap(find.text('Connect GitHub'));
     expect(connected, 1);
+  });
+
+  testWidgets('the token path stays reachable when disconnected', (
+    tester,
+  ) async {
+    var tokens = 0;
+    await tester.pumpWidget(
+      _app(
+        V2RepoPickerPage(
+          data: const V2RepoPickerData(
+            status: V2RepoPickerStatus.empty,
+            githubConnected: false,
+          ),
+          onOpenToken: () => tokens++,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Use a token'));
+    expect(tokens, 1);
   });
 
   testWidgets('tapping a repository reports the selection', (tester) async {
@@ -148,25 +168,22 @@ void main() {
     OButton primary() =>
         tester.widget<OButton>(find.byKey(const Key('repo-picker-primary')));
 
-    expect(primary().onPressed, isNull);
-    expect(find.text('Choose a repository'), findsOneWidget);
+    // Step one has no primary action: tapping a repository advances the step.
+    expect(find.byKey(const Key('repo-picker-primary')), findsNothing);
 
     await tester.tap(find.text('acme/no-default'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Choose branch'), findsOneWidget);
     expect(find.text('trunk'), findsOneWidget);
     expect(find.text('release'), findsOneWidget);
     expect(primary().onPressed, isNull);
-    expect(find.widgetWithText(OButton, 'Choose a branch'), findsOneWidget);
+    expect(find.widgetWithText(OButton, 'Choose branch'), findsOneWidget);
 
-    await tester.tap(
-      find.byKey(const Key('repo-picker-branch-release')),
-    );
+    await tester.tap(find.byKey(const Key('repo-picker-branch-release')));
     await tester.pumpAndSettle();
 
     expect(primary().onPressed, isNotNull);
-    expect(find.text('Start coding'), findsOneWidget);
+    expect(find.text('Start'), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('repo-picker-primary')));
     await tester.pumpAndSettle();
@@ -196,7 +213,8 @@ void main() {
     await tester.tap(find.text('acme/landing-page'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Choose branch'), findsOneWidget);
+    // The header names the repository; the primary action is the gate.
+    expect(find.text('acme/landing-page'), findsOneWidget);
     final primary = tester.widget<OButton>(
       find.byKey(const Key('repo-picker-primary')),
     );
@@ -246,17 +264,15 @@ void main() {
 
     await tester.tap(find.text('acme/landing-page'));
     await tester.pumpAndSettle();
-    expect(find.text('Choose branch'), findsOneWidget);
+    expect(find.byKey(const Key('repo-picker-branch-develop')), findsOneWidget);
 
-    await tester.tap(find.byKey(const Key('repo-picker-change-repo')));
+    await tester.tap(find.byKey(const Key('repo-picker-back-to-repos')));
     await tester.pumpAndSettle();
 
-    expect(find.text('Choose branch'), findsNothing);
+    expect(find.byKey(const Key('repo-picker-branch-develop')), findsNothing);
     expect(find.text('acme/landing-page'), findsOneWidget);
-    final primary = tester.widget<OButton>(
-      find.byKey(const Key('repo-picker-primary')),
-    );
-    expect(primary.onPressed, isNull);
+    // Back on the repository step there is no primary action to press.
+    expect(find.byKey(const Key('repo-picker-primary')), findsNothing);
   });
 
   testWidgets('a repo without branches cannot pass the gate', (tester) async {
@@ -264,9 +280,7 @@ void main() {
       _app(
         const V2RepoPickerPage(
           data: V2RepoPickerData(
-            repos: <V2Repo>[
-              V2Repo(id: '4', name: 'empty', owner: 'acme'),
-            ],
+            repos: <V2Repo>[V2Repo(id: '4', name: 'empty', owner: 'acme')],
           ),
           onConfirm: _noopConfirm,
         ),
@@ -277,16 +291,15 @@ void main() {
     await tester.tap(find.text('acme/empty'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Choose branch'), findsOneWidget);
     expect(find.text('No branches found'), findsOneWidget);
     final primary = tester.widget<OButton>(
       find.byKey(const Key('repo-picker-primary')),
     );
     expect(primary.onPressed, isNull);
 
-    await tester.ensureVisible(find.text('Change repository').last);
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Change repository').last);
+    // The header back is the only way back to the repository list.
+    expect(find.text('Change repository'), findsNothing);
+    await tester.tap(find.byKey(const Key('repo-picker-back-to-repos')));
     await tester.pumpAndSettle();
     expect(find.text('acme/empty'), findsOneWidget);
   });
@@ -300,9 +313,7 @@ void main() {
       _app(
         V2RepoPickerPage(
           data: const V2RepoPickerData(
-            repos: <V2Repo>[
-              V2Repo(id: 'acme/api', name: 'api', owner: 'acme'),
-            ],
+            repos: <V2Repo>[V2Repo(id: 'acme/api', name: 'api', owner: 'acme')],
           ),
           onLoadBranches: (repo) async {
             loads++;
@@ -345,9 +356,7 @@ void main() {
       _app(
         V2RepoPickerPage(
           data: const V2RepoPickerData(
-            repos: <V2Repo>[
-              V2Repo(id: 'acme/api', name: 'api', owner: 'acme'),
-            ],
+            repos: <V2Repo>[V2Repo(id: 'acme/api', name: 'api', owner: 'acme')],
           ),
           onLoadBranches: (repo) async {
             loads++;
@@ -393,10 +402,7 @@ void main() {
       find.byKey(const Key('repo-picker-primary')),
     );
     expect(primary.onPressed, isNull);
-    expect(
-      find.textContaining('Studio setup is not connected yet'),
-      findsOneWidget,
-    );
+    expect(find.textContaining('not connected'), findsNothing);
   });
 
   testWidgets('search filters the repository list', (tester) async {
@@ -497,7 +503,8 @@ void main() {
 
     expect(find.text('acme/landing-page'), findsOneWidget);
     expect(find.text('acme/api-server'), findsOneWidget);
-    expect(find.text('Enter a personal access token'), findsOneWidget);
+    // Unwired advanced rows are removed, not shown disabled.
+    expect(find.text('Personal access token'), findsNothing);
   });
 
   testWidgets('repository rows announce their label', (tester) async {
@@ -525,10 +532,7 @@ void main() {
 
     final scenarios = <String, Widget>{
       'content': const V2RepoPickerPage(
-        data: V2RepoPickerData(
-          repos: _repos,
-          accountLabel: 'Priya Ramanathan',
-        ),
+        data: V2RepoPickerData(repos: _repos, accountLabel: 'Priya Ramanathan'),
       ),
       'disconnected': const V2RepoPickerPage(
         data: V2RepoPickerData(
@@ -542,8 +546,7 @@ void main() {
       'error': const V2RepoPickerPage(
         data: V2RepoPickerData(
           status: V2RepoPickerStatus.error,
-          errorMessage:
-              'We could not load your repositories. Check your connection and try again.',
+          errorMessage: 'Repositories did not load.',
         ),
       ),
     };
@@ -554,9 +557,9 @@ void main() {
           _app(
             Builder(
               builder: (context) => MediaQuery(
-                data: MediaQuery.of(context).copyWith(
-                  textScaler: const TextScaler.linear(2),
-                ),
+                data: MediaQuery.of(
+                  context,
+                ).copyWith(textScaler: const TextScaler.linear(2)),
                 child: entry.value,
               ),
             ),
@@ -665,11 +668,12 @@ void main() {
       await tester.tap(find.text('acme/landing-page'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Choose branch'), findsOneWidget);
+      expect(find.text('Start'), findsOneWidget);
       expect(
         tester.takeException(),
         isNull,
-        reason: 'branch step overflowed at 320 dp / 200% text '
+        reason:
+            'branch step overflowed at 320 dp / 200% text '
             '(${dark ? 'dark' : 'light'})',
       );
     }

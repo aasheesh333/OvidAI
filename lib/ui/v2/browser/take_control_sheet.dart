@@ -8,52 +8,29 @@ import '../../design/o_tokens.dart';
 
 enum V2TakeControlStatus { ready, loading, ended, error }
 
-/// State for the hand-over sheet. The countdown comes from the live session,
-/// so it is injected rather than ticked inside the widget.
+/// State for the hand-over sheet. The server does not put a timer on human
+/// control, so there is no countdown to show.
 @immutable
 class V2TakeControlData {
   const V2TakeControlData({
     this.status = V2TakeControlStatus.ready,
-    // No countdown by default: the server does not put a timer on human
-    // control, so showing "4:59" would be invented.
-    this.countdownLabel = '',
-    this.keyboard = false,
-    this.trackpad = false,
     this.errorMessage = 'Ovid could not pause the page. Try again.',
-    this.pausedItems = const <String>[
-      'Clicks and scrolling',
-      'Typing and form entries',
-      'Opening new pages',
-    ],
-    this.startWindowLabel = 'Ovid stays paused until you hand control back.',
   });
 
   final V2TakeControlStatus status;
-  final String countdownLabel;
-  final bool keyboard;
-  final bool trackpad;
   final String errorMessage;
-
-  /// What Ovid stops doing while the person is in control.
-  final List<String> pausedItems;
-
-  /// The short window to start before Ovid carries on by itself.
-  final String startWindowLabel;
 }
 
-/// Bottom sheet that hands the live page to the person for five minutes.
+/// Bottom sheet that hands the live page to the person.
 ///
-/// The widget includes its own scrim so it can be dropped straight into a
-/// [Stack] over the browser; [showModalBottomSheet] callers can pass
-/// `TakeControlSheet(scrim: false)` instead.
+/// One title, one line, two buttons. What pauses and when Ovid resumes are
+/// facts the person learns by using it, not paragraphs to read first.
 class TakeControlSheet extends StatelessWidget {
   const TakeControlSheet({
     super.key,
     required this.data,
     this.onStart,
     this.onStayWatching,
-    this.onToggleKeyboard,
-    this.onToggleTrackpad,
     this.onRetry,
     this.scrim = true,
   });
@@ -61,8 +38,6 @@ class TakeControlSheet extends StatelessWidget {
   final V2TakeControlData data;
   final VoidCallback? onStart;
   final VoidCallback? onStayWatching;
-  final VoidCallback? onToggleKeyboard;
-  final VoidCallback? onToggleTrackpad;
   final VoidCallback? onRetry;
   final bool scrim;
 
@@ -72,65 +47,48 @@ class TakeControlSheet extends StatelessWidget {
     final maxHeight = MediaQuery.sizeOf(context).height * 0.9;
     final panel = ConstrainedBox(
       constraints: BoxConstraints(maxWidth: 560, maxHeight: maxHeight),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (data.status != V2TakeControlStatus.ended &&
-              data.countdownLabel.isNotEmpty) ...[
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: OSpace.l),
-              child: _CountdownPill(label: data.countdownLabel),
+      child: Container(
+        width: double.infinity,
+        decoration: BoxDecoration(
+          color: c.surface,
+          borderRadius: const BorderRadius.vertical(
+            top: Radius.circular(ORadius.xl),
+          ),
+          border: Border.all(color: c.hairline),
+        ),
+        child: SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(
+              OSpace.xl,
+              OSpace.s,
+              OSpace.xl,
+              OSpace.l,
             ),
-            const SizedBox(height: OSpace.s),
-          ],
-          Flexible(
-            child: Container(
-              width: double.infinity,
-              decoration: BoxDecoration(
-                color: c.surface,
-                borderRadius: const BorderRadius.vertical(
-                  top: Radius.circular(ORadius.xl),
-                ),
-                border: Border.all(color: c.hairline),
-              ),
-              child: SafeArea(
-                top: false,
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(
-                    OSpace.xl,
-                    OSpace.s,
-                    OSpace.xl,
-                    OSpace.l,
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        width: 36,
-                        height: 4,
-                        decoration: BoxDecoration(
-                          color: c.hairlineStrong,
-                          borderRadius: BorderRadius.circular(2),
-                        ),
-                      ),
-                      const SizedBox(height: OSpace.l),
-                      Flexible(
-                        child: _PanelBody(
-                          data: data,
-                          onStart: onStart,
-                          onStayWatching: onStayWatching,
-                          onToggleKeyboard: onToggleKeyboard,
-                          onToggleTrackpad: onToggleTrackpad,
-                          onRetry: onRetry,
-                        ),
-                      ),
-                    ],
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 36,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: c.hairlineStrong,
+                    borderRadius: BorderRadius.circular(2),
                   ),
                 ),
-              ),
+                const SizedBox(height: OSpace.l),
+                Flexible(
+                  child: _PanelBody(
+                    data: data,
+                    onStart: onStart,
+                    onStayWatching: onStayWatching,
+                    onRetry: onRetry,
+                  ),
+                ),
+              ],
             ),
           ),
-        ],
+        ),
       ),
     );
 
@@ -144,8 +102,8 @@ class TakeControlSheet extends StatelessWidget {
       children: [
         Positioned.fill(
           // The barrier is a shortcut for "Stay watching"; the visible button
-          // carries the action and the label, so the barrier itself is kept out
-          // of the semantics tree instead of being announced unlabelled.
+          // carries the action and the label, so the barrier itself is kept
+          // out of the semantics tree instead of being announced unlabelled.
           child: ExcludeSemantics(
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
@@ -160,231 +118,70 @@ class TakeControlSheet extends StatelessWidget {
   }
 }
 
-class _CountdownPill extends StatelessWidget {
-  const _CountdownPill({required this.label});
-
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      constraints: const BoxConstraints(minHeight: 36),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: OSpace.xs),
-      decoration: BoxDecoration(
-        color: c.surfaceRaised,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-        border: Border.all(color: c.hairline),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.timer_outlined, size: 15, color: c.accent),
-          const SizedBox(width: OSpace.s),
-          Flexible(
-            child: Text(
-              label,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.center,
-              style: OType.caption.copyWith(
-                color: c.text,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _PanelBody extends StatelessWidget {
   const _PanelBody({
     required this.data,
     this.onStart,
     this.onStayWatching,
-    this.onToggleKeyboard,
-    this.onToggleTrackpad,
     this.onRetry,
   });
 
   final V2TakeControlData data;
   final VoidCallback? onStart;
   final VoidCallback? onStayWatching;
-  final VoidCallback? onToggleKeyboard;
-  final VoidCallback? onToggleTrackpad;
   final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
-    final c = OColors.of(context);
     return switch (data.status) {
       V2TakeControlStatus.loading => const SizedBox(
-        height: 220,
+        height: 160,
         child: OLoadingState(label: 'Pausing Ovid…'),
       ),
-      V2TakeControlStatus.ended => OEmptyState(
-        compact: true,
-        icon: Icons.timer_off_outlined,
+      V2TakeControlStatus.ended => _Message(
         title: 'Session ended',
-        message:
-            'Ovid is back to watching this tab. You can ask to take over '
-            'again at any time.',
+        body: 'Ovid is watching this tab again.',
         action: onStayWatching == null
             ? null
             : OButton(
                 label: 'Back to browser',
+                expand: true,
                 onPressed: onStayWatching,
               ),
       ),
-      V2TakeControlStatus.error => OErrorState(
+      V2TakeControlStatus.error => _Message(
         title: 'Could not pause',
-        message: data.errorMessage,
-        onRetry: onRetry,
+        body: data.errorMessage,
+        action: onRetry == null
+            ? null
+            : OButton(label: 'Try again', expand: true, onPressed: onRetry),
       ),
       V2TakeControlStatus.ready => SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Container(
-              width: 56,
-              height: 56,
-              decoration: BoxDecoration(
-                color: c.accentSoft,
-                borderRadius: BorderRadius.circular(ORadius.l),
-              ),
-              child: Icon(Icons.front_hand_outlined, size: 28, color: c.accent),
+            OSheetHeader(
+              title: 'Take control',
+              body: 'Tap, type and scroll. Ovid pauses until you hand back.',
+              onClose: onStayWatching,
+              padding: EdgeInsets.zero,
             ),
-            const SizedBox(height: OSpace.m),
-            Semantics(
-              container: true,
-              header: true,
-              child: Text(
-                'Take control',
-                textAlign: TextAlign.center,
-                style: OType.h1.copyWith(color: c.text),
-              ),
-            ),
-            const SizedBox(height: OSpace.s),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 340),
-              child: Text(
-                'You can tap, type, and scroll just like on your own '
-                'phone. Ovid will hold the spot right here.',
-                textAlign: TextAlign.center,
-                style: OType.bodySm.copyWith(color: c.textMuted),
-              ),
-            ),
-            if (data.pausedItems.isNotEmpty) ...[
-              const SizedBox(height: OSpace.m),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(OSpace.m),
-                decoration: BoxDecoration(
-                  color: c.surfaceAlt,
-                  borderRadius: BorderRadius.circular(ORadius.m),
-                  border: Border.all(color: c.hairline),
-                ),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Icon(
-                      Icons.pause_circle_outline_rounded,
-                      size: 16,
-                      color: c.textMuted,
-                    ),
-                    const SizedBox(width: OSpace.s),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'What pauses',
-                            style: OType.label.copyWith(color: c.textMuted),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            data.pausedItems.join(' · '),
-                            style: OType.caption.copyWith(color: c.text),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-            // Only tools this build can actually drive are offered. A chip
-            // with no handler would toggle nothing.
-            if (onToggleKeyboard != null || onToggleTrackpad != null) ...[
-              const SizedBox(height: OSpace.m),
-              Row(
-                children: [
-                  if (onToggleKeyboard != null)
-                    Expanded(
-                      child: _ToolChip(
-                        icon: Icons.keyboard_outlined,
-                        label: 'Show keyboard',
-                        selected: data.keyboard,
-                        onTap: onToggleKeyboard,
-                      ),
-                    ),
-                  if (onToggleKeyboard != null && onToggleTrackpad != null)
-                    const SizedBox(width: OSpace.m),
-                  if (onToggleTrackpad != null)
-                    Expanded(
-                      child: _ToolChip(
-                        icon: Icons.mouse_outlined,
-                        label: 'Trackpad',
-                        selected: data.trackpad,
-                        onTap: onToggleTrackpad,
-                      ),
-                    ),
-                ],
-              ),
-            ],
-            if (onStart != null) ...[
-              const SizedBox(height: OSpace.m),
+            const SizedBox(height: OSpace.l),
+            if (onStart != null)
               OButton(
                 label: 'Start controlling',
-                icon: Icons.front_hand_outlined,
                 expand: true,
                 onPressed: onStart,
               ),
-              if (data.startWindowLabel.isNotEmpty) ...[
-                const SizedBox(height: OSpace.s),
-                Text(
-                  data.startWindowLabel,
-                  textAlign: TextAlign.center,
-                  style: OType.caption.copyWith(color: c.warn),
-                ),
-              ],
-            ],
-            if (onStayWatching != null) ...[
+            if (onStart != null && onStayWatching != null)
               const SizedBox(height: OSpace.s),
+            if (onStayWatching != null)
               OButton(
                 label: 'Stay watching',
                 variant: OButtonVariant.secondary,
                 expand: true,
                 onPressed: onStayWatching,
               ),
-            ],
-            const SizedBox(height: OSpace.m),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(Icons.info_outline_rounded, size: 16, color: c.textFaint),
-                const SizedBox(width: OSpace.s),
-                Expanded(
-                  child: Text(
-                    'Ovid resumes when you hand control back, or when this '
-                    'viewer closes.',
-                    style: OType.caption.copyWith(color: c.textFaint),
-                  ),
-                ),
-              ],
-            ),
           ],
         ),
       ),
@@ -392,62 +189,39 @@ class _PanelBody extends StatelessWidget {
   }
 }
 
-class _ToolChip extends StatelessWidget {
-  const _ToolChip({
-    required this.icon,
-    required this.label,
-    required this.selected,
-    this.onTap,
-  });
+/// One title, one line, one action. Used by the non-ready states so they keep
+/// the same shape as the sheet without adding more copy.
+class _Message extends StatelessWidget {
+  const _Message({required this.title, required this.body, this.action});
 
-  final IconData icon;
-  final String label;
-  final bool selected;
-  final VoidCallback? onTap;
+  final String title;
+  final String body;
+  final Widget? action;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final enabled = onTap != null;
-    return Semantics(
-      container: true,
-      label: label,
-      button: true,
-      selected: selected,
-      enabled: enabled,
-      onTap: onTap,
-      child: ExcludeSemantics(
-        child: OPressable(
-          onTap: onTap,
-          child: AnimatedContainer(
-            duration: OMotion.fast,
-            curve: OMotion.standard,
-            height: OSpace.touch,
-            padding: const EdgeInsets.symmetric(horizontal: OSpace.m),
-            decoration: BoxDecoration(
-              color: selected ? c.accentSoft : c.surfaceAlt,
-              borderRadius: BorderRadius.circular(ORadius.m),
-              border: Border.all(color: selected ? c.accentFill : c.hairline),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(icon, size: 18, color: selected ? c.accent : c.textMuted),
-                const SizedBox(width: OSpace.s),
-                Flexible(
-                  child: Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.label.copyWith(
-                      color: selected ? c.accent : c.textMuted,
-                    ),
-                  ),
-                ),
-              ],
+    return SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Semantics(
+            container: true,
+            header: true,
+            child: Text(
+              title,
+              textAlign: TextAlign.center,
+              style: OType.h2.copyWith(color: c.text),
             ),
           ),
-        ),
+          const SizedBox(height: OSpace.s),
+          Text(
+            body,
+            textAlign: TextAlign.center,
+            style: OType.bodySm.copyWith(color: c.textMuted),
+          ),
+          if (action != null) ...[const SizedBox(height: OSpace.l), action!],
+        ],
       ),
     );
   }

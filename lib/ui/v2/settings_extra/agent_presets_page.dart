@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
-import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 
 // TODO(l10n): move the English copy in this screen to the ARB files.
@@ -56,12 +56,12 @@ class V2AgentPresetsPageData {
   final String errorMessage;
 }
 
-/// Agent presets: built-in approaches plus the user's own presets.
+/// Agent presets: one list. Tap a row to apply it; the row menu edits or
+/// deletes a custom preset; the header action creates one.
 ///
 /// The screen keeps a working copy of the list so a selection or a deletion
 /// is visible at once. The caller still persists it; a page pushed once from
-/// Settings has no listener on `AppState`, so rendering only the injected
-/// snapshot made every tap look ignored until the screen was reopened.
+/// Settings has no listener on `AppState`.
 class AgentPresetsPage extends StatefulWidget {
   const AgentPresetsPage({super.key, required this.data});
 
@@ -122,113 +122,49 @@ class _AgentPresetsPageState extends State<AgentPresetsPage> {
 
   @override
   Widget build(BuildContext context) {
-    return OScaffold(
-      appBar: const OAppBar(title: 'Agent presets'),
-      body: _body(context),
+    return OScreen(
+      title: 'Agent presets',
+      actions: [
+        if (data.onCreate != null)
+          OIconButton(
+            key: const ValueKey<String>('presets-new'),
+            icon: Icons.add_rounded,
+            semanticLabel: 'New preset',
+            onPressed: data.onCreate,
+          ),
+      ],
+      child: _body(context),
     );
   }
 
   Widget _body(BuildContext context) {
-    if (data.status == V2AgentPresetsStatus.loading) {
-      return const OFadeSlide(child: OSkeletonList(rows: 6));
-    }
-    if (data.status == V2AgentPresetsStatus.error) {
-      return OErrorState(message: data.errorMessage, onRetry: data.onRetry);
-    }
-    if (data.status == V2AgentPresetsStatus.empty || _presets.isEmpty) {
-      return OEmptyState(
-        icon: Icons.auto_awesome_outlined,
-        title: 'No presets yet',
-        message: 'Make a preset to change how Ovid works on your tasks.',
-        action: OButton(
-          label: 'New preset',
-          icon: Icons.add_rounded,
-          onPressed: data.onCreate,
-        ),
-      );
-    }
-
-    final builtIn = _presets.where((preset) => preset.builtIn).toList();
-    final custom = _presets.where((preset) => !preset.builtIn).toList();
-
-    return OFadeSlide(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(
-          OSpace.screen,
-          OSpace.l,
-          OSpace.screen,
-          OSpace.xxl,
-        ),
-        child: OStagger(
-          children: [
-            _explainer(context),
-            if (builtIn.isNotEmpty)
-              _presetSection(context, title: 'Built-in', presets: builtIn),
-            if (custom.isNotEmpty)
-              _presetSection(context, title: 'Your presets', presets: custom),
-            Padding(
-              padding: const EdgeInsets.only(top: OSpace.s),
-              child: OButton(
-                label: 'New preset',
-                icon: Icons.add_rounded,
-                expand: true,
-                onPressed: data.onCreate,
-              ),
-            ),
-          ],
-        ),
-      ),
+    final status = switch (data.status) {
+      V2AgentPresetsStatus.loading => OStatus.loading,
+      V2AgentPresetsStatus.error => OStatus.error,
+      V2AgentPresetsStatus.empty => OStatus.empty,
+      V2AgentPresetsStatus.ready => _presets.isEmpty
+          ? OStatus.empty
+          : OStatus.content,
+    };
+    return OStateView(
+      status: status,
+      errorMessage: data.errorMessage,
+      onRetry: data.onRetry,
+      emptyTitle: 'No presets yet',
+      emptyBody: 'Make a preset to change how Ovid works.',
+      emptyActionLabel: 'New preset',
+      onEmptyAction: data.onCreate,
+      skeletonRows: 6,
+      child: _list(context),
     );
   }
 
-  Widget _explainer(BuildContext context) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.xl),
-      child: OCard(
-        accent: true,
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(Icons.auto_awesome_rounded, size: 20, color: c.accent),
-            const SizedBox(width: OSpace.m),
-            Expanded(
-              child: Text(
-                'Presets change how Ovid approaches a task.',
-                style: OType.body.copyWith(color: c.text),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _presetSection(
-    BuildContext context, {
-    required String title,
-    required List<V2AgentPreset> presets,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          OSectionHeader(
-            label: title,
-            padding: const EdgeInsets.only(bottom: OSpace.s),
-          ),
-          OStagger(
-            children: [
-              for (final preset in presets)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: OSpace.m),
-                  child: _presetCard(context, preset),
-                ),
-            ],
-          ),
-        ],
-      ),
+  Widget _list(BuildContext context) {
+    return ListView.separated(
+      padding: const EdgeInsets.only(top: OSpace.l, bottom: OSpace.xxl),
+      itemCount: _presets.length,
+      separatorBuilder: (_, _) => const SizedBox(height: OSpace.s),
+      itemBuilder: (context, index) => _presetCard(context, _presets[index]),
     );
   }
 
@@ -244,108 +180,42 @@ class _AgentPresetsPageState extends State<AgentPresetsPage> {
           '${preset.name} preset${selected ? ', selected' : ''}. '
           '${preset.description}',
       child: Padding(
-        padding: const EdgeInsets.all(OSpace.l),
+        padding: const EdgeInsets.symmetric(
+          horizontal: OSpace.l,
+          vertical: OSpace.m,
+        ),
         child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                color: c.accentSoft,
-                borderRadius: BorderRadius.circular(ORadius.m),
-              ),
-              child: Icon(preset.icon, size: 21, color: c.accent),
-            ),
-            const SizedBox(width: OSpace.m),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    children: [
-                      Expanded(
-                        child: Wrap(
-                          spacing: OSpace.s,
-                          runSpacing: OSpace.xs,
-                          crossAxisAlignment: WrapCrossAlignment.center,
-                          children: [
-                            Text(
-                              preset.name,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: OType.h3.copyWith(color: c.text),
-                            ),
-                            if (preset.builtIn)
-                              _pill(
-                                context,
-                                label: 'Built-in',
-                                foreground: c.textMuted,
-                                background: c.surfaceAlt,
-                              ),
-                          ],
-                        ),
-                      ),
-                      if (selected) ...[
-                        const SizedBox(width: OSpace.s),
-                        Icon(
-                          Icons.check_circle_rounded,
-                          size: 18,
-                          color: c.accentFill,
-                        ),
-                      ],
-                    ],
+                  Text(
+                    preset.name,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: OType.bodyStrong.copyWith(color: c.text),
                   ),
-                  const SizedBox(height: OSpace.xs),
+                  const SizedBox(height: OSpace.xxs),
                   Text(
                     preset.description,
-                    style: OType.bodySm.copyWith(color: c.textMuted),
-                  ),
-                  const SizedBox(height: OSpace.s),
-                  Row(
-                    children: [
-                      Icon(Icons.memory_rounded, size: 14, color: c.textFaint),
-                      const SizedBox(width: OSpace.xs),
-                      Flexible(
-                        child: Text(
-                          preset.modelLabel,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: OType.caption.copyWith(color: c.textFaint),
-                        ),
-                      ),
-                    ],
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: OType.caption.copyWith(color: c.textMuted),
                   ),
                 ],
               ),
             ),
+            if (selected) ...[
+              const SizedBox(width: OSpace.s),
+              Icon(
+                Icons.check_circle_rounded,
+                size: 20,
+                color: c.accentFill,
+              ),
+            ],
             if (!preset.builtIn) _presetMenu(context, preset),
           ],
-        ),
-      ),
-    );
-  }
-
-  Widget _pill(
-    BuildContext context, {
-    required String label,
-    required Color foreground,
-    required Color background,
-  }) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: OSpace.xs),
-      decoration: BoxDecoration(
-        color: background,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-      ),
-      child: Text(
-        label,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: OType.caption.copyWith(
-          color: foreground,
-          fontWeight: FontWeight.w600,
         ),
       ),
     );
@@ -411,8 +281,7 @@ class _AgentPresetsPageState extends State<AgentPresetsPage> {
             style: OType.h2.copyWith(color: dialogColors.text),
           ),
           content: Text(
-            'This preset will be removed from your list. Chats that used it '
-            'keep their history.',
+            'Chats that used it keep their history.',
             style: OType.bodySm.copyWith(color: dialogColors.textMuted),
           ),
           actions: [

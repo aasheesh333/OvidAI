@@ -68,7 +68,7 @@ class V2StateTileCopy {
   static const offline = V2StateTileCopy(
     icon: Icons.cloud_off_rounded,
     title: "You're offline",
-    message: 'No internet connection. Messages will send when you reconnect.',
+    message: 'Messages will send when you reconnect.',
     actionLabel: 'Retry',
     actionVariant: OButtonVariant.secondary,
   );
@@ -76,9 +76,7 @@ class V2StateTileCopy {
   static const planLimited = V2StateTileCopy(
     icon: Icons.hourglass_top_rounded,
     title: 'Plan limit reached',
-    message:
-        'You have reached the limit for your plan. Upgrade to keep going now, '
-        'or wait for your allowance to reset.',
+    message: 'Your allowance is spent. Upgrade now or wait for the reset.',
     actionLabel: 'See plans',
     tone: V2StateTileTone.warn,
   );
@@ -86,9 +84,7 @@ class V2StateTileCopy {
   static const storageFull = V2StateTileCopy(
     icon: Icons.storage_rounded,
     title: 'Storage full',
-    message:
-        'Your storage is full, so new files cannot be saved. Delete old chats '
-        'or clear previews to free space, or upgrade for more storage.',
+    message: 'New files cannot be saved. Delete old chats or upgrade.',
     actionLabel: 'Manage storage',
     tone: V2StateTileTone.warn,
   );
@@ -96,9 +92,7 @@ class V2StateTileCopy {
   static const abuseBlocked = V2StateTileCopy(
     icon: Icons.gpp_bad_rounded,
     title: 'Account suspended',
-    message:
-        'This account is suspended for abuse. Contact support to appeal. '
-        'Your files are kept while support reviews your account.',
+    message: 'Contact support to appeal. Your files are kept during review.',
     actionLabel: 'Get help',
     actionVariant: OButtonVariant.secondary,
     tone: V2StateTileTone.danger,
@@ -108,9 +102,8 @@ class V2StateTileCopy {
     icon: Icons.delete_sweep_rounded,
     title: 'Account deletion pending',
     message:
-        'Your account is kept for a 24-hour grace period. Sign in again and '
-        'choose Restore to cancel the deletion; after that, your chats, files '
-        'and memory are deleted.',
+        'Sign in and choose Restore within 24 hours. After that, your data is '
+        'deleted.',
     actionLabel: 'Restore',
     tone: V2StateTileTone.warn,
   );
@@ -118,8 +111,7 @@ class V2StateTileCopy {
   static const serverError = V2StateTileCopy(
     icon: Icons.error_outline_rounded,
     title: 'Something went wrong',
-    message:
-        'Ovid could not finish that request. Your chats and changes are safe.',
+    message: 'Your chats and changes are safe.',
     actionLabel: 'Try again',
     tone: V2StateTileTone.danger,
   );
@@ -273,14 +265,11 @@ class V2StateTile extends StatelessWidget {
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                ExcludeSemantics(
-                  child: Container(
-                    width: 44,
-                    height: 44,
-                    decoration: BoxDecoration(
-                      color: tone.withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(ORadius.m),
-                    ),
+                // A bare tone icon, not a tinted medallion: the card is
+                // already the surface.
+                Padding(
+                  padding: const EdgeInsets.only(top: OSpace.xxs),
+                  child: ExcludeSemantics(
                     child: Icon(resolved.icon, size: 22, color: tone),
                   ),
                 ),
@@ -349,35 +338,10 @@ class _StateDetail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: OSpace.m,
-        vertical: OSpace.xs,
-      ),
-      decoration: BoxDecoration(
-        color: tone.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(ORadius.pill),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 6,
-            height: 6,
-            decoration: BoxDecoration(color: tone, shape: BoxShape.circle),
-          ),
-          const SizedBox(width: 6),
-          Flexible(
-            child: Text(
-              label,
-              style: OType.caption.copyWith(
-                color: tone,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ],
-      ),
+    // Measured data, not a badge: no pill, no dot, just the fact.
+    return Text(
+      label,
+      style: OType.caption.copyWith(color: tone, fontWeight: FontWeight.w600),
     );
   }
 }

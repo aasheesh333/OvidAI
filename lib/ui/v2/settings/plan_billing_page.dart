@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'plan_compare_table.dart';
 
@@ -273,7 +274,8 @@ class V2Plan {
   String periodSuffix(V2BillingPeriod period) =>
       period == V2BillingPeriod.monthly ? '/ month' : '/ year';
 
-  String get actionLabel => ctaLabel ??
+  String get actionLabel =>
+      ctaLabel ??
       (canonicalId == 'free'
           // A paid account downgrades/cancels in Play, it never "selects Free".
           ? 'Manage in Google Play'
@@ -403,46 +405,10 @@ class V2PlanBillingData {
   final String errorMessage;
 }
 
-class PlanBillingPage extends StatefulWidget {
+class PlanBillingPage extends StatelessWidget {
   const PlanBillingPage({super.key, required this.data});
 
   final V2PlanBillingData data;
-
-  @override
-  State<PlanBillingPage> createState() => _PlanBillingPageState();
-}
-
-class _PlanBillingPageState extends State<PlanBillingPage> {
-  final ScrollController _scroll = ScrollController();
-  final GlobalKey _plansKey = GlobalKey();
-
-  V2PlanBillingData get data => widget.data;
-
-  @override
-  void dispose() {
-    _scroll.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final Widget body;
-    switch (data.status) {
-      case V2PlanBillingStatus.loading:
-        body = const OSkeletonList(rows: 5);
-      case V2PlanBillingStatus.error:
-        body = OErrorState(message: data.errorMessage, onRetry: data.onRetry);
-      case V2PlanBillingStatus.empty:
-        body = _emptyState(context);
-      case V2PlanBillingStatus.ready:
-        body = data.plans.isEmpty ? _emptyState(context) : _content(context);
-    }
-
-    return OScaffold(
-      appBar: const OAppBar(title: 'Plan & billing'),
-      body: OFadeSlide(child: body),
-    );
-  }
 
   /// The current plan in canonical form (`3x` → `go`), so the badge, the
   /// comparison column and the plan card all agree.
@@ -450,8 +416,7 @@ class _PlanBillingPageState extends State<PlanBillingPage> {
       V2PlanLimits.forId(data.currentPlanId)?.id ?? data.currentPlanId;
 
   bool _isCurrent(V2Plan plan) =>
-      plan.canonicalId == _currentCanonicalId ||
-      plan.id == data.currentPlanId;
+      plan.canonicalId == _currentCanonicalId || plan.id == data.currentPlanId;
 
   /// The page's plans and the selected currency/period are mapped onto the
   /// shared comparison contract, so the table always matches the plan cards.
@@ -482,68 +447,61 @@ class _PlanBillingPageState extends State<PlanBillingPage> {
     );
   }
 
-  Widget _emptyState(BuildContext context) {
+  @override
+  Widget build(BuildContext context) {
+    final Widget body;
+    switch (data.status) {
+      case V2PlanBillingStatus.loading:
+        body = const OSkeletonList(rows: 5);
+      case V2PlanBillingStatus.error:
+        body = OErrorState(message: data.errorMessage, onRetry: data.onRetry);
+      case V2PlanBillingStatus.empty:
+        body = _emptyState();
+      case V2PlanBillingStatus.ready:
+        body = data.plans.isEmpty ? _emptyState() : _content(context);
+    }
+
+    return OScreen(
+      title: 'Plan & billing',
+      actions: [
+        if (data.onRestorePurchases != null)
+          OIconButton(
+            key: const ValueKey<String>('restore-purchases'),
+            icon: Icons.restore_rounded,
+            semanticLabel: 'Restore purchases',
+            tooltip: 'Restore purchases',
+            onPressed: data.onRestorePurchases,
+          ),
+      ],
+      child: body,
+    );
+  }
+
+  Widget _emptyState() {
     return OEmptyState(
       icon: Icons.sell_outlined,
       title: 'No plans to show',
       message: 'Check your connection and try again.',
-      action: OButton(
-        label: 'Check plans again',
-        icon: Icons.refresh_rounded,
-        onPressed: data.onRetry,
-      ),
-    );
-  }
-
-  /// Scrolls the payment-history "See plans" action back up to the plan list.
-  void _scrollToPlans() {
-    final target = _plansKey.currentContext;
-    if (target == null) return;
-    Scrollable.ensureVisible(
-      target,
-      duration: OMotion.medium,
-      curve: OMotion.standard,
-      alignment: 0.05,
+      action: data.onRetry == null
+          ? null
+          : OButton(
+              label: 'Check plans again',
+              icon: Icons.refresh_rounded,
+              onPressed: data.onRetry,
+            ),
     );
   }
 
   Widget _content(BuildContext context) {
     final c = OColors.of(context);
     return SingleChildScrollView(
-      controller: _scroll,
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.screen,
-        OSpace.l,
-        OSpace.screen,
-        OSpace.xxl,
-      ),
+      padding: const EdgeInsets.only(top: OSpace.l, bottom: OSpace.xxl),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
-            children: [
-              Container(
-                width: 8,
-                height: 8,
-                decoration: BoxDecoration(
-                  color: c.success,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const SizedBox(width: OSpace.s),
-              Expanded(
-                child: Text(
-                  'ACCOUNT TIER',
-                  style: OType.overline.copyWith(color: c.textMuted),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: OSpace.m),
           Wrap(
             spacing: OSpace.m,
             runSpacing: OSpace.s,
-            crossAxisAlignment: WrapCrossAlignment.center,
             children: [
               _BillingPeriodToggle(
                 value: data.period,
@@ -555,119 +513,62 @@ class _PlanBillingPageState extends State<PlanBillingPage> {
               ),
             ],
           ),
-          const SizedBox(height: OSpace.xl),
-          OSectionHeader(
-            key: _plansKey,
-            label: 'Plans',
-            padding: EdgeInsets.zero,
-            trailing: Align(
-              alignment: Alignment.centerRight,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.bolt_rounded, size: 15, color: c.accent),
-                  const SizedBox(width: OSpace.xs),
-                  Flexible(
-                    child: Text(
-                      'Instant activation',
-                      textAlign: TextAlign.end,
-                      style: OType.caption.copyWith(color: c.accent),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: OSpace.m),
-          OStagger(
-            children: [
-              for (final plan in data.plans)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: OSpace.m),
-                  child: _PlanCard(
-                    plan: plan,
-                    currency: data.currency,
-                    period: data.period,
-                    current: _isCurrent(plan),
-                    onPurchase: data.onPurchase,
-                  ),
-                ),
-            ],
-          ),
-          const SizedBox(height: OSpace.xl),
-          OSectionHeader(label: 'Plan limits', padding: EdgeInsets.zero),
-          const SizedBox(height: OSpace.m),
-          PlanCompareTable(data: _compareData()),
-          const SizedBox(height: OSpace.m),
-          const _AutoModeNote(),
           const SizedBox(height: OSpace.l),
-          Center(
-            child: OButton(
-              label: 'Restore purchases',
-              icon: Icons.restore_rounded,
-              variant: OButtonVariant.ghost,
-              onPressed: data.onRestorePurchases,
-            ),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final twoUp = OResponsive.of(context).isTablet;
+              final gap = OSpace.m;
+              final cardWidth = twoUp
+                  ? (constraints.maxWidth - gap) / 2
+                  : constraints.maxWidth;
+              return Wrap(
+                spacing: gap,
+                runSpacing: gap,
+                children: [
+                  for (final plan in data.plans)
+                    SizedBox(
+                      width: cardWidth,
+                      child: _PlanCard(
+                        plan: plan,
+                        currency: data.currency,
+                        period: data.period,
+                        current: _isCurrent(plan),
+                        onPurchase: data.onPurchase,
+                      ),
+                    ),
+                ],
+              );
+            },
           ),
-          const SizedBox(height: OSpace.xl),
-          OSectionHeader(
-            label: 'Payment history',
-            padding: EdgeInsets.zero,
-            trailing: data.history.isEmpty
-                ? null
-                : Text(
-                    data.history.length == 1
-                        ? '1 payment'
-                        : '${data.history.length} payments',
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-          ),
-          const SizedBox(height: OSpace.m),
+          const SizedBox(height: OSpace.l),
+          OSectionHeader(label: 'Plan limits', padding: EdgeInsets.zero),
+          const SizedBox(height: OSpace.s),
+          PlanCompareTable(data: _compareData()),
+          const SizedBox(height: OSpace.l),
+          OSectionHeader(label: 'Payment history', padding: EdgeInsets.zero),
           if (data.history.isEmpty)
-            OCard(
-              child: OEmptyState(
-                compact: true,
-                icon: Icons.receipt_long_outlined,
-                title: 'No payments yet',
-                message: 'Your receipts will appear here after you upgrade.',
-                action: OButton(
-                  label: 'See plans',
-                  icon: Icons.arrow_upward_rounded,
-                  onPressed: _scrollToPlans,
-                ),
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: OSpace.m),
+              child: Text(
+                'No payments yet',
+                style: OType.bodySm.copyWith(color: c.textMuted),
               ),
             )
           else
             OCard(
               padding: EdgeInsets.zero,
-              child: OStagger(
+              child: Column(
                 children: [
-                  for (var index = 0; index < data.history.length; index++)
-                    Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        _HistoryRow(
-                          entry: data.history[index],
-                          onTap: data.onHistoryTap,
-                        ),
-                        if (index != data.history.length - 1)
-                          Divider(
-                            height: 1,
-                            thickness: 1,
-                            indent: 64,
-                            color: c.hairline,
-                          ),
-                      ],
+                  for (var index = 0; index < data.history.length; index++) ...[
+                    if (index > 0) Divider(height: 1, color: c.hairline),
+                    _HistoryRow(
+                      entry: data.history[index],
+                      onTap: data.onHistoryTap,
                     ),
+                  ],
                 ],
               ),
             ),
-          const SizedBox(height: OSpace.l),
-          Text(
-            data.legalNote,
-            textAlign: TextAlign.center,
-            style: OType.caption.copyWith(color: c.textMuted),
-          ),
         ],
       ),
     );
@@ -862,6 +763,8 @@ class _PeriodOption extends StatelessWidget {
   }
 }
 
+/// One plan: name, price, a single line, one CTA. Every limit lives in the
+/// comparison table below, so the card never repeats it.
 class _PlanCard extends StatelessWidget {
   const _PlanCard({
     required this.plan,
@@ -887,74 +790,50 @@ class _PlanCard extends StatelessWidget {
       padding: const EdgeInsets.all(OSpace.l),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          if (plan.popular || current) ...[
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Wrap(
-                spacing: OSpace.s,
-                runSpacing: OSpace.xs,
-                children: [
-                  if (current)
-                    OPill(
-                      key: ValueKey<String>('plan-current-${plan.id}'),
-                      label: 'Current plan',
-                      tone: OPillTone.success,
-                      dot: true,
-                    ),
-                  if (plan.popular)
-                    const OPill(label: 'Most popular', tone: OPillTone.accent),
-                ],
-              ),
-            ),
-            const SizedBox(height: OSpace.m),
-          ],
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(plan.name, style: OType.h2.copyWith(color: c.text)),
-                    if (plan.tagline.isNotEmpty) ...[
-                      const SizedBox(height: 2),
-                      Text(
-                        plan.tagline,
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ],
-                  ],
+                child: Text(
+                  plan.name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.h2.copyWith(color: c.text),
                 ),
               ),
-              const SizedBox(width: OSpace.m),
+              const SizedBox(width: OSpace.s),
               Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
+                mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
                     plan.priceLabel(currency, period: period),
+                    maxLines: 1,
                     style: OType.h2.copyWith(
                       color: plan.popular ? c.accent : c.text,
                     ),
                   ),
                   Text(
                     plan.periodSuffix(period),
+                    maxLines: 1,
                     style: OType.caption.copyWith(color: c.textMuted),
                   ),
                 ],
               ),
             ],
           ),
-          const SizedBox(height: OSpace.m),
-          _PlanMeta(plan: plan),
-          if (plan.features.isNotEmpty) const SizedBox(height: OSpace.s),
-          for (final feature in plan.features)
-            _FeatureLine(
-              label: feature,
-              icon: plan.popular ? Icons.verified_rounded : Icons.check_rounded,
-              color: plan.popular ? c.accent : c.success,
+          if (plan.tagline.isNotEmpty) ...[
+            const SizedBox(height: OSpace.xs),
+            Text(
+              plan.tagline,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: OType.caption.copyWith(color: c.textMuted),
             ),
-          const SizedBox(height: OSpace.s),
+          ],
+          const SizedBox(height: OSpace.l),
           OButton(
             key: ValueKey<String>('plan-cta-${plan.id}'),
             label: current ? 'Current plan' : plan.actionLabel,
@@ -966,101 +845,8 @@ class _PlanCard extends StatelessWidget {
             // the honest state: tapping it would only re-purchase a plan the
             // account already owns.
             onPressed: canBuy
-                ? () => onPurchase!(
-                    V2PlanPurchase(plan: plan, period: period),
-                  )
+                ? () => onPurchase!(V2PlanPurchase(plan: plan, period: period))
                 : null,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _PlanMeta extends StatelessWidget {
-  const _PlanMeta({required this.plan});
-
-  final V2Plan plan;
-
-  @override
-  Widget build(BuildContext context) {
-    final limits = plan.planLimits;
-    final rows = <Widget>[
-      if (limits.storageGb > 0)
-        _PlanMetaRow(
-          icon: Icons.cloud_outlined,
-          label: 'Storage',
-          value: limits.storageLabel,
-        ),
-      if (limits.filesPerWindow > 0)
-        _PlanMetaRow(
-          icon: Icons.upload_file_outlined,
-          label: 'Files',
-          value: limits.filesLabel,
-        ),
-      if (limits.filesPerProject > 0)
-        _PlanMetaRow(
-          icon: Icons.folder_copy_outlined,
-          label: 'Per project',
-          value: limits.filesPerProjectLabel,
-        ),
-      _PlanMetaRow(
-        icon: Icons.auto_awesome_outlined,
-        label: 'Models',
-        value: limits.modelAccessLabel,
-      ),
-      _PlanMetaRow(
-        icon: Icons.bolt_outlined,
-        label: 'Auto allowance',
-        value: limits.autoMultiplierLabel,
-      ),
-    ];
-    if (rows.isEmpty) return const SizedBox.shrink();
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: rows,
-    );
-  }
-}
-
-class _PlanMetaRow extends StatelessWidget {
-  const _PlanMetaRow({
-    required this.icon,
-    required this.label,
-    required this.value,
-  });
-
-  final IconData icon;
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.xs),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, size: 15, color: c.textFaint),
-          const SizedBox(width: OSpace.s),
-          Expanded(
-            flex: 2,
-            child: Text(
-              label,
-              style: OType.caption.copyWith(color: c.textMuted),
-            ),
-          ),
-          const SizedBox(width: OSpace.s),
-          Expanded(
-            flex: 3,
-            child: Text(
-              value,
-              style: OType.caption.copyWith(
-                color: c.text,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
           ),
         ],
       ),
@@ -1073,54 +859,6 @@ int _fileWindowHours(String label) {
   if (label.trim().toLowerCase() == 'day') return 24;
   final match = RegExp(r'([0-9]+)').firstMatch(label);
   return match == null ? 24 : int.tryParse(match.group(1)!) ?? 24;
-}
-
-class _AutoModeNote extends StatelessWidget {
-  const _AutoModeNote();
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return OCard(
-      padding: const EdgeInsets.all(OSpace.l),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 28,
-            height: 28,
-            decoration: BoxDecoration(
-              color: c.accentSoft,
-              shape: BoxShape.circle,
-            ),
-            child: Icon(Icons.lock_outline_rounded, size: 16, color: c.accent),
-          ),
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Auto mode only',
-                  style: OType.bodySm.copyWith(
-                    color: c.text,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  'Free and Go use Auto only. Manual models unlock with Plus '
-                  'or Pro, and Ovid rejects manual model requests on Free and '
-                  'Go.',
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 class _HistoryRow extends StatelessWidget {
@@ -1137,55 +875,14 @@ class _HistoryRow extends StatelessWidget {
       title: entry.title,
       subtitle: entry.dateLabel,
       showChevron: false,
-      trailing: Column(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Text(
-            entry.amountLabel,
-            style: OType.bodySm.copyWith(
-              color: c.text,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 2),
-          OPill(label: entry.statusLabel, tone: OPillTone.success, dot: true),
-        ],
+      trailing: Text(
+        entry.amountLabel,
+        style: OType.bodySm.copyWith(
+          color: c.text,
+          fontWeight: FontWeight.w600,
+        ),
       ),
       onTap: onTap == null ? null : () => onTap!(entry),
-    );
-  }
-}
-
-class _FeatureLine extends StatelessWidget {
-  const _FeatureLine({
-    required this.label,
-    required this.icon,
-    required this.color,
-  });
-
-  final String label;
-  final IconData icon;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.s),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, size: 18, color: color),
-          const SizedBox(width: OSpace.s),
-          Expanded(
-            child: Text(
-              label,
-              style: OType.bodySm.copyWith(color: c.textMuted),
-            ),
-          ),
-        ],
-      ),
     );
   }
 }

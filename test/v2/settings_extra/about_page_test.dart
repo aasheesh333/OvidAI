@@ -3,10 +3,10 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/app_info.dart';
 import 'package:ovid_ai/core/legal_links.dart';
+import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/settings_extra/about_page.dart';
 import 'package:ovid_ai/ui/v2/settings_extra/legal_page.dart';
-import 'package:ovid_ai/ui/v2/states/state_tiles.dart';
 
 const _versioned = V2AboutPageData(
   version: '2.4.1',
@@ -79,25 +79,30 @@ Future<List<FlutterErrorDetails>> _pumpCatching(
 }
 
 void main() {
-  testWidgets('renders the app mark and rows in light', (tester) async {
+  testWidgets('renders the build and legal links in light', (tester) async {
     await _pump(tester, _versioned);
 
     expect(find.text('About'), findsOneWidget);
-    expect(find.text('Ovid Si'), findsOneWidget);
-    expect(find.text('Chat. Code. Create.'), findsOneWidget);
-    expect(find.text('v2.4.1 (418)'), findsOneWidget);
-    expect(find.text('Privacy policy'), findsOneWidget);
-    expect(find.text('Operational'), findsOneWidget);
+    expect(find.text('Version'), findsOneWidget);
     expect(find.text('2.4.1 · build 418'), findsOneWidget);
-    expect(find.text('Made for Android'), findsOneWidget);
+    expect(find.text('Privacy policy'), findsOneWidget);
+    expect(find.text('Terms of service'), findsOneWidget);
+    expect(find.text('Open-source licences'), findsOneWidget);
+
+    // No hero, tagline, footer or duplicate account action.
+    expect(find.text('Ovid Si'), findsNothing);
+    expect(find.text('Chat. Code. Create.'), findsNothing);
+    expect(find.text('Made for Android'), findsNothing);
+    expect(find.text('Delete account'), findsNothing);
+    expect(find.text('Contact support'), findsNothing);
   });
 
   testWidgets('renders in dark', (tester) async {
     await _pump(tester, _versioned, dark: true);
 
-    expect(find.text('Ovid Si'), findsOneWidget);
-    expect(find.text('System status'), findsOneWidget);
-    expect(find.text('Operational'), findsOneWidget);
+    expect(find.text('Version'), findsOneWidget);
+    expect(find.text('Privacy policy'), findsOneWidget);
+    expect(find.text('Open-source licences'), findsOneWidget);
   });
 
   testWidgets('default data shows the real build info, not a demo string', (
@@ -107,17 +112,14 @@ void main() {
 
     // Version and build come from core/app_info.dart (dart-define or the
     // pubspec), so the shipped build is always shown.
-    expect(find.text('v$kAppVersion ($kAppBuildNumber)'), findsOneWidget);
     expect(
       find.text('$kAppVersion · build $kAppBuildNumber'),
       findsOneWidget,
     );
     expect(find.textContaining('v2.4.1'), findsNothing);
-    expect(find.text('Operational'), findsNothing);
     // Unknown status with no checker is not a control at all.
     expect(find.text('System status'), findsNothing);
-    expect(find.text('Chat. Code. Create.'), findsOneWidget);
-    expect(find.text('Privacy policy'), findsOneWidget);
+    expect(find.text('Operational'), findsNothing);
   });
 
   testWidgets('opens a legal row', (tester) async {
@@ -128,38 +130,6 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(privacyTaps, 1);
-  });
-
-  testWidgets('delete account opens the deletion flow', (tester) async {
-    var deletes = 0;
-    await _pump(tester, V2AboutPageData(onDeleteAccount: () => deletes++));
-
-    expect(find.text('ACCOUNT'), findsOneWidget);
-    expect(find.text('Delete account'), findsOneWidget);
-    expect(
-      find.textContaining('Scheduled after a 24-hour grace period'),
-      findsOneWidget,
-    );
-
-    final row = find.byKey(const ValueKey<String>('about-delete-account'));
-    await tester.ensureVisible(row);
-    await tester.tap(row);
-    await tester.pumpAndSettle();
-
-    expect(deletes, 1);
-  });
-
-  testWidgets('delete account is announced as disabled when unwired', (
-    tester,
-  ) async {
-    final handle = tester.ensureSemantics();
-    await _pump(tester, const V2AboutPageData());
-
-    final node = tester.getSemantics(find.text('Delete account'));
-    expect(node, isSemantics(hasEnabledState: true, isEnabled: false));
-    expect(node.label, contains('Delete account'));
-    expect(node.label, contains('24-hour grace period'));
-    handle.dispose();
   });
 
   testWidgets('legal rows open a real destination without a callback', (
@@ -236,19 +206,26 @@ void main() {
     expect(copies, 1);
   });
 
-  testWidgets('shows the status while it is being checked', (tester) async {
+  testWidgets('shows a status row only when it is real', (tester) async {
+    var opened = 0;
     await _pump(
       tester,
-      const V2AboutPageData(systemStatus: V2SystemStatus.checking),
+      V2AboutPageData(
+        systemStatus: V2SystemStatus.operational,
+        onSystemStatus: () => opened++,
+      ),
     );
 
-    expect(find.text('Checking…'), findsOneWidget);
-    expect(find.text('Checking the latest status.'), findsOneWidget);
+    expect(find.text('System status'), findsOneWidget);
+    expect(find.text('Operational'), findsOneWidget);
+
+    await tester.tap(find.text('System status'));
+    await tester.pumpAndSettle();
+
+    expect(opened, 1);
   });
 
-  testWidgets('a failed status check explains itself and retries', (
-    tester,
-  ) async {
+  testWidgets('a failed status check retries', (tester) async {
     var retries = 0;
     var opened = 0;
     await _pump(
@@ -260,11 +237,8 @@ void main() {
       ),
     );
 
+    expect(find.text('System status'), findsOneWidget);
     expect(find.text('Could not check'), findsOneWidget);
-    expect(
-      find.text('We could not reach the status page. Tap to try again.'),
-      findsOneWidget,
-    );
 
     await tester.tap(find.text('System status'));
     await tester.pumpAndSettle();
@@ -273,40 +247,28 @@ void main() {
     expect(opened, 0);
   });
 
-  testWidgets('a failed status check falls back to the status page', (
-    tester,
-  ) async {
-    var opened = 0;
+  testWidgets('a status row with no handler is not shown', (tester) async {
+    await _pump(tester, const V2AboutPageData());
+    expect(find.text('System status'), findsNothing);
+
     await _pump(
       tester,
-      V2AboutPageData(
-        systemStatus: V2SystemStatus.error,
-        onSystemStatus: () => opened++,
-      ),
+      const V2AboutPageData(systemStatus: V2SystemStatus.degraded),
     );
-
-    await tester.tap(find.text('System status'));
-    await tester.pumpAndSettle();
-
-    expect(opened, 1);
+    expect(find.text('System status'), findsNothing);
   });
 
-  testWidgets('opens the status page when the status is healthy', (
-    tester,
-  ) async {
-    var opened = 0;
+  testWidgets('the minimal About has no support row', (tester) async {
+    var contacts = 0;
     await _pump(
       tester,
-      V2AboutPageData(
-        systemStatus: V2SystemStatus.operational,
-        onSystemStatus: () => opened++,
-      ),
+      V2AboutPageData(onContactSupport: () => contacts++),
     );
 
-    await tester.tap(find.text('System status'));
-    await tester.pumpAndSettle();
-
-    expect(opened, 1);
+    // Support lives in Account → Team & support. About keeps the build and
+    // the three legal documents only.
+    expect(find.text('Contact support'), findsNothing);
+    expect(contacts, 0);
   });
 
   for (final dark in [false, true]) {
@@ -318,7 +280,6 @@ void main() {
           V2AboutPageData(
             version: '2.4.1',
             build: '418',
-            tagline: 'Chat. Code. Create. Ask anything, build anything.',
             systemStatus: V2SystemStatus.operational,
             onCopyVersion: () {},
             onPrivacyPolicy: () {},
@@ -327,55 +288,52 @@ void main() {
             onContactSupport: () {},
             onSystemStatus: () {},
             onRetrySystemStatus: () {},
-            onDeleteAccount: () {},
           ),
           dark: dark,
         );
 
         expect(errors, isEmpty, reason: errors.join('\n'));
-        expect(find.text('Privacy policy'), findsOneWidget);
-        expect(find.text('Delete account'), findsOneWidget);
-        // No room for the pill at this width and scale: the status folds into
-        // the subtitle instead of squeezing the row title.
-        expect(
-          find.textContaining('Operational · Check if Ovid'),
-          findsOneWidget,
-        );
+        expect(find.text('Version'), findsOneWidget);
+        await tester.scrollUntilVisible(find.text('Open-source licences'), 200);
+        expect(find.text('Open-source licences'), findsOneWidget);
       },
     );
   }
 
-  testWidgets('no overflow at 320 dp and 200 % text with a degraded status', (
-    tester,
-  ) async {
-    final errors = await _pumpCatching(
-      tester,
-      const V2AboutPageData(
-        version: '2.4.1',
-        build: '418',
-        systemStatus: V2SystemStatus.degraded,
-      ),
-      dark: false,
-    );
+  for (final width in <double>[600, 900]) {
+    testWidgets('content is centred and capped at $width dp', (tester) async {
+      await _pump(tester, _versioned, size: Size(width, 1600));
 
-    expect(errors, isEmpty, reason: errors.join('\n'));
-    expect(find.text('System status'), findsOneWidget);
-    // The status pill must not squeeze the row title away at 200 % text.
-    expect(tester.getSize(find.text('System status')).width, greaterThan(80));
-  });
+      final card = tester.getRect(find.byType(OCard).first);
+      final limit = width >= 900 ? 720.0 : 640.0;
+
+      expect(card.width, lessThanOrEqualTo(limit));
+      expect(card.width, lessThan(width), reason: 'rows must not stretch');
+      expect(
+        card.center.dx,
+        moreOrLessEquals(width / 2, epsilon: 1),
+        reason: 'content must be centred, not left aligned',
+      );
+    });
+  }
 
   testWidgets('reduced motion keeps every row', (tester) async {
-    await _pump(tester, _versioned, reduceMotion: true);
+    await _pump(
+      tester,
+      V2AboutPageData(
+        version: '2.4.1',
+        build: '418',
+        systemStatus: V2SystemStatus.operational,
+        onSystemStatus: () {},
+      ),
+      reduceMotion: true,
+    );
 
-    expect(find.text('Ovid Si'), findsOneWidget);
+    expect(find.text('Version'), findsOneWidget);
     expect(find.text('Privacy policy'), findsOneWidget);
     expect(find.text('Terms of service'), findsOneWidget);
     expect(find.text('Open-source licences'), findsOneWidget);
-    expect(find.text('Contact support'), findsOneWidget);
     expect(find.text('System status'), findsOneWidget);
-    expect(find.text('Version and build'), findsOneWidget);
-    expect(find.text('Delete account'), findsOneWidget);
-    expect(find.text('Made for Android'), findsOneWidget);
   });
 
   test('the standard documents carry the published policy and terms', () {
@@ -436,8 +394,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(LegalPage), findsOneWidget);
+    await tester.scrollUntilVisible(find.text('Accepting these Terms'), 200);
     expect(find.text('Accepting these Terms'), findsOneWidget);
-    expect(find.text('Plans, payments and subscriptions'), findsOneWidget);
   });
 
   testWidgets('licences row opens the in-app document', (tester) async {
@@ -471,53 +429,5 @@ void main() {
 
     expect(find.byType(LegalPage), findsOneWidget);
     expect(callbacks, 0);
-  });
-
-  testWidgets('system status is a state tile that opens the status page', (
-    tester,
-  ) async {
-    var opened = 0;
-    await _pump(
-      tester,
-      V2AboutPageData(
-        systemStatus: V2SystemStatus.operational,
-        onSystemStatus: () => opened++,
-      ),
-    );
-
-    expect(find.byType(V2StateTile), findsOneWidget);
-    expect(find.text('System status'), findsOneWidget);
-    expect(find.text('Operational'), findsOneWidget);
-    expect(find.text('Check if Ovid is working normally.'), findsOneWidget);
-
-    await tester.tap(find.text('System status'));
-    await tester.pumpAndSettle();
-
-    expect(opened, 1);
-  });
-
-  testWidgets('a failed status check renders as a warning state tile', (
-    tester,
-  ) async {
-    var retries = 0;
-    await _pump(
-      tester,
-      V2AboutPageData(
-        systemStatus: V2SystemStatus.error,
-        onRetrySystemStatus: () => retries++,
-      ),
-    );
-
-    expect(find.byType(V2StateTile), findsOneWidget);
-    expect(find.text('Could not check'), findsOneWidget);
-    expect(
-      find.text('We could not reach the status page. Tap to try again.'),
-      findsOneWidget,
-    );
-
-    await tester.tap(find.text('System status'));
-    await tester.pumpAndSettle();
-
-    expect(retries, 1);
   });
 }

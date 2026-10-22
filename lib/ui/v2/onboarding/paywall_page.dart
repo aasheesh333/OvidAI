@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'purchase_banner.dart';
+import 'step_progress.dart';
 
 // TODO(l10n): move paywall copy to the ARB files.
 
@@ -14,23 +16,21 @@ class V2PlanOption {
   const V2PlanOption({
     required this.id,
     required this.name,
-    required this.subtitle,
     required this.priceUsd,
     required this.priceInr,
     required this.storageGb,
     this.autoOnly = false,
-    this.popular = false,
     this.features = const [],
   });
 
   final String id;
   final String name;
-  final String subtitle;
   final int priceUsd;
   final int priceInr;
   final int storageGb;
   final bool autoOnly;
-  final bool popular;
+
+  /// At most three are shown; the card is a comparison, not a feature list.
   final List<String> features;
 
   String priceFor(V2Currency currency) =>
@@ -53,37 +53,32 @@ class V2PaywallData {
       V2PlanOption(
         id: 'free',
         name: 'Ovid Free',
-        subtitle: 'No card needed',
         priceUsd: 0,
         priceInr: 0,
         storageGb: 3,
         autoOnly: true,
-        features: ['Auto model', '3 GB storage', '50M tokens a day'],
+        features: ['3 GB storage', '50M tokens a day'],
       ),
       V2PlanOption(
         id: 'go',
         name: 'Ovid Go',
-        subtitle: 'Essential agent toolkit',
         priceUsd: 5,
         priceInr: 499,
         storageGb: 5,
         autoOnly: true,
-        features: ['Auto model only', '5 GB storage', 'Schedules'],
+        features: ['5 GB storage', 'Schedules'],
       ),
       V2PlanOption(
         id: 'plus',
         name: 'Ovid Plus',
-        subtitle: 'Ideal for creative builders',
         priceUsd: 18,
         priceInr: 1799,
         storageGb: 15,
-        popular: true,
         features: ['All models', '15 GB storage', 'Collaboration'],
       ),
       V2PlanOption(
         id: 'pro',
         name: 'Ovid Pro',
-        subtitle: 'For teams and heavy use',
         priceUsd: 99,
         priceInr: 9999,
         storageGb: 75,
@@ -127,6 +122,8 @@ class V2PaywallData {
   final int trialDays;
 }
 
+/// Last step of the tour: one header, the same footer action, and plan cards
+/// that are name, price, three bullets and one badge.
 class PaywallPage extends StatefulWidget {
   const PaywallPage({
     super.key,
@@ -135,10 +132,14 @@ class PaywallPage extends StatefulWidget {
     this.onCurrencyChanged,
     this.onStartTrial,
     this.onContinueFree,
-    this.onComparePlans,
     this.onRetry,
     this.onManageSubscription,
     this.onClose,
+    this.step = const V2OnboardingStepData(
+      step: V2OnboardingTour.plan,
+      totalSteps: V2OnboardingTour.totalSteps,
+      trailingLabel: '',
+    ),
   });
 
   final V2PaywallData data;
@@ -150,12 +151,13 @@ class PaywallPage extends StatefulWidget {
   /// only handler used by the Free card's call to action.
   final VoidCallback? onContinueFree;
 
-  final VoidCallback? onComparePlans;
   final VoidCallback? onRetry;
 
   /// Opens the store's own subscription controls. Hidden when null.
   final VoidCallback? onManageSubscription;
   final VoidCallback? onClose;
+
+  final V2OnboardingStepData step;
 
   @override
   State<PaywallPage> createState() => _PaywallPageState();
@@ -190,14 +192,20 @@ class _PaywallPageState extends State<PaywallPage> {
 
   @override
   Widget build(BuildContext context) {
-    final c = OColors.of(context);
     final data = widget.data;
+    final hasPlans = !data.loading && data.plans.isNotEmpty;
+    final selectedPlan = hasPlans ? _selectedPlan(data) : null;
+    final canBuy =
+        selectedPlan != null &&
+        (selectedPlan.isFree
+            ? widget.onContinueFree != null
+            : widget.onStartTrial != null);
     final Widget body;
     if (data.loading) {
       body = const OSkeletonList(rows: 6);
     } else if (data.plans.isEmpty && data.error != null) {
       body = OErrorState(
-        title: 'We could not load plans',
+        title: 'Plans did not load',
         message: data.error!,
         onRetry: widget.onRetry,
       );
@@ -205,32 +213,53 @@ class _PaywallPageState extends State<PaywallPage> {
       body = OEmptyState(
         icon: Icons.workspace_premium_rounded,
         title: 'No plans right now',
-        message: 'Keep using the Free plan, or check back in a moment.',
+        message: 'Check back in a moment.',
         action: widget.onRetry == null
             ? null
             : OButton(label: 'Try again', onPressed: widget.onRetry),
       );
     } else {
-      final selectedPlan = _selectedPlan(data);
-      body = _content(context, c, data, selectedPlan);
+      body = _content(context, data, selectedPlan!);
     }
 
-    return OScaffold(
-      appBar: OAppBar(
-        title: 'Upgrade',
-        // Paywall is a tour step, not a pushed route: the default arrow would
-        // try to pop the gate itself.
-        showBack: false,
-        actions: [
-          if (widget.onClose != null)
-            OIconButton(
-              icon: Icons.close_rounded,
-              semanticLabel: 'Close',
-              onPressed: widget.onClose,
-            ),
-        ],
-      ),
-      body: body,
+    return OnboardingStepScaffold(
+      step: widget.step,
+      title: 'Upgrade',
+      subtitle: 'Choose a plan',
+      onClose: widget.onClose,
+      primaryKey: const Key('paywall-trial'),
+      primaryLabel: selectedPlan == null
+          ? 'Continue'
+          : selectedPlan.isFree
+          ? 'Continue with Free'
+          : data.trialDays > 0
+          ? 'Start free trial'
+          : 'Subscribe',
+      primaryLoading: data.purchasing,
+      primaryVisible: hasPlans,
+      scrollable: !data.loading,
+      onPrimary: !canBuy
+          ? null
+          : () {
+              if (selectedPlan.isFree) {
+                widget.onContinueFree?.call();
+              } else {
+                widget.onStartTrial?.call(selectedPlan.id);
+              }
+            },
+      secondaryActions: [
+        // A visible way out that does not depend on finding the close icon:
+        // declining is a real, supported outcome.
+        if (selectedPlan != null &&
+            !selectedPlan.isFree &&
+            widget.onContinueFree != null)
+          OTextAction(
+            key: const Key('paywall-continue-free'),
+            label: 'Continue with Free',
+            onPressed: data.purchasing ? null : widget.onContinueFree,
+          ),
+      ],
+      child: body,
     );
   }
 
@@ -273,192 +302,260 @@ class _PaywallPageState extends State<PaywallPage> {
 
   Widget _content(
     BuildContext context,
-    OColors c,
     V2PaywallData data,
     V2PlanOption selectedPlan,
   ) {
+    final c = OColors.of(context);
     final banner = _bannerData(data, selectedPlan);
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.screen,
-        OSpace.s,
-        OSpace.screen,
-        OSpace.xxl,
-      ),
-      child: Stack(
-        children: [
-          // The paywall hero glow is the only gradient on this screen.
-          Positioned(
-            top: -40,
-            left: 0,
-            right: 0,
-            child: IgnorePointer(
-              child: Center(
-                child: Container(
-                  width: 280,
-                  height: 200,
-                  decoration: BoxDecoration(
-                    gradient: RadialGradient(
-                      colors: [
-                        c.accent.withValues(alpha: 0.18),
-                        c.accent.withValues(alpha: 0),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Align(
+          alignment: Alignment.centerLeft,
+          child: _CurrencyToggle(
+            currency: _currency,
+            onChanged: _selectCurrency,
+          ),
+        ),
+        const SizedBox(height: OSpace.l),
+        _PlanGrid(
+          plans: data.plans,
+          selectedId: selectedPlan.id,
+          currency: _currency,
+          onTap: _selectPlan,
+        ),
+        const SizedBox(height: OSpace.l),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.verified_user_rounded, size: 16, color: c.success),
+            const SizedBox(width: OSpace.iconGap),
+            Flexible(
+              child: Text(
+                'Cancel anytime. Billed by Google Play.',
+                textAlign: TextAlign.center,
+                style: OType.caption.copyWith(color: c.textMuted),
+              ),
+            ),
+          ],
+        ),
+        if (banner.status != V2PurchaseBannerStatus.hidden) ...[
+          const SizedBox(height: OSpace.l),
+          V2PurchaseBanner(
+            data: banner,
+            onRetry: widget.onRetry,
+            onManageSubscription: widget.onManageSubscription,
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+/// One column on a phone, two columns of cards from 600 dp. A card may become
+/// a grid cell; a row never becomes a column.
+class _PlanGrid extends StatelessWidget {
+  const _PlanGrid({
+    required this.plans,
+    required this.selectedId,
+    required this.currency,
+    required this.onTap,
+  });
+
+  final List<V2PlanOption> plans;
+  final String selectedId;
+  final V2Currency currency;
+  final ValueChanged<String> onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    // The band comes from the window, not from the (already capped) content
+    // width: at exactly 600 dp the page is a tablet even though its content
+    // column is only 552 dp wide.
+    final columns = OResponsive.of(context).isTablet ? 2 : 1;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (columns == 1) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              for (var i = 0; i < plans.length; i++) ...[
+                if (i > 0) const SizedBox(height: OSpace.m),
+                _card(plans[i]),
+              ],
+            ],
+          );
+        }
+        final itemWidth = (constraints.maxWidth - OSpace.m) / 2;
+        return Wrap(
+          spacing: OSpace.m,
+          runSpacing: OSpace.m,
+          children: [
+            for (final plan in plans)
+              SizedBox(width: itemWidth, child: _card(plan)),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _card(V2PlanOption plan) => _PlanCard(
+    plan: plan,
+    selected: plan.id == selectedId,
+    currency: currency,
+    onTap: () => onTap(plan.id),
+  );
+}
+
+class _PlanCard extends StatelessWidget {
+  const _PlanCard({
+    required this.plan,
+    required this.selected,
+    required this.currency,
+    required this.onTap,
+  });
+
+  final V2PlanOption plan;
+  final bool selected;
+  final V2Currency currency;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Semantics(
+      label: [
+        plan.name,
+        plan.modelAccessLabel,
+        '${plan.priceFor(currency)} ${plan.pricePeriod}',
+      ].join(', '),
+      selected: selected,
+      button: true,
+      enabled: true,
+      onTap: onTap,
+      child: OPressable(
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: OMotion.fast,
+          curve: OMotion.standard,
+          padding: const EdgeInsets.all(OSpace.l),
+          decoration: BoxDecoration(
+            color: selected ? c.accentSoft : c.surface,
+            borderRadius: BorderRadius.circular(ORadius.l),
+            border: Border.all(
+              color: selected
+                  ? c.accentFill.withValues(alpha: 0.50)
+                  : c.hairline,
+              width: selected ? 1.5 : 1,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: 22,
+                    height: 22,
+                    margin: const EdgeInsets.only(top: OSpace.xxs),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: selected ? c.accentFill : c.surfaceAlt,
+                      border: Border.all(
+                        color: selected ? c.accentFill : c.hairlineStrong,
+                      ),
+                    ),
+                    child: selected
+                        ? Icon(Icons.check_rounded, size: 14, color: c.onAccent)
+                        : null,
+                  ),
+                  const SizedBox(width: OSpace.m),
+                  Expanded(
+                    child: Wrap(
+                      alignment: WrapAlignment.spaceBetween,
+                      crossAxisAlignment: WrapCrossAlignment.start,
+                      spacing: OSpace.m,
+                      runSpacing: OSpace.s,
+                      children: [
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              plan.name,
+                              style: OType.h3.copyWith(color: c.text),
+                            ),
+                            const SizedBox(height: OSpace.xs),
+                            OPill(
+                              key: Key('plan-access-${plan.id}'),
+                              label: plan.modelAccessLabel,
+                              tone: plan.autoOnly
+                                  ? OPillTone.neutral
+                                  : OPillTone.success,
+                              icon: plan.autoOnly
+                                  ? Icons.lock_outline_rounded
+                                  : Icons.tune_rounded,
+                            ),
+                          ],
+                        ),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text(
+                              plan.priceFor(currency),
+                              style: OType.h3.copyWith(
+                                color: selected ? c.accent : c.text,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            Text(
+                              plan.pricePeriod,
+                              style: OType.caption.copyWith(color: c.textMuted),
+                            ),
+                          ],
+                        ),
                       ],
                     ),
                   ),
-                ),
+                ],
               ),
-            ),
-          ),
-          OFadeSlide(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Wrap(
-                  alignment: WrapAlignment.spaceBetween,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  spacing: OSpace.s,
-                  runSpacing: OSpace.s,
-                  children: [
-                    Text(
-                      'TIER SELECTION',
-                      style: OType.overline.copyWith(color: c.accent),
-                    ),
-                    _CurrencyToggle(
-                      currency: _currency,
-                      onChanged: _selectCurrency,
-                    ),
-                  ],
-                ),
-                const SizedBox(height: OSpace.xl),
-                const Center(child: _HeroPill(label: 'OVID PLUS')),
+              if (plan.features.isNotEmpty) ...[
                 const SizedBox(height: OSpace.m),
-                Semantics(
-                  container: true,
-                  header: true,
-                  child: Text(
-                    'Do more with Ovid Plus',
-                    textAlign: TextAlign.center,
-                    style: OType.display.copyWith(color: c.text),
-                  ),
-                ),
-                const SizedBox(height: OSpace.s),
-                Text(
-                  'More models, more storage and background runs up to 8 hours.',
-                  textAlign: TextAlign.center,
-                  style: OType.bodySm.copyWith(color: c.textMuted),
-                ),
-                const SizedBox(height: OSpace.xl),
-                OStagger(
-                  children: [
-                    for (final plan in data.plans)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: OSpace.m),
-                        child: _PlanCard(
-                          plan: plan,
-                          selected: plan.id == selectedPlan.id,
-                          currency: _currency,
-                          onTap: () => _selectPlan(plan.id),
+                for (final feature in plan.features.take(3))
+                  Padding(
+                    padding: const EdgeInsets.only(top: OSpace.xs),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.only(top: OSpace.xxs),
+                          child: Icon(
+                            Icons.check_rounded,
+                            size: 14,
+                            color: c.textMuted,
+                          ),
                         ),
-                      ),
-                  ],
-                ),
-                const SizedBox(height: OSpace.xs),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      Icons.verified_user_rounded,
-                      size: 18,
-                      color: c.success,
+                        const SizedBox(width: OSpace.s),
+                        Expanded(
+                          child: Text(
+                            feature,
+                            style: OType.bodySm.copyWith(color: c.textMuted),
+                          ),
+                        ),
+                      ],
                     ),
-                    const SizedBox(width: 6),
-                    Flexible(
-                      child: Text(
-                        'Activates after Google Play confirms · Switch or cancel '
-                        'anytime',
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ),
-                  ],
-                ),
-                if (banner.status != V2PurchaseBannerStatus.hidden) ...[
-                  const SizedBox(height: OSpace.l),
-                  V2PurchaseBanner(
-                    data: banner,
-                    onRetry: widget.onRetry,
-                    onManageSubscription: widget.onManageSubscription,
                   ),
-                ],
-                const SizedBox(height: OSpace.l),
-                OButton(
-                  key: const Key('paywall-trial'),
-                  label: selectedPlan.isFree
-                      ? 'Continue with Free'
-                      : data.trialDays > 0
-                      ? 'Start ${data.trialDays}-day free trial'
-                      : 'Subscribe to ${selectedPlan.name}',
-                  icon: Icons.arrow_forward_rounded,
-                  expand: true,
-                  loading: data.purchasing,
-                  onPressed:
-                      data.purchasing ||
-                          (selectedPlan.isFree
-                              ? widget.onContinueFree == null
-                              : widget.onStartTrial == null)
-                      ? null
-                      : () {
-                          if (selectedPlan.isFree) {
-                            widget.onContinueFree!();
-                          } else {
-                            widget.onStartTrial!(selectedPlan.id);
-                          }
-                        },
-                ),
-                const SizedBox(height: OSpace.m),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.shop_rounded, size: 16, color: c.textMuted),
-                    const SizedBox(width: 6),
-                    Flexible(
-                      child: Text(
-                        'Cancel anytime. Billed securely through Google Play.',
-                        textAlign: TextAlign.center,
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ),
-                  ],
-                ),
-                // A visible way out that does not depend on finding the close
-                // icon: declining is a real, supported outcome.
-                if (!selectedPlan.isFree && widget.onContinueFree != null) ...[
-                  const SizedBox(height: OSpace.s),
-                  OButton(
-                    key: const Key('paywall-continue-free'),
-                    label: 'Continue with Free',
-                    variant: OButtonVariant.ghost,
-                    onPressed: data.purchasing ? null : widget.onContinueFree,
-                  ),
-                ],
-                // Only shown when a real comparison destination is wired.
-                if (widget.onComparePlans != null) ...[
-                  const SizedBox(height: OSpace.s),
-                  OButton(
-                    label: 'Compare all plans',
-                    variant: OButtonVariant.ghost,
-                    onPressed: widget.onComparePlans,
-                  ),
-                ],
-                const SizedBox(height: OSpace.l),
               ],
-            ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
 }
 
+/// States the model access a tier actually has. Free and Go are Auto-only;
+/// saying so on the card is part of the product, not decoration.
 class _CurrencyToggle extends StatelessWidget {
   const _CurrencyToggle({required this.currency, required this.onChanged});
 
@@ -522,6 +619,8 @@ class _CurrencyTab extends StatelessWidget {
       label: semanticLabel,
       selected: selected,
       button: true,
+      enabled: true,
+      onTap: onTap,
       child: OPressable(
         onTap: onTap,
         child: Padding(
@@ -547,295 +646,6 @@ class _CurrencyTab extends StatelessWidget {
             ),
           ),
         ),
-      ),
-    );
-  }
-}
-
-/// Accent pill that wraps its label instead of clipping it at large text sizes.
-class _HeroPill extends StatelessWidget {
-  const _HeroPill({required this.label});
-
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: OSpace.xs),
-      decoration: BoxDecoration(
-        color: c.accentSoft,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 6,
-            height: 6,
-            decoration: BoxDecoration(color: c.accent, shape: BoxShape.circle),
-          ),
-          const SizedBox(width: 6),
-          Flexible(
-            child: Text(
-              label,
-              textAlign: TextAlign.center,
-              style: OType.caption.copyWith(
-                color: c.accent,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _PlanCard extends StatelessWidget {
-  const _PlanCard({
-    required this.plan,
-    required this.selected,
-    required this.currency,
-    required this.onTap,
-  });
-
-  final V2PlanOption plan;
-  final bool selected;
-  final V2Currency currency;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final card = Semantics(
-      label: [
-        plan.name,
-        if (plan.popular) 'Most popular',
-        plan.modelAccessLabel,
-        '${plan.priceFor(currency)} ${plan.pricePeriod}',
-      ].join(', '),
-      selected: selected,
-      button: true,
-      child: OPressable(
-        onTap: onTap,
-        child: AnimatedContainer(
-          duration: OMotion.fast,
-          curve: OMotion.standard,
-          padding: const EdgeInsets.all(OSpace.l),
-          decoration: BoxDecoration(
-            color: selected ? c.accentSoft : c.surface,
-            borderRadius: BorderRadius.circular(ORadius.l),
-            border: Border.all(
-              color: selected
-                  ? c.accentFill.withValues(alpha: 0.50)
-                  : c.hairline,
-              width: selected ? 1.5 : 1,
-            ),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    width: 24,
-                    height: 24,
-                    margin: const EdgeInsets.only(top: 2),
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: selected ? c.accentFill : c.surfaceAlt,
-                      border: Border.all(
-                        color: selected ? c.accentFill : c.hairlineStrong,
-                      ),
-                    ),
-                    child: selected
-                        ? Icon(Icons.check_rounded, size: 16, color: c.onAccent)
-                        : null,
-                  ),
-                  const SizedBox(width: OSpace.m),
-                  Expanded(
-                    child: Wrap(
-                      alignment: WrapAlignment.spaceBetween,
-                      crossAxisAlignment: WrapCrossAlignment.start,
-                      spacing: OSpace.m,
-                      runSpacing: OSpace.s,
-                      children: [
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              plan.name,
-                              style: OType.h2.copyWith(color: c.text),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              plan.subtitle,
-                              style: OType.caption.copyWith(
-                                color: selected ? c.accent : c.textMuted,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            _AccessPill(plan: plan, colors: c),
-                          ],
-                        ),
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: [
-                            Text(
-                              plan.priceFor(currency),
-                              style: OType.h2.copyWith(
-                                color: selected ? c.accent : c.text,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            Text(
-                              plan.pricePeriod,
-                              style: OType.caption.copyWith(color: c.textMuted),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: OSpace.m),
-              Divider(color: c.hairline, height: 1),
-              const SizedBox(height: OSpace.m),
-              Wrap(
-                spacing: OSpace.s,
-                runSpacing: OSpace.s,
-                children: [
-                  for (final feature in plan.features)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: OSpace.s,
-                        vertical: 6,
-                      ),
-                      decoration: BoxDecoration(
-                        color: selected ? c.surface : c.surfaceAlt,
-                        borderRadius: BorderRadius.circular(ORadius.s),
-                        border: Border.all(color: c.hairline),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.check_rounded, size: 13, color: c.success),
-                          const SizedBox(width: 4),
-                          Flexible(
-                            child: Text(
-                              feature,
-                              style: OType.caption.copyWith(color: c.textMuted),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-
-    if (!plan.popular) return card;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Align(
-          alignment: Alignment.centerRight,
-          child: Padding(
-            padding: const EdgeInsets.only(right: OSpace.l),
-            child: Transform.translate(
-              offset: const Offset(0, 6),
-              child: const _PopularBadge(),
-            ),
-          ),
-        ),
-        card,
-      ],
-    );
-  }
-}
-
-/// States the model access a tier actually has. Free and Go are Auto-only;
-/// saying so on the card is part of the product, not decoration.
-class _AccessPill extends StatelessWidget {
-  const _AccessPill({required this.plan, required this.colors});
-
-  final V2PlanOption plan;
-  final OColors colors;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = colors;
-    final autoOnly = plan.autoOnly;
-    return Container(
-      key: Key('plan-access-${plan.id}'),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(
-        color: autoOnly
-            ? c.surfaceAlt
-            : c.success.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(ORadius.s),
-        border: Border.all(
-          color: autoOnly ? c.hairline : c.success.withValues(alpha: 0.32),
-        ),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            autoOnly ? Icons.lock_outline_rounded : Icons.tune_rounded,
-            size: 12,
-            color: autoOnly ? c.textMuted : c.success,
-          ),
-          const SizedBox(width: 4),
-          Flexible(
-            child: Text(
-              plan.modelAccessLabel,
-              style: OType.caption.copyWith(
-                color: autoOnly ? c.textMuted : c.success,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _PopularBadge extends StatelessWidget {
-  const _PopularBadge();
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: OSpace.xs),
-      decoration: BoxDecoration(
-        color: c.accentFill,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.star_rounded, size: 13, color: c.onAccent),
-          const SizedBox(width: 4),
-          Flexible(
-            child: Text(
-              'Most popular',
-              style: OType.caption.copyWith(
-                color: c.onAccent,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }

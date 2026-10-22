@@ -13,6 +13,15 @@ Widget _host(Widget child, {ThemeData? theme}) => MaterialApp(
   home: Scaffold(body: child),
 );
 
+/// True when the current frame contains at least one non-empty piece of text.
+bool _visibleText(WidgetTester tester) {
+  for (final element in find.byType(RichText).evaluate()) {
+    final widget = element.widget as RichText;
+    if (widget.text.toPlainText().trim().isNotEmpty) return true;
+  }
+  return false;
+}
+
 void main() {
   group('web registry', () {
     test('ids are unique', () {
@@ -79,6 +88,76 @@ void main() {
             );
           }
         }
+      }
+    });
+
+    testWidgets('every screen survives 320 dp at 200 % text', (tester) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(320, 900);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetPhysicalSize);
+
+      // The contract's hardest cell: the narrowest phone with the largest text
+      // scale. A RenderFlex overflow is reported as an exception here, so this
+      // catches the yellow stripes a reviewer would see in the browser.
+      for (final dark in <bool>[false, true]) {
+        for (final entry in v2ScreensWeb) {
+          await tester.pumpWidget(
+            _host(
+              Builder(
+                builder: (context) => MediaQuery(
+                  data: MediaQuery.of(context).copyWith(
+                    size: const Size(320, 900),
+                    textScaler: const TextScaler.linear(2),
+                  ),
+                  child: entry.builder(context),
+                ),
+              ),
+              theme: dark ? OTheme.dark() : OTheme.light(),
+            ),
+          );
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 400));
+          expect(
+            tester.takeException(),
+            isNull,
+            reason: '${entry.id} overflowed at 320 dp 200 % text '
+                '(${dark ? 'dark' : 'light'})',
+          );
+        }
+      }
+    });
+
+    testWidgets('every screen paints content, not a blank frame', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(412, 900);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetPhysicalSize);
+
+      for (final entry in v2ScreensWeb) {
+        await tester.pumpWidget(
+          _host(
+            Builder(builder: entry.builder),
+            theme: OTheme.light(),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(
+          tester.takeException(),
+          isNull,
+          reason: '${entry.id} threw while painting',
+        );
+
+        // A gallery entry that renders no text at all is a blank frame: every
+        // screen in this registry either names itself, its rows or its state.
+        expect(
+          _visibleText(tester),
+          isTrue,
+          reason: '${entry.id} painted no text at 412 dp',
+        );
       }
     });
   });

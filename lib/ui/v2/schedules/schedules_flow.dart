@@ -25,7 +25,6 @@ class V2SchedulesFlow {
   static Future<void> openSchedules(
     BuildContext context, {
     String? sessionId,
-    String? sessionTitle,
     ScheduleGateway? gateway,
   }) async {
     final controller = SchedulesController(gateway: gateway);
@@ -33,11 +32,8 @@ class V2SchedulesFlow {
     if (!context.mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => SchedulesScreen(
-          controller: controller,
-          sessionId: sessionId,
-          sessionTitle: sessionTitle,
-        ),
+        builder: (_) =>
+            SchedulesScreen(controller: controller, sessionId: sessionId),
       ),
     );
     controller.dispose();
@@ -46,16 +42,10 @@ class V2SchedulesFlow {
 
 /// The list screen, rebuilt from [SchedulesController] on every change.
 class SchedulesScreen extends StatefulWidget {
-  const SchedulesScreen({
-    super.key,
-    required this.controller,
-    this.sessionId,
-    this.sessionTitle,
-  });
+  const SchedulesScreen({super.key, required this.controller, this.sessionId});
 
   final SchedulesController controller;
   final String? sessionId;
-  final String? sessionTitle;
 
   @override
   State<SchedulesScreen> createState() => _SchedulesScreenState();
@@ -94,7 +84,6 @@ class _SchedulesScreenState extends State<SchedulesScreen> {
             timezoneId: zone,
             timezoneLabel: zone,
             timezoneShort: _zoneShort(zone),
-            sourceSessionTitle: widget.sessionTitle,
             now: now,
           )
         : _editorDataFrom(schedule, zone, now);
@@ -118,10 +107,8 @@ class _SchedulesScreenState extends State<SchedulesScreen> {
   Future<void> _openRuns(V2ScheduleItem schedule) async {
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => ScheduleRunsScreen(
-          controller: _controller,
-          schedule: schedule,
-        ),
+        builder: (_) =>
+            ScheduleRunsScreen(controller: _controller, schedule: schedule),
       ),
     );
   }
@@ -136,9 +123,8 @@ class _SchedulesScreenState extends State<SchedulesScreen> {
           onCreate: () => _openEditor(),
           onScheduleTap: _openRuns,
           onEdit: (schedule) => _openEditor(schedule: schedule),
-          onToggle: (schedule, enabled) => _act(
-            () => _controller.setEnabled(schedule, enabled),
-          ),
+          onToggle: (schedule, enabled) =>
+              _act(() => _controller.setEnabled(schedule, enabled)),
           onRunNow: (schedule) => _act(() => _controller.runNow(schedule)),
           onRetryRun: (schedule) => _act(() => _controller.runNow(schedule)),
           onDelete: (schedule) => _act(() => _controller.delete(schedule)),
@@ -266,7 +252,6 @@ class _ScheduleRunsScreenState extends State<ScheduleRunsScreen> {
       _data = V2ScheduleRunsData(
         status: V2ScheduleRunsStatus.loading,
         scheduleTitle: widget.schedule.title,
-        sessionTitle: widget.schedule.sessionTitle,
       );
     });
     try {
@@ -276,7 +261,6 @@ class _ScheduleRunsScreenState extends State<ScheduleRunsScreen> {
         _data = V2ScheduleRunsData.fromRuns(
           rows,
           scheduleTitle: widget.schedule.title,
-          sessionTitle: widget.schedule.sessionTitle,
         );
       });
     } catch (_) {
@@ -285,7 +269,6 @@ class _ScheduleRunsScreenState extends State<ScheduleRunsScreen> {
         _data = V2ScheduleRunsData(
           status: V2ScheduleRunsStatus.error,
           scheduleTitle: widget.schedule.title,
-          sessionTitle: widget.schedule.sessionTitle,
         );
       });
     }
@@ -345,10 +328,6 @@ V2ScheduleEditorData _editorDataFrom(
   return V2ScheduleEditorData(
     prompt: item.description,
     title: item.title,
-    // The DTO has one text field, which holds the prompt. The optional note is
-    // not persisted by the current schema, so an edit starts with it empty
-    // rather than duplicating the prompt.
-    description: '',
     frequency: switch (cadence?.frequency) {
       V2CadenceFrequency.daily => V2ScheduleFrequency.daily,
       V2CadenceFrequency.custom => V2ScheduleFrequency.custom,
@@ -360,8 +339,6 @@ V2ScheduleEditorData _editorDataFrom(
     timezoneId: cadence?.timezoneId ?? zone,
     timezoneLabel: cadence?.timezoneLabel ?? zone,
     timezoneShort: cadence?.timezoneShort ?? _zoneShort(zone),
-    endsAt: item.endsAt,
-    sourceSessionTitle: item.sessionTitle,
     now: now,
   );
 }

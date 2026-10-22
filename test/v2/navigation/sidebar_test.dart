@@ -83,6 +83,13 @@ void _useNarrowScreen(WidgetTester tester) {
   addTearDown(tester.view.resetDevicePixelRatio);
 }
 
+void _useScreen(WidgetTester tester, double width, {double height = 900}) {
+  tester.view.physicalSize = Size(width, height);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+}
+
 void main() {
   testWidgets('sidebar uses the shared footer with the next-run subtitle', (
     tester,
@@ -131,7 +138,7 @@ void main() {
     expect(find.text('Next.js Portfolio Setup'), findsOneWidget);
     expect(find.text('Landing page copy review'), findsOneWidget);
     expect(find.text('Mobile App Redesign'), findsOneWidget);
-    expect(find.text('3 files'), findsOneWidget);
+    expect(find.text('3 chats · 3 files'), findsOneWidget);
     expect(find.text('Schedule'), findsOneWidget);
     expect(find.text('Next run 9:00 AM'), findsOneWidget);
     expect(find.text('Artifacts'), findsOneWidget);
@@ -149,7 +156,9 @@ void main() {
     expect(find.text('Schedule'), findsOneWidget);
   });
 
-  testWidgets('sidebar empty state offers New session', (tester) async {
+  testWidgets('sidebar empty state is one line and keeps one New session', (
+    tester,
+  ) async {
     var newChats = 0;
     await tester.pumpWidget(
       _app(
@@ -162,7 +171,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('No chats yet'), findsOneWidget);
-    await tester.tap(find.text('New session').last);
+    expect(find.text('New session'), findsOneWidget);
+    await tester.tap(find.text('New session'));
     expect(newChats, 1);
   });
 
@@ -386,6 +396,11 @@ void main() {
     await tester.pump();
 
     expect(find.text('PINNED'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('Next.js Portfolio Setup'),
+      100,
+      scrollable: _sidebarScrollable,
+    );
     expect(find.text('Next.js Portfolio Setup'), findsOneWidget);
 
     // The drawer list is lazy, so later sections mount as they scroll in.
@@ -441,7 +456,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('2 files'), findsOneWidget);
+    expect(find.text('2 chats · 2 files'), findsOneWidget);
     await tester.tap(find.byIcon(Icons.memory_rounded));
     await tester.pumpAndSettle();
 
@@ -468,7 +483,9 @@ void main() {
     expect(memory?.id, 'pr1');
   });
 
-  testWidgets('projects without memory show a muted chip', (tester) async {
+  testWidgets('projects without memory show only the chat count', (
+    tester,
+  ) async {
     await tester.pumpWidget(
       _app(
         const Sidebar(
@@ -483,7 +500,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('No memory'), findsOneWidget);
+    expect(find.text('No chats'), findsOneWidget);
+    expect(find.byIcon(Icons.memory_rounded), findsNothing);
   });
 
   testWidgets('pinned rows carry a pin glyph and project name', (tester) async {
@@ -677,6 +695,90 @@ void main() {
     expect(profiles, 1);
   });
 
+  testWidgets('rail layout is a fixed 280 dp column at 600 and 300 dp at 900', (
+    tester,
+  ) async {
+    _useScreen(tester, 600);
+    for (final (width, expected) in <(double, double)>[
+      (600, Sidebar.railWidthTablet),
+      (900, Sidebar.railWidthWide),
+    ]) {
+      tester.view.physicalSize = Size(width, 900);
+      await tester.pumpWidget(
+        _app(Sidebar(data: _contentData(), layout: SidebarLayout.rail)),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull, reason: '$width dp');
+      expect(
+        tester.getSize(find.byKey(const Key('v2-sidebar-surface'))).width,
+        expected,
+        reason: '$width dp',
+      );
+      // A rail is a column, not a page: no app bar, same content order.
+      expect(find.byType(AppBar), findsNothing);
+      expect(find.text('New session'), findsOneWidget);
+      expect(find.text('PROJECTS'), findsOneWidget);
+      expect(find.text('Schedule'), findsOneWidget);
+    }
+  });
+
+  testWidgets('rail layout fits 600 dp at 200 % text', (tester) async {
+    _useScreen(tester, 600);
+    await tester.pumpWidget(
+      _narrow(Sidebar(data: _contentData(), layout: SidebarLayout.rail)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('Alex Rivera'), findsOneWidget);
+    expect(find.text('Schedule'), findsOneWidget);
+  });
+
+  testWidgets('default layout stays a drawer at tablet width', (tester) async {
+    _useScreen(tester, 900);
+    await tester.pumpWidget(_app(Sidebar(data: _contentData())));
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.getSize(find.byKey(const Key('v2-sidebar-surface'))).width,
+      Sidebar.drawerWidth,
+    );
+  });
+
+  testWidgets('a chat row shows time or project, never both', (tester) async {
+    const withTime = V2SidebarSession(
+      id: 's1',
+      title: 'Brand colours',
+      modelLabel: 'Auto',
+      timeLabel: '2h ago',
+      projectName: 'Brand Voice',
+    );
+    const projectOnly = V2SidebarSession(
+      id: 's2',
+      title: 'Tone notes',
+      modelLabel: 'Auto',
+      projectName: 'Brand Voice',
+    );
+    await tester.pumpWidget(
+      _app(
+        const Sidebar(
+          data: V2SidebarData(
+            name: 'Alex Rivera',
+            today: <V2SidebarSession>[withTime, projectOnly],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Time wins; the project is not stacked under it.
+    expect(find.text('2h ago'), findsOneWidget);
+    // The project-only row still gets its one meta line.
+    expect(find.text('Brand Voice'), findsOneWidget);
+    expect(find.text('Auto'), findsNothing);
+  });
+
   testWidgets('inline search filters chats and projects, then clears', (
     tester,
   ) async {
@@ -856,8 +958,9 @@ void main() {
     }
   });
 
-  testWidgets('a project without a memory handler shows an info chip, not a '
-      'dead control', (tester) async {
+  testWidgets('a project without a memory handler shows no memory control', (
+    tester,
+  ) async {
     final handle = tester.ensureSemantics();
     V2SidebarProject? opened;
     await tester.pumpWidget(
@@ -873,20 +976,15 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    // No handler and no detail payload: the chip is information only.
-    final chip = find.byKey(const ValueKey<String>('v2-sidebar-memory-pr1'));
-    expect(chip, findsOneWidget);
+    // No handler and no detail payload: no memory affordance at all.
     expect(
-      find.descendant(of: chip, matching: find.byType(GestureDetector)),
+      find.byKey(const ValueKey<String>('v2-sidebar-memory-pr1')),
       findsNothing,
     );
-    expect(
-      find.descendant(of: chip, matching: find.byType(InkWell)),
-      findsNothing,
-    );
+    expect(find.byIcon(Icons.memory_rounded), findsNothing);
 
-    // The tap falls through to the project row instead of doing nothing.
-    await tester.tap(find.text('3 files'));
+    // The tap falls through to the project row.
+    await tester.tap(find.text('3 chats · 3 files'));
     expect(opened?.id, 'pr1');
     handle.dispose();
   });

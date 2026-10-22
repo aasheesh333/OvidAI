@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'composer_sheet.dart';
 
 // TODO(l10n): move user-facing copy to ARB keys in the localization pass.
 
@@ -63,11 +64,19 @@ class V2ModelPickerData {
   final String selectedId;
   final String planLabel;
   final String autoName;
+
+  /// The one description line on the Auto card.
   final String autoSubtitle;
+
+  /// Kept so callers keep compiling. The minimal card draws [autoSubtitle]
+  /// only; there is no second paragraph and no tag.
   final String autoDescription;
   final String autoTag;
   final String searchHint;
   final String manageLabel;
+
+  /// Kept for callers. The plan gate lives on the locked rows, so the sheet
+  /// draws no footer note.
   final String freePlanNote;
   final String standardLabel;
   final String advancedLabel;
@@ -77,7 +86,8 @@ class V2ModelPickerData {
   /// visible but are greyed out and cannot be selected.
   final bool manualModelsAllowed;
 
-  /// Short explanation shown under the header while the plan is Auto-only.
+  /// Kept for callers. The minimal sheet shows the gate as a row tag instead
+  /// of an upgrade paragraph.
   final String upgradeHint;
 
   /// Plan a manual model requires, used by the locked-row tag and its spoken
@@ -151,9 +161,7 @@ class _V2ModelPickerSheetState extends State<V2ModelPickerSheet> {
     final q = _query.toLowerCase();
     final d = widget.data;
     return d.autoName.toLowerCase().contains(q) ||
-        d.autoSubtitle.toLowerCase().contains(q) ||
-        d.autoDescription.toLowerCase().contains(q) ||
-        d.autoTag.toLowerCase().contains(q);
+        d.autoSubtitle.toLowerCase().contains(q);
   }
 
   @override
@@ -166,99 +174,77 @@ class _V2ModelPickerSheetState extends State<V2ModelPickerSheet> {
 
     return Material(
       color: c.surface,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(OSpace.l, OSpace.s, OSpace.s, 0),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Semantics(
-                        container: true,
-                        header: true,
-                        child: Text(
-                          'Select model',
-                          style: OType.h2.copyWith(color: c.text),
+      // A sheet body never stretches past the contract's 560 dp dialog cap,
+      // even when a gallery or test renders it outside showV2ChatSheet.
+      child: Center(
+        heightFactor: 1,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 560),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  OSpace.l,
+                  OSpace.s,
+                  OSpace.s,
+                  0,
+                ),
+                child: OSheetHeader(
+                  title: 'Select model',
+                  onClose: widget.onClose ?? () => Navigator.maybePop(context),
+                  closeLabel: 'Close model picker',
+                  padding: EdgeInsets.zero,
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  OSpace.l,
+                  OSpace.m,
+                  OSpace.l,
+                  OSpace.s,
+                ),
+                child: OSearchField(
+                  controller: _search,
+                  hint: data.searchHint,
+                  onChanged: (value) => setState(() => _query = value),
+                  trailing: _query.isEmpty
+                      ? null
+                      : IconButton(
+                          tooltip: 'Clear search',
+                          onPressed: _clearSearch,
+                          icon: Icon(
+                            Icons.cancel_rounded,
+                            size: 18,
+                            color: c.textFaint,
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        'Switch models anytime',
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ],
-                  ),
                 ),
-                OIconButton(
-                  icon: Icons.close_rounded,
-                  semanticLabel: 'Close model picker',
-                  onPressed:
-                      widget.onClose ?? () => Navigator.maybePop(context),
+              ),
+              Flexible(
+                child: OAnimatedSwap(
+                  child: _buildBody(models, showAuto, hasResults),
                 ),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              OSpace.l,
-              OSpace.m,
-              OSpace.l,
-              OSpace.s,
-            ),
-            child: OSearchField(
-              controller: _search,
-              hint: data.searchHint,
-              onChanged: (value) => setState(() => _query = value),
-              trailing: _query.isEmpty
-                  ? null
-                  : IconButton(
-                      tooltip: 'Clear search',
-                      onPressed: _clearSearch,
-                      icon: Icon(
-                        Icons.cancel_rounded,
-                        size: 18,
-                        color: c.textFaint,
-                      ),
-                    ),
-            ),
-          ),
-          Flexible(
-            child: OAnimatedSwap(
-              child: _buildBody(models, showAuto, hasResults),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              OSpace.l,
-              OSpace.s,
-              OSpace.l,
-              OSpace.l,
-            ),
-            child: Column(
-              children: [
-                OButton(
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  OSpace.l,
+                  OSpace.s,
+                  OSpace.l,
+                  OSpace.l,
+                ),
+                child: OButton(
                   label: data.manageLabel,
                   icon: Icons.tune_rounded,
                   variant: OButtonVariant.secondary,
                   expand: true,
                   onPressed: widget.onManageModels,
                 ),
-                const SizedBox(height: OSpace.s),
-                Text(
-                  data.freePlanNote,
-                  textAlign: TextAlign.center,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ],
-            ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -288,7 +274,7 @@ class _V2ModelPickerSheetState extends State<V2ModelPickerSheet> {
           compact: true,
           icon: Icons.search_off_rounded,
           title: 'No models found',
-          message: 'Try another name, or clear the search.',
+          message: 'Try another name.',
           action: OButton(
             label: 'Clear search',
             variant: OButtonVariant.secondary,
@@ -299,19 +285,6 @@ class _V2ModelPickerSheetState extends State<V2ModelPickerSheet> {
     }
 
     final rows = <Widget>[];
-    // The plan explanation leads the scrollable body so it sits under the
-    // header without squeezing the list on short screens.
-    if (data.autoOnly) {
-      rows.add(
-        Padding(
-          padding: const EdgeInsets.only(bottom: OSpace.s),
-          child: _UpgradeNotice(
-            hint: data.upgradeHint,
-            planLabel: data.lockedPlanLabel,
-          ),
-        ),
-      );
-    }
     if (showAuto) {
       rows.add(_AutoCard(data: data, onTap: () => widget.onSelect('auto')));
     }
@@ -333,11 +306,31 @@ class _V2ModelPickerSheetState extends State<V2ModelPickerSheet> {
     final standard = models.where((model) => !model.locked).toList();
     final advanced = models.where((model) => model.locked).toList();
     if (standard.isNotEmpty) {
-      rows.add(_SectionLabel(label: data.standardLabel));
+      rows.add(
+        OSectionHeader(
+          label: data.standardLabel,
+          padding: const EdgeInsets.fromLTRB(
+            OSpace.xs,
+            OSpace.m,
+            OSpace.xs,
+            OSpace.xs,
+          ),
+        ),
+      );
       rows.addAll(standard.map(row));
     }
     if (advanced.isNotEmpty) {
-      rows.add(_SectionLabel(label: data.advancedLabel));
+      rows.add(
+        OSectionHeader(
+          label: data.advancedLabel,
+          padding: const EdgeInsets.fromLTRB(
+            OSpace.xs,
+            OSpace.m,
+            OSpace.xs,
+            OSpace.xs,
+          ),
+        ),
+      );
       rows.addAll(advanced.map(row));
     }
 
@@ -349,29 +342,6 @@ class _V2ModelPickerSheetState extends State<V2ModelPickerSheet> {
         OSpace.s,
       ),
       child: OStagger(children: rows),
-    );
-  }
-}
-
-class _SectionLabel extends StatelessWidget {
-  const _SectionLabel({required this.label});
-
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.xs,
-        OSpace.m,
-        OSpace.xs,
-        OSpace.xs,
-      ),
-      child: Text(
-        label.toUpperCase(),
-        style: OType.overline.copyWith(color: c.textMuted),
-      ),
     );
   }
 }
@@ -391,109 +361,46 @@ class _AutoCard extends StatelessWidget {
       child: OCard(
         accent: selected,
         onTap: onTap,
-        semanticLabel: '${data.autoName}, ${data.autoTag}',
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: c.accentSoft,
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(
-                    Icons.auto_awesome_rounded,
-                    size: 20,
-                    color: c.accent,
-                  ),
-                ),
-                const SizedBox(width: OSpace.m),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Wrap(
-                        spacing: OSpace.s,
-                        runSpacing: OSpace.xs,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [
-                          Text(
-                            data.autoName,
-                            style: OType.bodyStrong.copyWith(color: c.text),
-                          ),
-                          _Tag(label: data.autoTag, tone: OPillTone.accent),
-                        ],
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        data.autoSubtitle,
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: OSpace.s),
-                _SelectionMark(selected: selected),
-              ],
-            ),
-            const SizedBox(height: OSpace.m),
-            Text(
-              data.autoDescription,
-              style: OType.bodySm.copyWith(color: c.textMuted),
-            ),
-            const SizedBox(height: OSpace.m),
-            Wrap(
-              spacing: OSpace.s,
-              runSpacing: OSpace.xs,
-              children: [
-                _MetricPill(
-                  icon: Icons.bolt_rounded,
-                  label: 'Ultra fast',
-                  tone: c.success,
-                ),
-                _MetricPill(
-                  icon: Icons.savings_outlined,
-                  label: 'Included free',
-                  tone: c.textMuted,
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _UpgradeNotice extends StatelessWidget {
-  const _UpgradeNotice({required this.hint, required this.planLabel});
-
-  final String hint;
-  final String planLabel;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Semantics(
-      label: '$planLabel required. $hint',
-      child: Container(
-        padding: const EdgeInsets.all(OSpace.s),
-        decoration: BoxDecoration(
-          color: c.accentSoft,
-          borderRadius: BorderRadius.circular(ORadius.m),
-        ),
+        semanticLabel: '${data.autoName}, ${data.autoSubtitle}',
         child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(Icons.lock_outline_rounded, size: 18, color: c.accent),
-            const SizedBox(width: OSpace.s),
-            Expanded(
-              child: Text(hint, style: OType.caption.copyWith(color: c.text)),
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: c.accentSoft,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                Icons.auto_awesome_rounded,
+                size: 20,
+                color: c.accent,
+              ),
             ),
+            const SizedBox(width: OSpace.m),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    data.autoName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: OType.bodyStrong.copyWith(color: c.text),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    data.autoSubtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: OType.caption.copyWith(color: c.textMuted),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: OSpace.s),
+            _SelectionMark(selected: selected),
           ],
         ),
       ),
@@ -519,9 +426,15 @@ class _ModelRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    // One meta line, then the cost. A locked row carries the plan gate as its
+    // only tag; the caller's tag is dropped when it would repeat the gate.
+    final gateTag = locked ? planLabel : null;
     final row = Container(
       constraints: const BoxConstraints(minHeight: OSpace.listRow),
-      padding: const EdgeInsets.all(OSpace.m),
+      padding: const EdgeInsets.symmetric(
+        horizontal: OSpace.m,
+        vertical: OSpace.s,
+      ),
       decoration: BoxDecoration(
         color: locked ? c.surfaceAlt.withValues(alpha: 0.55) : c.surface,
         borderRadius: BorderRadius.circular(ORadius.l),
@@ -529,17 +442,19 @@ class _ModelRow extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: c.surfaceAlt,
-              borderRadius: BorderRadius.circular(ORadius.m),
-            ),
-            child: Icon(
-              locked ? Icons.lock_outline_rounded : model.icon,
-              size: 19,
-              color: locked ? c.textFaint : c.textMuted,
+          ExcludeSemantics(
+            child: Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: c.surfaceAlt,
+                borderRadius: BorderRadius.circular(ORadius.m),
+              ),
+              child: Icon(
+                locked ? Icons.lock_outline_rounded : model.icon,
+                size: 19,
+                color: locked ? c.textFaint : c.textMuted,
+              ),
             ),
           ),
           const SizedBox(width: OSpace.m),
@@ -555,42 +470,37 @@ class _ModelRow extends StatelessWidget {
                   children: [
                     Text(
                       model.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: OType.body.copyWith(
                         color: locked ? c.textMuted : c.text,
                         fontWeight: FontWeight.w500,
                       ),
                     ),
-                    if (model.tag != null)
-                      _Tag(label: model.tag!, tone: model.tagTone),
+                    if (gateTag != null)
+                      OPill(label: gateTag, tone: OPillTone.accent),
                   ],
                 ),
                 const SizedBox(height: 2),
-                Text(
-                  model.subtitle,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-                const SizedBox(height: OSpace.s),
+                // Wrap, not Row: at 200 % text the meta line and the cost each
+                // get a full line instead of overflowing the row.
                 Wrap(
                   spacing: OSpace.s,
-                  runSpacing: OSpace.xs,
+                  runSpacing: OSpace.xxs,
                   crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
-                    _MetricPill(
-                      icon: Icons.speed_rounded,
-                      label: model.speed,
-                      tone: c.textMuted,
+                    Text(
+                      model.subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: OType.caption.copyWith(color: c.textMuted),
                     ),
-                    _MetricPill(
-                      icon: Icons.toll_outlined,
-                      label: model.costHint,
-                      tone: c.textMuted,
+                    Text(
+                      model.costHint,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: OType.caption.copyWith(color: c.textFaint),
                     ),
-                    // The plan a locked row needs sits with the metrics rather
-                    // than in a trailing column: a side column steals ~110 dp
-                    // and wraps the subtitle on a 360 dp screen.
-                    if (locked) _Tag(label: planLabel, tone: OPillTone.accent),
                   ],
                 ),
               ],
@@ -598,7 +508,13 @@ class _ModelRow extends StatelessWidget {
           ),
           const SizedBox(width: OSpace.xs),
           if (locked)
-            Icon(Icons.lock_outline_rounded, size: 18, color: c.textFaint)
+            ExcludeSemantics(
+              child: Icon(
+                Icons.lock_outline_rounded,
+                size: 18,
+                color: c.textFaint,
+              ),
+            )
           else
             _SelectionMark(selected: selected),
         ],
@@ -646,93 +562,8 @@ class _SelectionMark extends StatelessWidget {
   }
 }
 
-/// Tag with the same look as [OPill] that can shrink when the text is scaled
-/// up: the shared pill pins its height and lets its label overflow.
-class _Tag extends StatelessWidget {
-  const _Tag({required this.label, required this.tone});
-
-  final String label;
-  final OPillTone tone;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final (bg, fg) = switch (tone) {
-      OPillTone.neutral => (c.surfaceAlt, c.textMuted),
-      OPillTone.accent => (c.accentSoft, c.accent),
-      OPillTone.success => (c.success.withValues(alpha: 0.12), c.success),
-      OPillTone.warn => (c.warn.withValues(alpha: 0.12), c.warn),
-      OPillTone.danger => (c.danger.withValues(alpha: 0.12), c.danger),
-    };
-    return Container(
-      constraints: const BoxConstraints(minHeight: 24),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Flexible(
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: OType.caption.copyWith(
-                color: fg,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _MetricPill extends StatelessWidget {
-  const _MetricPill({
-    required this.icon,
-    required this.label,
-    required this.tone,
-  });
-
-  final IconData icon;
-  final String label;
-  final Color tone;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      constraints: const BoxConstraints(minHeight: 24),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(
-        color: c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.s),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 13, color: tone),
-          const SizedBox(width: OSpace.xs),
-          Flexible(
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: OType.caption.copyWith(color: c.textMuted),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Opens the picker in the shared bottom sheet. Selection and manage actions
-/// close the sheet after the caller callback runs.
+/// Opens the picker in the shared sheet container. Selection and manage
+/// actions close the sheet after the caller callback runs.
 Future<void> showV2ModelPickerSheet(
   BuildContext context, {
   required V2ModelPickerData data,
@@ -740,7 +571,7 @@ Future<void> showV2ModelPickerSheet(
   required VoidCallback onManageModels,
   VoidCallback? onRetry,
 }) {
-  return showOSheet<void>(
+  return showV2ChatSheet<void>(
     context,
     builder: (sheetContext) => V2ModelPickerSheet(
       data: data,

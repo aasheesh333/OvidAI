@@ -67,17 +67,17 @@ Future<void> _pump(
 }
 
 void main() {
-  testWidgets('renders the ownership note and every open tab', (tester) async {
+  testWidgets('renders every open tab and no ownership note', (tester) async {
     await _pump(
       tester,
       const BrowserTabStrip(tabs: _tabs, activeTabId: 'docs'),
     );
 
-    expect(find.text('Ovid opens tabs'), findsOneWidget);
     expect(find.text('Docs'), findsOneWidget);
     expect(find.text('GitHub'), findsOneWidget);
     expect(find.text('Inbox'), findsOneWidget);
     expect(find.byKey(_scrollKey), findsOneWidget);
+    expect(find.text('Ovid opens tabs'), findsNothing);
   });
 
   testWidgets('renders in dark theme', (tester) async {
@@ -87,32 +87,17 @@ void main() {
       theme: OTheme.dark(),
     );
 
-    expect(find.text('Ovid opens tabs'), findsOneWidget);
     expect(find.text('GitHub'), findsOneWidget);
+    expect(find.text('Docs'), findsOneWidget);
   });
 
-  testWidgets('the plus is disabled and explains that Ovid opens tabs', (
-    tester,
-  ) async {
-    final semantics = tester.ensureSemantics();
+  testWidgets('there is no add control at all', (tester) async {
     await _pump(tester, const BrowserTabStrip(tabs: _tabs));
 
-    expect(find.byTooltip('Ovid opens tabs'), findsOneWidget);
-    final iconButton = tester.widget<IconButton>(
-      find.descendant(
-        of: find.byTooltip('Ovid opens tabs'),
-        matching: find.byType(IconButton),
-      ),
-    );
-    expect(iconButton.onPressed, isNull);
-
-    final node = tester.getSemantics(
-      find.byKey(const ValueKey('v2-browser-tab-add')),
-    );
-    expect(node.flagsCollection.isButton, isTrue);
-    expect(node.flagsCollection.isEnabled, Tristate.isFalse);
-    expect(node.label, contains('Ovid opens tabs'));
-    semantics.dispose();
+    // Tabs are agent-owned: no disabled plus, no tooltip explaining one.
+    expect(find.byKey(const ValueKey('v2-browser-tab-add')), findsNothing);
+    expect(find.byIcon(Icons.add_rounded), findsNothing);
+    expect(find.text('Ovid opens tabs'), findsNothing);
   });
 
   testWidgets('no tap, long-press or key can create a tab', (tester) async {
@@ -123,17 +108,7 @@ void main() {
       BrowserTabStrip(tabs: _tabs, onSelectTab: (_) => selects++),
     );
 
-    final plus = find.byKey(const ValueKey('v2-browser-tab-add'));
-    final button = tester.widget<IconButton>(
-      find.descendant(of: plus, matching: find.byType(IconButton)),
-    );
-    // No activation path at all: no tap, no long-press, no key handler.
-    expect(button.onPressed, isNull);
-    expect(button.onLongPress, isNull);
-    expect(button.focusNode?.canRequestFocus ?? false, isFalse);
-
-    await tester.longPress(plus);
-    await tester.tap(plus, warnIfMissed: false);
+    await tester.longPress(find.byKey(const ValueKey('v2-browser-tab-docs')));
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.pump(const Duration(milliseconds: 300));
 
@@ -142,7 +117,7 @@ void main() {
     expect(find.byKey(const ValueKey('v2-browser-tab-github')), findsOneWidget);
     expect(find.byKey(const ValueKey('v2-browser-tab-inbox')), findsOneWidget);
     expect(find.text('New tab'), findsNothing);
-    expect(selects, 0);
+    expect(selects, 1); // the long-press selected that tab, it created none
     semantics.dispose();
   });
 
@@ -226,10 +201,7 @@ void main() {
   });
 
   testWidgets('close controls are 48 dp targets for every tab', (tester) async {
-    await _pump(
-      tester,
-      BrowserTabStrip(tabs: _tabs, onCloseTab: (_) {}),
-    );
+    await _pump(tester, BrowserTabStrip(tabs: _tabs, onCloseTab: (_) {}));
 
     for (final tab in _tabs) {
       final size = tester.getSize(
@@ -265,6 +237,7 @@ void main() {
             closable: false,
           ),
         ],
+        onCloseTab: _noop,
       ),
     );
 
@@ -305,9 +278,7 @@ void main() {
     expect(find.byIcon(Icons.language_rounded), findsNothing);
   });
 
-  testWidgets('the headless badge marks a tab whose live view paused', (
-    tester,
-  ) async {
+  testWidgets('the headless mark is an icon, not a word', (tester) async {
     final semantics = tester.ensureSemantics();
     await _pump(tester, const BrowserTabStrip(tabs: _tabs));
 
@@ -315,8 +286,8 @@ void main() {
       find.byKey(const ValueKey('v2-browser-tab-headless-inbox')),
       findsOneWidget,
     );
-    expect(find.text('Headless'), findsOneWidget);
-    expect(find.byTooltip('Headless · the live view paused'), findsOneWidget);
+    expect(find.byTooltip('Headless'), findsOneWidget);
+    expect(find.text('Headless'), findsNothing);
     expect(
       find.byKey(const ValueKey('v2-browser-tab-headless-docs')),
       findsNothing,
@@ -388,9 +359,7 @@ void main() {
     );
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Ovid opens tabs'), findsOneWidget);
     expect(find.byKey(_scrollKey), findsOneWidget);
-    expect(find.text('Headless'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('v2-browser-tab-close-docs')),
       findsOneWidget,
@@ -409,12 +378,10 @@ void main() {
     );
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Ovid opens tabs'), findsOneWidget);
     expect(find.text('Inbox'), findsOneWidget);
-    expect(find.text('Headless'), findsOneWidget);
   });
 
-  testWidgets('empty strip explains who opens the first tab', (tester) async {
+  testWidgets('an empty strip renders nothing', (tester) async {
     await _pump(
       tester,
       const BrowserTabStrip(tabs: <V2BrowserTabItem>[]),
@@ -423,10 +390,10 @@ void main() {
     );
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Ovid opens tabs'), findsOneWidget);
-    expect(find.text('No tabs yet. Ovid opens the first one.'), findsOneWidget);
     expect(find.byKey(_scrollKey), findsNothing);
-    expect(find.byTooltip('Ovid opens tabs'), findsOneWidget);
-    expect(tester.takeException(), isNull);
+    expect(find.text('No tabs yet. Ovid opens the first one.'), findsNothing);
+    expect(tester.getSize(find.byType(BrowserTabStrip)).height, 0);
   });
 }
+
+void _noop(String _) {}

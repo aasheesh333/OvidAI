@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 
 // TODO(l10n): move the English copy in this screen to the ARB files.
@@ -44,7 +44,6 @@ class V2LegalPageData {
         "You're offline. This is the saved copy of the document.",
     this.errorMessage = 'We could not load this document.',
     this.onBack,
-    this.onCopy,
     this.onRetry,
   });
 
@@ -67,9 +66,6 @@ class V2LegalPageData {
   final String errorMessage;
 
   final VoidCallback? onBack;
-
-  /// Copies the whole document. Clipboard work belongs to the caller.
-  final VoidCallback? onCopy;
   final VoidCallback? onRetry;
 
   String get updatedLabel =>
@@ -88,54 +84,15 @@ class LegalPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return OScaffold(
-      appBar: OAppBar(
-        title: data.title,
-        leading: OIconButton(
-          icon: Icons.arrow_back_rounded,
-          semanticLabel: 'Back',
-          onPressed: data.onBack ?? () => Navigator.maybePop(context),
-        ),
-        actions: [
-          OIconButton(
-            icon: Icons.copy_rounded,
-            semanticLabel: 'Copy document',
-            tooltip: 'Copy document',
-            onPressed: data.hasContent
-                ? (data.onCopy ?? () => _copy(context))
-                : null,
-          ),
-        ],
+    return OScreen(
+      title: data.title,
+      leading: OIconButton(
+        icon: Icons.arrow_back_rounded,
+        semanticLabel: 'Back',
+        onPressed: data.onBack ?? () => Navigator.maybePop(context),
       ),
-      body: _body(context),
+      child: _body(context),
     );
-  }
-
-  /// Real clipboard copy of the whole document, so the action is never a
-  /// disabled button. A caller that needs different behaviour can still pass
-  /// [V2LegalPageData.onCopy].
-  Future<void> _copy(BuildContext context) async {
-    final text = StringBuffer()..writeln(data.title);
-    if (data.updatedLabel.isNotEmpty) text.writeln(data.updatedLabel);
-    if (data.summary.trim().isNotEmpty) {
-      text
-        ..writeln()
-        ..writeln(data.summary.trim());
-    }
-    for (final section in data.sections) {
-      text
-        ..writeln()
-        ..writeln(section.heading);
-      if (section.hasBody) text.writeln(section.body.trim());
-      for (final bullet in section.bullets) {
-        text.writeln('• $bullet');
-      }
-    }
-    await Clipboard.setData(ClipboardData(text: text.toString().trim()));
-    if (!context.mounted) return;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(const SnackBar(content: Text('Document copied.')));
   }
 
   Widget _body(BuildContext context) {
@@ -156,79 +113,42 @@ class LegalPage extends StatelessWidget {
   }
 
   Widget _content(BuildContext context) {
-    return OFadeSlide(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(
-          OSpace.screen,
-          OSpace.xl,
-          OSpace.screen,
-          OSpace.xxl,
-        ),
-        child: OStagger(
-          children: [
-            _header(context),
-            if (data.offline && data.offlineNote.trim().isNotEmpty)
-              _offlineNote(context),
-            for (final section in data.sections) _section(context, section),
-          ],
-        ),
-      ),
+    final sections = data.sections;
+    return ListView.builder(
+      padding: const EdgeInsets.only(top: OSpace.xl, bottom: OSpace.xxl),
+      itemCount: sections.length + 1,
+      itemBuilder: (context, index) {
+        if (index == 0) return _header(context);
+        return _section(context, sections[index - 1]);
+      },
     );
   }
 
+  /// The document title already lives in the header; the body carries only
+  /// the date, the lead-in and the offline note.
   Widget _header(BuildContext context) {
     final c = OColors.of(context);
+    final showOffline = data.offline && data.offlineNote.trim().isNotEmpty;
     return Padding(
       padding: const EdgeInsets.only(bottom: OSpace.xl),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(
-              color: c.accentSoft,
-              borderRadius: BorderRadius.circular(ORadius.m),
-            ),
-            child: Icon(data.icon, size: 24, color: c.accent),
-          ),
-          const SizedBox(height: OSpace.l),
-          Semantics(
-            header: true,
-            child: Text(data.title, style: OType.h1.copyWith(color: c.text)),
-          ),
           if (data.updatedLabel.isNotEmpty) ...[
-            const SizedBox(height: OSpace.s),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.only(top: 2),
-                  child: Icon(
-                    Icons.event_outlined,
-                    size: 16,
-                    color: c.textFaint,
-                  ),
-                ),
-                const SizedBox(width: OSpace.xs),
-                Expanded(
-                  child: Text(
-                    data.updatedLabel,
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                ),
-              ],
+            Text(
+              data.updatedLabel,
+              style: OType.caption.copyWith(color: c.textMuted),
             ),
+            const SizedBox(height: OSpace.m),
           ],
           if (data.summary.trim().isNotEmpty) ...[
-            const SizedBox(height: OSpace.m),
             Text(
               data.summary,
               style: OType.bodySm.copyWith(color: c.textMuted),
             ),
+            const SizedBox(height: OSpace.l),
           ],
-          const SizedBox(height: OSpace.l),
-          Divider(color: c.hairline, height: 1),
+          if (showOffline) _offlineNote(context),
         ],
       ),
     );
@@ -312,9 +232,8 @@ class LegalPage extends StatelessWidget {
       icon: Icons.article_outlined,
       title: 'Document unavailable',
       message: retry == null
-          ? 'This document is not available right now.'
-          : 'This document is not available right now. Check your connection '
-                'and try again.',
+          ? 'It may have been removed.'
+          : 'Check your connection and try again.',
       action: OButton(
         label: retry == null ? 'Go back' : 'Try again',
         icon: retry == null ? Icons.arrow_back_rounded : Icons.refresh_rounded,

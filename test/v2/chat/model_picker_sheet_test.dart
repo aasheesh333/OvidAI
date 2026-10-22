@@ -109,13 +109,27 @@ void main() {
 
     expect(find.text('Select model'), findsOneWidget);
     expect(find.text('Auto'), findsOneWidget);
-    expect(find.text('Recommended'), findsOneWidget);
+    expect(
+      find.text('Recommended'),
+      findsNothing,
+      reason: 'the Auto card keeps one description line, not a tag',
+    );
+    expect(find.text('Smart routing'), findsOneWidget);
     expect(find.text('Ovid Flash 2.5'), findsOneWidget);
     expect(find.text('Ovid Pro 1.5'), findsOneWidget);
     expect(find.text('Claude 3.7 Sonnet'), findsOneWidget);
     expect(find.text('Plus plan'), findsNWidgets(3));
     expect(find.text('Manage models'), findsOneWidget);
-    expect(find.text('Free plan uses Auto only.'), findsOneWidget);
+    expect(
+      find.text('Free plan uses Auto only.'),
+      findsNothing,
+      reason: 'the plan gate lives on the rows, not as a footer paragraph',
+    );
+    expect(
+      find.text('Speed'),
+      findsNothing,
+      reason: 'a row is name, one meta line and cost; the gate is the only tag',
+    );
   });
 
   testWidgets('renders the picker in dark', (tester) async {
@@ -177,25 +191,36 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
 
-    for (final dark in [false, true]) {
-      await tester.pumpWidget(
-        MaterialApp(
-          theme: dark ? OTheme.dark() : OTheme.light(),
-          builder: (context, child) => MediaQuery(
-            data: MediaQuery.of(
-              context,
-            ).copyWith(textScaler: const TextScaler.linear(2)),
-            child: child!,
-          ),
-          home: _sheet(),
-        ),
-      );
-      await tester.pumpAndSettle();
+    const plans = <String, V2ModelPickerData>{
+      'free': _data,
+      'plus': V2ModelPickerData(models: _manualModels, planLabel: 'Plus'),
+    };
 
-      expect(tester.takeException(), isNull, reason: 'dark: $dark');
-      expect(find.text('Select model'), findsOneWidget);
-      expect(find.text('Ovid Flash 2.5'), findsOneWidget);
-      expect(find.text('Manage models'), findsOneWidget);
+    for (final dark in [false, true]) {
+      for (final entry in plans.entries) {
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: dark ? OTheme.dark() : OTheme.light(),
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: const TextScaler.linear(2)),
+              child: child!,
+            ),
+            home: _sheet(data: entry.value),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          tester.takeException(),
+          isNull,
+          reason: '${entry.key} dark: $dark',
+        );
+        expect(find.text('Select model'), findsOneWidget);
+        expect(find.text('Ovid Pro 1.5'), findsOneWidget);
+        expect(find.text('Manage models'), findsOneWidget);
+      }
     }
   });
 
@@ -265,7 +290,6 @@ void main() {
               models: _manualModels,
               planLabel: plan,
               manualModelsAllowed: false,
-              freePlanNote: '$plan uses Auto only.',
             ),
             onSelect: (id) => selected = id,
           ),
@@ -273,8 +297,8 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // The upgrade explanation sits under the header.
-      expect(find.text(_upgradeHint), findsOneWidget);
+      // The plan gate is the per-row tag, not a paragraph.
+      expect(find.text(_upgradeHint), findsNothing);
 
       // Manual models stay visible, greyed, with the plan they need.
       expect(find.text('Ovid Mini 1.0'), findsOneWidget);
@@ -303,7 +327,6 @@ void main() {
               models: _manualModels,
               planLabel: plan,
               manualModelsAllowed: true,
-              freePlanNote: 'All models are available on your plan.',
             ),
             onSelect: picks.add,
           ),
@@ -335,7 +358,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text(_upgradeHint), findsOneWidget);
+    expect(find.text(_upgradeHint), findsNothing);
     expect(find.text('Plus plan'), findsNWidgets(2));
 
     await tester.tap(find.text('Ovid Mini 1.0'));
@@ -459,5 +482,46 @@ void main() {
       Tristate.isTrue,
     );
     handle.dispose();
+  });
+
+  testWidgets('opens as a centred 560 dp dialog at 600 dp and wider', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(900, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: OTheme.light(),
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: Center(
+              child: TextButton(
+                onPressed: () => showV2ModelPickerSheet(
+                  context,
+                  data: _data,
+                  onSelect: (_) {},
+                  onManageModels: () {},
+                ),
+                child: const Text('Open models'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Open models'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(Dialog), findsOneWidget);
+    expect(find.byType(BottomSheet), findsNothing);
+
+    final sheet = tester.getRect(find.byType(V2ModelPickerSheet));
+    expect(sheet.width, lessThanOrEqualTo(560));
+    expect(sheet.center.dx, closeTo(450, 1));
+    expect(find.text('Select model'), findsOneWidget);
+    expect(find.text('Ovid Flash 2.5'), findsOneWidget);
   });
 }

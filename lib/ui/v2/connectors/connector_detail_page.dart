@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'add_connector_page.dart';
 import 'catalog_data.dart';
@@ -160,8 +161,7 @@ class V2ConnectorDetailData {
   final bool enabled;
 
   /// The server URL or command behind this connection. Empty for a catalog
-  /// row that has never been set up — the detail page then says there is
-  /// nothing to test instead of offering a test that cannot work.
+  /// row that has never been set up — the detail page then offers no test.
   final String endpoint;
   final V2ConnectorTarget target;
 
@@ -180,8 +180,7 @@ class V2ConnectorDetailData {
   /// Primary credential the catalog says this integration needs, e.g. OAuth.
   final String authLabel;
 
-  /// Blast radius of the whole connector. Individual grants can be at least
-  /// this risky; the permissions screen shows the higher of the two.
+  /// Blast radius of the whole connector.
   final V2ConnectorPermissionRisk risk;
 
   final V2ConnectorDetailStatus status;
@@ -192,7 +191,7 @@ class V2ConnectorDetailData {
   final Set<String> disabledTools;
 }
 
-/// One connector: what it can do, who can use it, and how to disconnect it.
+/// One connector: its status, its grants, and one way to disconnect it.
 class ConnectorDetailPage extends StatefulWidget {
   const ConnectorDetailPage({
     super.key,
@@ -202,7 +201,6 @@ class ConnectorDetailPage extends StatefulWidget {
     this.onDisconnect,
     this.onEnabledChanged,
     this.onPermissionChanged,
-    this.onAutoSyncChanged,
     this.onOpenPermissions,
     this.onMenu,
     this.onRetry,
@@ -221,7 +219,6 @@ class ConnectorDetailPage extends StatefulWidget {
   final ValueChanged<bool>? onEnabledChanged;
 
   final void Function(String permissionId, bool granted)? onPermissionChanged;
-  final ValueChanged<bool>? onAutoSyncChanged;
 
   /// Optional override for the wiring layer. When omitted the detail page
   /// opens [permissions.ConnectorPermissionsPage] with mapped grants itself.
@@ -242,7 +239,6 @@ class ConnectorDetailPage extends StatefulWidget {
 
 class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
   late Map<String, bool> _granted = _initialGrants();
-  late bool _autoSync = widget.data.autoSync;
   late bool _enabled = widget.data.enabled;
   V2ConnectorTestReport? _report;
   bool _testing = false;
@@ -264,7 +260,6 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.data != widget.data) {
       _granted = _initialGrants();
-      _autoSync = widget.data.autoSync;
       _enabled = widget.data.enabled;
     }
   }
@@ -289,9 +284,7 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
     } catch (_) {
       if (!mounted) return;
       setState(
-        () => _actionError =
-            'Could not save that permission. Check your connection and try '
-            'again.',
+        () => _actionError = 'Could not save that permission.',
       );
     }
   }
@@ -316,27 +309,9 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
       if (!mounted) return;
       setState(() {
         _enabled = !value;
-        _actionError =
-            'Could not save that change. Check your connection and try again.';
+        _actionError = 'Could not save that change.';
       });
     }
-  }
-
-  void _toggleAutoSync(bool value) {
-    setState(() => _autoSync = value);
-    final external = widget.onAutoSyncChanged;
-    if (external != null) {
-      external(value);
-      return;
-    }
-    _store.setAutoSync(widget.data.id, value).catchError((Object _) {
-      if (!mounted) return;
-      setState(
-        () => _actionError =
-            'Could not save automatic sync. Check your connection and try '
-            'again.',
-      );
-    });
   }
 
   /// Runs the real test. Never reports success without a server answer.
@@ -415,7 +390,7 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
   }
 
   /// The detail page owns the live switch state, so map it (plus the tool and
-  /// agent wiring) into the standalone permissions screen when the row opens.
+  /// agent wiring) into the standalone permissions screen when the menu opens.
   permissions.V2ConnectorPermissionsData _permissionsScreenData() {
     final data = widget.data;
     final granted = data.permissions.where(_isGranted).toList();
@@ -526,19 +501,12 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
       await _store.setToolEnabled(widget.data.id, toolId, enabled);
     } catch (_) {
       if (!mounted) return;
-      setState(
-        () => _actionError =
-            'Could not save that tool. Check your connection and try again.',
-      );
+      setState(() => _actionError = 'Could not save that tool.');
     }
   }
 
   Future<void> _confirmDisconnect() async {
     final data = widget.data;
-    final note = data.disconnectNote.isEmpty
-        ? 'Ovid will stop using ${data.name} in chats and projects until you '
-              'connect it again.'
-        : data.disconnectNote;
     final confirmed = await showOSheet<bool>(
       context,
       title: 'Disconnect ${data.name}?',
@@ -549,14 +517,16 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(
-              note,
+              data.disconnectNote.isEmpty
+                  ? 'Ovid stops using it until you connect again.'
+                  : data.disconnectNote,
               style: OType.bodySm.copyWith(
                 color: OColors.of(sheetContext).textMuted,
               ),
             ),
             const SizedBox(height: OSpace.l),
             OButton(
-              label: 'Disconnect ${data.name}',
+              label: 'Disconnect',
               icon: Icons.link_off_rounded,
               variant: OButtonVariant.dangerFill,
               expand: true,
@@ -584,10 +554,7 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
       await _secrets.delete(widget.data.id);
     } catch (_) {
       if (!mounted) return;
-      setState(
-        () => _actionError =
-            'Could not disconnect. Check your connection and try again.',
-      );
+      setState(() => _actionError = 'Could not disconnect.');
       return;
     }
     if (!mounted) return;
@@ -595,7 +562,7 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
     Navigator.of(context).maybePop();
   }
 
-  /// The overflow menu, with the actions this screen can really perform.
+  /// The overflow menu. Destructive actions stay at the bottom of the page.
   Future<void> _openMenu() async {
     final external = widget.onMenu;
     if (external != null) {
@@ -604,40 +571,20 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
     }
     final action = await showOSheet<String>(
       context,
-      title: widget.data.name,
+      title: 'Options',
       builder: (sheetContext) => Padding(
         padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.l),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            OButton(
-              label: 'Review permissions',
-              icon: Icons.verified_user_outlined,
-              variant: OButtonVariant.secondary,
-              expand: true,
-              onPressed: () => Navigator.of(sheetContext).pop('permissions'),
-            ),
-            if (widget.data.connected) ...[
-              const SizedBox(height: OSpace.s),
-              OButton(
-                label: 'Disconnect ${widget.data.name}',
-                icon: Icons.link_off_rounded,
-                variant: OButtonVariant.danger,
-                expand: true,
-                onPressed: () => Navigator.of(sheetContext).pop('disconnect'),
-              ),
-            ],
-          ],
+        child: OButton(
+          label: 'Review permissions',
+          icon: Icons.verified_user_outlined,
+          variant: OButtonVariant.secondary,
+          expand: true,
+          onPressed: () => Navigator.of(sheetContext).pop('permissions'),
         ),
       ),
     );
     if (!mounted) return;
-    if (action == 'permissions') {
-      await _openPermissions();
-    } else if (action == 'disconnect') {
-      await _confirmDisconnect();
-    }
+    if (action == 'permissions') await _openPermissions();
   }
 
   /// Opens the real setup form for a connector that is not connected yet.
@@ -674,24 +621,24 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
 
   @override
   Widget build(BuildContext context) {
-    return OScaffold(
-      appBar: OAppBar(
-        title: 'Connector details',
-        subtitle: 'Ovid Si',
-        leading: OIconButton(
-          icon: Icons.arrow_back_rounded,
-          semanticLabel: 'Back',
-          onPressed: widget.onBack ?? () => Navigator.maybePop(context),
+    return OScreen(
+      title: widget.data.name,
+      maxWidth: 640,
+      leading: widget.onBack == null
+          ? null
+          : OIconButton(
+              icon: Icons.arrow_back_rounded,
+              semanticLabel: 'Back',
+              onPressed: widget.onBack,
+            ),
+      actions: [
+        OIconButton(
+          icon: Icons.more_vert_rounded,
+          semanticLabel: 'Connector menu',
+          onPressed: _openMenu,
         ),
-        actions: [
-          OIconButton(
-            icon: Icons.more_vert_rounded,
-            semanticLabel: 'Connector menu',
-            onPressed: _openMenu,
-          ),
-        ],
-      ),
-      body: OFadeSlide(child: _body(context)),
+      ],
+      child: OFadeSlide(child: _body(context)),
     );
   }
 
@@ -711,11 +658,10 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
     return OEmptyState(
       icon: Icons.link_off_rounded,
       title: 'Not connected',
-      message:
-          'Connect ${widget.data.name} so Ovid can use it in your chats '
-          'and projects.',
+      message: 'Connect ${widget.data.name} to use it.',
       action: OButton(
-        label: 'Connect ${widget.data.name}',
+        label: 'Connect',
+        semanticLabel: 'Connect ${widget.data.name}',
         icon: Icons.link_rounded,
         onPressed: _connect,
       ),
@@ -725,112 +671,48 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
   Widget _content(BuildContext context) {
     final c = OColors.of(context);
     final data = widget.data;
+    final permissions = data.permissions.take(3).toList();
     return ListView(
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.l,
-        OSpace.s,
-        OSpace.l,
-        OSpace.xl,
-      ),
+      padding: const EdgeInsets.only(top: OSpace.l, bottom: OSpace.xxl),
       children: [
-        OCard(
-          padding: const EdgeInsets.all(OSpace.xl),
-          child: Column(
-            children: [
-              Container(
-                width: 72,
-                height: 72,
-                decoration: BoxDecoration(
-                  color: c.surfaceAlt,
-                  shape: BoxShape.circle,
-                  border: Border.all(color: c.hairline),
-                ),
-                child: Icon(data.icon, size: 34, color: c.text),
-              ),
-              const SizedBox(height: OSpace.m),
-              Text(
-                data.name,
-                textAlign: TextAlign.center,
-                style: OType.h1.copyWith(color: c.text),
-              ),
-              const SizedBox(height: OSpace.s),
-              OPill(
-                label: _enabled ? 'Connected' : 'Connected · paused',
-                tone: _enabled ? OPillTone.success : OPillTone.neutral,
-                dot: _enabled,
-              ),
-              const SizedBox(height: OSpace.m),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 340),
-                child: Text(
-                  data.description,
-                  textAlign: TextAlign.center,
-                  style: OType.bodySm.copyWith(color: c.textMuted),
+        // Status is the one line the page leads with; the switch is the only
+        // control beside it.
+        Row(
+          key: const Key('connector-enabled-card'),
+          children: [
+            OPill(
+              label: _enabled ? 'On' : 'Paused',
+              tone: _enabled ? OPillTone.success : OPillTone.neutral,
+              dot: _enabled,
+            ),
+            const Spacer(),
+            MergeSemantics(
+              child: Semantics(
+                label: 'Enabled',
+                child: SizedBox(
+                  height: OSpace.touch,
+                  child: Switch(value: _enabled, onChanged: _toggleEnabled),
                 ),
               ),
-              const SizedBox(height: OSpace.l),
-              if (data.accountLabel.isNotEmpty || data.syncedLabel.isNotEmpty)
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: OSpace.m,
-                    vertical: OSpace.s,
-                  ),
-                  decoration: BoxDecoration(
-                    color: c.surfaceAlt,
-                    borderRadius: BorderRadius.circular(ORadius.pill),
-                  ),
-                  child: Wrap(
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    alignment: WrapAlignment.center,
-                    spacing: OSpace.s,
-                    runSpacing: OSpace.xs,
-                    children: [
-                      if (data.accountLabel.isNotEmpty) ...[
-                        Icon(
-                          Icons.account_circle_outlined,
-                          size: 16,
-                          color: c.textMuted,
-                        ),
-                        Text(
-                          data.accountLabel,
-                          style: OType.caption.copyWith(color: c.text),
-                        ),
-                      ],
-                      if (data.accountLabel.isNotEmpty &&
-                          data.syncedLabel.isNotEmpty)
-                        Container(
-                          width: 3,
-                          height: 3,
-                          decoration: BoxDecoration(
-                            color: c.textFaint,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                      if (data.syncedLabel.isNotEmpty)
-                        Text(
-                          data.syncedLabel,
-                          style: OType.caption.copyWith(color: c.textMuted),
-                        ),
-                    ],
-                  ),
-                ),
-            ],
+            ),
+          ],
+        ),
+        if (data.endpoint.isNotEmpty) ...[
+          const SizedBox(height: OSpace.l),
+          OButton(
+            key: const Key('connector-test-card'),
+            label: 'Test connection',
+            icon: Icons.sync_rounded,
+            variant: OButtonVariant.secondary,
+            expand: true,
+            loading: _testing,
+            onPressed: _testing ? null : _testConnection,
           ),
-        ),
-        const SizedBox(height: OSpace.m),
-        _ConnectorSwitchCard(
-          enabled: _enabled,
-          name: data.name,
-          onChanged: _toggleEnabled,
-        ),
-        const SizedBox(height: OSpace.m),
-        _ConnectionTestCard(
-          endpoint: data.endpoint,
-          target: data.target,
-          testing: _testing,
-          report: _report,
-          onTest: data.endpoint.isEmpty ? null : _testConnection,
-        ),
+          if (_report != null) ...[
+            const SizedBox(height: OSpace.s),
+            _ReportLine(report: _report!),
+          ],
+        ],
         if (_actionError != null) ...[
           const SizedBox(height: OSpace.s),
           Text(
@@ -839,571 +721,28 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
             style: OType.caption.copyWith(color: c.danger),
           ),
         ],
-        const SizedBox(height: OSpace.m),
-        _SafetyNote(note: data.safetyNote, builtIn: data.builtIn),
-        const SizedBox(height: OSpace.m),
-        _PermissionsEntry(
-          connectorName: data.name,
-          granted: data.permissions.where(_isGranted).length,
-          total: data.permissions.length,
-          onTap: _openPermissions,
-        ),
-        const SizedBox(height: OSpace.m),
-        OCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'Permissions granted',
-                      style: OType.h3.copyWith(color: c.text),
-                    ),
-                  ),
-                  if (data.accessLabel.isNotEmpty) ...[
-                    Icon(
-                      Icons.verified_user_outlined,
-                      size: 15,
-                      color: c.textMuted,
-                    ),
-                    const SizedBox(width: OSpace.xs),
-                    Flexible(
-                      child: Text(
-                        data.accessLabel,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-              const SizedBox(height: OSpace.s),
-              if (data.permissions.isEmpty)
-                Text(
-                  'No permissions granted yet.',
-                  style: OType.caption.copyWith(color: c.textMuted),
-                )
-              else
-                OStagger(
-                  children: [
-                    for (var i = 0; i < data.permissions.length; i++) ...[
-                      if (i > 0) Divider(color: c.hairline, height: 1),
-                      _PermissionRow(
-                        permission: data.permissions[i],
-                        granted: _granted[data.permissions[i].id] ?? false,
-                        onChanged: (value) =>
-                            _togglePermission(data.permissions[i], value),
-                      ),
-                    ],
-                  ],
-                ),
-            ],
-          ),
-        ),
-        const SizedBox(height: OSpace.m),
-        _ToolsCard(tools: data.tools),
-        const SizedBox(height: OSpace.m),
-        _UsageCard(usage: data.usage),
-        const SizedBox(height: OSpace.m),
-        OCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'Used by',
-                      style: OType.h3.copyWith(color: c.text),
-                    ),
-                  ),
-                  Flexible(
-                    child: Text(
-                      '${data.agents.length} assigned',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: OType.caption.copyWith(color: c.textMuted),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: OSpace.s),
-              if (data.agents.isEmpty)
-                Text(
-                  'No agents can use this connector yet.',
-                  style: OType.caption.copyWith(color: c.textMuted),
-                )
-              else
-                OStagger(
-                  children: [
-                    for (var i = 0; i < data.agents.length; i++) ...[
-                      if (i > 0) Divider(color: c.hairline, height: 1),
-                      _AgentRow(agent: data.agents[i]),
-                    ],
-                  ],
-                ),
-            ],
-          ),
-        ),
-        const SizedBox(height: OSpace.m),
-        _ActivityCard(activity: data.activity),
-        const SizedBox(height: OSpace.m),
-        OCard(
-          padding: const EdgeInsets.symmetric(
-            horizontal: OSpace.m,
-            vertical: OSpace.s,
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: c.surfaceAlt,
-                  borderRadius: BorderRadius.circular(ORadius.m),
-                ),
-                child: Icon(Icons.sync_rounded, size: 19, color: c.textMuted),
-              ),
-              const SizedBox(width: OSpace.m),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Automatic sync',
-                      style: OType.bodyStrong.copyWith(color: c.text),
-                    ),
-                    Text(
-                      'Updates when code is pushed or a pull request opens.',
-                      style: OType.caption.copyWith(color: c.textMuted),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: OSpace.s),
-              Semantics(
-                label: 'Automatic sync',
-                child: SizedBox(
-                  height: OSpace.touch,
-                  child: Switch(
-                    key: const Key('connector-autosync-switch'),
-                    value: _autoSync,
-                    onChanged: _toggleAutoSync,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: OSpace.xl),
+        if (permissions.isNotEmpty) ...[
+          const SizedBox(height: OSpace.xl),
+          OSectionTitle(title: 'Permissions'),
+          for (var i = 0; i < permissions.length; i++) ...[
+            if (i > 0) Divider(color: c.hairline, height: 1),
+            _PermissionRow(
+              permission: permissions[i],
+              granted: _isGranted(permissions[i]),
+              onChanged: (value) => _togglePermission(permissions[i], value),
+            ),
+          ],
+        ],
+        const SizedBox(height: OSpace.xxl),
         OButton(
-          label: 'Disconnect ${data.name}',
+          label: 'Disconnect',
+          semanticLabel: 'Disconnect ${data.name}',
           icon: Icons.link_off_rounded,
           variant: OButtonVariant.danger,
           expand: true,
           onPressed: _confirmDisconnect,
         ),
-        const SizedBox(height: OSpace.s),
-        Text(
-          'Disconnecting pauses sync and stops Ovid from using this connector '
-          'in chats and projects.',
-          textAlign: TextAlign.center,
-          style: OType.caption.copyWith(color: c.textMuted),
-        ),
       ],
-    );
-  }
-}
-
-/// Row that opens the grouped permissions screen. Kept separate from the
-/// compact switches below so the person can review risk, tools, and revoke
-/// every grant in one place.
-class _PermissionsEntry extends StatelessWidget {
-  const _PermissionsEntry({
-    required this.connectorName,
-    required this.granted,
-    required this.total,
-    required this.onTap,
-  });
-
-  final String connectorName;
-  final int granted;
-  final int total;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return OCard(
-      key: const Key('connector-permissions-entry'),
-      padding: const EdgeInsets.all(OSpace.m),
-      onTap: onTap,
-      semanticLabel: 'Review permissions for $connectorName',
-      child: Row(
-        children: [
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: c.surfaceAlt,
-              borderRadius: BorderRadius.circular(ORadius.m),
-              border: Border.all(color: c.hairline),
-            ),
-            child: Icon(
-              Icons.verified_user_outlined,
-              size: 20,
-              color: c.textMuted,
-            ),
-          ),
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Permissions',
-                  style: OType.bodyStrong.copyWith(color: c.text),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  total == 0
-                      ? 'Review grants, tools and risk'
-                      : '$granted of $total granted · review tools and risk',
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: OSpace.s),
-          Icon(Icons.chevron_right_rounded, size: 22, color: c.textMuted),
-        ],
-      ),
-    );
-  }
-}
-
-class _SafetyNote extends StatelessWidget {
-  const _SafetyNote({required this.note, required this.builtIn});
-
-  final String note;
-  final bool builtIn;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final color = builtIn ? c.success : c.warn;
-    final text = note.isNotEmpty
-        ? note
-        : builtIn
-        ? 'This connector is built in and reviewed by Ovid. Ovid only uses '
-              'the permissions you turn on, and it never installs plugins '
-              'from a chat message.'
-        : 'This is a custom connector. Ovid did not review it, so only add '
-              'servers you trust. Ovid never installs plugins from a chat '
-              'message.';
-    return Container(
-      key: const Key('connector-safety-note'),
-      padding: const EdgeInsets.all(OSpace.m),
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(ORadius.l),
-        border: Border.all(color: c.hairline),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.12),
-              shape: BoxShape.circle,
-            ),
-            child: Icon(Icons.shield_outlined, size: 18, color: color),
-          ),
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  builtIn ? 'Built-in safety' : 'Custom connector safety',
-                  style: OType.label.copyWith(color: c.text),
-                ),
-                const SizedBox(height: 2),
-                Text(text, style: OType.caption.copyWith(color: c.textMuted)),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ToolsCard extends StatelessWidget {
-  const _ToolsCard({required this.tools});
-
-  final List<V2ConnectorTool> tools;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return OCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text('Tools', style: OType.h3.copyWith(color: c.text)),
-              ),
-              Flexible(
-                child: Text(
-                  '${tools.length} available',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: OSpace.s),
-          if (tools.isEmpty)
-            Text(
-              'No tools yet. Ovid will list them here.',
-              style: OType.caption.copyWith(color: c.textMuted),
-            )
-          else
-            OStagger(
-              children: [
-                for (var i = 0; i < tools.length; i++) ...[
-                  if (i > 0) Divider(color: c.hairline, height: 1),
-                  _ToolRow(tool: tools[i]),
-                ],
-              ],
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ToolRow extends StatelessWidget {
-  const _ToolRow({required this.tool});
-
-  final V2ConnectorTool tool;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: OSpace.s),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 32,
-            height: 32,
-            decoration: BoxDecoration(
-              color: c.surfaceAlt,
-              borderRadius: BorderRadius.circular(ORadius.m),
-            ),
-            child: Icon(Icons.terminal_rounded, size: 17, color: c.textMuted),
-          ),
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  tool.name,
-                  style: OType.bodyStrong.copyWith(color: c.text),
-                ),
-                if (tool.description.isNotEmpty)
-                  Text(
-                    tool.description,
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-              ],
-            ),
-          ),
-          const SizedBox(width: OSpace.s),
-          Flexible(
-            child: OPill(
-              label: tool.write ? 'Can change' : 'Read only',
-              tone: tool.write ? OPillTone.warn : OPillTone.neutral,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _UsageCard extends StatelessWidget {
-  const _UsageCard({this.usage});
-
-  final V2ConnectorUsage? usage;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final value = usage;
-    return OCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text('Usage', style: OType.h3.copyWith(color: c.text)),
-              ),
-              Flexible(
-                child: Text(
-                  value?.periodLabel ?? 'this week',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: OSpace.s),
-          if (value == null)
-            Text(
-              'No calls yet. Ovid will count them here.',
-              style: OType.caption.copyWith(color: c.textMuted),
-            )
-          else ...[
-            Text(
-              '${value.calls} of ${value.limit} calls',
-              style: OType.bodySm.copyWith(color: c.text),
-            ),
-            const SizedBox(height: OSpace.s),
-            OProgressBar(value: value.fraction),
-            if (value.resetLabel.isNotEmpty) ...[
-              const SizedBox(height: OSpace.s),
-              Text(
-                value.resetLabel,
-                style: OType.caption.copyWith(color: c.textMuted),
-              ),
-            ],
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _ActivityCard extends StatelessWidget {
-  const _ActivityCard({required this.activity});
-
-  final List<V2ConnectorActivity> activity;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final shown = activity.take(8).toList();
-    return OCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  'Recent activity',
-                  style: OType.h3.copyWith(color: c.text),
-                ),
-              ),
-              if (shown.isNotEmpty)
-                Flexible(
-                  child: Text(
-                    '${activity.length} events',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                ),
-            ],
-          ),
-          const SizedBox(height: OSpace.s),
-          if (shown.isEmpty)
-            Text(
-              'No activity yet. Ovid will show what it did here.',
-              style: OType.caption.copyWith(color: c.textMuted),
-            )
-          else
-            OStagger(
-              children: [
-                for (var i = 0; i < shown.length; i++) ...[
-                  if (i > 0) Divider(color: c.hairline, height: 1),
-                  _ActivityRow(activity: shown[i]),
-                ],
-              ],
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ActivityRow extends StatelessWidget {
-  const _ActivityRow({required this.activity});
-
-  final V2ConnectorActivity activity;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final color = activity.ok ? c.success : c.warn;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: OSpace.s),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 26,
-            height: 26,
-            decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.12),
-              shape: BoxShape.circle,
-            ),
-            child: Icon(
-              activity.ok ? Icons.check_rounded : Icons.error_outline_rounded,
-              size: 15,
-              color: color,
-            ),
-          ),
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  activity.title,
-                  style: OType.bodySm.copyWith(color: c.text),
-                ),
-                if (activity.detail.isNotEmpty)
-                  Text(
-                    activity.detail,
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-              ],
-            ),
-          ),
-          if (activity.timeLabel.isNotEmpty) ...[
-            const SizedBox(width: OSpace.s),
-            Text(
-              activity.timeLabel,
-              style: OType.caption.copyWith(color: c.textFaint),
-            ),
-          ],
-        ],
-      ),
     );
   }
 }
@@ -1422,176 +761,28 @@ class _PermissionRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: OSpace.s),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 32,
-            height: 32,
-            decoration: BoxDecoration(
-              color: granted ? c.success.withValues(alpha: 0.12) : c.surfaceAlt,
-              shape: BoxShape.circle,
-            ),
-            child: Icon(
-              granted ? Icons.check_rounded : Icons.remove_rounded,
-              size: 17,
-              color: granted ? c.success : c.textFaint,
-            ),
-          ),
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  permission.name,
-                  style: OType.bodyStrong.copyWith(color: c.text),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  permission.description,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: OSpace.s),
-          Semantics(
-            label: '${permission.name} permission',
-            child: SizedBox(
-              height: OSpace.touch,
-              child: Switch(
-                key: ValueKey('connector-permission-switch-${permission.id}'),
-                value: granted,
-                onChanged: onChanged,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _AgentRow extends StatelessWidget {
-  const _AgentRow({required this.agent});
-
-  final V2ConnectorAgent agent;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: OSpace.s),
-      child: Row(
-        children: [
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: c.accentSoft,
-              borderRadius: BorderRadius.circular(ORadius.m),
-            ),
-            child: Icon(
-              agent.fullAccess
-                  ? Icons.psychology_outlined
-                  : Icons.smart_toy_outlined,
-              size: 20,
-              color: c.accent,
-            ),
-          ),
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  agent.name,
-                  style: OType.bodyStrong.copyWith(color: c.text),
-                ),
-                Text(
-                  agent.description,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: OSpace.s),
-          Flexible(
-            child: OPill(
-              label: agent.accessLabel,
-              tone: agent.fullAccess ? OPillTone.accent : OPillTone.neutral,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// The connector switch, separate from the permission switches: pausing keeps
-/// the grants but stops Ovid from calling the connector at all.
-class _ConnectorSwitchCard extends StatelessWidget {
-  const _ConnectorSwitchCard({
-    required this.enabled,
-    required this.name,
-    required this.onChanged,
-  });
-
-  final bool enabled;
-  final String name;
-  final ValueChanged<bool> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return OCard(
-      key: const Key('connector-enabled-card'),
-      padding: const EdgeInsets.symmetric(
-        horizontal: OSpace.m,
-        vertical: OSpace.s,
-      ),
-      child: MergeSemantics(
+    return MergeSemantics(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: OSpace.s),
         child: Row(
           children: [
-            Container(
-              width: 36,
-              height: 36,
-              decoration: BoxDecoration(
-                color: c.surfaceAlt,
-                borderRadius: BorderRadius.circular(ORadius.m),
-              ),
-              child: Icon(
-                enabled ? Icons.power_settings_new_rounded : Icons.pause_rounded,
-                size: 19,
-                color: enabled ? c.success : c.textMuted,
+            Expanded(
+              child: Text(
+                permission.name,
+                style: OType.bodyStrong.copyWith(color: c.text),
               ),
             ),
             const SizedBox(width: OSpace.m),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Enabled',
-                    style: OType.bodyStrong.copyWith(color: c.text),
-                  ),
-                  Text(
-                    enabled
-                        ? 'Ovid can call $name in chats and projects.'
-                        : 'Saved, but Ovid will not call $name until you turn '
-                              'it back on.',
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                ],
+            Semantics(
+              label: '${permission.name} permission',
+              child: SizedBox(
+                height: OSpace.touch,
+                child: Switch(
+                  key: ValueKey('connector-permission-switch-${permission.id}'),
+                  value: granted,
+                  onChanged: onChanged,
+                ),
               ),
-            ),
-            const SizedBox(width: OSpace.s),
-            SizedBox(
-              height: OSpace.touch,
-              child: Switch(value: enabled, onChanged: onChanged),
             ),
           ],
         ),
@@ -1600,99 +791,41 @@ class _ConnectorSwitchCard extends StatelessWidget {
   }
 }
 
-/// Real connection test: the button runs an HTTP probe and the card shows what
-/// came back, including the reason when it failed.
-class _ConnectionTestCard extends StatelessWidget {
-  const _ConnectionTestCard({
-    required this.endpoint,
-    required this.target,
-    required this.testing,
-    required this.report,
-    required this.onTest,
-  });
+/// The real result of the last test, in one line plus its reason.
+class _ReportLine extends StatelessWidget {
+  const _ReportLine({required this.report});
 
-  final String endpoint;
-  final V2ConnectorTarget target;
-  final bool testing;
-  final V2ConnectorTestReport? report;
-  final VoidCallback? onTest;
+  final V2ConnectorTestReport report;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final report = this.report;
-    final color = report == null
-        ? c.textMuted
-        : report.unsupported
+    final color = report.unsupported
         ? c.textMuted
         : report.ok
         ? c.success
         : c.danger;
-    return OCard(
-      key: const Key('connector-test-card'),
-      child: Column(
+    return Semantics(
+      liveRegion: true,
+      child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // A Wrap, not a Row: at 200 % text the pill no longer fits beside
-          // the title on a 320 dp phone and moves to its own line.
-          Wrap(
-            spacing: OSpace.s,
-            runSpacing: OSpace.xs,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              Text('Connection', style: OType.h3.copyWith(color: c.text)),
-              if (target == V2ConnectorTarget.command)
-                const OPill(label: 'Command', tone: OPillTone.neutral)
-              else if (endpoint.isNotEmpty)
-                const OPill(label: 'Server URL', tone: OPillTone.neutral),
-            ],
+          Icon(
+            report.unsupported
+                ? Icons.info_outline_rounded
+                : report.ok
+                ? Icons.check_circle_outline_rounded
+                : Icons.error_outline_rounded,
+            size: 18,
+            color: color,
           ),
-          const SizedBox(height: OSpace.s),
-          Text(
-            endpoint.isEmpty
-                ? 'No server address is saved for this connector, so there is '
-                      'nothing to test yet.'
-                : endpoint,
-            maxLines: 3,
-            overflow: TextOverflow.ellipsis,
-            style: OType.mono.copyWith(color: c.textMuted),
-          ),
-          const SizedBox(height: OSpace.m),
-          OButton(
-            label: 'Test connection',
-            icon: Icons.sync_rounded,
-            variant: OButtonVariant.secondary,
-            expand: true,
-            loading: testing,
-            onPressed: testing ? null : onTest,
-          ),
-          if (report != null) ...[
-            const SizedBox(height: OSpace.m),
-            Semantics(
-              liveRegion: true,
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Icon(
-                    report.unsupported
-                        ? Icons.info_outline_rounded
-                        : report.ok
-                        ? Icons.check_circle_outline_rounded
-                        : Icons.error_outline_rounded,
-                    size: 18,
-                    color: color,
-                  ),
-                  const SizedBox(width: OSpace.s),
-                  Expanded(
-                    child: Text(
-                      report.message,
-                      style: OType.caption.copyWith(color: color),
-                    ),
-                  ),
-                ],
-              ),
+          const SizedBox(width: OSpace.s),
+          Expanded(
+            child: Text(
+              report.message,
+              style: OType.caption.copyWith(color: color),
             ),
-          ],
+          ),
         ],
       ),
     );
@@ -1703,8 +836,6 @@ class _ConnectionTestCard extends StatelessWidget {
 ///
 /// A row with no saved connection is *not* connected: the page then offers the
 /// real setup form instead of a "Connected" badge with nothing behind it.
-/// Permissions only exist once a connection was saved, and their copy comes
-/// from [V2ConnectorPermissionKind] so it matches what the connector does.
 V2ConnectorDetailData v2ConnectorDetailForRow(
   V2Connector row, {
   V2ConnectorConnection? connection,
