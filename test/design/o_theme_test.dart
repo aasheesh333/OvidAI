@@ -13,18 +13,30 @@ double _contrast(Color a, Color b) {
 
 void main() {
   group('OColors', () {
-    test('dark palette is the approved Stitch palette', () {
-      expect(OColors.dark.bg.toARGB32(), 0xFF0E0E10);
-      expect(OColors.dark.surface.toARGB32(), 0xFF16161A);
-      expect(OColors.dark.hairline.toARGB32(), 0xFF26262C);
-      expect(OColors.dark.accentFill.toARGB32(), 0xFF7857FA);
-      expect(OColors.dark.text.toARGB32(), 0xFFFFFFFF);
+    test('light palette is Paper, Ink, Signal Red and Stone', () {
+      // The three-colour system, pinned so a theme edit cannot drift it.
+      expect(OColors.light.bg.toARGB32(), 0xFFF4F1EA); // Paper
+      expect(OColors.light.text.toARGB32(), 0xFF1B1B1B); // Ink
+      expect(OColors.light.accentFill.toARGB32(), 0xFFE5484D); // Signal Red
+      expect(OColors.light.inputBorder.toARGB32(), 0xFF8A867D); // Stone
+    });
+
+    test('dark palette inverts Ink and Paper, keeps Signal Red', () {
+      expect(OColors.dark.text.toARGB32(), 0xFFF4F1EA); // Paper on Ink
+      expect(OColors.dark.accentFill.toARGB32(), 0xFFE5484D); // Signal Red
+      // The page is a near-black Ink, not pure black: pure black loses the
+      // paper-like softness the light theme is built on.
+      expect(OColors.dark.bg.computeLuminance(), lessThan(0.02));
+      expect(OColors.dark.bg.toARGB32(), isNot(0xFF000000));
     });
 
     test('light palette is a real counterpart, not an inversion', () {
       expect(OColors.light.bg.computeLuminance(), greaterThan(0.8));
       expect(OColors.light.text.computeLuminance(), lessThan(0.1));
-      expect(OColors.light.accentFill.toARGB32(), isNot(OColors.dark.accentFill.toARGB32()));
+      expect(
+        OColors.light.bg.toARGB32(),
+        isNot(OColors.dark.bg.toARGB32()),
+      );
     });
 
     test('body and muted text meet AA on their own background', () {

@@ -4,7 +4,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
-import '../../../core/session_artifacts.dart';
+import '../../../core/artifact_kind.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
@@ -223,7 +223,6 @@ class _ShimmerLineState extends State<_ShimmerLine>
 
   @override
   Widget build(BuildContext context) {
-    final c = OColors.of(context);
     final text = Text(
       widget.text,
       maxLines: 1,
@@ -231,21 +230,14 @@ class _ShimmerLineState extends State<_ShimmerLine>
       style: widget.style,
     );
     if (OMove.reduced(context)) return text;
-    final base = widget.style.color ?? c.textMuted;
+    // Flat system: the thinking line breathes its opacity instead of sweeping
+    // a gradient through the text.
     return AnimatedBuilder(
       animation: _controller,
       builder: (context, child) {
         final t = _controller.value;
-        return ShaderMask(
-          blendMode: BlendMode.srcATop,
-          shaderCallback: (rect) => LinearGradient(
-            begin: Alignment(-1.5 + t * 3, 0),
-            end: Alignment(-0.5 + t * 3, 0),
-            colors: [base, c.text, base],
-            stops: const [0.25, 0.5, 0.75],
-          ).createShader(rect),
-          child: child,
-        );
+        final pulse = 0.6 + (t < 0.5 ? t : 1 - t) * 0.4;
+        return Opacity(opacity: pulse, child: child);
       },
       child: text,
     );

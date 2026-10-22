@@ -5,15 +5,17 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'diag.dart';
 import 'html_artifact.dart';
+import 'artifact_kind.dart';
 import 'state.dart';
+
+// Re-exported so existing callers keep importing one file.
+export 'artifact_kind.dart';
 
 /// Where an artifact came from: a file the user attached to a message, or a
 /// file/image/page Ovid produced during a run.
 enum ArtifactOrigin { uploaded, generated }
 
 /// Coarse type used for the icon, the preview route and the filters.
-enum ArtifactKind { image, html, code, document, other }
-
 /// One entry of the Artifacts screen and of the in-chat artifact cards.
 ///
 /// Artifacts are DERIVED from the persisted transcript — user attachments,
@@ -239,20 +241,6 @@ ArtifactKind artifactKindFor(String name) {
 }
 
 /// True for text the preview can show inline (code, markdown, csv, html …).
-bool artifactIsText(String name) {
-  final ext = artifactExtension(name);
-  if (_codeExt.contains(ext) || _htmlExt.contains(ext)) return true;
-  return const {
-    'md',
-    'markdown',
-    'txt',
-    'csv',
-    'tsv',
-    'log',
-    'tex',
-    'svg',
-  }.contains(ext);
-}
 
 /// Tools whose successful run leaves a file in the workspace.
 const fileWritingTools = {

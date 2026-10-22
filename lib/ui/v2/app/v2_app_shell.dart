@@ -510,7 +510,7 @@ class _V2AppShellState extends State<V2AppShell> {
       queuedPreview: queued.firstOrNull,
       limitResetLabel: _resetLabel(),
       permissionLabel: agent.mode.label,
-      composerHint: 'Ask Ovid to do anything...',
+      composerHint: 'Ask Ovid anything',
       offlineTitle: "You're offline",
       offlineMessage: 'Messages will send when you reconnect.',
     );
@@ -524,28 +524,45 @@ class _V2AppShellState extends State<V2AppShell> {
   /// simply never answered.
   V2ChatError? _chatErrorFor(ChatSession session) {
     final run = CloudAgentFacade.I.runStateFor(session.id);
-    return V2ChatError.fromCode(
-      run.lastErrorCode,
+    final code = run.lastErrorCode;
+    if (code == null || code.isEmpty) return null;
+    // A stop is expected, and a conflict means the server already accepted
+    // the prompt: neither is a failure the user must act on.
+    if (code == 'cancelled' || code == 'run_conflict') return null;
+    final resetsAt = CloudAgentFacade.I.errorResetsAtFor(session.id);
+    final copy = cloudErrorCopy(
+      code,
       message: run.lastErrorMessage,
-      resetsAt: CloudAgentFacade.I.errorResetsAtFor(session.id),
+      resetsAt: resetsAt,
+    );
+    return V2ChatError(
+      text: copy.text,
+      actionLabel: switch (copy.action) {
+        CloudErrorAction.retry => 'Retry',
+        CloudErrorAction.signIn => 'Sign in',
+        CloudErrorAction.openPlans => 'See plans',
+        CloudErrorAction.pickModel => 'Pick model',
+        CloudErrorAction.wait || CloudErrorAction.none => null,
+      },
+      detail: copy.detail,
+      resetsAt: resetsAt,
     );
   }
 
   /// Runs whatever the error bar's button names.
   void _actOnChatError(BuildContext context, V2ChatError error) {
-    switch (error.action) {
-      case CloudErrorAction.retry:
+    switch (error.actionLabel) {
+      case 'Retry':
         _retry();
-      case CloudErrorAction.signIn:
+      case 'Sign in':
         // Signing in again is the recovery: the login gate owns the flow, so
         // clear the local session and let it take over.
         unawaited(_settings.signOut(_navContext));
-      case CloudErrorAction.openPlans:
+      case 'See plans':
         V2SettingsRoutes.open(_navContext, 'plan_billing', _settings);
-      case CloudErrorAction.pickModel:
+      case 'Pick model':
         _openModelPicker(context);
-      case CloudErrorAction.wait:
-      case CloudErrorAction.none:
+      default:
         break;
     }
   }
@@ -580,7 +597,7 @@ class _V2AppShellState extends State<V2AppShell> {
           ? '$activity…'
           : 'Ovid is working...',
       draft: _draftFor(session.id),
-      composerHint: 'Ask Ovid to do anything...',
+      composerHint: 'Ask Ovid anything',
       queuedCount: agent.queuedCountFor(session.id),
       queuedPreview: queued.firstOrNull,
     );

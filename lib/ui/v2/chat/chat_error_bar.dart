@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../../../core/cloud/cloud_errors.dart';
 import '../../design/o_components.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
@@ -10,11 +9,16 @@ import '../../design/o_tokens.dart';
 /// It sits directly above the composer and keeps the transcript intact: a
 /// failed send must never look like an empty chat, which is exactly what a
 /// silently dropped message used to do.
+///
+/// Deliberately dependency-free. The mapping from a failure code to this copy
+/// lives in the app layer (`cloudErrorCopy`), because that file reaches the
+/// REST client and therefore Firebase; the web gallery renders this widget
+/// with sample data and must not pull `dart:ffi` in with it.
 @immutable
 class V2ChatError {
   const V2ChatError({
     required this.text,
-    required this.action,
+    this.actionLabel,
     this.detail,
     this.resetsAt,
   });
@@ -22,8 +26,8 @@ class V2ChatError {
   /// One or two plain sentences.
   final String text;
 
-  /// What the primary button does.
-  final CloudErrorAction action;
+  /// The button label, or null when there is nothing to do but read it.
+  final String? actionLabel;
 
   /// The server's own text, shown only inside the details expander.
   final String? detail;
@@ -31,41 +35,12 @@ class V2ChatError {
   /// The allowance reset instant for a 402.
   final DateTime? resetsAt;
 
-  /// Builds the surface from a facade error code. Returns null when there is
-  /// nothing to show.
-  static V2ChatError? fromCode(
-    String? code, {
-    String? message,
-    DateTime? resetsAt,
-    DateTime? now,
-  }) {
-    if (code == null || code.isEmpty) return null;
-    // These two are not failures the user must act on: a stop is expected, and
-    // a conflict means the server already accepted the prompt.
-    if (code == 'cancelled' || code == 'run_conflict') return null;
-    final copy = cloudErrorCopy(
-      code,
-      message: message,
-      resetsAt: resetsAt,
-      now: now,
-    );
-    return V2ChatError(
-      text: copy.text,
-      action: copy.action,
-      detail: copy.detail,
-      resetsAt: resetsAt,
-    );
-  }
-
-  /// The button label for [action], or null when there is no action.
-  String? get actionLabel => switch (action) {
-    CloudErrorAction.retry => 'Retry',
-    CloudErrorAction.signIn => 'Sign in',
-    CloudErrorAction.openPlans => 'See plans',
-    CloudErrorAction.pickModel => 'Pick model',
-    CloudErrorAction.wait => null,
-    CloudErrorAction.none => null,
-  };
+  /// Test/demo helper: a sample failure for the gallery.
+  static const sample = V2ChatError(
+    text: 'Ovid had a problem handling this message. Try again.',
+    actionLabel: 'Retry',
+    detail: 'provider returned 503 from us-east-1',
+  );
 }
 
 /// One compact error row: tone icon, the message, an optional action, and a
@@ -99,10 +74,16 @@ class _V2ChatErrorBarState extends State<V2ChatErrorBar> {
     final c = OColors.of(context);
     final label = widget.error.actionLabel;
     final detail = widget.error.detail;
+    final hasDetail = detail != null && detail.trim().isNotEmpty;
     return Container(
       key: const Key('v2-chat-error'),
       margin: const EdgeInsets.only(bottom: OSpace.s),
-      padding: const EdgeInsets.fromLTRB(OSpace.m, OSpace.s, OSpace.xs, OSpace.s),
+      padding: const EdgeInsets.fromLTRB(
+        OSpace.m,
+        OSpace.s,
+        OSpace.xs,
+        OSpace.s,
+      ),
       decoration: BoxDecoration(
         color: c.danger.withValues(alpha: 0.08),
         borderRadius: BorderRadius.circular(ORadius.l),
@@ -134,13 +115,12 @@ class _V2ChatErrorBarState extends State<V2ChatErrorBar> {
               ),
             ],
           ),
-          if ((label != null && widget.onAction != null) ||
-              widget.onDismiss != null) ...[
+          if (label != null || hasDetail || widget.onDismiss != null) ...[
             const SizedBox(height: OSpace.xxs),
             Row(
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
-                if (detail != null && detail.trim().isNotEmpty)
+                if (hasDetail)
                   OTextAction(
                     label: _open ? 'Hide details' : 'Details',
                     onPressed: () => setState(() => _open = !_open),
@@ -156,12 +136,8 @@ class _V2ChatErrorBarState extends State<V2ChatErrorBar> {
                   ),
               ],
             ),
-          ] else if (detail != null && detail.trim().isNotEmpty)
-            OTextAction(
-              label: _open ? 'Hide details' : 'Details',
-              onPressed: () => setState(() => _open = !_open),
-            ),
-          if (_open && detail != null && detail.trim().isNotEmpty) ...[
+          ],
+          if (_open && hasDetail) ...[
             const SizedBox(height: OSpace.xxs),
             Text(detail, style: OType.caption.copyWith(color: c.textMuted)),
           ],

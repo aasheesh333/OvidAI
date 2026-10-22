@@ -1001,19 +1001,17 @@ class _OSkeletonState extends State<OSkeleton>
                 borderRadius: BorderRadius.circular(widget.radius),
               ),
             )
+          // Flat system: a loading placeholder pulses its opacity rather than
+          // sweeping a gradient across the surface.
           : AnimatedBuilder(
               animation: _controller,
               builder: (context, _) {
                 final t = _controller.value;
+                final pulse = 0.55 + (t < 0.5 ? t : 1 - t) * 0.45;
                 return DecoratedBox(
                   decoration: BoxDecoration(
+                    color: Color.lerp(base, highlight, pulse),
                     borderRadius: BorderRadius.circular(widget.radius),
-                    gradient: LinearGradient(
-                      begin: Alignment(-1.5 + t * 3, 0),
-                      end: Alignment(-0.5 + t * 3, 0),
-                      colors: [base, highlight, base],
-                      stops: const [0.25, 0.5, 0.75],
-                    ),
                   ),
                 );
               },

@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 
-import '../../../core/session_artifacts.dart';
+import '../../../core/artifact_kind.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_screen.dart';
@@ -154,7 +154,7 @@ class V2LiveChatData {
     this.statusLabel = 'Ovid is generating code...',
     this.stopHint = 'Press stop to pause',
     this.draft = '',
-    this.composerHint = 'Ask Ovid to do anything...',
+    this.composerHint = 'Ask Ovid anything',
     this.emptyTitle = 'Ask Ovid anything',
     this.emptyMessage = 'Replies and files appear here.',
     this.emptyActionLabel = 'Start a chat',
@@ -1393,6 +1393,7 @@ class _LiveComposer extends StatelessWidget {
                     decoration: InputDecoration(
                       hintText: running ? data.statusLabel : data.composerHint,
                       hintStyle: OType.bodySm.copyWith(color: c.textFaint),
+                      hintMaxLines: 1,
                       filled: false,
                       isDense: true,
                       border: InputBorder.none,

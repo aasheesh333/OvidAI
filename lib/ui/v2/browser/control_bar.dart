@@ -154,16 +154,11 @@ class BrowserTakeControlPill extends StatelessWidget {
 /// One shared floating-chrome treatment: a raised pill that stays readable
 /// over any page the stream paints.
 BoxDecoration _overlayDecoration(OColors c) {
+  // Flat system: the dock is separated from the page by a hairline, not by a
+  // drop shadow.
   return BoxDecoration(
     color: c.surface,
     borderRadius: BorderRadius.circular(ORadius.pill),
     border: Border.all(color: c.hairlineStrong),
-    boxShadow: [
-      BoxShadow(
-        color: c.scrim.withValues(alpha: 0.16),
-        blurRadius: 16,
-        offset: const Offset(0, 4),
-      ),
-    ],
   );
 }

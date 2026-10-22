@@ -78,7 +78,7 @@ class V2ChatPageData {
     this.errorMessage =
         'Ovid could not load this chat. Check your connection and try again.',
     this.permissionLabel = 'General',
-    this.composerHint = 'Ask Ovid to do anything...',
+    this.composerHint = 'Ask Ovid anything',
     this.offlineTitle = "You're offline",
     this.offlineMessage = 'Messages will send when you reconnect.',
   }) : assert(subagentCount >= 0, 'subagentCount cannot be negative');
@@ -603,6 +603,8 @@ class _V2ChatPageState extends State<V2ChatPage> {
                       onStop: widget.onStop,
                       onAttach: _attach,
                       onPermissionTap: widget.onPermissionTap,
+                      onSendErrorAction: widget.onSendErrorAction,
+                      onDismissSendError: widget.onDismissSendError,
                       onMic: _toggleVoice,
                     ),
                     OLiveRegion(message: _announcement),
@@ -802,37 +804,77 @@ class _HomeContent extends StatelessWidget {
                 _OfflineBanner(data: data, onRetry: onRetry),
                 const SizedBox(height: OSpace.xl),
               ],
-              // The empty state is the brand: the wordmark, one short line and
-              // three starting points. No icon circle, no paragraph.
-              Text(
-                data.title,
-                textAlign: TextAlign.center,
-                style: OType.h2.copyWith(color: c.text),
-              ),
-              const SizedBox(height: OSpace.s),
+              // The empty state is one greeting and three starting points.
+              // No repeated wordmark (the top bar already carries the title),
+              // no icon circle, no paragraph.
+              const SizedBox(height: OSpace.xxl),
               Text(
                 data.headline,
                 textAlign: TextAlign.center,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: OType.bodySm.copyWith(color: c.textMuted),
+                style: OType.h2.copyWith(color: c.text),
               ),
               const SizedBox(height: OSpace.xl),
-              // Three starting points at most, as chips: one line each, no
-              // card subtitles and no trailing arrow.
-              Wrap(
-                alignment: WrapAlignment.center,
-                spacing: OSpace.s,
-                runSpacing: OSpace.s,
-                children: [
-                  for (final suggestion in data.suggestions.take(3))
-                    OChip(
-                      label: suggestion.title,
-                      icon: suggestion.icon,
-                      onTap: () => onSuggestionTap(suggestion),
-                    ),
-                ],
+              // Starting points stack full-width so a chip label never wraps
+              // into a ragged two-line pill on a narrow phone.
+              for (final suggestion in data.suggestions.take(3)) ...[
+                _SuggestionRow(
+                  suggestion: suggestion,
+                  onTap: () => onSuggestionTap(suggestion),
+                ),
+                if (suggestion != data.suggestions.take(3).last)
+                  const SizedBox(height: OSpace.s),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One starting point: a quiet full-width row, not a floating pill.
+class _SuggestionRow extends StatelessWidget {
+  const _SuggestionRow({required this.suggestion, required this.onTap});
+
+  final V2ChatSuggestion suggestion;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Semantics(
+      button: true,
+      label: suggestion.title,
+      excludeSemantics: true,
+      onTap: onTap,
+      child: OPressable(
+        onTap: onTap,
+        child: Container(
+          constraints: const BoxConstraints(minHeight: OSpace.touch),
+          padding: const EdgeInsets.symmetric(
+            horizontal: OSpace.m,
+            vertical: OSpace.s,
+          ),
+          decoration: BoxDecoration(
+            color: c.surface,
+            borderRadius: BorderRadius.circular(ORadius.l),
+            border: Border.all(color: c.hairline),
+          ),
+          child: Row(
+            children: [
+              Icon(suggestion.icon, size: 18, color: c.textMuted),
+              const SizedBox(width: OSpace.s),
+              Expanded(
+                child: Text(
+                  suggestion.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.bodySm.copyWith(color: c.text),
+                ),
               ),
+              Icon(Icons.arrow_forward_rounded, size: 16, color: c.textFaint),
             ],
           ),
         ),
@@ -962,6 +1004,8 @@ class _Composer extends StatelessWidget {
     required this.onAttach,
     required this.onPermissionTap,
     required this.onMic,
+    this.onSendErrorAction,
+    this.onDismissSendError,
   });
 
   final V2ChatPageData data;
@@ -979,6 +1023,8 @@ class _Composer extends StatelessWidget {
   final VoidCallback? onAttach;
   final VoidCallback? onPermissionTap;
   final VoidCallback? onMic;
+  final VoidCallback? onSendErrorAction;
+  final VoidCallback? onDismissSendError;
 
   @override
   Widget build(BuildContext context) {
@@ -1020,8 +1066,8 @@ class _Composer extends StatelessWidget {
               if (data.sendError != null)
                 V2ChatErrorBar(
                   error: data.sendError!,
-                  onAction: data.onSendErrorAction,
-                  onDismiss: data.onDismissSendError,
+                  onAction: onSendErrorAction,
+                  onDismiss: onDismissSendError,
                 ),
               // One row: plus, permission, field, mic, send. Nothing else.
               V2ComposerRow(
@@ -1046,11 +1092,13 @@ class _Composer extends StatelessWidget {
                       style: OType.body.copyWith(color: c.text),
                       decoration: InputDecoration(
                         hintText: running
-                            ? 'Ovid is working...'
+                            ? 'Ovid is working…'
                             : locked
                             ? 'Upgrade to keep building'
                             : data.composerHint,
                         hintStyle: OType.body.copyWith(color: c.textFaint),
+                        // A placeholder that wraps reads as a broken field.
+                        hintMaxLines: 1,
                         filled: false,
                         isDense: true,
                         border: InputBorder.none,

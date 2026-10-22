@@ -2,9 +2,11 @@ import 'package:flutter/material.dart';
 
 /// Ovid Si design tokens.
 ///
-/// The palette is the one approved in the Stitch reference (violet on
-/// obsidian) with a first-class light counterpart. The app follows the device
-/// theme by default and falls back to light when the platform reports nothing.
+/// Three colours, flat, no gradients and no glow: Paper `#F4F1EA`, Ink
+/// `#1B1B1B`, Signal Red `#E5484D`, plus Stone `#8A867D` for secondary text.
+/// Paper and Ink carry about 90 % of every surface; Signal Red is the agent's
+/// own colour and appears nowhere else. The app follows the device theme and
+/// falls back to Paper (light) when the platform reports nothing.
 @immutable
 class OColors extends ThemeExtension<OColors> {
   const OColors({
@@ -51,56 +53,67 @@ class OColors extends ThemeExtension<OColors> {
   final Color onDanger;
   final Color scrim;
 
+  /// Paper / Ink / Signal Red / Stone.
+  ///
+  /// Three colours, flat. Paper and Ink carry ~90 % of every surface; Signal
+  /// Red is reserved for the agent itself (its avatar, its live state, its
+  /// destructive confirmations) and never used as decoration. Stone is the
+  /// only secondary-text colour.
+  /// Paper / Ink / Signal Red / Stone.
+  ///
+  /// Three colours, flat. Paper and Ink carry ~90 % of every surface; Signal
+  /// Red is the agent's own colour (its mark, its live state, its destructive
+  /// confirmations) and never decoration. Stone is the only secondary text.
   static const light = OColors(
-    bg: Color(0xFFF7F7FA),
-    surface: Color(0xFFFFFFFF),
-    surfaceAlt: Color(0xFFF1F1F5),
-    surfaceRaised: Color(0xFFEAEAF0),
-    hairline: Color(0xFFE3E3EA),
-    hairlineStrong: Color(0xFFCFCFD9),
-    inputBorder: Color(0xFF8A8A99),
-    text: Color(0xFF121216),
-    textMuted: Color(0xFF5B5B66),
-    textFaint: Color(0xFF6B6B76),
-    codeBg: Color(0xFFF3F3F7),
-    accent: Color(0xFF5B3BE8),
-    accentFill: Color(0xFF6A45E8),
-    onAccent: Color(0xFFFFFFFF),
-    accentSoft: Color(0x146A45E8),
-    // Deepened from #0E9F6E: the emerald only reached 2.95:1 as pill text on
-    // its own 12 % tint and 2.83:1 on surfaceRaised, both under the 3:1
-    // non-text/large-text floor. #0B8457 is 4.02:1 / 3.94:1 on the same pairs.
-    success: Color(0xFF0B8457),
-    warn: Color(0xFFB45309),
-    danger: Color(0xFFD92D20),
+    bg: Color(0xFFF4F1EA), // Paper
+    surface: Color(0xFFF8F6F0), // one step up from Paper
+    surfaceAlt: Color(0xFFEDE9E0),
+    surfaceRaised: Color(0xFFE6E1D6),
+    hairline: Color(0xFFDDD8CC),
+    hairlineStrong: Color(0xFFC8C2B4),
+    inputBorder: Color(0xFF8A867D), // Stone
+    text: Color(0xFF1B1B1B), // Ink
+    textMuted: Color(0xFF605C55), // Stone, darkened for body-size text
+    textFaint: Color(0xFF837F76), // Stone, for captions and icons
+    codeBg: Color(0xFFEDE9E0),
+    // Signal Red as text/icon. #E5484D is 3.47:1 on Paper — enough for an icon
+    // or large text, not for a body-size link — so the text token is the same
+    // hue darkened to 4.86:1. `accentFill` keeps the exact brand value.
+    accent: Color(0xFFB32D34),
+    accentFill: Color(0xFFE5484D), // Signal Red
+    onAccent: Color(0xFF0F0F0F), // 4.83:1 on Signal Red
+    accentSoft: Color(0x1AE5484D),
+    // Status is carried by icon and wording, not by a fourth hue.
+    success: Color(0xFF1B1B1B),
+    warn: Color(0xFF605C55),
+    danger: Color(0xFFC2333A),
     onDanger: Color(0xFFFFFFFF),
-    scrim: Color(0x99000000),
+    scrim: Color(0x8A1B1B1B),
   );
 
+  /// The same three colours inverted: Ink becomes the page, Paper the text.
   static const dark = OColors(
-    bg: Color(0xFF0E0E10),
-    surface: Color(0xFF16161A),
-    surfaceAlt: Color(0xFF1B1B22),
-    surfaceRaised: Color(0xFF232329),
-    hairline: Color(0xFF26262C),
-    hairlineStrong: Color(0xFF3A3A44),
-    inputBorder: Color(0xFF5A5A66),
-    text: Color(0xFFFFFFFF),
-    textMuted: Color(0xFF9CA3AF),
-    textFaint: Color(0xFF6B7280),
-    codeBg: Color(0xFF0B0B0E),
-    accent: Color(0xFFCABEFF),
-    // Deepened from #7C5CFF: white on the dark violet fill measured 4.35:1,
-    // under the 4.5:1 body gate that every primary button label needs.
-    // #7857FA measures 4.62:1 and keeps the Stitch hue.
-    accentFill: Color(0xFF7857FA),
-    onAccent: Color(0xFFFFFFFF),
-    accentSoft: Color(0x1F7857FA),
-    success: Color(0xFF34D399),
-    warn: Color(0xFFFBBF24),
-    danger: Color(0xFFF87171),
-    onDanger: Color(0xFF2A0A0A),
-    scrim: Color(0xA6000000),
+    bg: Color(0xFF141413),
+    surface: Color(0xFF1B1B1A),
+    surfaceAlt: Color(0xFF232322),
+    surfaceRaised: Color(0xFF2C2C2A),
+    hairline: Color(0xFF333331),
+    hairlineStrong: Color(0xFF4A4A46),
+    inputBorder: Color(0xFF8A867D),
+    text: Color(0xFFF4F1EA), // Paper
+    textMuted: Color(0xFFA8A399), // Stone, lifted for body-size text
+    textFaint: Color(0xFF8A867D), // Stone
+    codeBg: Color(0xFF0F0F0E),
+    // Signal Red lifted for the Ink page: 6.66:1.
+    accent: Color(0xFFFF6B6F),
+    accentFill: Color(0xFFE5484D),
+    onAccent: Color(0xFF0F0F0F),
+    accentSoft: Color(0x24E5484D),
+    success: Color(0xFFF4F1EA),
+    warn: Color(0xFFA8A399),
+    danger: Color(0xFFFF6B6F),
+    onDanger: Color(0xFF0F0F0F),
+    scrim: Color(0xB3000000),
   );
 
   static OColors of(BuildContext context) =>

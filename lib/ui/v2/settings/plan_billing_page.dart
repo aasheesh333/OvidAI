@@ -1,7 +1,7 @@
 // TODO(l10n): move the English copy in this screen to the ARB files.
 import 'package:flutter/material.dart';
 
-import '../../../core/play_billing.dart';
+import '../../../core/billing_products.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_screen.dart';

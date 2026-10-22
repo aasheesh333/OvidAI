@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
 import 'core/app_lock.dart';
+import 'core/billing_uid.dart';
 import 'core/cert_pinning.dart';
 import 'core/cloud/cloud_account_binding.dart';
 import 'core/cloud/cloud_agent_facade.dart';
@@ -147,6 +148,9 @@ Future<void> main() async {
   // M7: no-op unless built with OVID_CERT_PINNING=true AND pins configured.
   installOvidCertificatePinning();
   AppState.I.registerProductionAccountFeatures();
+  // Billing reads the account id through this seam so `play_billing.dart` does
+  // not have to import Firebase (and therefore sqlite3) just for the uid.
+  ovidBillingUidProvider = () => FirebaseService.I.uid;
   // Coalesce session writes in production; tests keep the zero-window default.
   AppState.enableSessionPersistDebounce();
   // Chat history lives in SQLite (one-time verified migration from prefs).
