@@ -34,6 +34,26 @@ void main() {
       expect(OColors.dark.bg.toARGB32(), isNot(0xFF000000));
     });
 
+    test('dark danger is its own warm hue, never Signal Red', () {
+      // Signal Red belongs to the agent alone. Dark danger is a desaturated
+      // red-orange (#E8835C), pinned so it cannot drift back onto the agent.
+      expect(OColors.dark.danger.toARGB32(), 0xFFE8835C);
+      expect(
+        OColors.dark.danger.toARGB32(),
+        isNot(OColors.dark.agent.toARGB32()),
+      );
+      // Error text still clears AA body on the dark page, and the label on
+      // the destructive fill clears it too.
+      expect(
+        _contrast(OColors.dark.danger, OColors.dark.bg),
+        closeTo(6.88, 0.01),
+      );
+      expect(
+        _contrast(OColors.dark.onDanger, OColors.dark.danger),
+        greaterThanOrEqualTo(4.5),
+      );
+    });
+
     test('light palette is a real counterpart, not an inversion', () {
       expect(OColors.light.bg.computeLuminance(), greaterThan(0.8));
       expect(OColors.light.text.computeLuminance(), lessThan(0.1));

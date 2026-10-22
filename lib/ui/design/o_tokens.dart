@@ -121,7 +121,11 @@ class OColors extends ThemeExtension<OColors> {
     agent: Color(0xFFFF6B6F), // Signal Red, lifted for the dark page
     success: Color(0xFFF4F1EA),
     warn: Color(0xFFA8A399),
-    danger: Color(0xFFFF6B6F),
+    // Errors get their own warm red-orange, never the agent's Signal Red.
+    // #E8835C is a desaturated step in the same family: 6.88:1 on the page,
+    // 7.15:1 for onDanger on the fill, and ~18 degrees of hue away from the
+    // agent's 358 degrees so a destructive row cannot read as an agent mark.
+    danger: Color(0xFFE8835C),
     onDanger: Color(0xFF0F0F0F),
     scrim: Color(0xB3000000),
   );

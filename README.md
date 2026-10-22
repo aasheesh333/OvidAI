@@ -1,22 +1,135 @@
-# ovid_ai
+# Ovid Si
 
-An AI assistant Flutter app with a production plugin and MCP (Model Context
-Protocol) compatibility layer.
+Ovid Si is an AI agent app for Android: a chat-first assistant that can also
+edit code in a cloud workspace (Studio), drive a cloud browser, run scheduled
+tasks, keep artifacts, and work with plugins and MCP connectors. The v2 client
+in `lib/` is a thin client: in the shipped flow, model runs, sandboxes, git,
+storage and billing verification happen on Ovid's servers (`server/`, `cloud/`).
+A user can supply their own provider key (BYOK); the gateway stores it and uses
+it server-side (`cloud/apps/gateway/src/routes/byok.ts`).
+
+> **Status: internal testing only.** This is not a public release. It is on the
+> Play **internal testing** track (four testers, as recorded by the owner), has
+> no Play subscription created yet, and is missing several screens' backends.
+> Do not describe it as launched, and do not paste release notes from it. The
+> honest gap list is [`docs/audit/FEATURE_GAPS.md`](docs/audit/FEATURE_GAPS.md).
+
+---
+
+## Quick start
+
+Requirements: Flutter with Dart SDK `^3.12.2` (`pubspec.yaml`), and for a
+release build an Android keystore plus `android/app/google-services.json`
+(both gitignored).
+
+```bash
+flutter pub get --enforce-lockfile
+flutter run                     # debug build on an attached device/emulator
+```
+
+Android identity: package `com.dhanuk.ovidai`, minSdk 24, targetSdk 36. The app
+version is `1.0.0+3` (`pubspec.yaml`).
+
+Release builds (internal testing):
+
+```bash
+flutter build appbundle --release \
+  --dart-define=OVID_REVENUECAT_GOOGLE_KEY=<public Play SDK key>
+```
+
+RevenueCat keys are **not** baked in; without the define the app falls back to
+plain Play Billing. The full store setup is
+[`docs/play/REVENUECAT_SETUP.md`](docs/play/REVENUECAT_SETUP.md). A release
+build cannot be switched to the RevenueCat Test Store — that flag is
+debug/profile only.
+
+Server and cloud components are separate deployments; the account service has
+its own guide at [`server/account/DEPLOYMENT.md`](server/account/DEPLOYMENT.md).
+
+## How to test
+
+```bash
+# Flutter unit + widget suite (391 *_test.dart files at the time of writing)
+flutter test
+
+# Static analysis
+flutter analyze
+
+# Python tooling tests (no server dependencies)
+python3 -m unittest discover -s tool -p '*_test.py'
+```
+
+For a large or loaded machine, use the bounded runner instead of a bare
+`flutter test` — it owns a lock, batches files, and writes machine-readable
+evidence:
+
+```sh
+python3 tool/run_flutter_suite.py \
+  --flutter /absolute/path/to/flutter \
+  --output /tmp/flutter-suite-unique-run \
+  --lock /tmp/opencode/parallel-flutter.lock \
+  --batch-size 20 --batch-timeout 300 --lock-timeout 900
+```
+
+Use a fresh output directory name with an existing parent. All local runs
+sharing an SDK must use the same lock path. On manual CI dispatch,
+`bounded_flutter_suite=true` selects this runner.
+
+Cloud tests (gateway, worker, packages) run under pnpm from `cloud/`; the
+`cloud` workflow provisions PostgreSQL 16 and Redis. Server tests are pytest
+against `server/account/requirements.txt` plus a job-local PostgreSQL.
+
+CI: `.github/workflows/build.yml` (Android build), `cloud.yml` (cloud tests),
+`device-test.yml` (legacy debug-emulator diagnostics, manual dispatch). The
+repo's living TODO claims the suites are green; re-run them before treating
+that as evidence.
+
+## Where things live
+
+| Path | What |
+|---|---|
+| `lib/ui/v2/` | The shipped v2 shell: 50 screens plus the adapters in `lib/ui/v2/app/` |
+| `lib/ui/design/` | The design system — tokens, theme, components, motion, contrast (`o_tokens.dart`, `o_theme.dart`, `o_components.dart`, `o_motion.dart`, `o_contrast.dart`) |
+| `lib/core/` | Client services: cloud facade, billing, auth, sandbox, storage, state |
+| `docs/audit/` | Current audit: `SCREEN_INVENTORY.md` (50 screens), `SCREENS_AND_FEATURES.md`, `FEATURE_GAPS.md` (what does not work, with file citations) |
+| `docs/design/` | Design contracts and the Figma sheet workflow (`FIGMA_SETUP.md`, `MINIMAL_UI_CONTRACT.md`) |
+| `docs/play/` | Play Console worksheets (`DATA-SAFETY.md`, `REVENUECAT_SETUP.md`, `LISTING.md`, `PLAY_COMPLIANCE_AUDIT.md`) |
+| `docs/architecture/` | Scale, security and the 100 M-user plan |
+| `server/` | Python account, billing, collaboration, mint and security services |
+| `cloud/` | TypeScript gateway, worker, mint, browser, sandbox and storage packages |
+| `tool/` | Generators and test runners (`figma_sheet.py`, `run_flutter_suite.py`, `release_*.py`) |
+| `android/` | Manifest, network security config, signing config |
+
+The design system is the only source of colour, type, spacing and motion in the
+v2 UI; screens must not hard-code those values (`test/design/raw_literal_ratchet_test.dart`).
+
+The Figma file holds all 50 screens in light and dark as editable vectors and is
+regenerated from code — see [`docs/design/FIGMA_SETUP.md`](docs/design/FIGMA_SETUP.md).
+
+---
+
+# Behavior contracts
+
+These are the acceptance language for the app. They describe intended behavior,
+not a claim that every gap is closed: the current shortfalls are tracked screen
+by screen in [`docs/audit/FEATURE_GAPS.md`](docs/audit/FEATURE_GAPS.md).
 
 ## Account and shared-data server deployment
 
 The [account deployment guide](server/account/DEPLOYMENT.md) covers direct
-PostgreSQL private-sync and selectable PostgreSQL collaboration composition, durable account cleanup, collaboration/share
-routes, bounded retention and nonsecret Docker/systemd/Caddy templates. Configured
-cleanup authorities remain active when their HTTP routes are disabled. Local
-tests verify code behavior; production activation and gateway integration require
-the deployment acceptance steps in that guide.
+PostgreSQL private-sync and selectable PostgreSQL collaboration composition,
+durable account cleanup, collaboration/share routes, bounded retention and
+nonsecret Docker/systemd/Caddy templates. Configured cleanup authorities remain
+active when their HTTP routes are disabled. Local tests verify code behavior;
+production activation and gateway integration require the deployment acceptance
+steps in that guide.
 
 Collaboration defaults to SQLite until deliberately migrated with
-`LIVE_COLLABORATION_BACKEND=postgres`. PostgreSQL shares the account database/schema,
-checks its persisted authority identity, and retains cleanup/retention with HTTP
-disabled. The guide includes explicit schema deployment, offline SQLite import,
-restart and rollback boundaries; runtime never automatically migrates to PostgreSQL.
+`LIVE_COLLABORATION_BACKEND=postgres`. PostgreSQL shares the account
+database/schema, checks its persisted authority identity, and retains
+cleanup/retention with HTTP disabled. The guide includes explicit schema
+deployment, offline SQLite import, restart and rollback boundaries; runtime
+never automatically migrates to PostgreSQL.
 
 ## Plugin formats
 
@@ -32,7 +145,7 @@ relevant vendor formats into a single internal manifest:
 
 | Format | Contributions |
 |---|---|
-| Claude Code (`*.claude-plugin/`) | Commands, skills (with supporting assets), agents, hooks, stdio MCP servers |
+| [CC] (`*.claude-plugin/`) | Commands, skills (with supporting assets), agents, hooks, stdio MCP servers |
 | Codex (`AGENTS.md`-style manifests) | Agents, skills, hooks, MCP servers where declared |
 | Generic MCP | Stdio command servers and Streamable-HTTP remote servers |
 | Ovid built-in | Core tools, always available |
@@ -113,7 +226,7 @@ ids (`plugin:<id>/command:<name>`, `…/skill:<name>`, `…/agent:<name>`,
   icons, product copy, CSS token names, or other assets are copied or imported.
 
 The chat release gate and its measured evidence (focused suites, the full
-876-test Flutter suite, `flutter analyze`, the debug APK SHA-256, and the
+Flutter suite, `flutter analyze`, the debug APK SHA-256, and the
 physical-device checklist) are recorded in
 `docs/superpowers/audits/2026-09-10-chat-dsh-parity.md`. The physical-device
 smoke pass is `NOT EXECUTED` when no Android device/emulator is attached;
@@ -145,7 +258,9 @@ on-device sign-off remains open until a release owner completes that checklist.
   github.com authenticates from a credential helper scoped to
   `https://github.com`, injected into the spawned process environment only. It
   is never written to `.git-credentials` or any global/system config and is
-  cleared on sign-out.
+  cleared on sign-out. Server-side git jobs resolve a **per-user** GitHub token
+  from that user's connector credential and fail the job when it is absent
+  (`cloud/apps/worker/src/studioGit.ts`).
 
 The Studio/Git release gate and its measured evidence (the end-to-end suite,
 the full Flutter suite, `flutter analyze`, the debug APK SHA-256, and the
@@ -236,25 +351,11 @@ checks explicitly skip if their server dependencies are absent. The server CI
 job installs `server/account/requirements.txt` and runs those integration checks
 again, plus pytest against a job-local PostgreSQL 16 service.
 
-CI's default Flutter `Test` step still runs every tracked `test/**/*_test.dart`
+CI's default Flutter `Test` step runs every tracked `test/**/*_test.dart`
 file serially. New files enter that manifest when included in the commit checked
 out by CI. For filesystem coverage (including local untracked/nested tests), use
-the bounded runner after `flutter pub get --enforce-lockfile`:
-
-```sh
-python3 tool/run_flutter_suite.py \
-  --flutter /absolute/path/to/flutter \
-  --output /tmp/flutter-suite-unique-run \
-  --lock /tmp/flutter-suite.lock \
-  --batch-size 20 --batch-timeout 300 --lock-timeout 900
-```
-
-Use a fresh output directory name with an existing parent. All local runs sharing
-an SDK must use the same lock path (this workspace uses
-`/tmp/opencode/parallel-flutter.lock`); the runner owns the lock itself. On manual
-CI dispatch, `bounded_flutter_suite=true` selects this runner instead of the
-per-file step, resolving Flutter from PATH and placing output/lock under
-`RUNNER_TEMP`. The workflow uploads its evidence even after failure.
+the bounded runner after `flutter pub get --enforce-lockfile` (see **How to
+test** above).
 
 The runner executes batches sequentially with `--no-pub --concurrency=2 --machine`.
 `inventory.json`, per-attempt logs, tree hashes and `summary.json` account for all

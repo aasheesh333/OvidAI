@@ -304,7 +304,9 @@ void main() {
         expect(pick(dark, 'text/bg').ratio, closeTo(16.34, 0.05));
         expect(pick(dark, 'textMuted/bg').ratio, closeTo(7.34, 0.05));
         expect(pick(dark, 'accentFill/onAccent').ratio, closeTo(15.27, 0.05));
-        expect(pick(dark, 'danger/onDanger').ratio, closeTo(6.92, 0.05));
+        expect(pick(dark, 'danger/onDanger').ratio, closeTo(7.15, 0.05));
+        // Dark danger is a warm red-orange of its own, not Signal Red.
+        expect(pick(dark, 'danger/bg').ratio, closeTo(6.88, 0.05));
       },
     );
   });

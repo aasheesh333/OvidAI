@@ -28,15 +28,6 @@ const int stoneHex = 0xFF8A867D;
 /// documented step of the palette rather than a second colour.
 const int signalRedDarkHex = 0xFFFF6B6F;
 
-/// `OColors.dark.danger` is currently the same value as `OColors.dark.agent`.
-///
-/// That is a palette-level bug (a generic error paints in Signal Red on the
-/// Ink page), but the fix belongs in `o_tokens.dart` / the palette owner:
-/// `test/design/o_theme_test.dart` and `test/design/o_contrast_test.dart` pin
-/// both the dark agent hex and the dark `danger/onDanger` ratio. It is tracked
-/// here so a *new* collision fails, and so removing it is a one-line delete.
-const Set<String> knownAgentCollisions = <String>{'dark/danger'};
-
 /// Colour references to Signal Red. `V2CollabMessageKind.agent` and a local
 /// `final agent = …` are not colour references and must not match.
 final RegExp _signalRedReference = RegExp(
@@ -225,7 +216,7 @@ void main() {
         }
       }
       expect(
-        collisions.difference(knownAgentCollisions),
+        collisions,
         isEmpty,
         reason:
             'Signal Red is the agent\'s colour only. Use `danger` for errors '
