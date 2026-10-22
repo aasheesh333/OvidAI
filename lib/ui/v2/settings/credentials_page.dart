@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
@@ -193,7 +195,7 @@ class V2CredentialsPageData {
 ///
 /// Secrets are write-only from this screen's point of view: the add/replace
 /// sheet collects a key, hands it to the store, and the page keeps only a
-/// mask for display.
+/// mask for display. There is no reveal control and no copy control.
 class CredentialsPage extends StatefulWidget {
   const CredentialsPage({super.key, required this.data, this.keyStore});
 
@@ -207,6 +209,9 @@ class CredentialsPage extends StatefulWidget {
 }
 
 class _CredentialsPageState extends State<CredentialsPage> {
+  static const String _personalId = 'personal';
+  static const String _githubId = 'github';
+
   late final V2CredentialKeyStore _store =
       widget.keyStore ?? V2SecureCredentialKeyStore();
 
@@ -214,33 +219,55 @@ class _CredentialsPageState extends State<CredentialsPage> {
   String? _tokenMask;
   String? _githubPatMask;
 
+  /// The first store read, and a failed read that must be retried, not hidden.
+  bool _reading = true;
+  bool _readFailed = false;
+
+  /// One in-flight operation at a time. Each id owns its own row spinner.
+  String? _savingId;
+  String? _removingId;
+  bool _revoking = false;
+
   V2CredentialsPageData get data => widget.data;
+
+  bool get _busy => _savingId != null || _removingId != null || _revoking;
 
   @override
   void initState() {
     super.initState();
-    _loadSecrets();
+    unawaited(_loadSecrets());
   }
 
-  Future<void> _loadSecrets() async {
-    String? token;
-    String? pat;
-    // An unreadable keystore must not crash the screen; the row simply reads
-    // "Not added yet" until the platform answers again.
+  Future<void> _loadSecrets({bool showLoading = false}) async {
+    if (showLoading && mounted) {
+      setState(() {
+        _reading = true;
+        _readFailed = false;
+      });
+    }
+    String? tokenMask;
+    String? patMask;
+    var failed = false;
+    // An unreadable keystore must not crash the screen; it becomes a retryable
+    // error state instead of a row that quietly says "Not added yet".
     try {
-      token = await _store.read('personal');
+      tokenMask = _maskSecret(await _store.read(_personalId));
     } catch (error, stack) {
+      failed = true;
       Diag.swallow('credentials.readPersonal', error, stack);
     }
     try {
-      pat = await _store.read('github');
+      patMask = _maskSecret(await _store.read(_githubId));
     } catch (error, stack) {
+      failed = true;
       Diag.swallow('credentials.readGithub', error, stack);
     }
     if (!mounted) return;
     setState(() {
-      _tokenMask = _maskSecret(token);
-      _githubPatMask = _maskSecret(pat);
+      _tokenMask = tokenMask;
+      _githubPatMask = patMask;
+      _reading = false;
+      _readFailed = failed;
     });
   }
 
@@ -249,7 +276,7 @@ class _CredentialsPageState extends State<CredentialsPage> {
 
   bool get _githubPatSaved => _githubPatMask != null || data.githubPatAdded;
 
-  String get _tokenSubtitle {
+  String get _tokenHint {
     if (_tokenMask != null) return _tokenMask!;
     final token = data.token;
     if (token != null && token.connected) return _maskedToken(token.subtitle);
@@ -257,113 +284,138 @@ class _CredentialsPageState extends State<CredentialsPage> {
   }
 
   bool get _hasAnyCredential =>
-      data.credentials.any(
-        (c) => c.kind == V2CredentialKind.token ? _tokenSaved : c.connected,
-      ) ||
-      data.browserCredentials.isNotEmpty ||
-      _githubPatSaved;
+      (data.google?.connected ?? false) ||
+      (data.github?.connected ?? false) ||
+      _tokenSaved ||
+      _githubPatSaved ||
+      data.browserCredentials.isNotEmpty;
 
-  Future<void> _saveSecret({required String id, required String value}) async {
-    await _store.write(id, value);
-    await _loadSecrets();
+  Future<bool> _storeSecret({
+    required String id,
+    required String value,
+    required ValueChanged<String>? host,
+    required String savedMessage,
+  }) async {
+    if (!mounted) return false;
+    setState(() => _savingId = id);
+    try {
+      if (host != null) {
+        host(value);
+      } else {
+        await _store.write(id, value);
+        await _loadSecrets();
+      }
+      _snack(savedMessage);
+      return true;
+    } catch (error, stack) {
+      Diag.swallow('credentials.save.$id', error, stack);
+      _snack('Could not save the key. Try again.');
+      return false;
+    } finally {
+      if (mounted) setState(() => _savingId = null);
+    }
   }
 
   Future<void> _editToken() async {
-    final key = await showOSheet<String>(
+    if (_busy) return;
+    final saved = _tokenSaved;
+    await showOSheet<bool>(
       context,
-      title: _tokenSaved ? 'Replace provider key' : 'Add provider key',
+      title: saved ? 'Replace provider key' : 'Add provider key',
       builder: (_) => _SecretForm(
         fieldLabel: 'Provider API key',
         helper: 'Encrypted on this device. Never shown again.',
-        replacing: _tokenSaved,
+        replacing: saved,
+        onSave: (value) => _storeSecret(
+          id: _personalId,
+          value: value,
+          host: data.onSaveToken,
+          savedMessage: 'Provider key saved.',
+        ),
       ),
     );
-    if (key == null || !mounted) return;
-    final host = data.onSaveToken;
-    if (host != null) {
-      host(key);
-    } else {
-      try {
-        await _saveSecret(id: 'personal', value: key);
-        if (mounted) _snack('Provider key saved.');
-      } catch (_) {
-        if (mounted) _snack('Could not save the key. Try again.');
-      }
-    }
   }
 
   Future<void> _removeToken() async {
+    if (_busy) return;
+    final hint = _tokenMask ?? _maskedToken(data.token?.subtitle ?? '');
     final confirmed = await _confirmSecretRemoval(
       title: 'Remove provider key?',
-      body:
-          'Ovid will stop using this key for custom providers. The saved key '
-          'is deleted from this device.',
+      body: hint == '••••'
+          ? 'This key is deleted from this device.'
+          : '$hint is deleted from this device.',
       action: 'Remove key',
     );
-    if (confirmed != true) return;
-    final host = data.onRemoveToken;
-    if (host != null) {
-      host();
-      return;
-    }
-    try {
-      await _store.delete('personal');
-      await _loadSecrets();
-      if (mounted) _snack('Provider key removed.');
-    } catch (_) {
-      if (mounted) _snack('Could not remove the key. Try again.');
-    }
+    if (confirmed != true || !mounted) return;
+    await _deleteStored(
+      _personalId,
+      'Provider key',
+      host: data.onRemoveToken,
+    );
   }
 
   Future<void> _editGithubPat() async {
+    if (_busy) return;
     final host = data.onAddGithubPat;
     if (host != null) {
       host();
       return;
     }
-    final token = await showOSheet<String>(
+    final saved = _githubPatSaved;
+    await showOSheet<bool>(
       context,
-      title: _githubPatSaved ? 'Replace GitHub token' : 'Add GitHub token',
+      title: saved ? 'Replace GitHub token' : 'Add GitHub token',
       builder: (_) => _SecretForm(
         fieldLabel: 'GitHub personal access token',
         helper: 'Used for git clone and push. Never shown again.',
-        replacing: _githubPatSaved,
+        replacing: saved,
+        onSave: (value) => _storeSecret(
+          id: _githubId,
+          value: value,
+          host: data.onSaveGithubPat,
+          savedMessage: 'GitHub token saved.',
+        ),
       ),
     );
-    if (token == null || !mounted) return;
-    final save = data.onSaveGithubPat;
-    if (save != null) {
-      save(token);
-    } else {
-      try {
-        await _saveSecret(id: 'github', value: token);
-        if (mounted) _snack('GitHub token saved.');
-      } catch (_) {
-        if (mounted) _snack('Could not save the token. Try again.');
-      }
-    }
   }
 
   Future<void> _removeGithubPat() async {
-    final host = data.onRemoveGithubPat;
-    if (host != null) {
-      host();
-      return;
-    }
+    if (_busy) return;
+    final hint = _githubPatMask ?? '••••';
     final confirmed = await _confirmSecretRemoval(
       title: 'Remove GitHub token?',
-      body:
-          'Studio will no longer be able to clone or push with this token. '
-          'It is deleted from this device.',
+      body: '$hint is deleted from this device.',
       action: 'Remove token',
+      cancelLabel: 'Keep token',
     );
-    if (confirmed != true) return;
+    if (confirmed != true || !mounted) return;
+    await _deleteStored(
+      _githubId,
+      'GitHub token',
+      host: data.onRemoveGithubPat,
+    );
+  }
+
+  Future<void> _deleteStored(
+    String id,
+    String label, {
+    VoidCallback? host,
+  }) async {
+    if (!mounted) return;
+    setState(() => _removingId = id);
     try {
-      await _store.delete('github');
+      if (host != null) {
+        host();
+      } else {
+        await _store.delete(id);
+      }
       await _loadSecrets();
-      if (mounted) _snack('GitHub token removed.');
-    } catch (_) {
-      if (mounted) _snack('Could not remove the token. Try again.');
+      _snack('$label removed.');
+    } catch (error, stack) {
+      Diag.swallow('credentials.delete.$id', error, stack);
+      _snack('Could not remove the key. Try again.');
+    } finally {
+      if (mounted) setState(() => _removingId = null);
     }
   }
 
@@ -371,6 +423,8 @@ class _CredentialsPageState extends State<CredentialsPage> {
     required String title,
     required String body,
     required String action,
+    String cancelLabel = 'Keep key',
+    Key confirmKey = const ValueKey<String>('credential-confirm-remove'),
   }) {
     return showOSheet<bool>(
       context,
@@ -386,15 +440,16 @@ class _CredentialsPageState extends State<CredentialsPage> {
               Text(body, style: OType.bodySm.copyWith(color: c.textMuted)),
               const SizedBox(height: OSpace.l),
               OButton(
-                label: 'Keep key',
+                label: cancelLabel,
                 variant: OButtonVariant.secondary,
                 expand: true,
                 onPressed: () => Navigator.of(sheetContext).pop(false),
               ),
               const SizedBox(height: OSpace.s),
               OButton(
-                key: const ValueKey<String>('credential-confirm-remove'),
+                key: confirmKey,
                 label: action,
+                semanticLabel: '$action, destructive',
                 variant: OButtonVariant.dangerFill,
                 expand: true,
                 onPressed: () => Navigator.of(sheetContext).pop(true),
@@ -417,6 +472,9 @@ class _CredentialsPageState extends State<CredentialsPage> {
   Widget build(BuildContext context) {
     return OScreen(
       title: 'Credentials',
+      // One column, never a stretched tablet row. The contract's cap for this
+      // settings surface is 640 dp at every width above the phone band.
+      maxWidth: 640,
       actions: [
         if (data.onAddBrowserCredential != null)
           OIconButton(
@@ -424,7 +482,7 @@ class _CredentialsPageState extends State<CredentialsPage> {
             icon: Icons.add_rounded,
             semanticLabel: 'Add login',
             tooltip: 'Add login',
-            onPressed: () => _editBrowserCredential(context),
+            onPressed: _busy ? null : () => unawaited(_editBrowserCredential()),
           ),
       ],
       child: _body(context),
@@ -432,46 +490,62 @@ class _CredentialsPageState extends State<CredentialsPage> {
   }
 
   Widget _body(BuildContext context) {
-    if (data.loading) return const OSkeletonList(rows: 6);
+    if (data.loading || _reading) return const OSkeletonList(rows: 6);
     if (data.errorMessage != null) {
       return OErrorState(message: data.errorMessage!, onRetry: data.onRetry);
     }
-    if (data.isEmpty) {
-      return OEmptyState(
-        icon: Icons.key_off_outlined,
-        title: 'No credentials yet',
-        message: 'Connect Google or GitHub to continue.',
-        action: data.onConnectGoogle == null
-            ? null
-            : OButton(
-                label: 'Connect Google',
-                icon: Icons.mail_outline_rounded,
-                onPressed: data.onConnectGoogle,
-              ),
+    if (_readFailed) {
+      return OErrorState(
+        message: 'Could not read saved keys.',
+        onRetry: () => unawaited(_loadSecrets(showLoading: true)),
       );
     }
+    if (data.isEmpty) return _emptyState();
 
     final rows = _rows(context);
     return SingleChildScrollView(
+      key: const ValueKey<String>('credentials-scroll'),
       padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xxl),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           V2SettingsRowList(rows: rows),
-          if (data.onRevokeAll != null) ...[
+          if (_hasAnyCredential) ...[
             const SizedBox(height: OSpace.l),
             OButton(
+              key: const ValueKey<String>('credential-revoke-all'),
               label: 'Revoke all credentials',
+              semanticLabel: 'Revoke all credentials, destructive',
               icon: Icons.warning_amber_rounded,
               variant: OButtonVariant.danger,
               expand: true,
-              onPressed: _hasAnyCredential
-                  ? () => _confirmRevoke(context)
-                  : null,
+              loading: _revoking,
+              onPressed: _busy ? null : () => unawaited(_confirmRevoke()),
             ),
           ],
         ],
       ),
+    );
+  }
+
+  Widget _emptyState() {
+    final connect = data.onConnectGoogle;
+    return OEmptyState(
+      icon: Icons.key_off_outlined,
+      title: 'No credentials yet',
+      message: 'Connect an account or add a key.',
+      action: connect != null
+          ? OButton(
+              label: 'Connect Google',
+              icon: Icons.mail_outline_rounded,
+              onPressed: connect,
+            )
+          : OButton(
+              key: const ValueKey<String>('credential-empty-add'),
+              label: 'Add key',
+              icon: Icons.add_rounded,
+              onPressed: _busy ? null : () => unawaited(_editToken()),
+            ),
     );
   }
 
@@ -480,12 +554,11 @@ class _CredentialsPageState extends State<CredentialsPage> {
   List<Widget> _rows(BuildContext context) {
     final rows = <Widget>[];
 
-    void add(Widget row) => rows.add(row);
-
     final google = data.google;
     final googleOn = google?.connected ?? false;
-    add(
+    rows.add(
       V2SettingsRow(
+        key: const ValueKey<String>('credential-row-google'),
         icon: Icons.mail_outline_rounded,
         title: 'Google',
         subtitle: googleOn ? google!.subtitle : 'Not connected',
@@ -499,48 +572,58 @@ class _CredentialsPageState extends State<CredentialsPage> {
     );
 
     final oauth = data.githubOAuthActive;
-    add(
+    rows.add(
       V2SettingsRow(
+        key: const ValueKey<String>('credential-row-github'),
         icon: Icons.terminal_rounded,
         title: 'GitHub',
         subtitle: oauth ? 'Connected' : 'Not connected',
         showChevron: false,
-        onTap: oauth ? data.onDisconnectGithubOAuth : data.onConnectGithubOAuth,
+        onTap: oauth
+            ? data.onDisconnectGithubOAuth
+            : data.onConnectGithubOAuth,
       ),
     );
 
-    add(
+    Widget? githubTrailing;
+    if (_savingId == _githubId) {
+      githubTrailing = _busyIndicator(_githubId, 'Saving token');
+    } else if (_removingId == _githubId) {
+      githubTrailing = _busyIndicator(_githubId, 'Removing token');
+    } else if (_githubPatSaved) {
+      githubTrailing = OIconButton(
+        icon: Icons.delete_outline_rounded,
+        semanticLabel: 'Remove GitHub token, destructive',
+        tooltip: 'Remove GitHub token',
+        onPressed: _busy ? null : () => unawaited(_removeGithubPat()),
+      );
+    }
+    rows.add(
       V2SettingsRow(
+        key: const ValueKey<String>('credential-row-github-token'),
         icon: Icons.key_rounded,
         title: 'GitHub token',
-        subtitle: _githubPatSaved
-            ? (_githubPatMask ?? _maskedToken(''))
-            : 'Not added',
+        subtitle: _githubPatSaved ? (_githubPatMask ?? '••••') : 'Not added',
         showChevron: false,
-        onTap: _editGithubPat,
-        trailing: _githubPatSaved
-            ? OIconButton(
-                icon: Icons.delete_outline_rounded,
-                semanticLabel: 'Remove GitHub token',
-                tooltip: 'Remove GitHub token',
-                onPressed: _removeGithubPat,
-              )
-            : null,
+        onTap: _busy ? null : () => unawaited(_editGithubPat()),
+        trailing: githubTrailing,
       ),
     );
 
-    add(
+    rows.add(
       V2SettingsRow(
+        key: const ValueKey<String>('credential-row-provider-key'),
         icon: Icons.vpn_key_outlined,
         title: 'Provider key',
-        subtitle: _tokenSubtitle,
+        subtitle: _tokenHint,
         showChevron: false,
-        trailing: _tokenActions(context),
+        trailing: _tokenActions(),
       ),
     );
 
-    add(
+    rows.add(
       V2SettingsRow(
+        key: const ValueKey<String>('credential-row-cloud-key'),
         icon: Icons.cloud_outlined,
         title: 'Cloud key',
         subtitle: data.cloudKeyActive ? 'Active' : 'Off',
@@ -559,9 +642,10 @@ class _CredentialsPageState extends State<CredentialsPage> {
     for (final credential in data.browserCredentials) {
       final edit = data.onEditBrowserCredential == null
           ? null
-          : () => _editBrowserCredential(context, existing: credential);
-      add(
+          : () => unawaited(_editBrowserCredential(existing: credential));
+      rows.add(
         V2SettingsRow(
+          key: ValueKey<String>('credential-row-browser-${credential.id}'),
           icon: Icons.language_rounded,
           title: credential.site,
           subtitle:
@@ -572,10 +656,10 @@ class _CredentialsPageState extends State<CredentialsPage> {
               ? null
               : OIconButton(
                   icon: Icons.delete_outline_rounded,
-                  semanticLabel: 'Delete ${credential.site}',
+                  semanticLabel: 'Delete ${credential.site}, destructive',
                   tooltip: 'Delete ${credential.site}',
                   onPressed: () =>
-                      _deleteBrowserCredential(context, credential),
+                      unawaited(_deleteBrowserCredential(credential)),
                 ),
         ),
       );
@@ -584,73 +668,72 @@ class _CredentialsPageState extends State<CredentialsPage> {
     return rows;
   }
 
-  Future<void> _editBrowserCredential(
-    BuildContext context, {
-    V2BrowserCredential? existing,
-  }) async {
+  Widget _busyIndicator(String id, String label) {
+    return Semantics(
+      key: ValueKey<String>('credential-busy-$id'),
+      label: label,
+      liveRegion: true,
+      child: const SizedBox(
+        width: 20,
+        height: 20,
+        child: CircularProgressIndicator(strokeWidth: 2),
+      ),
+    );
+  }
+
+  Future<void> _editBrowserCredential({V2BrowserCredential? existing}) async {
     final saved = await showOSheet<V2BrowserCredential>(
       context,
       title: existing == null ? 'Add browser login' : 'Edit browser login',
       builder: (_) => _BrowserCredentialForm(existing: existing),
     );
-    if (saved == null) return;
+    if (saved == null || !mounted) return;
     if (existing == null) {
       data.onAddBrowserCredential?.call(saved);
+      _snack('Login saved.');
     } else {
       data.onEditBrowserCredential?.call(saved);
+      _snack('Login updated.');
     }
   }
 
   Future<void> _deleteBrowserCredential(
-    BuildContext context,
     V2BrowserCredential credential,
   ) async {
-    final confirmed = await showOSheet<bool>(
-      context,
-      title: 'Delete login?',
-      builder: (sheetContext) {
-        final c = OColors.of(sheetContext);
-        return SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.l),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(
-                'Ovid will no longer be able to sign in to ${credential.site}.',
-                style: OType.bodySm.copyWith(color: c.textMuted),
-              ),
-              const SizedBox(height: OSpace.l),
-              OButton(
-                label: 'Keep login',
-                variant: OButtonVariant.secondary,
-                expand: true,
-                onPressed: () => Navigator.of(sheetContext).pop(false),
-              ),
-              const SizedBox(height: OSpace.s),
-              OButton(
-                label: 'Delete login',
-                variant: OButtonVariant.dangerFill,
-                expand: true,
-                onPressed: () => Navigator.of(sheetContext).pop(true),
-              ),
-            ],
-          ),
-        );
-      },
+    final confirmed = await _confirmSecretRemoval(
+      title: 'Delete ${credential.site}?',
+      body: 'Ovid will no longer sign in to ${credential.site}.',
+      action: 'Delete login',
+      cancelLabel: 'Keep login',
+      confirmKey: const ValueKey<String>('credential-confirm-delete-browser'),
     );
-    if (confirmed == true) data.onDeleteBrowserCredential?.call(credential);
+    if (confirmed != true || !mounted) return;
+    final host = data.onDeleteBrowserCredential;
+    if (host == null) return;
+    try {
+      host(credential);
+      _snack('Login deleted.');
+    } catch (error, stack) {
+      Diag.swallow('credentials.deleteBrowser', error, stack);
+      _snack('Could not delete the login. Try again.');
+    }
   }
 
   /// Add/Replace/Remove for the provider key row. Icons keep the trailing
   /// control narrow enough for a 320 dp phone at 200 % text.
-  Widget _tokenActions(BuildContext context) {
+  Widget _tokenActions() {
+    if (_savingId == _personalId) {
+      return _busyIndicator(_personalId, 'Saving key');
+    }
+    if (_removingId == _personalId) {
+      return _busyIndicator(_personalId, 'Removing key');
+    }
     if (!_tokenSaved) {
       return OButton(
         key: const ValueKey<String>('provider-key-add'),
         label: 'Add',
         variant: OButtonVariant.ghost,
-        onPressed: _editToken,
+        onPressed: _busy ? null : () => unawaited(_editToken()),
       );
     }
     return Row(
@@ -661,25 +744,25 @@ class _CredentialsPageState extends State<CredentialsPage> {
           icon: Icons.edit_rounded,
           semanticLabel: 'Replace provider key',
           tooltip: 'Replace provider key',
-          onPressed: _editToken,
+          onPressed: _busy ? null : () => unawaited(_editToken()),
         ),
         OIconButton(
           key: const ValueKey<String>('provider-key-remove'),
           icon: Icons.delete_outline_rounded,
-          semanticLabel: 'Remove provider key',
+          semanticLabel: 'Remove provider key, destructive',
           tooltip: 'Remove provider key',
-          onPressed: _removeToken,
+          onPressed: _busy ? null : () => unawaited(_removeToken()),
         ),
       ],
     );
   }
 
-  Future<void> _confirmRevoke(BuildContext context) async {
+  Future<void> _confirmRevoke() async {
     final confirmed = await showOSheet<bool>(
       context,
       title: 'Revoke all credentials?',
-      builder: (context) {
-        final c = OColors.of(context);
+      builder: (sheetContext) {
+        final c = OColors.of(sheetContext);
         return SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.l),
           child: Column(
@@ -687,7 +770,7 @@ class _CredentialsPageState extends State<CredentialsPage> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Text(
-                'This disconnects Google, GitHub, and your personal token. Active tasks will stop.',
+                'Every saved key and login is removed. Active tasks stop.',
                 style: OType.bodySm.copyWith(color: c.textMuted),
               ),
               const SizedBox(height: OSpace.l),
@@ -695,31 +778,76 @@ class _CredentialsPageState extends State<CredentialsPage> {
                 label: 'Keep active',
                 variant: OButtonVariant.secondary,
                 expand: true,
-                onPressed: () => Navigator.of(context).pop(false),
+                onPressed: () => Navigator.of(sheetContext).pop(false),
               ),
               const SizedBox(height: OSpace.s),
               OButton(
+                key: const ValueKey<String>('credential-confirm-revoke'),
                 label: 'Revoke now',
+                semanticLabel: 'Revoke now, destructive',
                 variant: OButtonVariant.dangerFill,
                 expand: true,
-                onPressed: () => Navigator.of(context).pop(true),
+                onPressed: () => Navigator.of(sheetContext).pop(true),
               ),
             ],
           ),
         );
       },
     );
-    if (confirmed == true) {
-      // Revoking also removes the secrets this screen owns.
+    if (confirmed != true || !mounted) return;
+    await _revokeEverything();
+  }
+
+  /// Revokes every credential this screen can reach: the two secrets it owns,
+  /// each host-owned browser login, and finally the host's own revoke (the
+  /// Google/GitHub session). Every failure is reported, never swallowed.
+  Future<void> _revokeEverything() async {
+    setState(() => _revoking = true);
+    var failed = false;
+
+    Future<void> revokeLocal(String id, VoidCallback? host) async {
       try {
-        await _store.delete('personal');
-        await _store.delete('github');
+        if (host != null) {
+          host();
+        } else {
+          await _store.delete(id);
+        }
       } catch (error, stack) {
-        Diag.swallow('credentials.revokeAll', error, stack);
+        failed = true;
+        Diag.swallow('credentials.revokeAll.$id', error, stack);
       }
-      await _loadSecrets();
-      data.onRevokeAll?.call();
     }
+
+    await revokeLocal(_personalId, data.onRemoveToken);
+    await revokeLocal(_githubId, data.onRemoveGithubPat);
+
+    final deleteBrowser = data.onDeleteBrowserCredential;
+    if (deleteBrowser != null) {
+      for (final credential in data.browserCredentials) {
+        try {
+          deleteBrowser(credential);
+        } catch (error, stack) {
+          failed = true;
+          Diag.swallow('credentials.revokeAllBrowser', error, stack);
+        }
+      }
+    }
+
+    try {
+      data.onRevokeAll?.call();
+    } catch (error, stack) {
+      failed = true;
+      Diag.swallow('credentials.revokeAllHost', error, stack);
+    }
+
+    await _loadSecrets();
+    if (!mounted) return;
+    setState(() => _revoking = false);
+    _snack(
+      failed
+          ? 'Some credentials could not be revoked.'
+          : 'All credentials revoked.',
+    );
   }
 }
 
@@ -753,14 +881,17 @@ class _BrowserCredentialFormState extends State<_BrowserCredentialForm> {
 
   void _save() {
     final existing = widget.existing;
+    final entered = _password.text;
+    // Never keep the typed password in the controller once it is handed over.
+    _password.clear();
     Navigator.of(context).pop(
       V2BrowserCredential(
         id: existing?.id ?? 'browser-${DateTime.now().microsecondsSinceEpoch}',
         site: _site.text.trim(),
         username: _username.text.trim(),
-        password: _password.text.isEmpty && existing != null
+        password: entered.isEmpty && existing != null
             ? existing.password
-            : _password.text,
+            : entered,
       ),
     );
   }
@@ -838,17 +969,23 @@ String? _maskSecret(String? value) {
 }
 
 /// One-way secret editor. The entered value is handed to the caller and never
-/// pre-filled or rendered again; the field stays obscured.
+/// pre-filled or rendered again; the field stays obscured and is cleared the
+/// moment the save succeeds.
 class _SecretForm extends StatefulWidget {
   const _SecretForm({
     required this.fieldLabel,
     required this.helper,
     required this.replacing,
+    required this.onSave,
   });
 
   final String fieldLabel;
   final String helper;
   final bool replacing;
+
+  /// Writes the value to the real store. False keeps the sheet open so the
+  /// person can retry without retyping the key.
+  final Future<bool> Function(String value) onSave;
 
   @override
   State<_SecretForm> createState() => _SecretFormState();
@@ -856,6 +993,8 @@ class _SecretForm extends StatefulWidget {
 
 class _SecretFormState extends State<_SecretForm> {
   final _controller = TextEditingController();
+  bool _saving = false;
+  String? _error;
 
   @override
   void dispose() {
@@ -863,10 +1002,25 @@ class _SecretFormState extends State<_SecretForm> {
     super.dispose();
   }
 
-  void _save() {
+  Future<void> _save() async {
     final value = _controller.text.trim();
-    if (value.isEmpty) return;
-    Navigator.of(context).pop(value);
+    if (value.isEmpty || _saving) return;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    final saved = await widget.onSave(value);
+    if (!mounted) return;
+    if (!saved) {
+      setState(() {
+        _saving = false;
+        _error = 'Could not save. Try again.';
+      });
+      return;
+    }
+    // The key must not survive the successful save in this widget.
+    _controller.clear();
+    Navigator.of(context).pop(true);
   }
 
   @override
@@ -881,16 +1035,18 @@ class _SecretFormState extends State<_SecretForm> {
             key: const ValueKey<String>('provider-key-field'),
             controller: _controller,
             autofocus: true,
+            enabled: !_saving,
             obscureText: true,
             autocorrect: false,
             enableSuggestions: false,
             textInputAction: TextInputAction.done,
             onChanged: (_) => setState(() {}),
-            onSubmitted: (_) => _save(),
+            onSubmitted: (_) => unawaited(_save()),
             decoration: InputDecoration(
               labelText: widget.fieldLabel,
               helperText: widget.helper,
               helperMaxLines: 2,
+              errorText: _error,
             ),
           ),
           const SizedBox(height: OSpace.l),
@@ -898,14 +1054,17 @@ class _SecretFormState extends State<_SecretForm> {
             key: const ValueKey<String>('provider-key-save'),
             label: widget.replacing ? 'Replace key' : 'Save key',
             expand: true,
-            onPressed: _controller.text.trim().isEmpty ? null : _save,
+            loading: _saving,
+            onPressed: _saving || _controller.text.trim().isEmpty
+                ? null
+                : () => unawaited(_save()),
           ),
           const SizedBox(height: OSpace.s),
           OButton(
             label: 'Cancel',
             variant: OButtonVariant.secondary,
             expand: true,
-            onPressed: () => Navigator.of(context).pop(),
+            onPressed: _saving ? null : () => Navigator.of(context).pop(),
           ),
         ],
       ),
@@ -913,12 +1072,12 @@ class _SecretFormState extends State<_SecretForm> {
   }
 }
 
-/// Tokens are only ever rendered in a masked form. If a caller passes a raw
-/// value by mistake, everything except the last four characters is hidden.
+/// Tokens are only ever rendered in a masked form. Everything except the last
+/// four characters is hidden, whether the caller passed a raw key or an
+/// already-masked hint. A value that is too short to have a safe tail renders
+/// as a full mask instead.
 String _maskedToken(String value) {
   final trimmed = value.trim();
-  if (trimmed.isEmpty) return '••••';
-  if (trimmed.contains('•') || trimmed.contains('*')) return trimmed;
   if (trimmed.length <= 4) return '••••';
   return '••••••${trimmed.substring(trimmed.length - 4)}';
 }

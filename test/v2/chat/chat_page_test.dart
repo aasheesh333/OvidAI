@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
+import 'package:ovid_ai/ui/design/o_motion.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/chat/chat_page.dart';
 import 'package:ovid_ai/ui/v2/chat/composer_attachments.dart';
@@ -16,12 +18,25 @@ void main() {
   testWidgets('renders the top bar, empty state and suggestions in light', (
     tester,
   ) async {
-    await tester.pumpWidget(_app(const V2ChatPage(data: V2ChatPageData())));
+    await tester.pumpWidget(
+      _app(
+        V2ChatPage(
+          data: const V2ChatPageData(),
+          onModelChipTap: () {},
+          onMenu: () {},
+          onStudio: () {},
+          onBrowser: () {},
+          onMore: () {},
+        ),
+      ),
+    );
     await tester.pump(const Duration(milliseconds: 400));
 
     // The wordmark is the empty state, so the name reads twice: once in the
     // top bar, once as the brand in the body.
-    expect(find.text('Ovid Si'), findsNWidgets(2));
+    // The empty state no longer repeats the wordmark the top bar already
+    // carries; one occurrence is correct.
+    expect(find.text('Ovid Si'), findsOneWidget);
     expect(find.text('Auto'), findsOneWidget);
     expect(find.text('What should we build?'), findsOneWidget);
     // The empty state is the wordmark, one short line and three chips; the
@@ -239,7 +254,9 @@ void main() {
     expect(plans, 1);
   });
 
-  testWidgets('running state shows a stop action', (tester) async {
+  testWidgets('running state is one status line and one stop control', (
+    tester,
+  ) async {
     var stops = 0;
     await tester.pumpWidget(
       _app(
@@ -252,7 +269,13 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('Ovid is working'), findsOneWidget);
-    await tester.tap(find.text('Stop'));
+    // Stop lives in the composer's send slot, so the same action never gets a
+    // second button in the body.
+    expect(find.widgetWithText(OButton, 'Stop'), findsNothing);
+    final stop = find.bySemanticsLabel('Stop');
+    expect(stop, findsOneWidget);
+    await tester.tap(stop);
+    await tester.pump();
     expect(stops, 1);
   });
 
@@ -494,8 +517,9 @@ void main() {
 
     await tester.pumpWidget(
       _app(
-        const V2ChatPage(
-          data: V2ChatPageData(modelLabel: 'Ovid Si Pro Reasoning'),
+        V2ChatPage(
+          data: const V2ChatPageData(modelLabel: 'Ovid Si Pro Reasoning'),
+          onModelChipTap: () {},
         ),
       ),
     );
@@ -503,7 +527,9 @@ void main() {
 
     expect(errors, isEmpty);
     // Top bar and the empty-state wordmark both carry the name.
-    expect(find.text('Ovid Si'), findsNWidgets(2));
+    // The empty state no longer repeats the wordmark the top bar already
+    // carries; one occurrence is correct.
+    expect(find.text('Ovid Si'), findsOneWidget);
   });
 
   testWidgets('top bar uses the shared model chip with plan and subagents', (
@@ -541,18 +567,30 @@ void main() {
     expect(taps, 1);
   });
 
-  testWidgets('model chip is disabled when the host cannot change models', (
-    tester,
-  ) async {
+  testWidgets('a model chip without a handler is not drawn', (tester) async {
     await tester.pumpWidget(_app(const V2ChatPage(data: V2ChatPageData())));
     await tester.pump(const Duration(milliseconds: 400));
 
-    final chip = tester.widget<V2ModelChip>(find.byType(V2ModelChip));
-    expect(chip.enabled, isFalse);
-    expect(
-      find.bySemanticsLabel('Model: Auto. Model selection unavailable'),
-      findsOneWidget,
-    );
+    // Model selection exists in the app, but this host supplied no way to
+    // open it. A grey chip that announces "unavailable" is still a control
+    // that cannot act, so the bar shows the title alone.
+    expect(find.byType(V2ModelChip), findsNothing);
+    expect(find.text('Auto'), findsNothing);
+    expect(find.text('Ovid Si'), findsOneWidget);
+  });
+
+  testWidgets('header actions without handlers are not drawn', (tester) async {
+    await tester.pumpWidget(_app(const V2ChatPage(data: V2ChatPageData())));
+    await tester.pump(const Duration(milliseconds: 400));
+
+    for (final label in [
+      'Open menu',
+      'Open Studio',
+      'Open Browser',
+      'More options',
+    ]) {
+      expect(find.bySemanticsLabel(label), findsNothing, reason: label);
+    }
   });
 
   testWidgets('plus callback replaces the file picker', (tester) async {
@@ -613,10 +651,7 @@ void main() {
     await tester.pumpWidget(
       _app(
         V2ChatPage(
-          data: const V2ChatPageData(
-            queuedCount: 2,
-            queuedPreview: 'Add the pricing page',
-          ),
+          data: const V2ChatPageData(queuedCount: 2),
           onStop: _noop,
         ),
       ),
@@ -762,7 +797,6 @@ void main() {
           data: const V2ChatPageData(
             state: V2ChatState.running,
             queuedCount: 1,
-            queuedPreview: 'Queued prompt',
           ),
           onStop: () => stops++,
           onDismissQueued: () => dismisses++,
@@ -786,6 +820,481 @@ void main() {
     await tester.pump();
     expect(dismisses, 1);
   });
+
+  // ── Wiring ────────────────────────────────────────────────────────────────
+
+  testWidgets('every control on the wired screen reaches its owner', (
+    tester,
+  ) async {
+    final taps = <String, int>{};
+    void hit(String name) => taps[name] = (taps[name] ?? 0) + 1;
+    String? sent;
+    await tester.pumpWidget(
+      _app(
+        V2ChatPage(
+          data: const V2ChatPageData(),
+          onMenu: () => hit('menu'),
+          onModelChipTap: () => hit('model'),
+          onStudio: () => hit('studio'),
+          onBrowser: () => hit('browser'),
+          onMore: () => hit('more'),
+          onSuggestionTap: (_) => hit('suggestion'),
+          onPlus: () => hit('plus'),
+          onPermissionTap: () => hit('permission'),
+          onMic: () => hit('mic'),
+          onSend: (text) => sent = text,
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+
+    for (final label in [
+      'Open menu',
+      'Open Studio',
+      'Open Browser',
+      'More options',
+      'Add attachment or action',
+      'Voice input',
+    ]) {
+      await tester.tap(find.bySemanticsLabel(label));
+    }
+    await tester.tap(find.text('Auto'));
+    await tester.tap(find.text('Build a landing page'));
+    await tester.pump();
+    await tester.tap(find.bySemanticsLabel('Permission: General. Change'));
+    await tester.enterText(find.byType(TextField), 'Ship it');
+    await tester.pump();
+    await tester.tap(find.bySemanticsLabel('Send'));
+    await tester.pump();
+
+    expect(taps, <String, int>{
+      'menu': 1,
+      'model': 1,
+      'studio': 1,
+      'browser': 1,
+      'more': 1,
+      'suggestion': 1,
+      'plus': 1,
+      'permission': 1,
+      'mic': 1,
+    });
+    expect(sent, 'Ship it');
+  });
+
+  testWidgets('a state never draws an action it cannot honour', (tester) async {
+    final handle = tester.ensureSemantics();
+
+    await tester.pumpWidget(
+      _app(
+        const V2ChatPage(
+          data: V2ChatPageData(state: V2ChatState.planLimited),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Daily limit reached'), findsOneWidget);
+    expect(find.text('See plans'), findsNothing);
+
+    await tester.pumpWidget(
+      _app(const V2ChatPage(data: V2ChatPageData(state: V2ChatState.error))),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text("Couldn't load this chat."), findsOneWidget);
+    expect(find.text('Try again'), findsNothing);
+
+    await tester.pumpWidget(
+      _app(const V2ChatPage(data: V2ChatPageData(state: V2ChatState.offline))),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text("You're offline"), findsOneWidget);
+    expect(find.widgetWithText(OButton, 'Retry'), findsNothing);
+
+    await tester.pumpWidget(
+      _app(const V2ChatPage(data: V2ChatPageData(state: V2ChatState.running))),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Ovid is working'), findsOneWidget);
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Stop')),
+      isSemantics(
+        label: 'Stop',
+        isButton: true,
+        hasEnabledState: true,
+        isEnabled: false,
+      ),
+    );
+    handle.dispose();
+  });
+
+  // ── Text budget ───────────────────────────────────────────────────────────
+
+  test('copy fits the text budget', () {
+    int words(String value) => value.trim().split(RegExp(r'\s+')).length;
+    const data = V2ChatPageData();
+
+    expect(words(data.headline), lessThanOrEqualTo(4));
+    expect(data.suggestions, hasLength(3));
+    for (final row in data.suggestions) {
+      expect(words(row.title), lessThanOrEqualTo(4), reason: row.title);
+    }
+    for (final label in ['See plans', 'Try again', 'Retry', 'Send now']) {
+      expect(words(label), lessThanOrEqualTo(3), reason: label);
+    }
+    // One question, no paragraph: the empty state is a greeting, not an
+    // explainer.
+    expect(data.headline, isNot(contains('.')));
+  });
+
+  // ── Responsive ────────────────────────────────────────────────────────────
+
+  for (final width in <double>[320, 360, 412, 600, 900, 1280]) {
+    for (final scale in <double>[1, 2]) {
+      for (final dark in [false, true]) {
+        testWidgets(
+          'fits ${width.toInt()} dp at ${scale}x (${dark ? 'dark' : 'light'})',
+          (tester) async {
+            tester.view.physicalSize = Size(width, 800);
+            tester.view.devicePixelRatio = 1;
+            addTearDown(tester.view.resetPhysicalSize);
+            addTearDown(tester.view.resetDevicePixelRatio);
+
+            Widget page(V2ChatState state) => MaterialApp(
+              theme: dark ? OTheme.dark() : OTheme.light(),
+              home: MediaQuery(
+                data: MediaQueryData(
+                  size: Size(width, 800),
+                  textScaler: TextScaler.linear(scale),
+                ),
+                child: V2ChatPage(
+                  data: V2ChatPageData(state: state, queuedCount: 2),
+                  onMenu: _noop,
+                  onModelChipTap: _noop,
+                  onStudio: _noop,
+                  onBrowser: _noop,
+                  onMore: _noop,
+                  onSuggestionTap: _ignoreSuggestion,
+                  onPlus: _noop,
+                  onPermissionTap: _noop,
+                  onMic: _noop,
+                  onSend: _ignoreText,
+                  onStop: _noop,
+                  onRetry: _noop,
+                  onSeePlans: _noop,
+                  onDismissQueued: _noop,
+                  onSendQueuedNow: _noop,
+                ),
+              ),
+            );
+
+            for (final state in V2ChatState.values) {
+              await tester.pumpWidget(page(state));
+              await tester.pump();
+              await tester.pump(const Duration(milliseconds: 400));
+              expect(
+                tester.takeException(),
+                isNull,
+                reason: '$state overflowed at ${width.toInt()} dp / ${scale}x',
+              );
+            }
+
+            // Above the tablet breakpoint the column centres and stops at 720
+            // instead of stretching the phone layout across the window.
+            await tester.pumpWidget(page(V2ChatState.empty));
+            await tester.pump(const Duration(milliseconds: 400));
+            final scroll = find
+                .ancestor(
+                  of: find.text('What should we build?'),
+                  matching: find.byType(SingleChildScrollView),
+                )
+                .first;
+            expect(tester.getSize(scroll).width, lessThanOrEqualTo(720));
+            if (width > 720) {
+              expect(tester.getCenter(scroll).dx, closeTo(width / 2, 1));
+            }
+          },
+        );
+      }
+    }
+  }
+
+  // ── Keyboard ──────────────────────────────────────────────────────────────
+
+  testWidgets('the field stays above the keyboard', (tester) async {
+    tester.view.physicalSize = const Size(360, 740);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetViewInsets);
+
+    await tester.pumpWidget(
+      _app(V2ChatPage(data: const V2ChatPageData(), onSend: _ignoreText)),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+
+    tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+    await tester.pumpAndSettle();
+
+    final field = tester.getRect(find.byType(TextField));
+    expect(
+      field.bottom,
+      lessThanOrEqualTo(740 - 300),
+      reason: 'the composer must sit above the keyboard inset',
+    );
+    expect(field.top, greaterThanOrEqualTo(56));
+  });
+
+  testWidgets('focus survives a host rebuild', (tester) async {
+    const data = V2ChatPageData();
+    await tester.pumpWidget(
+      _app(V2ChatPage(data: data, onSend: _ignoreText)),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+
+    await tester.tap(find.byType(TextField));
+    await tester.pump();
+    final node = tester.widget<TextField>(find.byType(TextField)).focusNode!;
+    expect(node.hasFocus, isTrue);
+
+    // A new data instance (the shell rebuilds on every app-state change) must
+    // not swap the focus node or close the keyboard.
+    await tester.pumpWidget(
+      _app(
+        V2ChatPage(
+          data: data.copyWithSendError(null),
+          onSend: _ignoreText,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(tester.widget<TextField>(find.byType(TextField)).focusNode, same(node));
+    expect(node.hasFocus, isTrue);
+  });
+
+  // ── Semantics ─────────────────────────────────────────────────────────────
+
+  testWidgets('icon buttons are labelled and suggestion rows are buttons', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(
+      _app(
+        V2ChatPage(
+          data: const V2ChatPageData(),
+          onMenu: _noop,
+          onModelChipTap: _noop,
+          onStudio: _noop,
+          onBrowser: _noop,
+          onMore: _noop,
+          onSuggestionTap: _ignoreSuggestion,
+          onPlus: _noop,
+          onPermissionTap: _noop,
+          onMic: _noop,
+          onSend: _ignoreText,
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+
+    for (final label in [
+      'Open menu',
+      'Open Studio',
+      'Open Browser',
+      'More options',
+      'Add attachment or action',
+      'Voice input',
+      'Send',
+    ]) {
+      expect(find.bySemanticsLabel(label), findsOneWidget, reason: label);
+    }
+
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Build a landing page')),
+      isSemantics(
+        label: 'Build a landing page',
+        isButton: true,
+        hasTapAction: true,
+      ),
+    );
+    handle.dispose();
+  });
+
+  testWidgets('TalkBack reads top bar, then body, then composer', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(
+      _app(
+        V2ChatPage(
+          data: const V2ChatPageData(),
+          onMenu: _noop,
+          onModelChipTap: _noop,
+          onStudio: _noop,
+          onBrowser: _noop,
+          onMore: _noop,
+          onSuggestionTap: _ignoreSuggestion,
+          onPlus: _noop,
+          onPermissionTap: _noop,
+          onMic: _noop,
+          onSend: _ignoreText,
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final labels = _readingOrder(tester);
+    const anchors = [
+      'Ovid Si',
+      'What should we build?',
+      'Build a landing page',
+      'Add attachment or action',
+      'Send',
+    ];
+    final indices = [for (final anchor in anchors) labels.indexOf(anchor)];
+    expect(indices, everyElement(isNonNegative), reason: labels.join(' | '));
+    for (var i = 1; i < indices.length; i++) {
+      expect(
+        indices[i],
+        greaterThan(indices[i - 1]),
+        reason: '${anchors[i]} must read after ${anchors[i - 1]}: '
+            '${labels.join(' | ')}',
+      );
+    }
+    handle.dispose();
+  });
+
+  // ── Motion ────────────────────────────────────────────────────────────────
+
+  testWidgets('the entrance budget is 200 ms and nothing loops while idle', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_app(const V2ChatPage(data: V2ChatPageData())));
+    await tester.pump();
+
+    final slide = tester.widget<OFadeSlide>(find.byType(OFadeSlide).first);
+    expect(slide.duration, isNotNull);
+    expect(
+      slide.duration!,
+      lessThanOrEqualTo(const Duration(milliseconds: 200)),
+      reason: 'an entrance may not run longer than 200 ms',
+    );
+
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.pump();
+    expect(
+      tester.binding.transientCallbackCount,
+      isZero,
+      reason: 'the entrance leaves no ticker behind',
+    );
+
+    await tester.pump(const Duration(seconds: 2));
+    expect(
+      tester.binding.transientCallbackCount,
+      isZero,
+      reason: 'nothing loops while the screen is idle',
+    );
+  });
+
+  testWidgets('reduced motion removes the entrance and the working pulse', (
+    tester,
+  ) async {
+    Widget page(V2ChatState state) => MaterialApp(
+      theme: OTheme.light(),
+      home: MediaQuery(
+        data: const MediaQueryData(
+          size: Size(800, 600),
+          disableAnimations: true,
+        ),
+        child: V2ChatPage(
+          data: V2ChatPageData(state: state),
+          onStop: _noop,
+        ),
+      ),
+    );
+
+    await tester.pumpWidget(page(V2ChatState.empty));
+    await tester.pump();
+    // The entrance helper hands its child straight through: no opacity ramp,
+    // no slide, no switcher.
+    expect(
+      find.descendant(
+        of: find.byType(OFadeSlide),
+        matching: find.byType(AnimatedSlide),
+      ),
+      findsNothing,
+    );
+    expect(find.byType(AnimatedSwitcher), findsNothing);
+
+    await tester.pumpWidget(page(V2ChatState.running));
+    await tester.pump();
+    // The working dot is static: the pulse never wraps itself in a fade.
+    expect(find.byType(OPulse), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(OPulse),
+        matching: find.byType(FadeTransition),
+      ),
+      findsNothing,
+    );
+
+    // Whatever the text field schedules while it updates is one-shot: the
+    // screen settles and stays settled.
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(tester.binding.transientCallbackCount, isZero);
+    await tester.pump(const Duration(seconds: 2));
+    expect(tester.binding.transientCallbackCount, isZero);
+  });
 }
 
 void _noop() {}
+
+void _ignoreText(String _) {}
+
+void _ignoreSuggestion(V2ChatSuggestion _) {}
+
+/// Semantics in the order the platform receives it: children are sorted by
+/// their [SemanticsSortKey] within contiguous compatible groups.
+List<String> _readingOrder(WidgetTester tester) {
+  final root = tester
+      .binding
+      .renderViews
+      .first
+      .owner
+      ?.semanticsOwner
+      ?.rootSemanticsNode;
+  final nodes = <SemanticsNode>[];
+  if (root != null) _flattenOrdered(root, nodes);
+  return [
+    for (final node in nodes)
+      if (node.getSemanticsData().label.trim().isNotEmpty)
+        node.getSemanticsData().label.trim(),
+  ];
+}
+
+void _flattenOrdered(SemanticsNode node, List<SemanticsNode> out) {
+  out.add(node);
+  final children = <SemanticsNode>[];
+  node.visitChildren((child) {
+    children.add(child);
+    return true;
+  });
+  var start = 0;
+  while (start < children.length) {
+    final key = children[start].sortKey;
+    var end = start + 1;
+    while (end < children.length) {
+      final other = children[end].sortKey;
+      if (other.runtimeType != key.runtimeType) break;
+      if (key != null && other?.name != key.name) break;
+      end++;
+    }
+    final group = children.sublist(start, end);
+    if (key != null) {
+      group.sort((a, b) => a.sortKey!.compareTo(b.sortKey!));
+    }
+    for (final child in group) {
+      _flattenOrdered(child, out);
+    }
+    start = end;
+  }
+}

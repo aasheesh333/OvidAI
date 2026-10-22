@@ -76,7 +76,7 @@ class _SchedulesScreenState extends State<SchedulesScreen> {
   }
 
   Future<void> _openEditor({V2ScheduleItem? schedule}) async {
-    final zone = await ScheduleClient.deviceTimeZone();
+    final zone = await _deviceZone();
     if (!mounted) return;
     final now = DateTime.now();
     final data = schedule == null
@@ -89,14 +89,15 @@ class _SchedulesScreenState extends State<SchedulesScreen> {
         : _editorDataFrom(schedule, zone, now);
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => _ScheduleEditorScreen(
+        builder: (_) => ScheduleEditorScreen(
           initial: data,
           onSave: (draft) => schedule == null
               ? _controller.create(draft, sessionId: widget.sessionId)
               : _controller.update(schedule.id, draft),
-          onDelete: schedule == null
+          onReload: schedule == null
               ? null
-              : () => _controller.delete(schedule),
+              : () => _reloadEditorData(schedule.id, zone),
+          onDelete: schedule == null ? null : () => _deleteFromEditor(schedule),
         ),
       ),
     );
@@ -113,6 +114,48 @@ class _SchedulesScreenState extends State<SchedulesScreen> {
     );
   }
 
+  /// Deletes from the editor. A rejected delete is explained while the editor
+  /// is still open; the caller keeps the screen up instead of closing.
+  Future<bool> _deleteFromEditor(V2ScheduleItem schedule) async {
+    final deleted = await _controller.delete(schedule);
+    if (!deleted && mounted) {
+      final notice = _controller.notice;
+      if (notice != null) {
+        _controller.clearNotice();
+        showOSnack(context, notice);
+      }
+    }
+    return deleted;
+  }
+
+  /// The device zone, with a bound: a platform channel that never answers must
+  /// not stop the editor from opening. Falling back to UTC keeps the schedule
+  /// creatable; the saved trigger still carries a real zone everywhere else.
+  Future<String> _deviceZone() => ScheduleClient.deviceTimeZone().timeout(
+    const Duration(seconds: 2),
+    onTimeout: () => 'UTC',
+  );
+
+  /// Re-reads one schedule for the editor's retry. Null means the row no longer
+  /// exists; a failed refresh returns an error-state data so the inline message
+  /// stays true instead of pretending the schedule vanished.
+  Future<V2ScheduleEditorData?> _reloadEditorData(
+    String id,
+    String zone,
+  ) async {
+    await _controller.load(showLoading: false);
+    if (_controller.status == V2SchedulesStatus.error) {
+      return V2ScheduleEditorData(
+        status: V2ScheduleEditorStatus.error,
+        errorMessage: _controller.errorMessage,
+      );
+    }
+    for (final item in _controller.items) {
+      if (item.id == id) return _editorDataFrom(item, zone, DateTime.now());
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
@@ -126,7 +169,6 @@ class _SchedulesScreenState extends State<SchedulesScreen> {
           onToggle: (schedule, enabled) =>
               _act(() => _controller.setEnabled(schedule, enabled)),
           onRunNow: (schedule) => _act(() => _controller.runNow(schedule)),
-          onRetryRun: (schedule) => _act(() => _controller.runNow(schedule)),
           onDelete: (schedule) => _act(() => _controller.delete(schedule)),
           onRetry: () => _act(_controller.load),
         );
@@ -135,23 +177,30 @@ class _SchedulesScreenState extends State<SchedulesScreen> {
   }
 }
 
-/// The editor screen with its own saving/error state.
-class _ScheduleEditorScreen extends StatefulWidget {
-  const _ScheduleEditorScreen({
+/// The editor screen with its own saving, reloading and error state.
+class ScheduleEditorScreen extends StatefulWidget {
+  const ScheduleEditorScreen({
+    super.key,
     required this.initial,
     required this.onSave,
+    this.onReload,
     this.onDelete,
   });
 
   final V2ScheduleEditorData initial;
   final Future<String?> Function(V2ScheduleDraft draft) onSave;
-  final Future<void> Function()? onDelete;
+
+  /// Re-reads the schedule after an error. Null means the row was deleted.
+  final Future<V2ScheduleEditorData?> Function()? onReload;
+
+  /// Deletes the schedule; true means the service accepted it.
+  final Future<bool> Function()? onDelete;
 
   @override
-  State<_ScheduleEditorScreen> createState() => _ScheduleEditorScreenState();
+  State<ScheduleEditorScreen> createState() => ScheduleEditorScreenState();
 }
 
-class _ScheduleEditorScreenState extends State<_ScheduleEditorScreen> {
+class ScheduleEditorScreenState extends State<ScheduleEditorScreen> {
   late V2ScheduleEditorData _data = widget.initial;
   bool _saving = false;
 
@@ -170,6 +219,25 @@ class _ScheduleEditorScreenState extends State<_ScheduleEditorScreen> {
     setState(() {
       _saving = false;
       _data = _data.copyWith(saving: false, saveError: error);
+    });
+  }
+
+  /// Retry actually re-reads the schedule; it never leaves the screen.
+  Future<void> _reload() async {
+    final reload = widget.onReload;
+    if (reload == null) return;
+    setState(() {
+      _data = V2ScheduleEditorData(
+        status: V2ScheduleEditorStatus.loading,
+        prompt: _data.prompt,
+      );
+    });
+    final next = await reload();
+    if (!mounted) return;
+    setState(() {
+      _data =
+          next ??
+          const V2ScheduleEditorData(status: V2ScheduleEditorStatus.missing);
     });
   }
 
@@ -205,8 +273,16 @@ class _ScheduleEditorScreenState extends State<_ScheduleEditorScreen> {
       return;
     }
     if (action == 'delete') {
-      await widget.onDelete!();
-      if (mounted) Navigator.of(context).pop();
+      final confirmed = await confirmDeleteSchedule(
+        context,
+        widget.initial.title,
+      );
+      if (!mounted || !confirmed) return;
+      final deleted = await widget.onDelete!();
+      if (!mounted) return;
+      // A rejected delete keeps the editor open with the list's rollback and
+      // its explanation, instead of closing as if the row were gone.
+      if (deleted) Navigator.of(context).pop();
     }
   }
 
@@ -216,7 +292,7 @@ class _ScheduleEditorScreenState extends State<_ScheduleEditorScreen> {
       data: _data,
       onSave: _save,
       onMore: _openMore,
-      onRetry: () => Navigator.of(context).pop(),
+      onRetry: widget.onReload == null ? null : _reload,
     );
   }
 }

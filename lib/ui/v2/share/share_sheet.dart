@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../../core/collaboration/models.dart' show maxActiveMembers;
@@ -9,7 +11,12 @@ import 'share_link_card.dart';
 // TODO(l10n): extract this screen's English copy during the ARB pass.
 
 /// Load state for a share sheet. The link itself is data, not a route.
-enum V2ShareStatus { loading, ready, error }
+///
+/// [creating] and [revoking] are in-flight states owned by the host while its
+/// real service call is pending. [revoked] is terminal until a new link is
+/// created. The sheet also infers the short-lived in-flight states locally so
+/// a synchronous host callback still gets immediate feedback.
+enum V2ShareStatus { loading, ready, creating, revoking, revoked, error }
 
 /// How a shared chat can be used by the people who open the link.
 ///
@@ -45,6 +52,11 @@ class V2ShareSheetData {
     this.copied = false,
     this.status = V2ShareStatus.ready,
     this.errorMessage = 'We could not load the share link.',
+    this.revoked = false,
+    this.collabAvailable = true,
+    this.collabUnavailableReason,
+    this.readOnlyAvailable = true,
+    this.readOnlyUnavailableReason,
   }) : assert(capacity > 0, 'A shared room always has a capacity');
 
   /// The read-only link shown in the sheet, for example `ovidsi.com/c/79f9b4c0e`.
@@ -91,21 +103,48 @@ class V2ShareSheetData {
   final V2ShareStatus status;
   final String errorMessage;
 
+  /// True when the creator has revoked the link. This is distinct from
+  /// [active] being false: a chat that was never shared is not revoked.
+  final bool revoked;
+
+  /// Whether the service that creates Collab rooms is available. A mode that
+  /// is not supported is rendered disabled with [collabUnavailableReason], so
+  /// the sheet never silently hides half of the choice.
+  final bool collabAvailable;
+  final String? collabUnavailableReason;
+
+  /// Whether the read-only share service is available.
+  final bool readOnlyAvailable;
+  final String? readOnlyUnavailableReason;
+
   bool get isCollab => mode == V2ShareMode.collab;
+
+  /// True when the active link is live and non-empty.
+  bool get shared => active && link.trim().isNotEmpty;
 
   /// True when the room has reached its member cap.
   bool get roomFull => capacity > 0 && memberCount >= capacity;
 
   /// Short label for the member count, for example `3 of 50 members`.
   String get memberLabel => '$memberCount of $capacity members';
+
+  bool isModeAvailable(V2ShareMode value) => switch (value) {
+    V2ShareMode.collab => collabAvailable,
+    V2ShareMode.readOnly => readOnlyAvailable,
+  };
+
+  String? modeUnavailableReason(V2ShareMode value) => switch (value) {
+    V2ShareMode.collab => collabUnavailableReason,
+    V2ShareMode.readOnly => readOnlyUnavailableReason,
+  };
 }
 
-/// Generic share sheet. Presentational: all state and actions are injected.
+/// Generic share sheet. The host injects the real service actions.
 ///
 /// Minimal layout: a title row with close, two one-line mode cards, the link
 /// row with copy, then the revoke action. Sharing to an app is the operating
 /// system's job.
-class ShareSheet extends StatelessWidget {
+class ShareSheet extends StatefulWidget {
   const ShareSheet({
     super.key,
     required this.data,
@@ -117,6 +156,7 @@ class ShareSheet extends StatelessWidget {
     this.onShareTarget,
     this.onStopSharing,
     this.onCreateLink,
+    this.onCreateLinkForMode,
     this.onRetry,
     this.onClose,
     this.title = 'Share this chat',
@@ -134,7 +174,15 @@ class ShareSheet extends StatelessWidget {
   final ValueChanged<bool>? onToggleShowName;
   final ValueChanged<V2ShareTarget>? onShareTarget;
   final VoidCallback? onStopSharing;
+
+  /// Legacy create callback. The host reads the selected mode from [data].
   final VoidCallback? onCreateLink;
+
+  /// Per-mode create callback. Prefer this over [onCreateLink] when binding a
+  /// real service: the selected mode is passed explicitly, so Collab and
+  /// Read only cannot be created by the same branch by accident.
+  final ValueChanged<V2ShareMode>? onCreateLinkForMode;
+
   final VoidCallback? onRetry;
   final VoidCallback? onClose;
 
@@ -149,35 +197,200 @@ class ShareSheet extends StatelessWidget {
   final String? forkNote;
 
   @override
-  Widget build(BuildContext context) {
-    return Align(
-      alignment: Alignment.topCenter,
-      heightFactor: 1,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 560),
-        child: switch (data.status) {
-          V2ShareStatus.loading => const SizedBox(
-            height: 320,
-            child: OSkeletonList(rows: 4),
-          ),
-          V2ShareStatus.error => SizedBox(
-            height: 320,
-            child: OErrorState(message: data.errorMessage, onRetry: onRetry),
-          ),
-          V2ShareStatus.ready =>
-            data.active ? _content(context) : _empty(context),
-        },
-      ),
-    );
-  }
+  State<ShareSheet> createState() => _ShareSheetState();
+}
+
+class _ShareSheetState extends State<ShareSheet> {
+  static const Duration _createWatchdog = Duration(seconds: 25);
+  static const Duration _revokeWatchdog = Duration(seconds: 20);
+  static const Duration _copiedLinger = Duration(milliseconds: 1600);
+
+  /// A host callback is synchronous. These flags bridge the gap until the
+  /// host rebuilds with the real result, so the person sees the request is in
+  /// flight instead of the Create button disappearing.
+  bool _creating = false;
+  bool _revoking = false;
+  bool _revoked = false;
+  bool _copied = false;
+  String? _actionError;
+  Timer? _createTimer;
+  Timer? _revokeTimer;
+  Timer? _copyTimer;
+
+  V2ShareSheetData get _data => widget.data;
 
   bool get _canPickMode =>
-      data.canChangeMode && !data.viewerCanFork && onModeChanged != null;
+      _data.canChangeMode &&
+      !_data.viewerCanFork &&
+      widget.onModeChanged != null;
 
-  /// Revoking is irreversible for everyone holding the link, so the sheet owns
-  /// the confirmation even when the host's callback is a bare service call.
-  Future<void> _confirmRevoke(BuildContext context) async {
-    final revoke = onStopSharing;
+  bool get _hasCreateAction =>
+      widget.onCreateLink != null || widget.onCreateLinkForMode != null;
+
+  V2ShareStatus get _status {
+    if (_data.status != V2ShareStatus.ready) return _data.status;
+    if (_actionError != null) return V2ShareStatus.error;
+    if (_data.revoked || _revoked) return V2ShareStatus.revoked;
+    if (_creating) return V2ShareStatus.creating;
+    if (_revoking) return V2ShareStatus.revoking;
+    return V2ShareStatus.ready;
+  }
+
+  String get _errorMessage => _actionError ?? _data.errorMessage;
+
+  @override
+  void didUpdateWidget(covariant ShareSheet oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final oldShared =
+        oldWidget.data.active && oldWidget.data.link.trim().isNotEmpty;
+    final shared = _data.active && _data.link.trim().isNotEmpty;
+
+    if (_data.mode != oldWidget.data.mode) {
+      _clearTransient();
+      _revoked = false;
+      _copied = false;
+    }
+    if (_data.link != oldWidget.data.link) _copied = false;
+
+    if (shared != oldShared) {
+      _cancelActionTimers();
+      _creating = false;
+      _revoking = false;
+      if (shared) {
+        _revoked = false;
+        _actionError = null;
+      } else if (oldShared) {
+        // A link that was live and is now gone was revoked by the host.
+        _revoked = true;
+      }
+    }
+
+    if (_data.status != oldWidget.data.status) {
+      if (_data.status == V2ShareStatus.error ||
+          _data.status == V2ShareStatus.loading) {
+        _creating = false;
+        _revoking = false;
+        if (_data.status == V2ShareStatus.error) _actionError = null;
+      }
+      if (_data.status == V2ShareStatus.revoked) _revoked = true;
+      if (_data.status == V2ShareStatus.ready && !shared) {
+        _creating = false;
+        _revoking = false;
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _cancelActionTimers();
+    _copyTimer?.cancel();
+    super.dispose();
+  }
+
+  void _cancelActionTimers() {
+    _createTimer?.cancel();
+    _createTimer = null;
+    _revokeTimer?.cancel();
+    _revokeTimer = null;
+  }
+
+  void _clearTransient() {
+    _cancelActionTimers();
+    _creating = false;
+    _revoking = false;
+    _actionError = null;
+  }
+
+  void _startCreate() {
+    if (_creating || _status == V2ShareStatus.creating) return;
+    if (!_data.isModeAvailable(_data.mode) || !_hasCreateAction) return;
+    setState(() {
+      _creating = true;
+      _revoked = false;
+      _actionError = null;
+    });
+    _createTimer?.cancel();
+    _createTimer = Timer(_createWatchdog, () {
+      if (!mounted || !_creating) return;
+      setState(() => _creating = false);
+    });
+    try {
+      final forMode = widget.onCreateLinkForMode;
+      if (forMode != null) {
+        forMode(_data.mode);
+      } else {
+        widget.onCreateLink!();
+      }
+    } catch (error) {
+      _createTimer?.cancel();
+      _createTimer = null;
+      if (!mounted) return;
+      setState(() {
+        _creating = false;
+        _actionError = _messageOf(error);
+      });
+    }
+  }
+
+  void _startRevoke() {
+    final revoke = widget.onStopSharing;
+    if (revoke == null || _revoking) return;
+    setState(() {
+      _revoking = true;
+      _actionError = null;
+    });
+    _revokeTimer?.cancel();
+    _revokeTimer = Timer(_revokeWatchdog, () {
+      if (!mounted || !_revoking) return;
+      setState(() => _revoking = false);
+    });
+    try {
+      revoke();
+    } catch (error) {
+      _revokeTimer?.cancel();
+      _revokeTimer = null;
+      if (!mounted) return;
+      setState(() {
+        _revoking = false;
+        _actionError = _messageOf(error);
+      });
+    }
+  }
+
+  void _copy() {
+    final copy = widget.onCopyLink;
+    if (copy == null || !_data.shared) return;
+    copy();
+    if (!mounted) return;
+    setState(() => _copied = true);
+    _copyTimer?.cancel();
+    _copyTimer = Timer(_copiedLinger, () {
+      if (mounted) setState(() => _copied = false);
+    });
+  }
+
+  void _selectMode(V2ShareMode mode) {
+    if (!_canPickMode || _status != V2ShareStatus.ready) return;
+    if (mode == _data.mode || !_data.isModeAvailable(mode)) return;
+    _clearTransient();
+    setState(() {
+      _revoked = false;
+      _copied = false;
+    });
+    widget.onModeChanged!(mode);
+  }
+
+  void _retry() {
+    if (_actionError != null) {
+      setState(() => _actionError = null);
+      _startCreate();
+      return;
+    }
+    widget.onRetry?.call();
+  }
+
+  Future<void> _confirmRevoke() async {
+    final revoke = widget.onStopSharing;
     if (revoke == null) return;
     final confirmed = await showDialog<bool>(
       context: context,
@@ -203,91 +416,64 @@ class ShareSheet extends StatelessWidget {
         ],
       ),
     );
-    if (confirmed == true) revoke();
+    if (!mounted || confirmed != true) return;
+    _startRevoke();
   }
 
-  Widget _empty(BuildContext context) {
-    final c = OColors.of(context);
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.l,
-        OSpace.s,
-        OSpace.l,
-        OSpace.l,
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _header(),
-          if (_canPickMode) ...[
-            const SizedBox(height: OSpace.s),
-            _modeCard(V2ShareMode.collab),
-            const SizedBox(height: OSpace.s),
-            _modeCard(V2ShareMode.readOnly),
-          ],
-          const SizedBox(height: OSpace.l),
-          OCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Text(
-                  'Not shared yet',
-                  style: OType.h3.copyWith(color: c.text),
-                ),
-                const SizedBox(height: OSpace.l),
-                if (onCreateLink != null)
-                  OButton(
-                    label: 'Create link',
-                    icon: Icons.link_rounded,
-                    expand: true,
-                    onPressed: onCreateLink,
-                  )
-                else
-                  Text(
-                    'Sign in to create a link.',
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-              ],
-            ),
+  String _messageOf(Object error) {
+    final text = error.toString();
+    return text.startsWith('Bad state: ')
+        ? text.substring('Bad state: '.length)
+        : text;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.topCenter,
+      heightFactor: 1,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 560),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(
+            OSpace.l,
+            OSpace.s,
+            OSpace.l,
+            OSpace.l,
           ),
-        ],
+          child: _body(context),
+        ),
       ),
     );
   }
 
-  Widget _content(BuildContext context) {
-    final viewer = data.viewerCanFork;
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.l,
-        OSpace.s,
-        OSpace.l,
-        OSpace.l,
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _header(),
-          if (_canPickMode) ...[
-            const SizedBox(height: OSpace.s),
-            _modeCard(V2ShareMode.collab),
-            const SizedBox(height: OSpace.s),
-            _modeCard(V2ShareMode.readOnly),
-          ],
-          const SizedBox(height: OSpace.l),
-          _linkBlock(context),
-          if (!viewer && onStopSharing != null) ...[
-            const SizedBox(height: OSpace.l),
-            OButton(
-              label: 'Revoke link',
-              icon: Icons.link_off_rounded,
-              variant: OButtonVariant.danger,
-              expand: true,
-              onPressed: () => _confirmRevoke(context),
-            ),
-          ],
+  Widget _body(BuildContext context) {
+    final status = _status;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _header(),
+        if (status != V2ShareStatus.loading) ...[
+          const SizedBox(height: OSpace.s),
+          if (_canPickMode) _modeChooser() else _modeSummary(),
         ],
-      ),
+        const SizedBox(height: OSpace.l),
+        switch (status) {
+          V2ShareStatus.loading => const SizedBox(
+            height: 320,
+            child: OSkeletonList(rows: 4),
+          ),
+          V2ShareStatus.error => SizedBox(
+            height: 320,
+            child: OErrorState(message: _errorMessage, onRetry: _retry),
+          ),
+          V2ShareStatus.creating => _creatingCard(context),
+          V2ShareStatus.revoking => _sharedBlock(context, revoking: true),
+          V2ShareStatus.revoked => _revokedCard(context),
+          V2ShareStatus.ready =>
+            _data.shared ? _sharedBlock(context) : _notSharedCard(context),
+        },
+      ],
     );
   }
 
@@ -296,44 +482,215 @@ class ShareSheet extends StatelessWidget {
   /// header only adds the gap under itself.
   Widget _header() {
     return OSheetHeader(
-      title: title,
+      title: widget.title,
       closeLabel: 'Close share sheet',
-      onClose: onClose,
+      onClose: widget.onClose,
       padding: const EdgeInsets.only(bottom: OSpace.s),
     );
   }
 
-  /// One line per mode. The selected card carries the check and the accent.
-  Widget _modeCard(V2ShareMode mode) {
-    final collab = mode == V2ShareMode.collab;
-    final selected = data.isCollab == collab;
-    final title = collab ? 'Collab' : 'Read only';
-    final body = collab
-        ? 'Up to ${data.capacity} people, one sender at a time.'
-        : 'Anyone with the link can read and fork.';
-    return _ModeCard(
-      title: title,
-      body: body,
-      icon: collab ? Icons.groups_rounded : Icons.visibility_rounded,
-      selected: selected,
-      onTap: onModeChanged == null ? null : () => onModeChanged!(mode),
+  Widget _modeChooser() {
+    final status = _status;
+    final locked =
+        status == V2ShareStatus.creating || status == V2ShareStatus.revoking;
+    return Semantics(
+      container: true,
+      explicitChildNodes: true,
+      label: 'Sharing mode',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _modeCard(V2ShareMode.collab, locked: locked),
+          const SizedBox(height: OSpace.s),
+          _modeCard(V2ShareMode.readOnly, locked: locked),
+        ],
+      ),
     );
   }
 
-  /// The active-link block. [V2ShareLinkCard] owns the URL and its copy
-  /// control; the sheet owns revoking, so the card never repeats it here.
-  Widget _linkBlock(BuildContext context) {
-    return V2ShareLinkCard(
-      data: V2ShareLinkCardData(
-        url: data.link,
-        mode: data.mode,
-        memberCount: data.memberCount,
-        capacity: data.capacity,
-        copied: data.copied,
-        viewer: data.viewerCanFork,
+  /// One line per mode. The selected card carries the check and the accent.
+  Widget _modeCard(V2ShareMode mode, {required bool locked}) {
+    final collab = mode == V2ShareMode.collab;
+    final selected = _data.mode == mode;
+    final available = _data.isModeAvailable(mode);
+    final reason = _data.modeUnavailableReason(mode);
+    final title = collab ? 'Collab' : 'Read only';
+    final body = collab
+        ? 'Max $v2ShareMemberLimit · one sender at a time · creator pays storage.'
+        : 'Recipients fork into their own account.';
+    final onTap = available && !locked ? () => _selectMode(mode) : null;
+    return _ModeCard(
+      title: title,
+      body: body,
+      note: available ? null : (reason ?? 'Unavailable in this build.'),
+      icon: collab ? Icons.groups_rounded : Icons.visibility_rounded,
+      selected: selected,
+      enabled: available,
+      onTap: onTap,
+    );
+  }
+
+  /// A viewer cannot change the mode, so the same two facts are shown as one
+  /// static summary instead of a control with no action behind it.
+  Widget _modeSummary() {
+    final collab = _data.isCollab;
+    return _ModeSummary(
+      title: collab ? 'Collab room' : 'Read only',
+      body: collab
+          ? 'Max $v2ShareMemberLimit · one sender at a time · creator pays storage.'
+          : 'Recipients fork into their own account.',
+      icon: collab ? Icons.groups_rounded : Icons.visibility_rounded,
+    );
+  }
+
+  Widget _sharedBlock(BuildContext context, {bool revoking = false}) {
+    final viewer = _data.viewerCanFork;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        V2ShareLinkCard(
+          data: V2ShareLinkCardData(
+            url: _data.link,
+            mode: _data.mode,
+            memberCount: _data.memberCount,
+            capacity: _data.capacity,
+            copied: _data.copied || _copied,
+            viewer: viewer,
+            revoked: _data.revoked,
+            busy: revoking,
+          ),
+          onCopy: _data.link.trim().isEmpty ? null : _copy,
+          onFork: widget.onFork,
+        ),
+        if (!viewer && (widget.onStopSharing != null || revoking)) ...[
+          const SizedBox(height: OSpace.l),
+          OButton(
+            label: revoking ? 'Revoking' : 'Revoke link',
+            icon: revoking ? null : Icons.link_off_rounded,
+            variant: OButtonVariant.danger,
+            loading: revoking,
+            expand: true,
+            onPressed: revoking ? null : () => unawaited(_confirmRevoke()),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _notSharedCard(BuildContext context) {
+    final c = OColors.of(context);
+    final available = _data.isModeAvailable(_data.mode);
+    final reason =
+        _data.modeUnavailableReason(_data.mode) ?? 'Unavailable in this build.';
+    return OCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Semantics(
+            container: true,
+            header: true,
+            child: Text(
+              'Not shared yet',
+              style: OType.h3.copyWith(color: c.text),
+            ),
+          ),
+          const SizedBox(height: OSpace.s),
+          Text(
+            available ? 'Only people with the link can open it.' : reason,
+            style: OType.bodySm.copyWith(color: c.textMuted),
+          ),
+          if (_hasCreateAction) ...[
+            const SizedBox(height: OSpace.l),
+            OButton(
+              label: 'Create link',
+              icon: Icons.link_rounded,
+              expand: true,
+              onPressed: available ? _startCreate : null,
+            ),
+          ] else ...[
+            const SizedBox(height: OSpace.s),
+            Text(
+              'Sign in to create a link.',
+              style: OType.caption.copyWith(color: c.textMuted),
+            ),
+          ],
+        ],
       ),
-      onCopy: data.link.trim().isEmpty ? null : onCopyLink,
-      onFork: onFork,
+    );
+  }
+
+  Widget _creatingCard(BuildContext context) {
+    final c = OColors.of(context);
+    return OCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('Creating link', style: OType.h3.copyWith(color: c.text)),
+          const SizedBox(height: OSpace.s),
+          Text(
+            'This only takes a moment.',
+            style: OType.bodySm.copyWith(color: c.textMuted),
+          ),
+          const SizedBox(height: OSpace.l),
+          // A progress row, not a button: nothing can be pressed while the
+          // link is being created, so the card must not draw a control.
+          Semantics(
+            liveRegion: true,
+            label: 'Creating link',
+            child: ExcludeSemantics(
+              child: SizedBox(
+                height: OSpace.touch,
+                child: Center(
+                  child: SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: c.textMuted,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _revokedCard(BuildContext context) {
+    final c = OColors.of(context);
+    final available = _data.isModeAvailable(_data.mode);
+    final reason =
+        _data.modeUnavailableReason(_data.mode) ?? 'Unavailable in this build.';
+    return OCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Semantics(
+            container: true,
+            header: true,
+            child: Text(
+              'Link revoked',
+              style: OType.h3.copyWith(color: c.text),
+            ),
+          ),
+          const SizedBox(height: OSpace.s),
+          Text(
+            available ? 'No one can open it now.' : reason,
+            style: OType.bodySm.copyWith(color: c.textMuted),
+          ),
+          if (_hasCreateAction) ...[
+            const SizedBox(height: OSpace.l),
+            OButton(
+              label: 'Create link',
+              icon: Icons.link_rounded,
+              expand: true,
+              onPressed: available ? _startCreate : null,
+            ),
+          ],
+        ],
+      ),
     );
   }
 }
@@ -350,6 +707,7 @@ Future<void> showShareSheet(
   ValueChanged<V2ShareTarget>? onShareTarget,
   VoidCallback? onStopSharing,
   VoidCallback? onCreateLink,
+  ValueChanged<V2ShareMode>? onCreateLinkForMode,
   VoidCallback? onRetry,
 }) {
   return showOSheet<void>(
@@ -364,88 +722,172 @@ Future<void> showShareSheet(
       onShareTarget: onShareTarget,
       onStopSharing: onStopSharing,
       onCreateLink: onCreateLink,
+      onCreateLinkForMode: onCreateLinkForMode,
       onRetry: onRetry,
       onClose: () => Navigator.maybePop(sheetContext),
     ),
   );
 }
 
-/// One selectable share mode. The whole card is the 48 dp target and reports
-/// its selected state to accessibility.
+/// One selectable share mode. The whole card is the 48 dp target, reports a
+/// radio group member with its checked state, and states the mode's cap and
+/// who pays in its accessible label.
 class _ModeCard extends StatelessWidget {
   const _ModeCard({
     required this.title,
     required this.body,
     required this.icon,
     required this.selected,
+    required this.enabled,
+    this.note,
     this.onTap,
   });
 
   final String title;
   final String body;
+  final String? note;
   final IconData icon;
   final bool selected;
+  final bool enabled;
   final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    return OPressable(
-      onTap: onTap,
-      semanticLabel: '$title. $body',
-      selected: selected,
+    final label = note == null ? '$title. $body' : '$title. $body $note';
+    return Semantics(
+      container: true,
+      inMutuallyExclusiveGroup: true,
+      checked: selected,
+      enabled: enabled,
+      label: label,
+      onTap: enabled ? onTap : null,
       child: ExcludeSemantics(
-        child: AnimatedContainer(
-          duration: OMotion.fast,
-          constraints: const BoxConstraints(minHeight: OSpace.touch),
-          padding: const EdgeInsets.all(OSpace.m),
-          decoration: BoxDecoration(
-            color: selected ? c.accentSoft : c.surface,
-            borderRadius: BorderRadius.circular(ORadius.m),
-            border: Border.all(
-              color: selected
-                  ? c.accentFill.withValues(alpha: 0.5)
-                  : c.hairline,
-              width: selected ? 1.5 : 1,
+        child: OPressable(
+          onTap: enabled ? onTap : null,
+          child: AnimatedContainer(
+            duration: OMotion.fast,
+            constraints: const BoxConstraints(minHeight: OSpace.touch),
+            padding: const EdgeInsets.all(OSpace.m),
+            decoration: BoxDecoration(
+              color: !enabled
+                  ? c.surfaceRaised
+                  : selected
+                  ? c.accentSoft
+                  : c.surface,
+              borderRadius: BorderRadius.circular(ORadius.m),
+              border: Border.all(
+                color: selected && enabled
+                    ? c.accentFill.withValues(alpha: 0.5)
+                    : c.hairline,
+                width: selected && enabled ? 1.5 : 1,
+              ),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  icon,
+                  size: 20,
+                  color: !enabled
+                      ? c.textFaint
+                      : selected
+                      ? c.accent
+                      : c.textMuted,
+                ),
+                const SizedBox(width: OSpace.m),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        title,
+                        style: OType.bodySm.copyWith(
+                          color: enabled ? c.text : c.textMuted,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: OSpace.xxs),
+                      Text(
+                        body,
+                        style: OType.caption.copyWith(
+                          color: enabled ? c.textMuted : c.textFaint,
+                        ),
+                      ),
+                      if (note != null) ...[
+                        const SizedBox(height: OSpace.xxs),
+                        Text(
+                          note!,
+                          style: OType.caption.copyWith(color: c.danger),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                if (selected) ...[
+                  const SizedBox(width: OSpace.s),
+                  Icon(
+                    Icons.check_rounded,
+                    size: 20,
+                    color: enabled ? c.accent : c.textFaint,
+                  ),
+                ],
+              ],
             ),
           ),
-          child: Row(
-            children: [
-              Icon(
-                icon,
-                size: 20,
-                color: selected ? c.accent : c.textMuted,
-              ),
-              const SizedBox(width: OSpace.m),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      title,
-                      style: OType.bodySm.copyWith(
-                        color: c.text,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: OSpace.xxs),
-                    Text(
-                      body,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: OType.caption.copyWith(color: c.textMuted),
-                    ),
-                  ],
-                ),
-              ),
-              if (selected) ...[
-                const SizedBox(width: OSpace.s),
-                Icon(Icons.check_rounded, size: 20, color: c.accent),
-              ],
-            ],
-          ),
         ),
+      ),
+    );
+  }
+}
+
+/// Static mode facts for a viewer, who cannot change the mode.
+class _ModeSummary extends StatelessWidget {
+  const _ModeSummary({
+    required this.title,
+    required this.body,
+    required this.icon,
+  });
+
+  final String title;
+  final String body;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Container(
+      constraints: const BoxConstraints(minHeight: OSpace.touch),
+      padding: const EdgeInsets.all(OSpace.m),
+      decoration: BoxDecoration(
+        color: c.surfaceRaised,
+        borderRadius: BorderRadius.circular(ORadius.m),
+        border: Border.all(color: c.hairline),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 20, color: c.textMuted),
+          const SizedBox(width: OSpace.m),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  title,
+                  style: OType.bodySm.copyWith(
+                    color: c.text,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: OSpace.xxs),
+                Text(body, style: OType.caption.copyWith(color: c.textMuted)),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

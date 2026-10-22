@@ -73,9 +73,14 @@ class V2TimelineRun {
       };
 
   /// The summary, or an honest line when the run has no result yet.
+  ///
+  /// Empty when a failed run already prints its reason in [failureDetail]: one
+  /// row never states the same thing twice. A failure with no detail still
+  /// says so.
   String get summaryLabel {
     final text = summary.trim();
     if (text.isNotEmpty) return text;
+    if (failed && failureDetail?.trim().isNotEmpty == true) return '';
     return switch (outcome) {
       V2RunOutcome.running => 'Still running.',
       V2RunOutcome.skipped => 'Skipped before it produced a result.',
@@ -228,24 +233,34 @@ class _DayGroup extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     final count = day.runs.length;
+    final countLabel = '$count ${count == 1 ? 'run' : 'runs'}';
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: Text(
-                day.label.toUpperCase(),
-                style: OType.overline.copyWith(color: c.textMuted),
-              ),
+        // One node per day so a screen reader hears the date and its count
+        // together, then the runs in visual order.
+        Semantics(
+          container: true,
+          header: true,
+          label: '${day.label}, $countLabel',
+          child: ExcludeSemantics(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Text(
+                    day.label.toUpperCase(),
+                    style: OType.overline.copyWith(color: c.textMuted),
+                  ),
+                ),
+                const SizedBox(width: OSpace.s),
+                Text(
+                  countLabel,
+                  style: OType.caption.copyWith(color: c.textFaint),
+                ),
+              ],
             ),
-            const SizedBox(width: OSpace.s),
-            Text(
-              '$count ${count == 1 ? 'run' : 'runs'}',
-              style: OType.caption.copyWith(color: c.textFaint),
-            ),
-          ],
+          ),
         ),
         const SizedBox(height: OSpace.s),
         Column(
@@ -325,18 +340,21 @@ class _RunRow extends StatelessWidget {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           _metaLine(c),
-                          const SizedBox(height: OSpace.xs),
-                          Text(
-                            run.summaryLabel,
-                            style: OType.bodySm.copyWith(
-                              color:
-                                  run.outcome == V2RunOutcome.unknown ||
-                                      run.outcome == V2RunOutcome.skipped
-                                  ? c.textMuted
-                                  : c.text,
+                          if (run.summaryLabel.isNotEmpty) ...[
+                            const SizedBox(height: OSpace.xs),
+                            Text(
+                              run.summaryLabel,
+                              style: OType.bodySm.copyWith(
+                                color:
+                                    run.outcome == V2RunOutcome.unknown ||
+                                        run.outcome == V2RunOutcome.skipped
+                                    ? c.textMuted
+                                    : c.text,
+                              ),
                             ),
-                          ),
-                          if (run.failed && run.failureDetail != null) ...[
+                          ],
+                          if (run.failed &&
+                              run.failureDetail?.trim().isNotEmpty == true) ...[
                             const SizedBox(height: OSpace.xs),
                             _failureLine(c, run.failureDetail!),
                           ],
@@ -450,7 +468,8 @@ class _RunRow extends StatelessWidget {
   }
 
   String _semanticLabel(V2TimelineRun run) {
-    final detail = run.failed ? run.failureDetail : null;
+    final rawDetail = run.failed ? run.failureDetail : null;
+    final detail = rawDetail?.trim().isNotEmpty == true ? rawDetail : null;
     final recorded = run.durationLabel?.trim().isNotEmpty == true;
     final duration = recorded
         ? 'took ${run.durationLabel}'

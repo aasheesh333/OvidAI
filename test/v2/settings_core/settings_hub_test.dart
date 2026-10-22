@@ -46,12 +46,7 @@ V2SettingsHubData _hubData({
           Icons.key_rounded,
           subtitle: 'Keys and access tokens',
         ),
-        row(
-          'usage',
-          'Usage',
-          Icons.data_usage_rounded,
-          value: '12.4M tokens',
-        ),
+        row('usage', 'Usage', Icons.data_usage_rounded, value: '12.4M tokens'),
         row(
           'plan_billing',
           'Plan & billing',
@@ -117,12 +112,7 @@ V2SettingsHubData _hubData({
           Icons.tune_rounded,
           subtitle: 'Tone, speed and persona',
         ),
-        row(
-          'connectors',
-          'Connectors',
-          Icons.extension_outlined,
-          value: '3',
-        ),
+        row('connectors', 'Connectors', Icons.extension_outlined, value: '3'),
       ],
     ),
     dataControl: V2SettingsSection(
@@ -146,12 +136,7 @@ V2SettingsHubData _hubData({
           Icons.bug_report_outlined,
           subtitle: 'Anonymous error reports',
         ),
-        row(
-          'storage',
-          'Storage',
-          Icons.cloud_outlined,
-          value: '1.2 of 3 GB',
-        ),
+        row('storage', 'Storage', Icons.cloud_outlined, value: '1.2 of 3 GB'),
         V2SettingsItem(
           id: 'delete_data',
           label: 'Delete data',
@@ -194,7 +179,9 @@ V2SettingsHubData _hubData({
       ],
     ),
     showReasoning: showReasoning,
-    onReasoningChanged: onReasoningChanged,
+    // The hub removes a row whose handler is missing, so the shared fixture
+    // wires the reasoning toggle the way the app shell does.
+    onReasoningChanged: onReasoningChanged ?? (_) {},
     onProfileTap: onProfileTap,
     onSignOut: onSignOut,
     onRetry: onRetry,
@@ -403,7 +390,7 @@ void main() {
     expect(rect.bottom, lessThanOrEqualTo(500));
   });
 
-  testWidgets('a row with no handler is not offered as a result', (
+  testWidgets('a row with no handler is removed from the hub and the index', (
     tester,
   ) async {
     final handle = tester.ensureSemantics();
@@ -412,13 +399,19 @@ void main() {
       _app(
         OTheme.light(),
         V2SettingsHubData(
-          advanced: const V2SettingsSection(
+          advanced: V2SettingsSection(
             title: 'Advanced',
             items: [
-              V2SettingsItem(
+              const V2SettingsItem(
                 id: 'ghost',
                 label: 'Ghost row',
                 icon: Icons.help_outline_rounded,
+              ),
+              V2SettingsItem(
+                id: 'about',
+                label: 'About',
+                icon: Icons.info_outline_rounded,
+                onTap: () {},
               ),
             ],
           ),
@@ -427,24 +420,183 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    // On the hub the dead row is visibly disabled and carries no chevron.
-    final rowNode = tester.getSemantics(
-      find.byKey(const ValueKey('settings-row-ghost')),
-    );
-    expect(rowNode, isSemantics(hasEnabledState: true, isEnabled: false));
+    // A row that cannot act is not a disabled control: it is not rendered.
+    expect(find.byKey(const ValueKey('settings-row-ghost')), findsNothing);
+    expect(find.text('Ghost row'), findsNothing);
+    expect(find.text('About'), findsOneWidget);
+    expect(find.text('ADVANCED'), findsOneWidget);
 
     await tester.tap(find.byKey(const ValueKey('settings-search')));
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), 'ghost');
     await tester.pumpAndSettle();
 
-    final result = tester.getSemantics(find.text('Ghost row'));
-    expect(result, isSemantics(hasEnabledState: true, isEnabled: false));
+    // The index is built from the same rows, so the dead row cannot come back
+    // as a result that silently goes nowhere.
+    expect(find.text('No settings found'), findsOneWidget);
+    expect(find.text('Ghost row'), findsNothing);
+    handle.dispose();
+  });
 
-    await tester.tap(find.text('Ghost row'));
+  testWidgets('the connectors row opens through the host work route', (
+    tester,
+  ) async {
+    final taps = <String>[];
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        V2SettingsHubData(
+          onAddConnector: () => taps.add('connectors'),
+          models: V2SettingsSection(
+            title: 'Models',
+            items: [
+              // The settings route table has no connectors case; the row is
+              // wired through the host's work route instead of being a dead
+              // end. No item handler is needed.
+              const V2SettingsItem(
+                id: 'connectors',
+                label: 'Connectors',
+                icon: Icons.extension_rounded,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
     await tester.pumpAndSettle();
-    // It neither closes search nor pretends to navigate.
-    expect(find.byType(SettingsSearchPage), findsOneWidget);
+
+    await tester.ensureVisible(find.text('Connectors'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Connectors'));
+    await tester.pump();
+
+    expect(taps, <String>['connectors']);
+  });
+
+  testWidgets('section headings are marked as headers', (tester) async {
+    final handle = tester.ensureSemantics();
+    _tallSize(tester);
+    await tester.pumpWidget(_app(OTheme.light(), _hubData(taps: <String>[])));
+    await tester.pumpAndSettle();
+
+    for (final label in const [
+      'ACCOUNT',
+      'CHAT',
+      'MODELS',
+      'DATA CONTROL',
+      'ADVANCED',
+    ]) {
+      final node = tester.getSemantics(find.text(label)).getSemanticsData();
+      expect(
+        node.flagsCollection.isHeader,
+        isTrue,
+        reason: '$label should be announced as a heading',
+      );
+    }
+    handle.dispose();
+  });
+
+  testWidgets('rows show real values and never a placeholder', (tester) async {
+    _tallSize(tester);
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        V2SettingsHubData(
+          profile: const V2SettingsProfile(
+            name: 'Aarav Sharma',
+            email: 'aarav@gmail.com',
+            planLabel: 'Plus',
+          ),
+          storageLabel: '1.2 of 15 GB',
+          account: V2SettingsSection(
+            title: 'Account',
+            items: [
+              V2SettingsItem(
+                id: 'plan_billing',
+                label: 'Plan & billing',
+                icon: Icons.credit_card_rounded,
+                onTap: () {},
+              ),
+            ],
+          ),
+          dataControl: V2SettingsSection(
+            title: 'Data control',
+            items: [
+              V2SettingsItem(
+                id: 'storage',
+                label: 'Storage',
+                icon: Icons.storage_rounded,
+                onTap: () {},
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The plan pill and the plan row both name the real plan.
+    expect(find.text('Plus'), findsNWidgets(2));
+    expect(find.text('1.2 of 15 GB'), findsOneWidget);
+
+    final row = tester
+        .getSemantics(find.byKey(const ValueKey('settings-row-storage')))
+        .getSemanticsData();
+    expect(row.label, 'Storage, 1.2 of 15 GB');
+  });
+
+  testWidgets('an unknown value is left blank, not filled with a placeholder', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        V2SettingsHubData(
+          dataControl: V2SettingsSection(
+            title: 'Data control',
+            items: [
+              V2SettingsItem(
+                id: 'storage',
+                label: 'Storage',
+                icon: Icons.storage_rounded,
+                onTap: () {},
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Storage'), findsOneWidget);
+    expect(find.text('0 MB'), findsNothing);
+    expect(find.text('—'), findsNothing);
+  });
+
+  testWidgets('a profile without a destination is not a disabled control', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        const V2SettingsHubData(
+          profile: V2SettingsProfile(
+            name: 'Aarav Sharma',
+            email: 'aarav@gmail.com',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final node = tester
+        .getSemantics(find.text('Aarav Sharma'))
+        .getSemanticsData();
+    expect(node.label, 'Aarav Sharma, Free plan');
+    // Informational identity, not a greyed-out button.
+    expect(node.flagsCollection.isEnabled.toBoolOrNull(), isNull);
+    expect(node.flagsCollection.isButton, isFalse);
     handle.dispose();
   });
 
@@ -487,12 +639,13 @@ void main() {
   ) async {
     _tallSize(tester);
     V2SettingsItem row(String id, String label, IconData icon) =>
-        V2SettingsItem(id: id, label: label, icon: icon);
+        V2SettingsItem(id: id, label: label, icon: icon, onTap: () {});
 
     await tester.pumpWidget(
       _app(
         OTheme.light(),
         V2SettingsHubData(
+          onReasoningChanged: (_) {},
           chat: V2SettingsSection(
             title: 'Chat',
             items: [
@@ -577,16 +730,19 @@ void main() {
                 id: 'response_wait',
                 label: 'Response wait limit',
                 icon: Icons.timer_outlined,
+                onTap: () {},
               ),
               V2SettingsItem(
                 id: 'presets',
                 label: 'Agent presets',
                 icon: Icons.tune_rounded,
+                onTap: () {},
               ),
               V2SettingsItem(
                 id: 'connectors',
                 label: 'Connectors',
                 icon: Icons.extension_outlined,
+                onTap: () {},
               ),
             ],
           ),
@@ -865,7 +1021,7 @@ void main() {
     expect(retried, 1);
   });
 
-  for (final width in <double>[600, 900]) {
+  for (final width in <double>[320, 360, 412, 600, 800, 1024, 1280]) {
     testWidgets('content is centred and capped at $width dp', (tester) async {
       _tallSize(tester, width: width);
       await tester.pumpWidget(_app(OTheme.light(), _hubData(taps: <String>[])));
@@ -874,7 +1030,11 @@ void main() {
       final row = tester.getRect(
         find.byKey(const ValueKey('settings-row-plan_billing')),
       );
-      final limit = width >= 900 ? 720.0 : 640.0;
+      final limit = width >= 900
+          ? 720.0
+          : width >= 600
+          ? 640.0
+          : width;
 
       expect(row.width, lessThanOrEqualTo(limit));
       expect(row.width, lessThan(width), reason: 'rows must not stretch');
@@ -884,5 +1044,32 @@ void main() {
         reason: 'content must be centred, not left aligned',
       );
     });
+  }
+
+  for (final dark in <bool>[false, true]) {
+    for (final width in <double>[320, 600, 1280]) {
+      testWidgets('fits $width dp at 200% text (${dark ? 'dark' : 'light'})', (
+        tester,
+      ) async {
+        tester.view.physicalSize = Size(width, 2600);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+
+        await tester.pumpWidget(
+          _app(
+            dark ? OTheme.dark() : OTheme.light(),
+            _hubData(taps: <String>[], onSignOut: () {}),
+            textScaler: const TextScaler.linear(2),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          tester.takeException(),
+          isNull,
+          reason: 'content overflowed at $width dp / 200 % text',
+        );
+      });
+    }
   }
 }

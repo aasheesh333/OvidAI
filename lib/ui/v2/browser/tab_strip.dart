@@ -154,7 +154,7 @@ class _Tab extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             SizedBox(
-              height: 2,
+              height: OSpace.xxs,
               child: selected
                   ? ColoredBox(
                       key: ValueKey('v2-browser-tab-active-${tab.id}'),
@@ -221,7 +221,7 @@ class _Favicon extends StatelessWidget {
     return Container(
       width: 22,
       height: 22,
-      padding: const EdgeInsets.all(2),
+      padding: const EdgeInsets.all(OSpace.xxs),
       decoration: BoxDecoration(
         color: c.surface,
         borderRadius: BorderRadius.circular(ORadius.s),

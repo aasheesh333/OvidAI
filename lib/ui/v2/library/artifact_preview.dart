@@ -155,7 +155,7 @@ class V2ArtifactPreview extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           if (showHeader) ...[_header(c), const SizedBox(height: OSpace.m)],
-          if (data.heavy) _heavyStage(c) else _stage(context, c),
+          _body(context, c),
           if (showFooter) ...[
             const SizedBox(height: OSpace.m),
             _footer(context, c),
@@ -163,6 +163,32 @@ class V2ArtifactPreview extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  /// The stage plus one screen-reader label naming its kind. The detail page
+  /// hides the preview header, so without this the preview is unlabelled.
+  Widget _body(BuildContext context, OColors c) {
+    return Semantics(
+      container: true,
+      label: _stageLabel(),
+      child: data.heavy ? _heavyStage(c) : _stage(context, c),
+    );
+  }
+
+  String _stageLabel() {
+    if (data.heavy) return 'Large file, preview skipped';
+    return switch (data.type) {
+      V2ArtifactPreviewType.image => 'Image preview of ${data.name}',
+      V2ArtifactPreviewType.code =>
+        data.totalCodeLines > 0
+            ? 'Code preview, ${data.totalCodeLines} lines'
+            : 'Code preview',
+      V2ArtifactPreviewType.document =>
+        data.documentText.trim().isEmpty
+            ? 'Document, metadata only'
+            : 'Document preview',
+      V2ArtifactPreviewType.page => 'Page preview',
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -267,7 +293,7 @@ class V2ArtifactPreview extends StatelessWidget {
                     image,
                   ),
                   fit: BoxFit.contain,
-                  semanticLabel: 'Preview of ${data.name}',
+                  excludeFromSemantics: true,
                   errorBuilder: (_, _, _) => _imagePlaceholder(c),
                 ),
         ),
@@ -379,14 +405,18 @@ class V2ArtifactPreview extends StatelessWidget {
     final lines = code.split('\n').take(maxLines).toList();
     final digits = '${lines.length}'.length;
     final lang = _codeLang(data.codeFile);
-    final base = OType.mono.copyWith(color: c.textMuted, height: 1.5);
+    // Three-colour system: syntax is separated by ink, stone and weight, not
+    // by hue. Keywords are bold ink, strings stone, numbers faint stone and
+    // comments faint stone italic — four distinguishable styles without
+    // spending the agent's signal red on code.
+    final base = OType.mono.copyWith(color: c.text, height: 1.5);
     final palette = CodePalette(
-      keyword: c.accent,
-      string: c.success,
+      keyword: c.text,
+      string: c.textMuted,
       comment: c.textFaint,
-      number: c.warn,
-      type: c.accent.withValues(alpha: 0.85),
-      annotation: c.warn,
+      number: c.textFaint,
+      type: c.text.withValues(alpha: 0.85),
+      annotation: c.textMuted,
     );
     final spans = <InlineSpan>[];
     for (var i = 0; i < lines.length; i++) {
@@ -438,9 +468,12 @@ class V2ArtifactPreview extends StatelessWidget {
               Icon(Icons.description_rounded, size: 22, color: c.accent),
               const SizedBox(width: OSpace.s),
               Expanded(
-                child: Text(
-                  body.isEmpty ? 'Metadata only' : 'Document preview',
-                  style: OType.bodyStrong.copyWith(color: c.text),
+                child: ExcludeSemantics(
+                  // The stage label above already names the kind.
+                  child: Text(
+                    body.isEmpty ? 'Metadata only' : 'Document preview',
+                    style: OType.bodyStrong.copyWith(color: c.text),
+                  ),
                 ),
               ),
             ],

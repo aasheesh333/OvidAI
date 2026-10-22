@@ -1,11 +1,20 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../../core/auth_phone_flow.dart' show normalizePhoneNumber;
+import '../../../core/legal_links.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import '../../widgets/external_link.dart';
 
 // TODO(l10n): move phone sign-in copy and country names to the ARB files.
+
+/// The SMS code is six digits. One constant so the field, the helper and the
+/// auto-submit guard cannot drift apart.
+const int _codeLength = 6;
 
 /// A country calling code offered by the phone sign-in sheet.
 ///
@@ -31,8 +40,6 @@ class V2PhoneCountry {
 
   /// A national-format example used as the phone field hint.
   final String example;
-
-  String get label => '$name $dialCode';
 }
 
 /// India first: it is Ovid's primary market and the fallback region.
@@ -142,9 +149,10 @@ enum V2PhoneAuthStep { phone, code }
 
 /// Injected state for the phone sign-in sheet.
 ///
-/// The resend countdown is owned by the auth controller and passed in, exactly
-/// like the take-control countdown: one source of truth, no timer inside a
-/// presentational widget. [code] must already be at most six digits.
+/// [resendSeconds] seeds the sheet's local resend cooldown. The host remains
+/// authoritative: every new value restarts the visible countdown, and the
+/// sheet ticks between host updates so the timer still moves when a host only
+/// supplies the initial window.
 @immutable
 class V2PhoneAuthData {
   const V2PhoneAuthData({
@@ -179,8 +187,6 @@ class V2PhoneAuthData {
     final trimmed = phone.trim();
     return trimmed.isEmpty ? country.dialCode : '${country.dialCode} $trimmed';
   }
-
-  bool get canResend => resendSeconds <= 0 && !loading;
 }
 
 /// Bottom sheet for signing in with a phone number and a six-digit SMS code.
@@ -201,8 +207,6 @@ class V2PhoneAuthSheet extends StatefulWidget {
     this.onChangeNumber,
     this.onClose,
     this.onRetry,
-    this.onTerms,
-    this.onPrivacy,
     this.showHandle = true,
   });
 
@@ -228,9 +232,6 @@ class V2PhoneAuthSheet extends StatefulWidget {
   /// Re-runs the failed request. Falls back to the primary action.
   final VoidCallback? onRetry;
 
-  final VoidCallback? onTerms;
-  final VoidCallback? onPrivacy;
-
   /// Set false when [showOSheet] already draws the grabber.
   final bool showHandle;
 
@@ -247,6 +248,32 @@ class _V2PhoneAuthSheetState extends State<V2PhoneAuthSheet> {
   );
   final FocusNode _codeFocus = FocusNode();
 
+  Timer? _resendTicker;
+
+  /// The visible countdown. [V2PhoneAuthData.resendSeconds] seeds it and any
+  /// later host value restarts it; between host updates the sheet ticks so a
+  /// host that only supplies the initial window still shows a moving timer.
+  int _resendRemaining = 0;
+
+  /// A number/code problem found here, before a request leaves the sheet.
+  /// Provider errors arrive through [V2PhoneAuthData.error].
+  String? _localError;
+
+  /// The code already auto-submitted, so a rebuild cannot submit it twice.
+  String? _autoSubmitted;
+
+  static const int _resendCooldown = 60;
+
+  @override
+  void initState() {
+    super.initState();
+    _resendRemaining = widget.data.resendSeconds;
+    _startResendTicker();
+    if (widget.data.step == V2PhoneAuthStep.code) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _focusCode());
+    }
+  }
+
   @override
   void didUpdateWidget(covariant V2PhoneAuthSheet oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -258,15 +285,34 @@ class _V2PhoneAuthSheetState extends State<V2PhoneAuthSheet> {
         widget.data.code != _code.text) {
       _code.text = widget.data.code;
     }
-    if (widget.data.step == V2PhoneAuthStep.phone &&
-        oldWidget.data.step != V2PhoneAuthStep.phone) {
-      _code.clear();
-      _codeFocus.unfocus();
+    if (widget.data.resendSeconds != oldWidget.data.resendSeconds) {
+      _resendRemaining = widget.data.resendSeconds;
+      _startResendTicker();
+    } else if (widget.onResend != oldWidget.onResend) {
+      _startResendTicker();
+    }
+    if (widget.data.step != oldWidget.data.step) {
+      _localError = null;
+      _autoSubmitted = null;
+      if (widget.data.step == V2PhoneAuthStep.phone) {
+        _code.clear();
+        _codeFocus.unfocus();
+        _resendTicker?.cancel();
+      } else {
+        WidgetsBinding.instance.addPostFrameCallback((_) => _focusCode());
+      }
+    }
+    if (widget.data.error != oldWidget.data.error &&
+        widget.data.error != null) {
+      // A rejected code may be corrected and submitted again; allow the
+      // auto-submit guard to see the next six-digit value.
+      _autoSubmitted = null;
     }
   }
 
   @override
   void dispose() {
+    _resendTicker?.cancel();
     _phone.dispose();
     _code.dispose();
     _codeFocus.dispose();
@@ -280,23 +326,65 @@ class _V2PhoneAuthSheetState extends State<V2PhoneAuthSheet> {
   bool get _canSend => widget.onSendCode != null && !_busy;
   bool get _canVerify => widget.onVerify != null && !_busy;
   bool get _canRetry =>
-      widget.onRetry != null || (_isCode ? _canVerify : _canSend);
+      widget.onRetry != null ||
+      (_isCode
+          ? _canVerify && _code.text.trim().length == _codeLength
+          : _canSend && _phone.text.trim().isNotEmpty);
+
+  void _startResendTicker() {
+    _resendTicker?.cancel();
+    if (!_isCode || widget.onResend == null || _resendRemaining <= 0) return;
+    _resendTicker = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      setState(() {
+        if (_resendRemaining > 0) _resendRemaining--;
+      });
+      if (_resendRemaining <= 0) timer.cancel();
+    });
+  }
+
+  void _focusCode() {
+    if (!mounted || !_isCode || _busy) return;
+    _codeFocus.requestFocus();
+  }
+
+  /// Mirrors the auth layer's E.164 rule so an invalid number is stopped
+  /// here, before an SMS request is made.
+  String? _numberProblem(String raw) {
+    final normalized = normalizePhoneNumber(
+      raw,
+      dialCode: widget.data.country.dialCode,
+    );
+    if (RegExp(r'^\+[1-9]\d{7,14}$').hasMatch(normalized)) return null;
+    return 'Enter a valid number.';
+  }
 
   void _send() {
     if (_busy || widget.onSendCode == null) return;
     final phone = _phone.text.trim();
-    if (phone.isEmpty) return;
+    final problem = _numberProblem(phone);
+    if (problem != null) {
+      setState(() => _localError = problem);
+      return;
+    }
+    setState(() => _localError = null);
     widget.onSendCode!(phone);
   }
 
-  void _verify() {
+  void _verify([String? value]) {
     if (_busy || widget.onVerify == null) return;
-    final code = _code.text.trim();
-    if (code.length != 6) return;
+    final code = (value ?? _code.text).trim();
+    if (code.length != _codeLength) return;
+    setState(() => _localError = null);
     widget.onVerify!(code);
   }
 
   void _retry() {
+    if (_busy) return;
+    setState(() => _localError = null);
     final retry = widget.onRetry;
     if (retry != null) {
       retry();
@@ -304,6 +392,34 @@ class _V2PhoneAuthSheetState extends State<V2PhoneAuthSheet> {
       _verify();
     } else if (!_isCode && _canSend) {
       _send();
+    }
+  }
+
+  void _resend() {
+    final resend = widget.onResend;
+    if (_busy || resend == null || _resendRemaining > 0) return;
+    setState(() {
+      _localError = null;
+      _autoSubmitted = null;
+      _resendRemaining = _resendCooldown;
+    });
+    _startResendTicker();
+    resend();
+  }
+
+  void _changeNumber() {
+    if (_busy) return;
+    setState(() {
+      _localError = null;
+      _autoSubmitted = null;
+      _code.clear();
+    });
+    _codeFocus.unfocus();
+    final change = widget.onChangeNumber;
+    if (change != null) {
+      change();
+    } else {
+      widget.onClose?.call();
     }
   }
 
@@ -318,8 +434,36 @@ class _V2PhoneAuthSheetState extends State<V2PhoneAuthSheet> {
       ),
     );
     if (selected != null && selected.region != widget.data.country.region) {
+      setState(() => _localError = null);
       widget.onCountryChanged?.call(selected);
     }
+  }
+
+  void _phoneChanged(String value) {
+    setState(() => _localError = null);
+    widget.onPhoneChanged?.call(value);
+  }
+
+  void _codeChanged(String value) {
+    final code = value.trim();
+    setState(() {
+      _localError = null;
+      if (code.length < _codeLength) _autoSubmitted = null;
+    });
+    widget.onCodeChanged?.call(value);
+    if (code.length != _codeLength ||
+        _busy ||
+        widget.onVerify == null ||
+        _autoSubmitted == code) {
+      return;
+    }
+    _autoSubmitted = code;
+    // Submit after the frame so the sixth slot paints before the keyboard
+    // closes and the host receives the code.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _busy) return;
+      if (_code.text.trim() == code) _verify(code);
+    });
   }
 
   @override
@@ -327,6 +471,11 @@ class _V2PhoneAuthSheetState extends State<V2PhoneAuthSheet> {
     final c = OColors.of(context);
     final data = widget.data;
     final isCode = data.step == V2PhoneAuthStep.code;
+    final error = data.error ?? _localError;
+    final showRetry = data.error != null && !_busy && _canRetry;
+    final canChangeNumber =
+        widget.onChangeNumber != null || widget.onClose != null;
+    final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -344,11 +493,14 @@ class _V2PhoneAuthSheetState extends State<V2PhoneAuthSheet> {
         ],
         Flexible(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(
+            // A host that mounts the sheet without showOSheet still gets the
+            // keyboard inset. showOSheet adds its own spacer, so the extra
+            // bottom padding only costs a few dp of scroll.
+            padding: EdgeInsets.fromLTRB(
               OSpace.xl,
               OSpace.l,
               OSpace.xl,
-              OSpace.xl,
+              OSpace.xl + keyboardInset,
             ),
             child: Center(
               child: ConstrainedBox(
@@ -358,63 +510,32 @@ class _V2PhoneAuthSheetState extends State<V2PhoneAuthSheet> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       OSheetHeader(
-                        leading: isCode
+                        leading: isCode && canChangeNumber
                             ? OIconButton(
                                 key: const Key('phone-auth-back'),
                                 icon: Icons.arrow_back_rounded,
                                 semanticLabel: 'Change number',
                                 tooltip: 'Change number',
-                                onPressed: isCode && !_busy
-                                    ? (widget.onChangeNumber ?? widget.onClose)
-                                    : null,
+                                onPressed: _busy ? null : _changeNumber,
                               )
-                            : Container(
-                                width: 40,
-                                height: 40,
-                                decoration: BoxDecoration(
-                                  color: c.accentSoft,
-                                  borderRadius: BorderRadius.circular(
-                                    ORadius.m,
-                                  ),
-                                ),
-                                child: Icon(
-                                  Icons.phone_iphone_rounded,
-                                  size: 20,
-                                  color: c.accent,
-                                ),
-                              ),
+                            : null,
+                        icon: isCode ? null : Icons.phone_iphone_rounded,
+                        title: isCode ? 'Enter your code' : 'Phone sign-in',
+                        subtitle: isCode
+                            ? 'Sent to ${data.displayNumber}'
+                            : 'We text you a 6-digit code.',
                         onClose: widget.onClose,
                         closeLabel: 'Close',
                         closeKey: const Key('phone-auth-close'),
                         padding: EdgeInsets.zero,
                       ),
-                      const SizedBox(height: OSpace.l),
-                      Text(
-                        isCode ? 'Enter your code' : 'Sign in with your phone',
-                        style: OType.h1.copyWith(color: c.text),
-                      ),
-                      const SizedBox(height: OSpace.s),
-                      if (isCode)
-                        _CodeSubtitle(
-                          number: data.displayNumber,
-                          onChangeNumber: _busy ? null : widget.onChangeNumber,
-                        )
-                      else
-                        Text(
-                          'We will text you a 6-digit code. Standard message '
-                          'rates may apply.',
-                          style: OType.bodySm.copyWith(color: c.textMuted),
-                        ),
                       const SizedBox(height: OSpace.xl),
                       if (isCode)
                         _CodeFields(
                           data: data,
                           controller: _code,
                           focusNode: _codeFocus,
-                          onChanged: (value) {
-                            setState(() {});
-                            widget.onCodeChanged?.call(value);
-                          },
+                          onChanged: _codeChanged,
                           onSubmitted: _verify,
                         )
                       else
@@ -424,24 +545,21 @@ class _V2PhoneAuthSheetState extends State<V2PhoneAuthSheet> {
                           countryEnabled:
                               !_busy && widget.onCountryChanged != null,
                           onPickCountry: _pickCountry,
-                          onChanged: (value) {
-                            setState(() {});
-                            widget.onPhoneChanged?.call(value);
-                          },
+                          onChanged: _phoneChanged,
                           onSubmitted: _send,
                         ),
-                      if (data.error != null) ...[
-                        const SizedBox(height: OSpace.l),
-                        _SheetError(
-                          message: data.error!,
-                          onRetry: _busy || !_canRetry ? null : _retry,
-                        ),
-                      ],
-                      if (isCode) ...[
+                      if (isCode && widget.onResend != null) ...[
                         const SizedBox(height: OSpace.l),
                         _ResendRow(
-                          data: data,
-                          onResend: _busy ? null : widget.onResend,
+                          remaining: _resendRemaining,
+                          onResend: _busy ? null : _resend,
+                        ),
+                      ],
+                      if (error != null) ...[
+                        const SizedBox(height: OSpace.l),
+                        _SheetError(
+                          message: error,
+                          onRetry: showRetry ? _retry : null,
                         ),
                       ],
                       const SizedBox(height: OSpace.xl),
@@ -462,30 +580,26 @@ class _V2PhoneAuthSheetState extends State<V2PhoneAuthSheet> {
                         onPressed: _busy
                             ? null
                             : (isCode
-                                  ? (_code.text.trim().length == 6 &&
+                                  ? (_code.text.trim().length == _codeLength &&
                                             _canVerify
                                         ? _verify
                                         : null)
-                                  : (_phone.text.trim().isNotEmpty &&
-                                            _canSend
+                                  : (_phone.text.trim().isNotEmpty && _canSend
                                         ? _send
                                         : null)),
                       ),
-                      if (!isCode) ...[
-                        const SizedBox(height: OSpace.l),
-                        _TermsNote(
-                          onTerms: widget.onTerms,
-                          onPrivacy: widget.onPrivacy,
-                        ),
-                      ] else ...[
+                      if (isCode) ...[
                         const SizedBox(height: OSpace.m),
                         Text(
-                          'Codes expire after 5 minutes. Never share your code '
-                          'with anyone.',
+                          'Codes expire in 5 minutes.',
                           textAlign: TextAlign.center,
                           style: OType.caption.copyWith(color: c.textFaint),
                         ),
-                      ],
+                      ] else
+                        const V2LegalNote(
+                          key: Key('phone-auth-terms'),
+                          padding: EdgeInsets.only(top: OSpace.l),
+                        ),
                     ],
                   ),
                 ),
@@ -494,6 +608,66 @@ class _V2PhoneAuthSheetState extends State<V2PhoneAuthSheet> {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Terms and privacy links shared by the sign-in screen and its phone sheet.
+///
+/// The URL comes from [LegalLinks] (overridable per build with `--dart-define`)
+/// and opens in the platform browser through [ExternalLinkButton]. When a build
+/// has no URL the link is omitted; it is never rendered as dead text.
+class V2LegalNote extends StatelessWidget {
+  const V2LegalNote({
+    super.key,
+    this.termsUrl = LegalLinks.terms,
+    this.privacyUrl = LegalLinks.privacyPolicy,
+    this.padding = const EdgeInsets.only(top: OSpace.xl),
+    this.alignment = WrapAlignment.center,
+  });
+
+  final String termsUrl;
+  final String privacyUrl;
+  final EdgeInsetsGeometry padding;
+  final WrapAlignment alignment;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasTerms = termsUrl.trim().isNotEmpty;
+    final hasPrivacy = privacyUrl.trim().isNotEmpty;
+    if (!hasTerms && !hasPrivacy) return const SizedBox.shrink();
+    final c = OColors.of(context);
+    final base = OType.caption.copyWith(color: c.textMuted);
+    final link = OType.caption.copyWith(color: c.accent);
+    return Padding(
+      padding: padding,
+      child: Wrap(
+        alignment: alignment,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          Text('By continuing, you agree to', style: base),
+          if (hasTerms)
+            Semantics(
+              enabled: true,
+              child: ExternalLinkButton(
+                label: 'Terms',
+                url: termsUrl,
+                style: link,
+              ),
+            ),
+          if (hasTerms && hasPrivacy) Text('and', style: base),
+          if (hasPrivacy)
+            Semantics(
+              enabled: true,
+              child: ExternalLinkButton(
+                label: 'Privacy Policy',
+                url: privacyUrl,
+                style: link,
+              ),
+            ),
+          Text('.', style: base),
+        ],
+      ),
     );
   }
 }
@@ -521,7 +695,14 @@ class _PhoneFields extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text('Phone number', style: OType.label.copyWith(color: c.textMuted)),
+        // The field below carries the label for assistive tech; the visual
+        // label is excluded so it is not announced twice.
+        ExcludeSemantics(
+          child: Text(
+            'Phone number',
+            style: OType.label.copyWith(color: c.textMuted),
+          ),
+        ),
         const SizedBox(height: OSpace.s),
         Row(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -534,22 +715,21 @@ class _PhoneFields extends StatelessWidget {
             const SizedBox(width: OSpace.s),
             Expanded(
               child: Semantics(
-                label: 'Phone number, ${data.country.name}',
+                label: 'Phone number',
                 textField: true,
                 child: TextField(
                   key: const Key('phone-auth-phone'),
                   controller: controller,
                   enabled: !data.loading,
+                  autofocus: true,
                   keyboardType: TextInputType.phone,
                   textInputAction: TextInputAction.done,
                   autofillHints: const [AutofillHints.telephoneNumberNational],
+                  scrollPadding: const EdgeInsets.only(bottom: 120),
                   onChanged: onChanged,
                   onSubmitted: (_) => onSubmitted?.call(),
                   style: OType.body.copyWith(color: c.text),
-                  decoration: InputDecoration(
-                    hintText: data.country.example,
-                    errorText: null,
-                  ),
+                  decoration: InputDecoration(hintText: data.country.example),
                 ),
               ),
             ),
@@ -622,34 +802,6 @@ class _CountryButton extends StatelessWidget {
   }
 }
 
-class _CodeSubtitle extends StatelessWidget {
-  const _CodeSubtitle({required this.number, required this.onChangeNumber});
-
-  final String number;
-  final VoidCallback? onChangeNumber;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Wrap(
-      crossAxisAlignment: WrapCrossAlignment.center,
-      spacing: OSpace.xs,
-      children: [
-        Text(
-          'We sent a 6-digit code to $number.',
-          style: OType.bodySm.copyWith(color: c.textMuted),
-        ),
-        OButton(
-          key: const Key('phone-auth-change'),
-          label: 'Change',
-          variant: OButtonVariant.ghost,
-          onPressed: onChangeNumber,
-        ),
-      ],
-    );
-  }
-}
-
 class _CodeFields extends StatelessWidget {
   const _CodeFields({
     required this.data,
@@ -665,8 +817,6 @@ class _CodeFields extends StatelessWidget {
   final ValueChanged<String> onChanged;
   final VoidCallback onSubmitted;
 
-  static const int _length = 6;
-
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
@@ -676,14 +826,16 @@ class _CodeFields extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text(
-          'Verification code',
-          style: OType.label.copyWith(color: c.textMuted),
+        ExcludeSemantics(
+          child: Text(
+            'Verification code',
+            style: OType.label.copyWith(color: c.textMuted),
+          ),
         ),
         const SizedBox(height: OSpace.s),
         Semantics(
           key: const Key('phone-auth-code'),
-          label: '6-digit verification code',
+          label: '$_codeLength-digit verification code',
           value: code.isEmpty ? null : code,
           textField: true,
           enabled: !data.loading,
@@ -693,7 +845,7 @@ class _CodeFields extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    for (var i = 0; i < _length; i++) ...[
+                    for (var i = 0; i < _codeLength; i++) ...[
                       if (i > 0) const SizedBox(width: OSpace.s),
                       Expanded(
                         child: _OtpSlot(
@@ -713,13 +865,14 @@ class _CodeFields extends StatelessWidget {
                     enabled: !data.loading,
                     keyboardType: TextInputType.number,
                     textInputAction: TextInputAction.done,
-                    maxLength: _length,
+                    maxLength: _codeLength,
                     showCursor: false,
                     enableInteractiveSelection: false,
                     autofillHints: const [AutofillHints.oneTimeCode],
+                    scrollPadding: const EdgeInsets.only(bottom: 120),
                     inputFormatters: [
                       FilteringTextInputFormatter.digitsOnly,
-                      LengthLimitingTextInputFormatter(_length),
+                      LengthLimitingTextInputFormatter(_codeLength),
                     ],
                     onChanged: onChanged,
                     onSubmitted: (_) => onSubmitted(),
@@ -743,7 +896,7 @@ class _CodeFields extends StatelessWidget {
         ),
         const SizedBox(height: OSpace.s),
         Text(
-          'Enter all $_length digits',
+          'Enter all $_codeLength digits',
           style: OType.caption.copyWith(color: c.textFaint),
         ),
       ],
@@ -796,9 +949,9 @@ class _OtpSlot extends StatelessWidget {
 }
 
 class _ResendRow extends StatelessWidget {
-  const _ResendRow({required this.data, required this.onResend});
+  const _ResendRow({required this.remaining, required this.onResend});
 
-  final V2PhoneAuthData data;
+  final int remaining;
   final VoidCallback? onResend;
 
   static String _format(int seconds) {
@@ -811,7 +964,7 @@ class _ResendRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    if (data.canResend) {
+    if (remaining <= 0) {
       // No handler means no resend service: render nothing rather than a
       // button that can never fire (MINIMAL_UI_CONTRACT §8).
       if (onResend == null) return const SizedBox.shrink();
@@ -832,9 +985,7 @@ class _ResendRow extends StatelessWidget {
         const SizedBox(width: OSpace.s),
         Expanded(
           child: Text(
-            data.resendSeconds > 0
-                ? 'Resend code in ${_format(data.resendSeconds)}'
-                : 'One moment…',
+            'Resend code in ${_format(remaining)}',
             key: const Key('phone-auth-resend-timer'),
             style: OType.caption.copyWith(color: c.textMuted),
           ),
@@ -854,9 +1005,9 @@ class _SheetError extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     return Semantics(
+      key: const Key('phone-auth-error'),
       liveRegion: true,
       child: Container(
-        key: const Key('phone-auth-error'),
         padding: const EdgeInsets.fromLTRB(
           OSpace.m,
           OSpace.s,
@@ -897,70 +1048,6 @@ class _SheetError extends StatelessWidget {
               ),
             ),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-class _TermsNote extends StatelessWidget {
-  const _TermsNote({this.onTerms, this.onPrivacy});
-
-  final VoidCallback? onTerms;
-  final VoidCallback? onPrivacy;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final base = OType.caption.copyWith(color: c.textMuted);
-    return Wrap(
-      key: const Key('phone-auth-terms'),
-      alignment: WrapAlignment.center,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      children: [
-        Text('By continuing, you agree to our ', style: base),
-        _InlineLink(label: 'Terms', onTap: onTerms),
-        Text(' and ', style: base),
-        _InlineLink(label: 'Privacy Policy', onTap: onPrivacy),
-        Text('.', style: base),
-      ],
-    );
-  }
-}
-
-/// Inline text link with a 48 dp tap target. The enclosing terms note owns the
-/// spoken sentence, so each link is what a screen reader can activate.
-class _InlineLink extends StatelessWidget {
-  const _InlineLink({required this.label, this.onTap});
-
-  final String label;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final text = Text(
-      label,
-      style: OType.caption.copyWith(
-        color: onTap == null ? c.textMuted : c.text,
-        decoration: onTap == null ? null : TextDecoration.underline,
-        decorationColor: c.textMuted,
-      ),
-    );
-    if (onTap == null) return text;
-    return Semantics(
-      container: true,
-      label: label,
-      button: true,
-      onTap: onTap,
-      child: ExcludeSemantics(
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: onTap,
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(minHeight: OSpace.touch),
-            child: Center(widthFactor: 1, heightFactor: 1, child: text),
-          ),
         ),
       ),
     );
@@ -1030,6 +1117,7 @@ class _CountryPickerSheetState extends State<_CountryPickerSheet> {
               controller: _search,
               autofocus: false,
               textInputAction: TextInputAction.search,
+              scrollPadding: const EdgeInsets.only(bottom: 120),
               onChanged: (value) => setState(() => _query = value),
               style: OType.bodySm.copyWith(color: c.text),
               decoration: InputDecoration(
@@ -1068,7 +1156,9 @@ class _CountryPickerSheetState extends State<_CountryPickerSheet> {
           else
             Expanded(
               child: ListView.builder(
-                padding: const EdgeInsets.only(bottom: OSpace.l),
+                padding: EdgeInsets.only(
+                  bottom: OSpace.l + MediaQuery.viewInsetsOf(context).bottom,
+                ),
                 itemCount: matches.length,
                 itemBuilder: (context, index) {
                   final country = matches[index];

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
@@ -8,45 +10,11 @@ import 'data_control_export.dart'
     if (dart.library.io) 'data_control_export_io.dart';
 import 'export_picker_sheet.dart';
 import 'settings_rows.dart';
-import 'storage_breakdown.dart';
-import 'storage_page.dart';
+import 'storage_breakdown.dart' show formatStorageBytes;
 
 // TODO(l10n): move user-facing copy to the ARB files in the localization pass.
 
-/// Writes a backup archive to a destination the user chose and returns that
-/// destination, or null when the user cancelled the save dialog.
-typedef V2ExportFileWriter = Future<String?> Function();
-
-/// Result of checking a backup file before it is imported.
-@immutable
-class V2ImportValidation {
-  const V2ImportValidation({
-    required this.fileName,
-    required this.message,
-    required this.valid,
-    this.checkedLabel = 'Checked now',
-    this.planQuotaLabel = '',
-    this.fitsPlan = true,
-  });
-
-  final String fileName;
-  final String message;
-  final bool valid;
-  final String checkedLabel;
-
-  /// Plain-language result of the plan-storage check, for example
-  /// "Needs 1.4 GB · 2.1 GB free on your plan".
-  final String planQuotaLabel;
-
-  /// False when the archive is valid but the account does not have enough
-  /// plan storage for it. Import stays blocked until the user frees space.
-  final bool fitsPlan;
-
-  bool get canImport => valid && fitsPlan;
-}
-
-/// One chat in the export selection window. Only used when the account is over
-/// the 64 MB archive limit.
+/// One chat in the export selection window, measured from this device.
 @immutable
 class V2ExportSession {
   const V2ExportSession({
@@ -59,11 +27,15 @@ class V2ExportSession {
     this.heavyArtifacts = false,
   });
 
+  /// The server session id the archive will carry.
   final String id;
   final String name;
   final int sizeBytes;
   final String sizeLabel;
+
+  /// A measured line such as "42 messages".
   final String detail;
+
   final bool selected;
 
   /// True when the chat contains videos or other large files that are not
@@ -75,100 +47,92 @@ class V2ExportSession {
 typedef V2ExportSessionToggle = void Function(String id, bool selected);
 
 /// Injected state for the Data control screen.
+///
+/// The four rows are backed by [service] (real on device, unavailable on web).
+/// The callbacks below are the host's hooks: the async ones take over a flow
+/// when supplied; the older `VoidCallback`s are only used on a platform with
+/// no service (web) and are kept so existing hosts still compile.
 @immutable
 class V2DataControlPageData {
   const V2DataControlPageData({
-    this.lastExportLabel = '',
-    this.backupSizeLabel = '',
     this.totalDataSizeLabel = '',
-    this.exportLimitLabel = 'Up to 64 MB · 1,000 chats · 20,000 messages',
     this.exportLimitBytes = 64 * 1024 * 1024,
     this.exportSessions = const <V2ExportSession>[],
-    this.permissionSummary = '',
-    this.storageUsedLabel = '',
-    this.storageFraction = 0,
-    this.storageFreeLabel = '',
-    this.crashReports = true,
-    this.importValidation,
-    this.importChecking = false,
     this.hasData = true,
     this.loading = false,
     this.errorMessage,
     this.accountContact = '',
-    this.memorySummaryLabel = '',
-    this.onExportImport,
+    this.service,
     this.onExport,
-    this.onSaveExport,
     this.onChooseImport,
-    this.onImport,
-    this.onExportSessionToggled,
-    this.onPermissions,
-    this.onCrashReportsChanged,
-    this.onStorage,
     this.onDeleteData,
-    this.onResetMemory,
+    this.onExportSessionToggled,
+    this.onRetry,
     this.onClearCache,
     this.onClearCacheAndReport,
-    this.onRetry,
+
+    // Retained for hosts that still pass them. Data control no longer renders
+    // rows for permissions, crash reports, storage or memory; those live on
+    // their own pages.
+    this.onExportImport,
+    this.onPermissions,
+    this.onStorage,
+    this.onResetMemory,
+    this.crashReports = true,
+    this.onCrashReportsChanged,
+    this.permissionSummary = '',
+    this.storageUsedLabel = '',
+    this.storageFraction = 0,
+    this.storageFreeLabel = '',
   });
 
-  final String lastExportLabel;
-  final String backupSizeLabel;
-
-  /// Total size of everything in the account, shown beside the export limits.
+  /// A real measured total, for example "1.2 GB across 42 chats".
   final String totalDataSizeLabel;
-  final String exportLimitLabel;
+
+  /// The archive cap the service and the picker enforce.
   final int exportLimitBytes;
 
-  /// Per-chat sizes. The selection window appears automatically when their
-  /// total is larger than [exportLimitBytes].
+  /// Per-chat sizes, used when the account is larger than the cap.
   final List<V2ExportSession> exportSessions;
 
-  final String permissionSummary;
-  final String storageUsedLabel;
-  final double storageFraction;
-  final String storageFreeLabel;
-
-  /// Opt-out crash reports and anonymous analytics. On by default.
-  final bool crashReports;
-  final V2ImportValidation? importValidation;
-  final bool importChecking;
   final bool hasData;
   final bool loading;
   final String? errorMessage;
 
-  /// Registered email or phone the user must type to delete their data.
+  /// Registered email or phone the user types to delete device data.
   final String accountContact;
 
-  /// Optional summary such as "Global memory and 12 session files".
-  final String memorySummaryLabel;
+  /// The real work behind the rows. Defaults to the platform service.
+  final V2DataControlService? service;
 
-  final VoidCallback? onExportImport;
+  /// Legacy export hook, used only where [service] is unavailable (web).
   final VoidCallback? onExport;
 
-  /// Saves the archive to a real destination. When null the page writes a real
-  /// zip and opens the platform save dialog itself.
-  final V2ExportFileWriter? onSaveExport;
+  /// Legacy import hook, used only where [service] is unavailable (web).
   final VoidCallback? onChooseImport;
-  final VoidCallback? onImport;
-  final V2ExportSessionToggle? onExportSessionToggled;
-  final VoidCallback? onPermissions;
-  final ValueChanged<bool>? onCrashReportsChanged;
-  final VoidCallback? onStorage;
+
+  /// Legacy delete hook, used only where [service] is unavailable (web).
   final VoidCallback? onDeleteData;
 
-  /// Retained for hosts that still pass it; memory reset lives on the Memory
-  /// page, so Data control no longer renders a row for it.
-  final VoidCallback? onResetMemory;
-
-  /// Clears the on-device cache. When null the page clears the app's
-  /// temporary directory itself, so the row always does real work.
-  final VoidCallback? onClearCache;
-
-  /// Clears the cache and returns the bytes actually freed. Wins over
-  /// [onClearCache] when the host can measure the result itself.
-  final Future<int> Function()? onClearCacheAndReport;
+  /// Reports the picker's ticks so the host can persist the selection.
+  final V2ExportSessionToggle? onExportSessionToggled;
   final VoidCallback? onRetry;
+
+  /// Legacy cache hooks. A measured reporter wins over the service.
+  final VoidCallback? onClearCache;
+  final Future<int> Function()? onClearCacheAndReport;
+
+  // Deprecated host hooks retained so existing call sites compile.
+  final VoidCallback? onExportImport;
+  final VoidCallback? onPermissions;
+  final VoidCallback? onStorage;
+  final VoidCallback? onResetMemory;
+  final bool crashReports;
+  final ValueChanged<bool>? onCrashReportsChanged;
+  final String permissionSummary;
+  final String storageUsedLabel;
+  final double storageFraction;
+  final String storageFreeLabel;
 
   int get exportTotalBytes =>
       exportSessions.fold<int>(0, (sum, session) => sum + session.sizeBytes);
@@ -180,7 +144,15 @@ class V2DataControlPageData {
   int get exportSelectedCount =>
       exportSessions.where((session) => session.selected).length;
 
-  bool get exportOverLimit => exportTotalBytes > exportLimitBytes;
+  int get exportTotalMessages => exportSessions.fold<int>(
+    0,
+    (sum, session) => sum + _messageCount(session.detail),
+  );
+
+  bool get exportOverLimit =>
+      exportTotalBytes > exportLimitBytes ||
+      exportSessions.length > v2ExportPickerChatLimit ||
+      exportTotalMessages > v2ExportPickerMessageLimit;
 
   bool get exportSelectionOverLimit => exportSelectedBytes > exportLimitBytes;
 
@@ -189,20 +161,58 @@ class V2DataControlPageData {
   bool get canExport =>
       !exportOverLimit ||
       (exportSelectedCount > 0 && !exportSelectionOverLimit);
-
-  bool get canImport => importValidation?.canImport ?? false;
 }
 
-/// Privacy and data controls: four rows — export, import, cache and the
-/// destructive delete. Every row is an action; there are no explanatory
-/// paragraphs.
-class DataControlPage extends StatelessWidget {
+enum _Phase { idle, exporting, importing, deleting }
+
+/// Privacy and data controls: export, import, cache and the destructive
+/// delete. Every row does real work, and every flow reports what happened.
+class DataControlPage extends StatefulWidget {
   const DataControlPage({super.key, required this.data});
 
   final V2DataControlPageData data;
 
   @override
+  State<DataControlPage> createState() => _DataControlPageState();
+}
+
+class _DataControlPageState extends State<DataControlPage> {
+  late final V2DataControlService _service =
+      widget.data.service ?? createDataControlService();
+
+  _Phase _phase = _Phase.idle;
+  bool _clearing = false;
+  V2TransferProgress? _progress;
+  V2ExportOutcome? _exportOutcome;
+  V2ImportOutcome? _importOutcome;
+  V2DeleteOutcome? _deleteOutcome;
+  int? _cacheBytes;
+  String? _cacheError;
+  String? _cacheMessage;
+
+  bool get _busy => _phase != _Phase.idle || _clearing;
+
+  bool get _canExport => _service.available || widget.data.onExport != null;
+
+  bool get _canImport =>
+      _service.available || widget.data.onChooseImport != null;
+
+  bool get _canDelete => _service.available || widget.data.onDeleteData != null;
+
+  bool get _canClear =>
+      _service.available ||
+      widget.data.onClearCache != null ||
+      widget.data.onClearCacheAndReport != null;
+
+  @override
+  void initState() {
+    super.initState();
+    if (_service.available) unawaited(_loadCache());
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final data = widget.data;
     final status = data.loading
         ? OStatus.loading
         : data.errorMessage != null
@@ -217,268 +227,774 @@ class DataControlPage extends StatelessWidget {
         errorMessage: data.errorMessage,
         onRetry: data.onRetry,
         skeletonRows: 5,
-        emptyTitle: 'No data to manage',
+        emptyTitle: 'No data yet',
         emptyBody: 'Chats and files appear here.',
-        emptyActionLabel: 'Export data',
-        onEmptyAction: data.onExportImport ?? data.onExport,
+        emptyActionLabel: _canImport ? 'Import backup' : null,
+        onEmptyAction: _canImport ? _import : null,
         child: _content(context),
       ),
     );
   }
 
   Widget _content(BuildContext context) {
-    final export = _exportTap(context);
+    final c = OColors.of(context);
+    final blocks = <Widget>[
+      if (_canExport) _Block(row: _exportRow(), status: _exportStatus(context)),
+      if (_canImport) _Block(row: _importRow(), status: _importStatus(context)),
+      if (_canClear) _Block(row: _cacheRow(), status: _cacheStatus(context)),
+      if (_canDelete) _Block(row: _deleteRow(), status: _deleteStatus(context)),
+    ];
     return SingleChildScrollView(
       padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xxl),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          V2SettingsRowList(
-            rows: [
-              if (export != null)
-                V2SettingsRow(
-                  key: const ValueKey<String>('export-backup-row'),
-                  icon: Icons.save_alt_rounded,
-                  title: 'Export backup',
-                  onTap: export,
-                ),
-              if (data.onChooseImport != null)
-                V2SettingsRow(
-                  key: const ValueKey<String>('import-backup-row'),
-                  icon: Icons.upload_file_rounded,
-                  title: 'Import',
-                  onTap: data.onChooseImport,
-                ),
-              if (data.importChecking || data.importValidation != null)
-                _importRow(context),
-              V2SettingsRow(
-                key: const ValueKey<String>('clear-cache-row'),
-                icon: Icons.cleaning_services_outlined,
-                title: 'Clear cache',
-                showChevron: false,
-                onTap: () => _clearCache(context),
+          for (var i = 0; i < blocks.length; i++) ...[
+            if (i > 0)
+              Divider(
+                height: 1,
+                thickness: 1,
+                indent: v2SettingsRowDividerIndent,
+                color: c.hairline,
               ),
-              if (data.onDeleteData != null)
-                V2SettingsRow(
-                  key: const ValueKey<String>('delete-data-row'),
-                  icon: Icons.delete_forever_outlined,
-                  title: 'Delete data',
-                  danger: true,
-                  showChevron: false,
-                  onTap: () => _confirmDelete(context),
-                ),
-            ],
-          ),
+            blocks[i],
+          ],
         ],
       ),
     );
   }
 
-  /// The export row's real tap: the archive flow when the host exports, the
-  /// save dialog when it only writes files. A page with neither omits the row.
-  VoidCallback? _exportTap(BuildContext context) {
-    if (data.onExport != null) return () => _handleExport(context);
-    if (data.onSaveExport != null) {
-      return () => _handleExport(context, save: true);
-    }
-    return null;
+  // ── Rows ──────────────────────────────────────────────────────────────────
+
+  Widget _exportRow() {
+    final total = widget.data.totalDataSizeLabel;
+    return V2SettingsRow(
+      key: const ValueKey<String>('export-backup-row'),
+      icon: Icons.save_alt_rounded,
+      title: 'Export backup',
+      subtitle: total.isEmpty ? null : total,
+      enabled: !_busy,
+      onTap: _busy ? null : _export,
+    );
   }
 
-  /// The checked backup, or the check in flight. One row, no paragraphs.
-  Widget _importRow(BuildContext context) {
-    final check = data.importValidation;
-    if (data.importChecking || check == null) {
-      return const V2SettingsRow(
-        icon: Icons.hourglass_empty_rounded,
-        title: 'Checking backup…',
-        showChevron: false,
+  Widget _importRow() {
+    return V2SettingsRow(
+      key: const ValueKey<String>('import-backup-row'),
+      icon: Icons.upload_file_rounded,
+      title: 'Import backup',
+      enabled: !_busy,
+      onTap: _busy ? null : _import,
+    );
+  }
+
+  Widget _cacheRow() {
+    final value = !_service.available
+        ? null
+        : _cacheBytes != null
+        ? formatStorageBytes(_cacheBytes!)
+        : (_cacheError == null ? '…' : null);
+    return V2SettingsRow(
+      key: const ValueKey<String>('clear-cache-row'),
+      icon: Icons.cleaning_services_outlined,
+      title: 'Clear cache',
+      subtitle: _cacheError,
+      value: value,
+      showChevron: false,
+      enabled: !_busy,
+      onTap: _busy ? null : _clearCache,
+    );
+  }
+
+  Widget _deleteRow() {
+    final row = V2SettingsRow(
+      key: const ValueKey<String>('delete-data-row'),
+      icon: Icons.delete_forever_outlined,
+      title: 'Delete data',
+      subtitle: 'This device',
+      danger: true,
+      showChevron: false,
+      enabled: !_busy,
+      onTap: _busy ? null : _delete,
+    );
+    // The shared row announces its label and scope; the destructive warning is
+    // added here so TalkBack says it before the action runs.
+    return Semantics(
+      container: true,
+      button: true,
+      enabled: !_busy,
+      label: 'Delete data, this device',
+      hint: 'Destructive, cannot be undone.',
+      onTap: _busy ? null : _delete,
+      child: ExcludeSemantics(child: row),
+    );
+  }
+
+  // ── Status under each row ─────────────────────────────────────────────────
+
+  Widget? _exportStatus(BuildContext context) {
+    if (_phase == _Phase.exporting) {
+      return _ProgressCard(title: 'Exporting backup', progress: _progress);
+    }
+    final outcome = _exportOutcome;
+    if (outcome == null) return null;
+    if (outcome.cancelled) {
+      return const _ResultCard(
+        icon: Icons.info_outline_rounded,
+        title: 'Export cancelled',
+        meta: 'Nothing was saved.',
       );
     }
-    final action = check.canImport
-        ? OButton(
-            label: 'Import',
-            variant: OButtonVariant.ghost,
-            onPressed: data.onImport,
-          )
-        : check.valid && !check.fitsPlan && data.onStorage != null
-        ? OButton(
-            label: 'Storage',
-            variant: OButtonVariant.ghost,
-            onPressed: data.onStorage,
-          )
-        : OButton(
-            label: 'Choose',
-            variant: OButtonVariant.ghost,
-            onPressed: data.onChooseImport,
-          );
-    return Column(
-      key: const ValueKey<String>('import-check-row'),
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        V2SettingsRow(
-          icon: check.valid
-              ? Icons.check_circle_outline_rounded
-              : Icons.error_outline_rounded,
-          title: check.fileName,
-          subtitle: check.message,
-          showChevron: false,
+    if (outcome.isFailure) {
+      return _ResultCard(
+        icon: Icons.error_outline_rounded,
+        tone: OColors.of(context).danger,
+        title: 'Export failed',
+        meta: outcome.message,
+        action: OButton(
+          label: 'Try again',
+          variant: OButtonVariant.ghost,
+          onPressed: _busy ? null : _export,
         ),
-        // The action sits under the text instead of beside it: at 200 % text
-        // a trailing button and a long file name cannot share one line.
-        Align(alignment: Alignment.centerRight, child: action),
+      );
+    }
+    final meta = StringBuffer(
+      '${_plural(outcome.chats, 'chat', 'chats')} · '
+      '${formatStorageBytes(outcome.bytes)}',
+    );
+    if (outcome.skippedChats > 0) {
+      meta.write(' · ${outcome.skippedChats} left out');
+    }
+    final limit = outcome.limitHit;
+    return _ResultCard(
+      icon: Icons.check_circle_outline_rounded,
+      tone: OColors.of(context).success,
+      title: outcome.path == null ? 'Backup shared' : 'Backup saved',
+      meta: meta.toString(),
+      details: [
+        if (limit != null)
+          Padding(
+            padding: const EdgeInsets.only(top: OSpace.s),
+            child: Text(
+              'Stopped by $limit.',
+              style: OType.caption.copyWith(
+                color: OColors.of(context).textMuted,
+              ),
+            ),
+          ),
       ],
     );
   }
 
-  /// Clears the on-device cache and reports the real bytes freed, exactly
-  /// like the Storage row: a host callback wins, otherwise the page measures
-  /// the temporary directory itself.
-  Future<void> _clearCache(BuildContext context) async {
-    final reporter = data.onClearCacheAndReport;
-    if (reporter != null) {
-      final freed = await reporter();
-      if (!context.mounted) return;
-      _snackFreed(context, freed);
-      return;
+  Widget? _importStatus(BuildContext context) {
+    if (_phase == _Phase.importing) {
+      return _ProgressCard(title: 'Importing backup', progress: _progress);
     }
-    if (data.onClearCache != null) {
-      data.onClearCache!();
-      if (context.mounted) _snack(context, 'Cache cleared.');
-      return;
+    final outcome = _importOutcome;
+    if (outcome == null) return null;
+    if (outcome.cancelled) {
+      return const _ResultCard(
+        icon: Icons.info_outline_rounded,
+        title: 'Import cancelled',
+        meta: 'Nothing was uploaded.',
+      );
     }
-    try {
-      final freed = await clearTemporaryCache();
-      if (!context.mounted) return;
-      _snackFreed(context, freed);
-    } catch (_) {
-      if (context.mounted) {
-        _snack(context, 'Could not clear the cache. Try again.');
-      }
+    if (outcome.isFailure) {
+      return _ResultCard(
+        icon: Icons.error_outline_rounded,
+        tone: OColors.of(context).danger,
+        title: 'Import failed',
+        meta: outcome.message,
+        details: _failureDetails(context, outcome.failures),
+        action: OButton(
+          label: 'Choose file',
+          variant: OButtonVariant.ghost,
+          onPressed: _busy ? null : _import,
+        ),
+      );
     }
-  }
-
-  void _snackFreed(BuildContext context, int freed) {
-    _snack(
-      context,
-      freed > 0
-          ? 'Freed ${formatStorageBytes(freed)} of cache.'
-          : 'Cache is already empty.',
+    final meta = StringBuffer(
+      '${_plural(outcome.chats, 'chat', 'chats')} · '
+      '${_plural(outcome.messages, 'message', 'messages')} added',
+    );
+    if (outcome.skippedChats > 0) {
+      meta.write(' · ${outcome.skippedChats} already there');
+    }
+    return _ResultCard(
+      icon: outcome.failures.isEmpty
+          ? Icons.check_circle_outline_rounded
+          : Icons.error_outline_rounded,
+      tone: outcome.failures.isEmpty
+          ? OColors.of(context).success
+          : OColors.of(context).warn,
+      title: outcome.failures.isEmpty ? 'Import complete' : 'Import stopped',
+      meta: meta.toString(),
+      details: _failureDetails(context, outcome.failures),
     );
   }
 
-  /// Over the archive cap, exporting opens the shared picker instead of an
-  /// inline list. Everything the sheet shows comes from this page's immutable
-  /// session list; every checkbox and the export action go back through the
-  /// page's callbacks.
-  Future<void> _handleExport(BuildContext context, {bool save = false}) async {
-    final export = data.onExport;
-    if (!save && export == null) return;
-    if (!data.showExportSelection) {
-      if (save) {
-        await _saveExport(context);
-      } else {
-        export!();
-      }
-      return;
+  Widget? _cacheStatus(BuildContext context) {
+    if (_clearing) {
+      return const _ProgressCard(title: 'Clearing cache', progress: null);
     }
-    final toggle = data.onExportSessionToggled;
-    await showExportPickerSheet(
-      context,
-      data: V2ExportPickerSheetData(
-        sessions: [
-          for (final session in data.exportSessions)
-            V2ExportPickerSession(
-              id: session.id,
-              name: session.name,
-              sizeBytes: session.sizeBytes,
-              sizeLabel: session.sizeLabel,
-              messageCount: _messageCount(session.detail),
-              detail: session.detail,
-              selected: session.selected,
-              heavyArtifacts: session.heavyArtifacts,
-            ),
-        ],
-        limitBytes: data.exportLimitBytes,
-        limitChats: v2ExportPickerChatLimit,
-        limitMessages: v2ExportPickerMessageLimit,
+    final message = _cacheMessage;
+    if (message == null) return null;
+    return _ResultCard(icon: Icons.cleaning_services_outlined, title: message);
+  }
+
+  Widget? _deleteStatus(BuildContext context) {
+    if (_phase == _Phase.deleting) {
+      return _ProgressCard(title: 'Deleting device data', progress: _progress);
+    }
+    final outcome = _deleteOutcome;
+    if (outcome == null) return null;
+    final c = OColors.of(context);
+    if (outcome.success) {
+      return _ResultCard(
+        icon: Icons.check_circle_outline_rounded,
+        tone: c.success,
+        title: 'Device data deleted',
+        meta: 'Cloud chats were kept.',
+      );
+    }
+    final failures = [
+      for (final entry in outcome.failures.entries)
+        V2ImportFailure(item: _storeLabel(entry.key), reason: entry.value),
+    ];
+    return _ResultCard(
+      icon: Icons.error_outline_rounded,
+      tone: c.danger,
+      title: outcome.message == null ? 'Delete incomplete' : 'Delete failed',
+      meta:
+          outcome.message ??
+          '${outcome.completed} of ${outcome.total} items removed.',
+      details: _failureDetails(context, failures),
+      action: OButton(
+        label: 'Try again',
+        variant: OButtonVariant.ghost,
+        onPressed: _busy ? null : _delete,
       ),
-      onToggleSession: toggle,
-      onSelectAll: toggle == null ? null : _applySelection,
-      onExport: () {
-        Navigator.of(context).maybePop();
-        if (save) {
-          _saveExport(context);
-        } else {
-          export?.call();
-        }
-      },
-      onRetry: data.onRetry,
     );
   }
 
-  /// Writes the archive to a destination the person picks. The default writer
-  /// builds the same zip the export uses and hands it to the platform save
-  /// dialog, so "Save to device" produces a real file instead of a toast.
-  Future<void> _saveExport(BuildContext context) async {
-    try {
-      final writer = data.onSaveExport;
-      if (writer != null) {
-        final path = await writer();
-        if (!context.mounted) return;
-        _snack(context, path == null ? 'Export cancelled.' : 'Saved to $path');
-        return;
-      }
-      final result = await saveHistoryExport();
-      if (!context.mounted) return;
-      if (result.path != null) {
-        _snack(context, 'Saved to ${result.path}');
-      } else if (result.message != null) {
-        _snack(context, result.message!);
-      } else {
-        _snack(context, 'Export cancelled.');
-      }
-    } catch (_) {
-      if (context.mounted) {
-        _snack(context, 'Could not save the export. Try again.');
-      }
-    }
+  /// Per-item failures: the chat or store, then the reason it gave.
+  List<Widget> _failureDetails(
+    BuildContext context,
+    List<V2ImportFailure> failures,
+  ) {
+    if (failures.isEmpty) return const <Widget>[];
+    final c = OColors.of(context);
+    const shown = 5;
+    return [
+      for (final failure in failures.take(shown))
+        Padding(
+          padding: const EdgeInsets.only(top: OSpace.s),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Icons.close_rounded, size: 14, color: c.danger),
+              const SizedBox(width: OSpace.s),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      failure.item,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: OType.caption.copyWith(
+                        color: c.text,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    Text(
+                      failure.reason,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: OType.caption.copyWith(color: c.textMuted),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      if (failures.length > shown)
+        Padding(
+          padding: const EdgeInsets.only(top: OSpace.xs),
+          child: Text(
+            '+${failures.length - shown} more',
+            style: OType.caption.copyWith(color: c.textMuted),
+          ),
+        ),
+    ];
   }
 
-  /// Applies the picker's complete id set as individual toggles, so the page's
-  /// injected callback remains the single owner of the selection.
+  // ── Export ────────────────────────────────────────────────────────────────
+
+  Future<void> _export() async {
+    if (_busy) return;
+    if (!_service.available) {
+      // Web: the host's own export runs and reports its own result.
+      widget.data.onExport?.call();
+      return;
+    }
+    setState(() => _exportOutcome = null);
+    final scope = await showExportScopeSheet(
+      context,
+      data: V2ExportScopeSheetData(
+        summaryLabel: _exportSummary(),
+        chatCount: widget.data.exportSessions.length,
+        overLimit: widget.data.exportOverLimit,
+        limitLabel: formatStorageBytes(widget.data.exportLimitBytes),
+      ),
+    );
+    if (!mounted || scope == null || scope.cancelled) return;
+    Set<String>? ids;
+    if (scope.chooseChats) {
+      ids = await showExportPickerSheet(
+        context,
+        data: _pickerData(),
+        onToggleSession: widget.data.onExportSessionToggled,
+        onSelectAll: _applySelection,
+        onRetry: widget.data.onRetry,
+      );
+      if (!mounted || ids == null) return;
+    }
+    await _runExport(ids);
+  }
+
+  String _exportSummary() {
+    final total = widget.data.totalDataSizeLabel;
+    if (total.isNotEmpty) return total;
+    final sessions = widget.data.exportSessions;
+    if (sessions.isEmpty) return '';
+    return '${_plural(sessions.length, 'chat', 'chats')} · '
+        '${formatStorageBytes(widget.data.exportTotalBytes)}';
+  }
+
+  V2ExportPickerSheetData _pickerData() {
+    return V2ExportPickerSheetData(
+      sessions: [
+        for (final session in widget.data.exportSessions)
+          V2ExportPickerSession(
+            id: session.id,
+            name: session.name,
+            sizeBytes: session.sizeBytes,
+            sizeLabel: session.sizeLabel,
+            messageCount: _messageCount(session.detail),
+            detail: session.detail,
+            selected: session.selected,
+            heavyArtifacts: session.heavyArtifacts,
+          ),
+      ],
+      limitBytes: widget.data.exportLimitBytes,
+      limitChats: v2ExportPickerChatLimit,
+      limitMessages: v2ExportPickerMessageLimit,
+    );
+  }
+
+  /// Reports the picker's complete id set as individual toggles so the host
+  /// stays the owner of its persisted selection.
   void _applySelection(List<String> ids) {
-    final selected = ids.toSet();
-    final toggle = data.onExportSessionToggled;
+    final toggle = widget.data.onExportSessionToggled;
     if (toggle == null) return;
-    for (final session in data.exportSessions) {
+    final selected = ids.toSet();
+    for (final session in widget.data.exportSessions) {
       final next = selected.contains(session.id);
       if (next != session.selected) toggle(session.id, next);
     }
   }
 
-  void _snack(BuildContext context, String message) {
-    if (!context.mounted) return;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message)));
+  Future<void> _runExport(Set<String>? ids) async {
+    if (!mounted) return;
+    setState(() {
+      _phase = _Phase.exporting;
+      _progress = const V2TransferProgress(label: 'Reading your chats…');
+      _exportOutcome = null;
+    });
+    final outcome = await _service.exportBackup(
+      sessionIds: ids,
+      onProgress: _onProgress,
+    );
+    if (!mounted) return;
+    setState(() {
+      _phase = _Phase.idle;
+      _progress = null;
+      _exportOutcome = outcome;
+    });
+    // The archive (or the scratch copy) changed the cache.
+    unawaited(_loadCache());
   }
 
-  Future<void> _confirmDelete(BuildContext context) async {
+  void _onProgress(V2TransferProgress progress) {
+    if (!mounted) return;
+    setState(() => _progress = progress);
+  }
+
+  // ── Import ────────────────────────────────────────────────────────────────
+
+  Future<void> _import() async {
+    if (_busy) return;
+    if (!_service.available) {
+      widget.data.onChooseImport?.call();
+      return;
+    }
+    setState(() {
+      _importOutcome = null;
+      _phase = _Phase.importing;
+      _progress = const V2TransferProgress(label: 'Reading backup…');
+    });
+    V2ImportPreview? preview;
+    try {
+      preview = await _service.pickImport();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _phase = _Phase.idle;
+        _progress = null;
+        _importOutcome = V2ImportOutcome.failed(_reasonOf(error));
+      });
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _phase = _Phase.idle;
+      _progress = null;
+    });
+    final ready = preview;
+    if (ready == null) return; // The file picker was dismissed.
+
+    final confirmed = await showImportPreviewSheet(
+      context,
+      data: V2ImportPreviewData(
+        fileName: ready.fileName,
+        summaryLabel:
+            '${_plural(ready.chats, 'chat', 'chats')} · '
+            '${_plural(ready.messages, 'message', 'messages')} · '
+            '${formatStorageBytes(ready.bytes)}',
+        filesIncluded: ready.filesIncluded,
+        filesUnavailable: ready.filesUnavailable,
+      ),
+    );
+    if (!mounted || !confirmed) return;
+
+    setState(() {
+      _phase = _Phase.importing;
+      _progress = V2TransferProgress(
+        label: 'Uploading chat 0 of ${ready.chats}…',
+      );
+    });
+    final outcome = await _service.importBackup(ready, onProgress: _onProgress);
+    if (!mounted) return;
+    setState(() {
+      _phase = _Phase.idle;
+      _progress = null;
+      _importOutcome = outcome;
+    });
+  }
+
+  // ── Cache ─────────────────────────────────────────────────────────────────
+
+  Future<void> _loadCache() async {
+    if (!_service.available) return;
+    try {
+      final bytes = await _service.cacheBytes();
+      if (!mounted) return;
+      setState(() {
+        _cacheBytes = bytes;
+        _cacheError = null;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _cacheError = 'Size unavailable');
+    }
+  }
+
+  Future<void> _clearCache() async {
+    if (_busy) return;
+    final reporter = widget.data.onClearCacheAndReport;
+    final legacy = widget.data.onClearCache;
+    if (!_service.available && reporter == null && legacy == null) return;
+    setState(() {
+      _clearing = true;
+      _cacheMessage = null;
+    });
+    int? freed;
+    String? failure;
+    try {
+      if (reporter != null) {
+        freed = await reporter();
+      } else if (_service.available) {
+        freed = await _service.clearCache();
+      } else {
+        legacy?.call();
+      }
+    } catch (_) {
+      failure = 'Could not clear.';
+    }
+    if (!mounted) return;
+    setState(() {
+      _clearing = false;
+      _cacheMessage =
+          failure ??
+          (freed == null
+              ? 'Cache cleared.'
+              : freed > 0
+              ? 'Freed ${formatStorageBytes(freed)}.'
+              : 'Cache was empty.');
+    });
+    // Re-measure: the row's number is what is left, not what it was.
+    await _loadCache();
+  }
+
+  // ── Delete ────────────────────────────────────────────────────────────────
+
+  Future<void> _delete() async {
+    if (_busy) return;
     final confirmed = await showConfirmTypedSheet(
       context,
       data: V2ConfirmTypedSheetData(
-        contact: data.accountContact,
-        title: 'Delete all your data?',
-        confirmLabel: 'Delete everything',
+        contact: widget.data.accountContact,
+        title: 'Delete device data?',
+        irreversibleLabel: 'Cannot be undone',
+        removalsTitle: 'Removed from device',
+        removals: const <String>[
+          'Chats and messages',
+          'Drafts and files',
+          'Cache and downloads',
+          'Saved keys and sign-in',
+        ],
+        // No Play billing note: this is a device reset, not an account delete.
+        playNote: '',
+        confirmLabel: 'Delete data',
         cancelLabel: 'Cancel',
       ),
     );
-    if (confirmed) data.onDeleteData?.call();
+    if (!mounted || !confirmed) return;
+    if (!_service.available) {
+      widget.data.onDeleteData?.call();
+      return;
+    }
+    setState(() {
+      _deleteOutcome = null;
+      _phase = _Phase.deleting;
+      _progress = const V2TransferProgress(label: 'Deleting device data…');
+    });
+    final outcome = await _service.deleteDeviceData();
+    if (!mounted) return;
+    setState(() {
+      _phase = _Phase.idle;
+      _progress = null;
+      _deleteOutcome = outcome;
+    });
+    unawaited(_loadCache());
   }
 }
 
-/// Extracts `42` from `42 messages` for the picker's message total. The page
-/// does not carry a separate count, and a missing number simply contributes 0.
+/// A settings row with its own status line underneath.
+class _Block extends StatelessWidget {
+  const _Block({required this.row, this.status});
+
+  final Widget row;
+  final Widget? status;
+
+  @override
+  Widget build(BuildContext context) {
+    final status = this.status;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        row,
+        if (status != null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: OSpace.m),
+            child: status,
+          ),
+      ],
+    );
+  }
+}
+
+/// One live progress line plus its bar. Announced as a live region so a
+/// screen reader hears each phase without re-reading the row.
+class _ProgressCard extends StatelessWidget {
+  const _ProgressCard({required this.title, required this.progress});
+
+  final String title;
+  final V2TransferProgress? progress;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final progress = this.progress;
+    final label = progress?.label ?? 'Working…';
+    final percent = progress?.fraction == null
+        ? null
+        : '${(progress!.fraction! * 100).round()}%';
+    return Semantics(
+      container: true,
+      liveRegion: true,
+      label: '$title. $label',
+      value: percent,
+      child: ExcludeSemantics(
+        child: Container(
+          key: const ValueKey('data-control-progress'),
+          padding: const EdgeInsets.all(OSpace.m),
+          decoration: BoxDecoration(
+            color: c.surfaceAlt,
+            borderRadius: BorderRadius.circular(ORadius.m),
+            border: Border.all(color: c.hairline),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                title,
+                style: OType.bodySm.copyWith(
+                  color: c.text,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: OSpace.xxs),
+              Text(
+                label,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: OType.caption.copyWith(color: c.textMuted),
+              ),
+              if (progress?.fraction != null) ...[
+                const SizedBox(height: OSpace.s),
+                OProgressBar(value: progress!.fraction!, height: 6),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One finished outcome: icon, one-line title, one meta line, optional
+/// per-item details and one action.
+class _ResultCard extends StatelessWidget {
+  const _ResultCard({
+    required this.icon,
+    required this.title,
+    this.meta,
+    this.tone,
+    this.details = const <Widget>[],
+    this.action,
+  });
+
+  final IconData icon;
+  final String title;
+  final String? meta;
+  final Color? tone;
+  final List<Widget> details;
+  final Widget? action;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final color = tone ?? c.textMuted;
+    return Semantics(
+      container: true,
+      liveRegion: true,
+      label: meta == null ? title : '$title. $meta',
+      child: ExcludeSemantics(
+        child: Container(
+          key: const ValueKey('data-control-result'),
+          padding: const EdgeInsets.all(OSpace.m),
+          decoration: BoxDecoration(
+            color: c.surfaceAlt,
+            borderRadius: BorderRadius.circular(ORadius.m),
+            border: Border.all(color: tone == null ? c.hairline : color),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(icon, size: 18, color: color),
+                  const SizedBox(width: OSpace.s),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          title,
+                          style: OType.bodySm.copyWith(
+                            color: c.text,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        if (meta != null) ...[
+                          const SizedBox(height: OSpace.xxs),
+                          Text(
+                            meta!,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: OType.caption.copyWith(color: c.textMuted),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              ...details,
+              if (action != null) ...[
+                const SizedBox(height: OSpace.s),
+                Align(alignment: Alignment.centerLeft, child: action!),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+String _plural(int count, String one, String many) =>
+    '$count ${count == 1 ? one : many}';
+
+String _reasonOf(Object error) {
+  if (error is V2BackupException) return error.message;
+  if (error is FormatException) return 'That file is not an Ovid backup.';
+  return 'The file could not be read.';
+}
+
+/// Store ids are internal; the failure list speaks the product's language.
+String _storeLabel(String id) {
+  return switch (id) {
+    'sessions' => 'Chats',
+    'search' => 'Search index',
+    'memory' => 'Memory files',
+    'account' => 'Sign-in',
+    'imageReceipts' => 'Image receipts',
+    'shares' => 'Shared links',
+    'collaboration' => 'Collaboration',
+    'configuration' => 'Configuration',
+    'secrets' => 'Saved keys',
+    'preferences' => 'Preferences',
+    'skills' => 'Skills',
+    'exports' => 'Old exports',
+    'cache' => 'Cache',
+    'cookies' => 'Cookies',
+    'drafts' => 'Drafts',
+    _ => id,
+  };
+}
+
+/// Extracts `42` from `42 messages` for the picker's message total. A missing
+/// number contributes 0, which the picker shows as "0 of 20,000 messages".
 int _messageCount(String detail) {
   final match = RegExp(r'([0-9]+)').firstMatch(detail);
   return match == null ? 0 : int.tryParse(match.group(1)!) ?? 0;

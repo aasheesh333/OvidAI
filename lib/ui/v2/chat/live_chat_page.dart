@@ -368,6 +368,14 @@ class V2LiveChatPage extends StatefulWidget {
 class _V2LiveChatPageState extends State<V2LiveChatPage> {
   late final TextEditingController _controller;
   late final V2VoiceDictation _voice;
+
+  /// Owns the transcript viewport so an appended row can follow the tail
+  /// without resetting a reader who scrolled up to read earlier messages.
+  late final ScrollController _transcriptController;
+
+  /// How close to the bottom still counts as "reading the tail".
+  static const double _tailSlop = 96;
+
   final Set<String> _expandedThinking = <String>{};
   final Set<String> _expandedTools = <String>{};
   final Set<String> _expandedTranscripts = <String>{};
@@ -401,6 +409,7 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
   @override
   void initState() {
     super.initState();
+    _transcriptController = ScrollController();
     _controller = TextEditingController(text: widget.data.draft);
     _lastDraft = _controller.text;
     _controller.addListener(_handleControllerChanged);
@@ -420,25 +429,44 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
   void didUpdateWidget(V2LiveChatPage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.data.queuedCount > oldWidget.data.queuedCount) {
-      _announce('Message queued');
+      // Say what is waiting, not just that something is. The preview is the
+      // queued text the host already has; the count alone is not enough for a
+      // screen reader to decide whether to send it now.
+      final preview = widget.data.queuedPreview?.trim();
+      _announce(
+        preview == null || preview.isEmpty
+            ? 'Message queued'
+            : 'Queued: $preview',
+      );
     }
     if (oldWidget.data.running && !widget.data.running) {
       _announce('Run finished');
     }
     // A newly appended row fades in once. Ids the first frame already showed
     // are known, so the initial paint never trips this path.
-    final fresh = <String>[
+    final fresh = <V2LiveChatItem>[
       for (final item in widget.data.items)
-        if (!_knownItemIds.contains(item.id)) item.id,
+        if (!_knownItemIds.contains(item.id)) item,
     ];
     if (fresh.isNotEmpty) {
-      _knownItemIds.addAll(fresh);
-      _freshItemIds.addAll(fresh);
+      _knownItemIds.addAll(fresh.map((item) => item.id));
+      _freshItemIds.addAll(fresh.map((item) => item.id));
       _freshTimer?.cancel();
       _freshTimer = Timer(OMotion.base + OMotion.stagger, () {
         if (mounted) setState(_freshItemIds.clear);
       });
+      final announcement = _newItemAnnouncement(fresh);
+      if (announcement != null) _announce(announcement, transient: false);
     }
+    // A live run appends rows and grows the streaming tail. Follow it only
+    // when the reader was already at the bottom; otherwise leave the offset
+    // exactly where they put it.
+    final grew = widget.data.items.length > oldWidget.data.items.length;
+    final tailChanged =
+        widget.data.items.isNotEmpty &&
+        oldWidget.data.items.isNotEmpty &&
+        !identical(widget.data.items.last, oldWidget.data.items.last);
+    if ((grew || tailChanged) && _wasAtTail()) _pinToTail();
     if (widget.data.draft != oldWidget.data.draft &&
         widget.data.draft != _controller.text) {
       _syncingDraft = true;
@@ -456,12 +484,66 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
   void dispose() {
     _announcementTimer?.cancel();
     _freshTimer?.cancel();
+    _transcriptController.dispose();
     if (_voice.listening) unawaited(_voice.cancel());
     _voice
       ..removeListener(_handleVoiceChanged)
       ..dispose();
     _controller.dispose();
     super.dispose();
+  }
+
+  /// True when the viewport sits at (or within [_tailSlop] of) the newest row
+  /// in the *current* layout. Read before an append is laid out, this is the
+  /// reader's intent: following the tail, or deliberately reading further up.
+  bool _wasAtTail() {
+    if (!_transcriptController.hasClients) return true;
+    final position = _transcriptController.position;
+    if (!position.hasContentDimensions) return true;
+    return position.pixels >= position.maxScrollExtent - _tailSlop;
+  }
+
+  /// Keeps the newest row in view after an append, but only for a reader who
+  /// was already following the tail. A jump (not an animation) means a
+  /// streaming token never fights the scroll physics or loses the offset.
+  void _pinToTail() {
+    var attempts = 0;
+    void settle() {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_transcriptController.hasClients) return;
+        final position = _transcriptController.position;
+        if (!position.hasContentDimensions) return;
+        if (position.maxScrollExtent <= 0) return;
+        if (position.pixels < position.maxScrollExtent) {
+          _transcriptController.jumpTo(position.maxScrollExtent);
+        }
+        attempts++;
+        if (attempts >= 3) return;
+        // A lazy list estimates the extent of rows it has not built yet. The
+        // newly built window reports its real height on the next frame, so
+        // ask for one more pass instead of stopping short of the tail.
+        WidgetsBinding.instance.ensureVisualUpdate();
+        settle();
+      });
+    }
+
+    settle();
+  }
+
+  /// The shortest useful spoken cue for an appended row. Thinking and tool
+  /// rows are progress, not results, and announcing each one would turn a run
+  /// into a stream of interruptions.
+  static String? _newItemAnnouncement(List<V2LiveChatItem> fresh) {
+    for (final item in fresh.reversed) {
+      final label = switch (item) {
+        V2LiveAssistantMessage _ => 'Ovid replied',
+        V2LiveArtifact _ => 'Artifact ready',
+        V2LiveVoiceReply _ => 'Voice reply ready',
+        _ => null,
+      };
+      if (label != null) return label;
+    }
+    return null;
   }
 
   V2MentionSource get _mentionSource =>
@@ -628,10 +710,15 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
     await _voice.toggle(_controller.text);
   }
 
-  void _announce(String message) {
+  void _announce(String message, {bool transient = true}) {
     if (!mounted) return;
     _announcementTimer?.cancel();
+    _announcementTimer = null;
     setState(() => _announcement = message);
+    // New-message cues stay until the next cue replaces them: the same row
+    // never needs to be announced twice, and a pending clear would only make
+    // a later identical label silent.
+    if (!transient) return;
     _announcementTimer = Timer(const Duration(seconds: 2), () {
       if (mounted) setState(() => _announcement = '');
     });
@@ -661,6 +748,9 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
     } else {
       widget.onSend?.call(text);
     }
+    // Sending is a deliberate jump to the newest row, even for a reader who
+    // had scrolled back: the reply is what they are waiting for.
+    _pinToTail();
     _clearComposer();
     _announce('Message sent');
   }
@@ -807,9 +897,19 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
                       left: 0,
                       right: 0,
                       bottom: 0,
-                      child: V2MentionSuggestions(
-                        candidates: _mentionCandidates,
-                        onSelect: _insertMention,
+                      // The suggestion sheet shares the transcript's column:
+                      // a tablet does not stretch a phone menu edge to edge.
+                      child: Align(
+                        alignment: Alignment.bottomCenter,
+                        child: ConstrainedBox(
+                          constraints: BoxConstraints(
+                            maxWidth: OResponsive.of(context).maxContentWidth,
+                          ),
+                          child: V2MentionSuggestions(
+                            candidates: _mentionCandidates,
+                            onSelect: _insertMention,
+                          ),
+                        ),
                       ),
                     ),
                 ],
@@ -880,7 +980,19 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
 
   Widget _buildBody(BuildContext context) {
     final data = widget.data;
-    if (data.loading) return const OSkeletonList(rows: 5);
+    if (data.loading) {
+      // The skeleton lives in the same column as the transcript, so a tablet
+      // does not paint placeholder rows across the whole window.
+      return Align(
+        alignment: Alignment.topCenter,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: OResponsive.of(context).maxContentWidth,
+          ),
+          child: const OSkeletonList(rows: 5),
+        ),
+      );
+    }
     if (data.errorMessage != null) {
       return OErrorState(message: data.errorMessage!, onRetry: widget.onRetry);
     }
@@ -902,11 +1014,16 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
         ),
         child: ListView.builder(
           key: const ValueKey<String>('v2-live-transcript'),
+          controller: _transcriptController,
           padding: EdgeInsets.fromLTRB(gutter, OSpace.l, gutter, OSpace.xl),
           itemCount: items.length,
           itemBuilder: (context, index) {
             final item = items[index];
             final row = Padding(
+              // The id is the row's identity: a rebuild reuses the element
+              // instead of re-creating it, and a host that prepends history
+              // cannot shift state onto the wrong message.
+              key: ValueKey('live-item-${item.id}'),
               padding: const EdgeInsets.only(bottom: OSpace.xl),
               child: _buildItem(
                 context,
@@ -983,10 +1100,7 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
         previewLabel: message.previewLabel,
         icon: message.icon,
         thumbnail: message.thumbnail,
-        copyText: v2ArtifactIsTextual(
-          message.fileName,
-          kind: message.kind,
-        ),
+        copyText: v2ArtifactIsTextual(message.fileName, kind: message.kind),
         onOpen: widget.onArtifactTap != null
             ? () => widget.onArtifactTap!(message.id)
             : () => openV2ArtifactDetail(
@@ -1097,11 +1211,8 @@ class _FadeInOnce extends StatelessWidget {
       duration: OMotion.base,
       curve: OMotion.standard,
       child: child,
-      builder: (context, value, child) => Opacity(
-        opacity: value,
-        alwaysIncludeSemantics: true,
-        child: child,
-      ),
+      builder: (context, value, child) =>
+          Opacity(opacity: value, alwaysIncludeSemantics: true, child: child),
     );
   }
 }
@@ -1147,7 +1258,31 @@ class _LiveTopBar extends StatelessWidget implements PreferredSizeWidget {
         // 600 dp the shell keeps its 280 dp rail, so the header has 320 dp and
         // two actions overflowed it by 16 dp at 200 % text.
         final wideHeader = !OBreakpoints.isCompact(constraints.maxWidth);
-        return _buildBar(context, c, wideHeader: wideHeader);
+        final showStudio = wideHeader && onStudio != null;
+        final showBrowser = wideHeader && onBrowser != null;
+        final showMore = onMore != null;
+        final actionCount =
+            (showStudio ? 1 : 0) + (showBrowser ? 1 : 0) + (showMore ? 1 : 0);
+        final leadingWidth = onMenu == null ? 0.0 : OSpace.touch;
+        // Leave the title at least one 48 dp target beside the chip: the chip
+        // ellipsizes its label instead of pushing the title off the bar.
+        final titleBudget =
+            constraints.maxWidth -
+            leadingWidth -
+            actionCount * OSpace.touch -
+            OSpace.xs;
+        final chipWidth = titleBudget - OSpace.s - OSpace.touch;
+        return _buildBar(
+          context,
+          c,
+          showStudio: showStudio,
+          showBrowser: showBrowser,
+          showMore: showMore,
+          // No handler means no menu to open: a grey chip that says
+          // "unavailable" is still a control that cannot act.
+          showChip: onModelChipTap != null && chipWidth >= OSpace.touch,
+          chipWidth: chipWidth,
+        );
       },
     );
   }
@@ -1155,7 +1290,11 @@ class _LiveTopBar extends StatelessWidget implements PreferredSizeWidget {
   Widget _buildBar(
     BuildContext context,
     OColors c, {
-    required bool wideHeader,
+    required bool showStudio,
+    required bool showBrowser,
+    required bool showMore,
+    required bool showChip,
+    required double chipWidth,
   }) {
     return Semantics(
       container: true,
@@ -1180,14 +1319,22 @@ class _LiveTopBar extends StatelessWidget implements PreferredSizeWidget {
             children: [
               // The chip keeps its intrinsic width; the title takes the rest.
               // Squeezing the chip below its icons is what overflowed at 320 dp.
-              V2ModelChip(
-                label: modelLabel,
-                autoOnly: autoOnly,
-                subagentCount: subagentCount,
-                enabled: onModelChipTap != null,
-                onTap: onModelChipTap,
-              ),
-              const SizedBox(width: OSpace.s),
+              if (showChip) ...[
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: chipWidth > v2ModelChipMaxWidth
+                        ? v2ModelChipMaxWidth
+                        : chipWidth,
+                  ),
+                  child: V2ModelChip(
+                    label: modelLabel,
+                    autoOnly: autoOnly,
+                    subagentCount: subagentCount,
+                    onTap: onModelChipTap,
+                  ),
+                ),
+                const SizedBox(width: OSpace.s),
+              ],
               Expanded(
                 // Idle is a single line. The state subtitle ("Working") is the
                 // only reason the title ever needs a second line.
@@ -1229,23 +1376,27 @@ class _LiveTopBar extends StatelessWidget implements PreferredSizeWidget {
           ),
         ),
         actions: [
-          if (wideHeader) ...[
+          // Studio and Browser are header shortcuts, not the only way to
+          // reach those surfaces. A host that did not wire them gets no glyph
+          // rather than a grey one.
+          if (showStudio)
             OIconButton(
               icon: Icons.terminal_rounded,
               semanticLabel: 'Open Studio',
               onPressed: onStudio,
             ),
+          if (showBrowser)
             OIconButton(
               icon: Icons.public_rounded,
               semanticLabel: 'Open Browser',
               onPressed: onBrowser,
             ),
-          ],
-          OIconButton(
-            icon: Icons.more_vert_rounded,
-            semanticLabel: 'More options',
-            onPressed: onMore,
-          ),
+          if (showMore)
+            OIconButton(
+              icon: Icons.more_vert_rounded,
+              semanticLabel: 'More options',
+              onPressed: onMore,
+            ),
           const SizedBox(width: OSpace.xs),
         ],
       ),
@@ -1261,26 +1412,41 @@ class _UserBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    final time = item.timeLabel?.trim() ?? '';
+    // The transcript never draws a timestamp, but the time the host already
+    // holds is still useful to a screen reader. One node keeps the speaker,
+    // the time and the text in reading order.
+    final spoken = time.isEmpty
+        ? 'You. ${item.text}'
+        : 'You, $time. ${item.text}';
     return LayoutBuilder(
       builder: (context, constraints) {
         // 78 % of the column on a phone, 560 dp absolute cap on a tablet.
         final cap = constraints.maxWidth * 0.78;
-        return Align(
-          alignment: Alignment.centerRight,
-          child: ConstrainedBox(
-            constraints: BoxConstraints(maxWidth: cap > 560 ? 560 : cap),
-            // A gentle filled bubble on the page background: no border, no
-            // shadow, no header and no timestamp.
-            child: Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: OSpace.l,
-                vertical: OSpace.m,
+        return Semantics(
+          container: true,
+          label: spoken,
+          excludeSemantics: true,
+          child: Align(
+            alignment: Alignment.centerRight,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: cap > 560 ? 560 : cap),
+              // A gentle filled bubble on the page background: no border, no
+              // shadow, no header and no timestamp.
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: OSpace.l,
+                  vertical: OSpace.m,
+                ),
+                decoration: BoxDecoration(
+                  color: c.surfaceAlt,
+                  borderRadius: BorderRadius.circular(ORadius.l),
+                ),
+                child: Text(
+                  item.text,
+                  style: OType.body.copyWith(color: c.text),
+                ),
               ),
-              decoration: BoxDecoration(
-                color: c.surfaceAlt,
-                borderRadius: BorderRadius.circular(ORadius.l),
-              ),
-              child: Text(item.text, style: OType.body.copyWith(color: c.text)),
             ),
           ),
         );
@@ -1333,11 +1499,13 @@ class _LiveComposer extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     final running = data.running;
-    final enabled = !running;
+    // A run pauses the composer (its one action is Stop); a history that is
+    // still loading has no owner to send to yet. Both are temporary states.
+    final enabled = !running && !data.loading;
     // Read the controller at press time; the field itself listens to it, so
     // typing never has to rebuild the page (or the transcript).
     bool canSendNow() =>
-        !running &&
+        enabled &&
         sendEnabled &&
         (controller.text.trim().isNotEmpty ||
             (onSubmitEnabled && attachments.isNotEmpty));
@@ -1412,7 +1580,7 @@ class _LiveComposer extends StatelessWidget {
                 valueListenable: controller,
                 builder: (context, value, _) {
                   final canSend =
-                      !running &&
+                      enabled &&
                       sendEnabled &&
                       (value.text.trim().isNotEmpty ||
                           (onSubmitEnabled && attachments.isNotEmpty));
@@ -1421,6 +1589,9 @@ class _LiveComposer extends StatelessWidget {
                         ? Icons.stop_rounded
                         : Icons.arrow_upward_rounded,
                     label: running ? 'Stop' : 'Send',
+                    // The host's own words for stopping, spoken only: the
+                    // visible control is the icon and its label.
+                    hint: running ? data.stopHint : null,
                     danger: running,
                     onPressed: running
                         ? onStop
@@ -1448,12 +1619,17 @@ class _LiveRoundAction extends StatelessWidget {
     required this.icon,
     required this.label,
     required this.onPressed,
+    this.hint,
     this.danger = false,
   });
 
   final IconData icon;
   final String label;
   final VoidCallback? onPressed;
+
+  /// Spoken context for a control whose label is deliberately terse (the
+  /// host's stop hint). Never drawn.
+  final String? hint;
   final bool danger;
 
   @override
@@ -1472,6 +1648,7 @@ class _LiveRoundAction extends StatelessWidget {
         : c.onAccent;
     return Semantics(
       label: label,
+      hint: hint,
       button: true,
       enabled: enabled,
       child: SizedBox(

@@ -520,10 +520,7 @@ void main() {
     );
 
     expect(find.text('No chats to export'), findsOneWidget);
-    expect(
-      find.text('Start a chat, then come back.'),
-      findsOneWidget,
-    );
+    expect(find.text('Start a chat, then come back.'), findsOneWidget);
 
     await tester.tap(find.text('Back to data control'));
     await tester.pump(const Duration(milliseconds: 200));
@@ -635,6 +632,209 @@ void main() {
         ),
       );
       expect(tester.takeException(), isNull, reason: 'status $status');
+    }
+  });
+
+  testWidgets('the sheet moves its own totals without a host rebuild', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      ExportPickerSheet(
+        data: _data(
+          sessions: [
+            _select(_sessions[0], selected: true),
+            _select(_sessions[1], selected: false),
+            _select(_sessions[2], selected: false),
+          ],
+        ),
+        onToggleSession: (_, _) {},
+      ),
+    );
+
+    expect(find.text('40 MB of 64 MB selected'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('export-picker-session-notes')));
+    await tester.pump();
+
+    expect(find.text('60 MB of 64 MB selected'), findsOneWidget);
+    expect(find.text('2 of 1,000 chats'), findsOneWidget);
+  });
+
+  testWidgets('the scope sheet states the enforced cap and returns all chats', (
+    tester,
+  ) async {
+    V2ExportScope? result;
+    await _pump(
+      tester,
+      Builder(
+        builder: (context) => OButton(
+          label: 'Open scope',
+          onPressed: () async {
+            result = await showExportScopeSheet(
+              context,
+              data: const V2ExportScopeSheetData(
+                summaryLabel: '42 chats · 12 MB',
+                chatCount: 42,
+              ),
+            );
+          },
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Open scope'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Export scope'), findsOneWidget);
+    expect(find.text('All chats'), findsOneWidget);
+    expect(find.text('42 chats · 12 MB'), findsOneWidget);
+    expect(find.text('64 MB per backup'), findsOneWidget);
+    expect(
+      find.text('Chats only. Files and memory stay online.'),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Export'));
+    await tester.pumpAndSettle();
+
+    expect(result, isNotNull);
+    expect(result!.sessionIds, isNull);
+    expect(result!.chooseChats, isFalse);
+    expect(result!.cancelled, isFalse);
+  });
+
+  testWidgets('over the cap the scope sheet preselects choosing chats', (
+    tester,
+  ) async {
+    V2ExportScope? result;
+    await _pump(
+      tester,
+      Builder(
+        builder: (context) => OButton(
+          label: 'Open scope',
+          onPressed: () async {
+            result = await showExportScopeSheet(
+              context,
+              data: const V2ExportScopeSheetData(
+                summaryLabel: '90 MB across 2 chats',
+                chatCount: 2,
+                overLimit: true,
+              ),
+            );
+          },
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Open scope'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Over the archive limit'), findsOneWidget);
+    await tester.tap(find.text('Export'));
+    await tester.pumpAndSettle();
+
+    expect(result!.chooseChats, isTrue);
+  });
+
+  testWidgets('without measured chats the scope sheet hides the picker', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      const ExportScopeSheet(
+        data: V2ExportScopeSheetData(summaryLabel: '42 chats'),
+      ),
+    );
+
+    expect(find.text('Choose chats'), findsNothing);
+    expect(find.text('All chats'), findsOneWidget);
+  });
+
+  testWidgets('the import preview names what will be added', (tester) async {
+    bool? result;
+    await _pump(
+      tester,
+      Builder(
+        builder: (context) => OButton(
+          label: 'Open preview',
+          onPressed: () async {
+            result = await showImportPreviewSheet(
+              context,
+              data: const V2ImportPreviewData(
+                fileName: 'ovid-backup.zip',
+                summaryLabel: '42 chats · 860 messages · 12 MB',
+                filesIncluded: 3,
+                filesUnavailable: 2,
+              ),
+            );
+          },
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Open preview'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Import archive'), findsOneWidget);
+    expect(find.text('ovid-backup.zip'), findsOneWidget);
+    expect(find.text('42 chats · 860 messages · 12 MB'), findsOneWidget);
+    expect(find.text('3 files included'), findsOneWidget);
+    expect(find.text('2 files unavailable'), findsOneWidget);
+    expect(find.text('Adds new chats. Nothing is replaced.'), findsOneWidget);
+
+    await tester.tap(find.text('Import'));
+    await tester.pumpAndSettle();
+    expect(result, isTrue);
+  });
+
+  testWidgets('cancelling the import preview adds nothing', (tester) async {
+    bool? result;
+    await _pump(
+      tester,
+      Builder(
+        builder: (context) => OButton(
+          label: 'Open preview',
+          onPressed: () async {
+            result = await showImportPreviewSheet(
+              context,
+              data: const V2ImportPreviewData(
+                fileName: 'ovid-backup.zip',
+                summaryLabel: '2 chats · 20 messages',
+              ),
+            );
+          },
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Open preview'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+
+    expect(result, isFalse);
+  });
+
+  testWidgets('scope and preview fit 320 dp at 200 % text', (tester) async {
+    for (final sheet in <Widget>[
+      const ExportScopeSheet(
+        data: V2ExportScopeSheetData(
+          summaryLabel: '1.2 GB across 42 chats',
+          chatCount: 42,
+          limitLabel: '64 MB',
+        ),
+      ),
+      const ImportPreviewSheet(
+        data: V2ImportPreviewData(
+          fileName: 'ovid-backup-2026-10-21-with-a-very-long-name.zip',
+          summaryLabel: '42 chats · 860 messages · 12 MB',
+          filesIncluded: 3,
+          filesUnavailable: 2,
+        ),
+      ),
+    ]) {
+      await _pumpNarrow(tester, sheet);
+      expect(tester.takeException(), isNull);
     }
   });
 }

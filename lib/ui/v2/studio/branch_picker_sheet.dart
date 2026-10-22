@@ -171,7 +171,10 @@ class _V2BranchPickerSheetState extends State<V2BranchPickerSheet> {
         if (current == null && data.branches.isEmpty) {
           return _buildEmpty();
         }
-        if (visible.isEmpty && _query.isNotEmpty) {
+        final showCurrent = current != null && _matches(current);
+        // The current branch is not in [visible], so a query that only matches
+        // it must still show the Current card rather than "no branches".
+        if (visible.isEmpty && _query.isNotEmpty && !showCurrent) {
           return OEmptyState(
             compact: true,
             icon: Icons.search_off_rounded,
@@ -184,16 +187,27 @@ class _V2BranchPickerSheetState extends State<V2BranchPickerSheet> {
             ),
           );
         }
-        return ListView(
+        final leading = showCurrent ? 2 : 0;
+        final createIndex = leading + visible.length;
+        final itemCount =
+            createIndex + (widget.onCreateBranch == null ? 0 : 1);
+        return ListView.builder(
           padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.xl),
-          children: [
-            if (current != null && _matches(current)) ...[
-              OSectionTitle(title: 'Current'),
-              _CurrentBranchCard(branch: current),
-              const SizedBox(height: OSpace.l),
-            ],
-            for (final branch in visible)
-              Padding(
+          itemCount: itemCount,
+          itemBuilder: (context, index) {
+            if (showCurrent && index == 0) {
+              return const OSectionTitle(title: 'Current');
+            }
+            if (showCurrent && index == 1) {
+              return Padding(
+                padding: const EdgeInsets.only(bottom: OSpace.l),
+                child: _CurrentBranchCard(branch: current),
+              );
+            }
+            final branchIndex = index - leading;
+            if (branchIndex < visible.length) {
+              final branch = visible[branchIndex];
+              return Padding(
                 padding: const EdgeInsets.only(bottom: OSpace.s),
                 child: _BranchRow(
                   branch: branch,
@@ -201,17 +215,19 @@ class _V2BranchPickerSheetState extends State<V2BranchPickerSheet> {
                       ? null
                       : () => widget.onSelectBranch!(branch),
                 ),
-              ),
-            const SizedBox(height: OSpace.xs),
-            if (widget.onCreateBranch != null)
-              OButton(
+              );
+            }
+            return Padding(
+              padding: const EdgeInsets.only(top: OSpace.xs),
+              child: OButton(
                 label: 'Create new branch',
                 icon: Icons.add_rounded,
                 variant: OButtonVariant.secondary,
                 expand: true,
                 onPressed: widget.onCreateBranch,
               ),
-          ],
+            );
+          },
         );
     }
   }
@@ -244,41 +260,49 @@ class _CurrentBranchCard extends StatelessWidget {
     final meta = branch.lastCommitLabel.isNotEmpty
         ? branch.lastCommitLabel
         : (branch.isDefault ? 'Default' : '');
-    return Container(
-      padding: const EdgeInsets.all(OSpace.m),
-      decoration: BoxDecoration(
-        color: c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.l),
-        border: Border.all(color: c.hairline),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.fork_right_rounded, size: 19, color: c.accent),
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  branch.name,
-                  style: OType.bodyStrong.copyWith(color: c.text),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                if (meta.isNotEmpty)
+    final label = meta.isEmpty
+        ? 'Current branch, ${branch.name}'
+        : 'Current branch, ${branch.name}, $meta';
+    return Semantics(
+      container: true,
+      excludeSemantics: true,
+      label: label,
+      child: Container(
+        padding: const EdgeInsets.all(OSpace.m),
+        decoration: BoxDecoration(
+          color: c.surfaceAlt,
+          borderRadius: BorderRadius.circular(ORadius.l),
+          border: Border.all(color: c.hairline),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.fork_right_rounded, size: 19, color: c.accent),
+            const SizedBox(width: OSpace.m),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
                   Text(
-                    meta,
-                    style: OType.caption.copyWith(color: c.textMuted),
+                    branch.name,
+                    style: OType.bodyStrong.copyWith(color: c.text),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
-              ],
+                  if (meta.isNotEmpty)
+                    Text(
+                      meta,
+                      style: OType.caption.copyWith(color: c.textMuted),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                ],
+              ),
             ),
-          ),
-          const SizedBox(width: OSpace.s),
-          Icon(Icons.check_circle_rounded, size: 18, color: c.accent),
-        ],
+            const SizedBox(width: OSpace.s),
+            Icon(Icons.check_circle_rounded, size: 18, color: c.accent),
+          ],
+        ),
       ),
     );
   }

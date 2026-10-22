@@ -750,25 +750,69 @@ class V2SettingsRoutes {
     BuildContext context,
     V2SettingsActions actions, {
     VoidCallback? onCancelDeletion,
+    int? storageUsedBytes,
+    int storageQuotaGb = 0,
   }) {
     final firebase = FirebaseService.I;
     final receipt = firebase.lastDeletionReceipt;
     final pending = receipt?.isPending == true;
     final deadline = receipt?.deleteAfter;
+    // `/usage` is the only server-authoritative plan and daily counter. The
+    // cached tier is a display-only fallback until the server answers.
+    final usage = actions.usage.usage;
+    final tier = usage?.tier.trim().isNotEmpty == true
+        ? usage!.tier.trim()
+        : AppState.I.ovidCloudTier;
+    final limits = V2PlanLimits.forIdOrFree(tier);
+    final today = usage?.today;
+    final todayTokens = today == null
+        ? null
+        : today.inputTokens + today.outputTokens;
+    // The account service answers on admission. Until that answer arrives (and
+    // while no failure is known) the page is loading; a real failure is shown
+    // with Retry instead of a screen full of dashes.
+    final accountError = firebase.accountError;
+    final awaitingReceipt =
+        firebase.isSignedIn &&
+        firebase.accountService.enabled &&
+        receipt == null &&
+        accountError == null;
     return health.V2AccountHealthPageData(
-      emailVerified: firebase.emailVerified,
-      emailLabel: firebase.email ?? '',
+      planLabel:
+          usage?.displayPlanName ??
+          (tier.trim().isEmpty ? '' : ovidPlanName(tier)),
       accountStatus: receipt == null
           ? null
           : pending
           ? health.V2AccountStatus.deletionPending
           : health.V2AccountStatus.active,
+      todayUsageLabel: todayTokens == null
+          ? ''
+          : '${compactTokens(todayTokens)} tokens',
+      todayUsageFraction: todayTokens == null || limits.dailyTokenCap == 0
+          ? null
+          : (todayTokens / limits.dailyTokenCap).clamp(0.0, 1.0),
+      // Measured by the loader from the artifact inventory plus this device's
+      // transcripts; null until that read finishes or when it fails.
+      storageUsedLabel: storageUsedBytes == null || storageQuotaGb <= 0
+          ? ''
+          : '${_bytes(storageUsedBytes)} of $storageQuotaGb GB',
+      storageFraction: storageUsedBytes == null || storageQuotaGb <= 0
+          ? null
+          : (storageUsedBytes / (storageQuotaGb * 1024 * 1024 * 1024)).clamp(
+              0.0,
+              1.0,
+            ),
       deletionScheduledLabel: pending && deadline != null
           ? formatLocalDateTime(deadline)
           : '',
-      // The same support inbox the About screen opens.
-      onContactSupport: () =>
-          actions.openUrl(context, 'mailto:${LegalLinks.supportEmail}'),
+      loading: awaitingReceipt,
+      errorMessage: receipt == null ? accountError : null,
+      onRetry: () => unawaited(firebase.retryAccountLogin()),
+      // The plan list and the storage screen are real routes; each row opens
+      // the screen that owns the number it shows.
+      onOpenPlans: () => unawaited(open(context, 'plan_billing', actions)),
+      onOpenStorage: () => unawaited(open(context, 'storage', actions)),
       onCancelDeletion: onCancelDeletion,
     );
   }
@@ -1382,20 +1426,62 @@ class _AccountHealthLoader extends StatefulWidget {
 }
 
 class _AccountHealthLoaderState extends State<_AccountHealthLoader> {
+  /// Used storage in bytes, or null until the read finishes (or if it fails).
+  int? _storageUsedBytes;
+  int _storageQuotaGb = 0;
+
   @override
   void initState() {
     super.initState();
     FirebaseService.I.addListener(_onChange);
+    // The plan and today's counters arrive from `/usage` after the page is
+    // built; without this the rows would stay at their first (unknown) value.
+    widget.actions.usage.addListener(_onChange);
+    unawaited(_loadStorage());
   }
 
   @override
   void dispose() {
     FirebaseService.I.removeListener(_onChange);
+    widget.actions.usage.removeListener(_onChange);
     super.dispose();
   }
 
   void _onChange() {
     if (mounted) setState(() {});
+  }
+
+  /// Measures the same storage the Storage screen reports: the account's
+  /// artifact inventory plus this device's transcripts. The on-device cache is
+  /// excluded, as it is not part of the cloud quota. A failed inventory read
+  /// leaves the value unknown instead of inventing a zero.
+  Future<void> _loadStorage() async {
+    final spec = V2SettingsRoutes._planSpec(AppState.I.ovidCloudTier);
+    final sessions = V2SettingsRoutes._localTranscriptBytes();
+    final artifacts = await _artifactBytes();
+    if (!mounted) return;
+    setState(() {
+      _storageQuotaGb = spec.storageGb;
+      _storageUsedBytes = artifacts == null ? null : artifacts + sessions;
+    });
+  }
+
+  Future<int?> _artifactBytes() async {
+    final svc = FirebaseService.I;
+    final uid = svc.uid;
+    if (!svc.isSignedIn || uid == null) return 0;
+    try {
+      final page = await ArtifactVaultClient(
+        accountId: () => 'firebase:$uid',
+      ).list(limit: 100);
+      var total = 0;
+      for (final item in page.items) {
+        total += item.sizeBytes;
+      }
+      return total;
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<void> _cancelDeletion() async {
@@ -1416,6 +1502,8 @@ class _AccountHealthLoaderState extends State<_AccountHealthLoader> {
         context,
         widget.actions,
         onCancelDeletion: _cancelDeletion,
+        storageUsedBytes: _storageUsedBytes,
+        storageQuotaGb: _storageQuotaGb,
       ),
     );
   }

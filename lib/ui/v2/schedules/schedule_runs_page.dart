@@ -116,8 +116,12 @@ class V2ScheduleRun {
       timeLabel: at == null ? 'Not scheduled' : _clockLabel(at),
       durationLabel: duration,
       status: status,
+      // A failure's reason is rendered once, in [failureDetail]. Repeating it
+      // as the summary made every failed row say the same thing twice.
       summary: status == V2RunStatus.succeeded
           ? 'Run finished.'
+          : status == V2RunStatus.failed
+          ? ''
           : error != null && error.isNotEmpty
           ? error
           : '',
@@ -170,9 +174,15 @@ class V2ScheduleRun {
   }
 
   /// An honest line when the run has no result yet.
+  ///
+  /// A failed run with a recorded error returns an empty string: the timeline
+  /// prints that error once, as the failure detail, so the row does not repeat
+  /// itself. A failure with no detail still gets a truthful line from the
+  /// timeline.
   String get summaryText {
     final text = summary.trim();
     if (text.isNotEmpty) return text;
+    if (failed) return '';
     return switch (status) {
       V2RunStatus.running => 'Still running.',
       V2RunStatus.retryScheduled => 'Waiting to retry.',
@@ -367,10 +377,7 @@ class ScheduleRunsPage extends StatelessWidget {
       padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xxl),
       children: [
         Text(
-          scheduleRunsSummaryLine(
-            succeeded: data.succeeded,
-            total: data.total,
-          ),
+          scheduleRunsSummaryLine(succeeded: data.succeeded, total: data.total),
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: OType.bodySm.copyWith(color: c.textMuted),
@@ -399,25 +406,35 @@ class ScheduleRunsPage extends StatelessWidget {
   List<V2TimelineRun> _timelineRuns(List<V2ScheduleRun> runs) {
     final labels = _dayLabels;
     final now = data.now ?? DateTime.now();
-    return [
-      for (final run in runs)
+    final out = <V2TimelineRun>[];
+    for (final run in runs) {
+      final rawDetail = run.failed
+          ? run.failureDetail ?? run.failureTitle
+          : null;
+      final detail = rawDetail?.trim().isNotEmpty == true ? rawDetail : null;
+      final summary = run.summaryText;
+      out.add(
         V2TimelineRun(
           id: run.id,
           dayLabel: labels[run.id] ?? '',
           timeLabel: run.timeLabel,
           durationLabel: run.durationText(now),
           outcome: _outcomeOf(run.status),
-          summary: run.summaryText,
+          // Never print the same reason as both the summary and the detail.
+          summary: detail != null && _sameLine(detail, summary) ? '' : summary,
           statusLabel: run.status == V2RunStatus.retryScheduled
               ? 'Retry scheduled'
               : null,
           artifactName: run.artifactName,
-          failureDetail: run.failed
-              ? run.failureDetail ?? run.failureTitle
-              : null,
+          failureDetail: detail,
         ),
-    ];
+      );
+    }
+    return out;
   }
+
+  bool _sameLine(String a, String b) =>
+      a.trim().toLowerCase() == b.trim().toLowerCase();
 
   V2RunOutcome _outcomeOf(V2RunStatus status) => switch (status) {
     V2RunStatus.succeeded => V2RunOutcome.succeeded,

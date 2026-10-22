@@ -211,6 +211,19 @@ void main() {
       expect(report.unsupported, isTrue);
       expect(report.message, contains('workspace session'));
     });
+
+    test('a key is never sent over plain HTTP to a remote host', () async {
+      final report = await V2HttpConnectorProbe().test(
+        const V2ConnectorConnection(
+          id: 'plain',
+          name: 'Plain',
+          endpoint: 'http://example.com/mcp',
+        ),
+        apiKey: 'sk-super-secret',
+      );
+      expect(report.ok, isFalse);
+      expect(report.message, contains('not HTTPS'));
+    });
   });
 
   group('add connector wiring', () {
@@ -425,7 +438,7 @@ void main() {
         ),
       );
 
-      expect(find.text('On'), findsWidgets);
+      expect(find.text('Connected'), findsWidgets);
 
       // Narrow to the saved row before opening it.
       await tester.enterText(find.byType(TextField).first, 'github');

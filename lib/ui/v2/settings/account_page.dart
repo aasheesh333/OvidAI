@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/account_service.dart';
 import '../../../core/format.dart';
+import '../../../core/ovid_cloud_service.dart';
 import '../../../core/play_billing.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
@@ -30,11 +31,12 @@ class V2AccountProfile {
   final String name;
   final String email;
 
-  /// Secondary label under the name (for example a job title).
+  /// Legacy slot that older adapters use for the plan label (for example a
+  /// job title before plans existed). [planName] wins when both are set.
   final String role;
 
-  /// Current plan, rendered as a pill next to the name. Falls back to [role]
-  /// so existing adapters that put the plan in `role` keep working.
+  /// Current plan, rendered as a pill next to the name. A raw tier id
+  /// (`free`, `3x`, `7x`, `15x`) is resolved to its real plan name.
   final String planName;
   final String? initials;
   final ImageProvider? image;
@@ -84,9 +86,7 @@ class V2AccountData {
     this.onFieldTap,
     this.onAccountTap,
     this.onLinkAccount,
-    this.onOpenCredentials,
     this.onDataControl,
-    this.onTeamSupport,
     this.onSignOut,
     this.onDeleteAccount,
     this.onManageSubscription,
@@ -112,17 +112,10 @@ class V2AccountData {
   final ValueChanged<V2ConnectedAccount>? onAccountTap;
   final VoidCallback? onLinkAccount;
 
-  /// Opens the Credentials screen (browser logins, GitHub, tokens).
-  ///
-  /// Retained for hosts that still pass it; the minimal Account page does not
-  /// render a Credentials row.
-  final VoidCallback? onOpenCredentials;
-
   /// Opens Data control (export, import, cache, deletion).
   final VoidCallback? onDataControl;
 
-  /// Opens team/shared-session and support destinations.
-  final VoidCallback? onTeamSupport;
+  /// Ends the session. Signing out is not deletion: the account stays.
   final VoidCallback? onSignOut;
   final VoidCallback? onDeleteAccount;
 
@@ -170,7 +163,7 @@ class _AccountPageState extends State<AccountPage> {
   V2AccountData get data => widget.data;
 
   /// The server's answer after a deletion request in this session. It wins
-  /// over injected data so the banner reflects what the service returned.
+  /// over injected data so the row reflects what the service returned.
   AccountDeletion? _receipt;
   bool _deleting = false;
   String? _deletionError;
@@ -184,12 +177,17 @@ class _AccountPageState extends State<AccountPage> {
 
   bool get _deletionLoading => data.deletionLoading || _deleting;
 
+  bool get _hasCancel =>
+      data.restoreDeletion != null || data.onRestoreAccount != null;
+
+  bool get _canCancel => _hasCancel && !_deletionLoading;
+
   @override
   Widget build(BuildContext context) {
     final Widget body;
     switch (data.status) {
       case V2AccountStatus.loading:
-        body = const OSkeletonList(rows: 6);
+        body = const OSkeletonList(rows: 5);
       case V2AccountStatus.error:
         body = OErrorState(message: data.errorMessage, onRetry: data.onRetry);
       case V2AccountStatus.empty:
@@ -221,6 +219,8 @@ class _AccountPageState extends State<AccountPage> {
 
   Widget _content(BuildContext context, V2AccountProfile profile) {
     final rows = _rows(context);
+    final sessionRows = _sessionRows();
+    final dangerRows = _deleteRows(context);
     return SingleChildScrollView(
       padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xxl),
       child: Column(
@@ -232,35 +232,36 @@ class _AccountPageState extends State<AccountPage> {
           ),
           const SizedBox(height: OSpace.xl),
           if (rows.isNotEmpty) V2SettingsRowList(rows: rows),
+          if (sessionRows.isNotEmpty) ...[
+            const SizedBox(height: OSpace.xl),
+            V2SettingsRowList(rows: sessionRows),
+          ],
+          if (dangerRows.isNotEmpty) ...[
+            const SizedBox(height: OSpace.xl),
+            V2SettingsRowList(rows: dangerRows),
+          ],
+          if (_deletionPending) ...[
+            const SizedBox(height: OSpace.s),
+            _GraceNote(canCancel: _hasCancel),
+          ],
           if (_deletionError != null) ...[
             const SizedBox(height: OSpace.l),
             _DeletionError(message: _deletionError!),
-          ],
-          if (_deletionPending) ...[
-            const SizedBox(height: OSpace.xl),
-            _DeletionBanner(
-              deadline: _deletionDeadline,
-              loading: _deletionLoading,
-              onRestore:
-                  data.onRestoreAccount == null && data.restoreDeletion == null
-                  ? null
-                  : _restoreAccount,
-            ),
           ],
         ],
       ),
     );
   }
 
-  /// Four destinations at most: the profile editor, the sign-in sheet, data
-  /// control and the destructive delete. Profile details, credentials and
-  /// support live behind those rows, not on the page.
+  /// Profile destinations: the editor, the sign-in sheet and data control.
+  /// A row is only rendered when it has a real destination.
   List<Widget> _rows(BuildContext context) {
     final rows = <Widget>[];
     final edit = _editProfileAction();
     if (edit != null) {
       rows.add(
         V2SettingsRow(
+          key: const ValueKey<String>('account-edit-row'),
           icon: Icons.edit_outlined,
           title: 'Edit profile',
           onTap: edit,
@@ -269,16 +270,16 @@ class _AccountPageState extends State<AccountPage> {
     }
     final canManageSignIn =
         data.onLinkAccount != null || data.onAccountTap != null;
-    // Only a row that either shows real linked accounts or opens the sheet.
-    // A dead "None linked" row is noise.
-    if (canManageSignIn || data.connectedAccounts.isNotEmpty) {
+    final hasSheetContent =
+        data.connectedAccounts.isNotEmpty || data.onLinkAccount != null;
+    if (canManageSignIn && hasSheetContent) {
       rows.add(
         V2SettingsRow(
+          key: const ValueKey<String>('account-sign-in-row'),
           icon: Icons.login_rounded,
           title: 'Sign-in methods',
           subtitle: _linkedLabel(),
-          showChevron: canManageSignIn,
-          onTap: canManageSignIn ? () => _openSignInSheet(context) : null,
+          onTap: () => _openSignInSheet(context),
         ),
       );
     }
@@ -292,19 +293,84 @@ class _AccountPageState extends State<AccountPage> {
         ),
       );
     }
-    if (_canDelete && !_deletionPending) {
-      rows.add(
+    return rows;
+  }
+
+  /// Sign out sits on its own, above the destructive row: ending a session
+  /// keeps the account, deleting it does not.
+  List<Widget> _sessionRows() {
+    final signOut = data.onSignOut;
+    if (signOut == null) return const <Widget>[];
+    return <Widget>[
+      V2SettingsRow(
+        key: const ValueKey<String>('account-sign-out-row'),
+        icon: Icons.logout_rounded,
+        title: 'Sign out',
+        enabled: !data.signOutLoading,
+        showChevron: false,
+        trailing: data.signOutLoading
+            ? const _Busy(semanticLabel: 'Signing out')
+            : null,
+        onTap: data.signOutLoading ? null : signOut,
+      ),
+    ];
+  }
+
+  /// The destructive row: one state at a time — idle, deleting, pending.
+  List<Widget> _deleteRows(BuildContext context) {
+    if (_deletionPending) {
+      final deadline = _deletionDeadline;
+      return <Widget>[
         V2SettingsRow(
           key: const ValueKey<String>('account-delete-row'),
-          icon: Icons.warning_amber_rounded,
-          title: 'Delete account',
-          danger: true,
+          icon: Icons.hourglass_bottom_rounded,
+          title: 'Deletion pending',
+          subtitle: deadline == null
+              ? 'Deletes after 24 hours'
+              : 'Deletes ${formatLocalDateTime(deadline)}',
           showChevron: false,
-          onTap: _deleting ? null : () => _confirmDelete(context),
+          stacksTrailing: true,
+          trailing: _hasCancel
+              ? OButton(
+                  key: const ValueKey<String>('account-cancel-deletion'),
+                  label: 'Cancel deletion',
+                  variant: OButtonVariant.ghost,
+                  size: OButtonSize.compact,
+                  loading: _deletionLoading,
+                  onPressed: _canCancel ? _restoreAccount : null,
+                )
+              : null,
         ),
-      );
+      ];
     }
-    return rows;
+
+    if (!_canDelete) return const <Widget>[];
+    final label = _deletionLoading ? 'Requesting deletion' : null;
+    return <Widget>[
+      Semantics(
+        container: true,
+        button: true,
+        enabled: !_deletionLoading,
+        label: 'Delete account',
+        hint: label ?? 'Destructive action. Deletes your account after 24 hours.',
+        onTap: _deletionLoading ? null : () => _confirmDelete(context),
+        child: ExcludeSemantics(
+          child: V2SettingsRow(
+            key: const ValueKey<String>('account-delete-row'),
+            icon: Icons.warning_amber_rounded,
+            title: 'Delete account',
+            subtitle: _deletionLoading ? 'Requesting deletion' : null,
+            danger: true,
+            enabled: !_deletionLoading,
+            showChevron: false,
+            trailing: _deletionLoading
+                ? const _Busy(semanticLabel: 'Requesting deletion')
+                : null,
+            onTap: _deletionLoading ? null : () => _confirmDelete(context),
+          ),
+        ),
+      ),
+    ];
   }
 
   VoidCallback? _editProfileAction() {
@@ -327,63 +393,41 @@ class _AccountPageState extends State<AccountPage> {
   }
 
   Future<void> _openSignInSheet(BuildContext context) {
-    return showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
+    return showOSheet<void>(
+      context,
+      title: 'Sign-in methods',
       builder: (sheetContext) {
         final c = OColors.of(sheetContext);
-        return SafeArea(
-          child: OContent(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.only(bottom: OSpace.xl),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const OSectionTitle(title: 'Sign-in methods'),
-                  Column(
-                    children: [
-                      for (
-                        var index = 0;
-                        index < data.connectedAccounts.length;
-                        index++
-                      ) ...[
-                        if (index > 0)
-                          Divider(
-                            height: 1,
-                            thickness: 1,
-                            color: c.hairline,
-                          ),
-                        _signInRow(
-                          sheetContext,
-                          data.connectedAccounts[index],
-                        ),
-                      ],
-                      if (data.onLinkAccount != null) ...[
-                        if (data.connectedAccounts.isNotEmpty)
-                          Divider(
-                            height: 1,
-                            thickness: 1,
-                            color: c.hairline,
-                          ),
-                        OListRow(
-                          icon: Icons.add_link_rounded,
-                          title: 'Link account',
-                          padding: const EdgeInsets.symmetric(
-                            vertical: OSpace.m,
-                          ),
-                          onTap: () {
-                            Navigator.of(sheetContext).pop();
-                            data.onLinkAccount?.call();
-                          },
-                        ),
-                      ],
-                    ],
-                  ),
+        return SingleChildScrollView(
+          padding: const EdgeInsets.only(bottom: OSpace.xl),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (var index = 0; index < data.connectedAccounts.length; index++)
+                ...[
+                  if (index > 0)
+                    Divider(height: 1, thickness: 1, color: c.hairline),
+                  _signInRow(sheetContext, data.connectedAccounts[index]),
                 ],
-              ),
-            ),
+              if (data.onLinkAccount != null) ...[
+                if (data.connectedAccounts.isNotEmpty)
+                  Divider(height: 1, thickness: 1, color: c.hairline),
+                OListRow(
+                  key: const ValueKey<String>('account-link-row'),
+                  icon: Icons.add_link_rounded,
+                  title: 'Link account',
+                  padding: const EdgeInsets.symmetric(
+                    vertical: OSpace.m,
+                    horizontal: OSpace.l,
+                  ),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    data.onLinkAccount?.call();
+                  },
+                ),
+              ],
+            ],
           ),
         );
       },
@@ -405,7 +449,10 @@ class _AccountPageState extends State<AccountPage> {
         tone: account.connected ? OPillTone.success : OPillTone.neutral,
       ),
       showChevron: false,
-      padding: const EdgeInsets.symmetric(vertical: OSpace.m),
+      padding: const EdgeInsets.symmetric(
+        vertical: OSpace.m,
+        horizontal: OSpace.l,
+      ),
       onTap: tap == null ? null : () => tap(account),
     );
   }
@@ -461,19 +508,9 @@ class _AccountPageState extends State<AccountPage> {
         _receipt = receipt.isPending ? receipt : null;
         _deletionError = receipt.isPending
             ? null
-            : 'The server did not schedule a deletion. Your account is still '
-                  'active.';
+            : 'Deletion was not scheduled. Try again.';
       });
-      if (receipt.isPending) {
-        final deadline = receipt.deleteAfter;
-        _snack(
-          deadline == null
-              ? 'Deletion scheduled. You can restore your account during the '
-                    '24-hour grace period.'
-              : 'Deletion scheduled for ${formatDeadline(deadline)}. You can '
-                    'restore your account until then.',
-        );
-      }
+      if (receipt.isPending) _snack('Deletion scheduled.');
     } on AccountException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -484,9 +521,7 @@ class _AccountPageState extends State<AccountPage> {
       if (!mounted) return;
       setState(() {
         _deleting = false;
-        _deletionError =
-            'We could not request deletion. Check your connection and try '
-            'again.';
+        _deletionError = 'Could not request deletion. Try again.';
       });
     }
   }
@@ -510,7 +545,7 @@ class _AccountPageState extends State<AccountPage> {
         _receipt = stillPending ? receipt : null;
         if (!stillPending) _restored = true;
       });
-      _snack('Your account was restored.');
+      if (!stillPending) _snack('Deletion cancelled.');
     } on AccountException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -521,9 +556,7 @@ class _AccountPageState extends State<AccountPage> {
       if (!mounted) return;
       setState(() {
         _deleting = false;
-        _deletionError =
-            'We could not restore your account. Check your connection and try '
-            'again.';
+        _deletionError = 'Could not cancel deletion. Try again.';
       });
     }
   }
@@ -536,9 +569,59 @@ class _AccountPageState extends State<AccountPage> {
   }
 }
 
-/// Current plan, or the legacy `role` value used as a plan by older adapters.
-String _planLabel(V2AccountProfile profile) =>
-    profile.planName.isNotEmpty ? profile.planName : profile.role;
+/// Names a host may pass when it has no real identity to show. They are not
+/// people's names, so the header falls back to the account's own identifier.
+const Set<String> _placeholderNames = <String>{
+  'ovid user',
+  'user',
+  'account',
+  'signed in',
+  'you',
+};
+
+/// Tier ids an adapter may hand over instead of a plan name.
+const Set<String> _tierIds = <String>{'free', '3x', '7x', '15x'};
+
+/// The real name, or the account's own identifier when the host only supplied
+/// a placeholder. Never a made-up name.
+String _displayName(V2AccountProfile profile) {
+  final raw = profile.name.trim();
+  if (raw.isNotEmpty && !_placeholderNames.contains(raw.toLowerCase())) {
+    return raw;
+  }
+  final identifier = profile.email.trim();
+  if (identifier.contains('@')) {
+    final local = identifier.substring(0, identifier.indexOf('@')).trim();
+    if (local.isNotEmpty) return local;
+  }
+  if (identifier.isNotEmpty) return identifier;
+  return 'Your account';
+}
+
+/// The string the avatar turns into initials: the supplied initials for a real
+/// name, otherwise the resolved identity.
+String _avatarSeed(V2AccountProfile profile, String name) {
+  final raw = profile.name.trim();
+  final realName =
+      raw.isNotEmpty && !_placeholderNames.contains(raw.toLowerCase());
+  final initials = profile.initials?.trim();
+  if (realName && initials != null && initials.isNotEmpty) return initials;
+  return name;
+}
+
+/// Current plan. A raw tier id is resolved through the same catalog the rest
+/// of the app uses; the legacy `role` slot is read only when it holds the plan.
+String _planLabel(V2AccountProfile profile) {
+  for (final value in <String>[profile.planName, profile.role]) {
+    final label = value.trim();
+    if (label.isEmpty) continue;
+    if (_tierIds.contains(label.toLowerCase())) {
+      return label.toLowerCase() == 'free' ? 'Free plan' : ovidPlanName(label);
+    }
+    return label;
+  }
+  return '';
+}
 
 Future<void> _openPlaySubscriptions() async {
   try {
@@ -551,78 +634,59 @@ Future<void> _openPlaySubscriptions() async {
   }
 }
 
-/// Warn-tinted card shown while the server holds a pending deletion request.
-class _DeletionBanner extends StatelessWidget {
-  const _DeletionBanner({
-    required this.deadline,
-    required this.loading,
-    required this.onRestore,
-  });
+/// One line of fact under a pending deletion row: the grace window and the
+/// way out. The deadline itself lives in the row.
+class _GraceNote extends StatelessWidget {
+  const _GraceNote({required this.canCancel});
 
-  final DateTime? deadline;
-  final bool loading;
-  final VoidCallback? onRestore;
+  final bool canCancel;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    return Container(
-      padding: const EdgeInsets.all(OSpace.l),
-      decoration: BoxDecoration(
-        color: c.warn.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(ORadius.l),
-        border: Border.all(color: c.warn.withValues(alpha: 0.35)),
+    return Padding(
+      padding: const EdgeInsets.only(
+        left: v2SettingsRowDividerIndent,
+        top: OSpace.xs,
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(Icons.hourglass_bottom_rounded, size: 20, color: c.warn),
-              const SizedBox(width: OSpace.s),
-              Expanded(
-                child: Text(
-                  'Deletion scheduled',
-                  style: OType.body.copyWith(
-                    color: c.text,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ],
+      child: Text(
+        canCancel
+            ? '24-hour grace · cancel anytime'
+            : 'Deletion happens after 24 hours.',
+        style: OType.caption.copyWith(color: c.textMuted),
+      ),
+    );
+  }
+}
+
+/// A 20 dp progress glyph for a row that is doing work.
+class _Busy extends StatelessWidget {
+  const _Busy({required this.semanticLabel});
+
+  final String semanticLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Semantics(
+      container: true,
+      label: semanticLabel,
+      child: ExcludeSemantics(
+        child: SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            color: c.textMuted,
           ),
-          const SizedBox(height: OSpace.s),
-          Text(
-            deadline == null
-                ? 'Your account will be deleted after the 24-hour grace '
-                      'period.'
-                : 'Your account will be deleted on '
-                      '${formatDeadline(deadline!)}.',
-            style: OType.bodySm.copyWith(color: c.text),
-          ),
-          const SizedBox(height: OSpace.xs),
-          Text(
-            'Signing in lets you choose Restore account until the deadline. '
-            'Nothing is deleted before then.',
-            style: OType.caption.copyWith(color: c.textMuted),
-          ),
-          const SizedBox(height: OSpace.m),
-          if (onRestore != null)
-            OButton(
-              label: 'Restore account',
-              icon: Icons.restore_rounded,
-              variant: OButtonVariant.secondary,
-              loading: loading,
-              onPressed: onRestore,
-            ),
-        ],
+        ),
       ),
     );
   }
 }
 
 /// Plain-language failure from the deletion service, shown next to the
-/// destructive actions instead of a raw exception.
+/// destructive row instead of a raw exception.
 class _DeletionError extends StatelessWidget {
   const _DeletionError({required this.message});
 
@@ -656,7 +720,7 @@ class _DeletionError extends StatelessWidget {
 }
 
 /// Avatar, name and plan pill. Everything else about the profile lives behind
-/// the one "Edit profile" action.
+/// the one "Edit profile" action, and the identity is announced once.
 class _ProfileHeader extends StatelessWidget {
   const _ProfileHeader({required this.profile, required this.onChangePhoto});
 
@@ -666,45 +730,55 @@ class _ProfileHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    final name = _displayName(profile);
     final plan = _planLabel(profile);
-    return Center(
-      child: Column(
-        children: [
-          Stack(
-            clipBehavior: Clip.none,
-            children: [
-              OAvatar(
-                initials: profile.initials ?? profile.name,
-                image: profile.image,
-                size: 80,
-                semanticLabel: '${profile.name} profile photo',
-              ),
-              if (onChangePhoto != null)
-                Positioned(
-                  right: -OSpace.s,
-                  bottom: -OSpace.s,
-                  child: OIconButton(
-                    icon: Icons.photo_camera_rounded,
-                    semanticLabel: 'Change photo',
-                    tooltip: 'Change photo',
-                    onPressed: onChangePhoto,
+    return Semantics(
+      container: true,
+      label: plan.isEmpty ? name : '$name, $plan',
+      child: Center(
+        child: Column(
+          children: [
+            Stack(
+              clipBehavior: Clip.none,
+              children: [
+                ExcludeSemantics(
+                  child: OAvatar(
+                    initials: _avatarSeed(profile, name),
+                    image: profile.image,
+                    size: 80,
                   ),
                 ),
+                if (onChangePhoto != null)
+                  Positioned(
+                    right: -OSpace.s,
+                    bottom: -OSpace.s,
+                    child: OIconButton(
+                      icon: Icons.photo_camera_rounded,
+                      semanticLabel: 'Change photo',
+                      tooltip: 'Change photo',
+                      onPressed: onChangePhoto,
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: OSpace.m),
+            ExcludeSemantics(
+              child: Text(
+                name,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+                style: OType.h2.copyWith(color: c.text),
+              ),
+            ),
+            if (plan.isNotEmpty) ...[
+              const SizedBox(height: OSpace.s),
+              ExcludeSemantics(
+                child: OPill(label: plan, tone: OPillTone.accent),
+              ),
             ],
-          ),
-          const SizedBox(height: OSpace.m),
-          Text(
-            profile.name,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            textAlign: TextAlign.center,
-            style: OType.h2.copyWith(color: c.text),
-          ),
-          if (plan.isNotEmpty) ...[
-            const SizedBox(height: OSpace.s),
-            OPill(label: plan, tone: OPillTone.accent),
           ],
-        ],
+        ),
       ),
     );
   }

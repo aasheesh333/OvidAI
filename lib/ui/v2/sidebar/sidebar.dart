@@ -74,6 +74,7 @@ class V2SidebarSession {
     this.timeLabel = '',
     this.pinned = false,
     this.projectName,
+    this.messageText,
   });
 
   final String id;
@@ -86,6 +87,10 @@ class V2SidebarSession {
   /// a row is title and time — but search matches on it so a project name
   /// finds the chats filed under it.
   final String? projectName;
+
+  /// The latest message text, when the caller has it. Never drawn on the row;
+  /// search matches on it so a phrase from inside a chat finds that chat.
+  final String? messageText;
 
   /// The one meta line a row is allowed. Empty when there is no time.
   String? get rowMeta => timeLabel.isEmpty ? null : timeLabel;
@@ -152,9 +157,13 @@ class Sidebar extends StatefulWidget {
   /// Defaults to [SidebarLayout.drawer] so the phone shell is unchanged.
   final SidebarLayout layout;
 
-  /// Phone drawer width. Kept below the 360 dp compact breakpoint so the
-  /// drawer never covers the whole narrow screen.
+  /// Phone drawer width. The drawer never covers the whole narrow screen:
+  /// it shrinks to 86 % of the window below 340 dp. The shell also caps the
+  /// [Drawer] it hosts at the same value, so the surface and its host agree.
   static const double drawerWidth = 340;
+
+  /// Share of a narrow window the drawer may occupy.
+  static const double drawerWidthFraction = 0.86;
 
   /// Fixed column widths for [SidebarLayout.rail].
   static const double railWidthTablet = 280;
@@ -206,9 +215,12 @@ class _SidebarState extends State<Sidebar> {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     final isRail = widget.layout == SidebarLayout.rail;
+    final window = MediaQuery.sizeOf(context).width;
     final width = isRail
-        ? Sidebar.railWidth(MediaQuery.sizeOf(context).width)
-        : Sidebar.drawerWidth;
+        ? Sidebar.railWidth(window)
+        : (window * Sidebar.drawerWidthFraction)
+              .clamp(0.0, Sidebar.drawerWidth)
+              .toDouble();
     return Align(
       alignment: Alignment.topLeft,
       child: SizedBox(
@@ -300,7 +312,7 @@ class _SidebarState extends State<Sidebar> {
         onRetry: _w.onRetry,
       );
     }
-    if (_query.isNotEmpty) return _searchResults(context);
+    if (_query.isNotEmpty) return _searchResults();
     if (_w.data.isEmpty) {
       // One line. The New session button above is the only action this zone
       // needs, so the empty state does not repeat it.
@@ -313,16 +325,11 @@ class _SidebarState extends State<Sidebar> {
     }
 
     final data = _w.data;
-    final sessions = <V2SidebarSession>[
-      ...data.pinned,
-      ...data.today,
-      ...data.yesterday,
-      ...data.earlier,
-    ];
+    final sessions = _sessions;
     // Two sections, one lazy list: a drawer with hundreds of chats builds
     // only the rows near the viewport instead of every row.
     final entries = <_SidebarEntry>[
-      if (data.projects.isNotEmpty)
+      if (data.projects.isNotEmpty || _w.onNewProject != null)
         _SectionEntry(
           'Projects',
           // Hidden, never disabled, when nothing can create a project.
@@ -340,6 +347,22 @@ class _SidebarState extends State<Sidebar> {
       for (final session in sessions) _SessionEntry(session),
     ];
     return OFadeSlide(child: _sidebarList(entries));
+  }
+
+  /// Every chat in the drawer index, in display order, once. A pinned chat
+  /// also present in today's list must not render twice.
+  List<V2SidebarSession> get _sessions {
+    final data = _w.data;
+    final seen = <String>{};
+    return <V2SidebarSession>[
+      for (final session in <V2SidebarSession>[
+        ...data.pinned,
+        ...data.today,
+        ...data.yesterday,
+        ...data.earlier,
+      ])
+        if (seen.add(session.id)) session,
+    ];
   }
 
   Widget _sidebarList(List<_SidebarEntry> entries) {
@@ -402,23 +425,16 @@ class _SidebarState extends State<Sidebar> {
       );
 
   /// Inline search: every chat and project in the drawer index, filtered by
-  /// title (or the project a chat belongs to). No second screen — the drawer is
-  /// where the user already is.
-  Widget _searchResults(BuildContext context) {
+  /// title, the project a chat belongs to, or the message text when the caller
+  /// supplied it. No second screen — the drawer is where the user already is.
+  Widget _searchResults() {
     final query = _query.toLowerCase();
-    final data = _w.data;
-    final seen = <String>{};
     final sessions = <V2SidebarSession>[
-      for (final session in <V2SidebarSession>[
-        ...data.pinned,
-        ...data.today,
-        ...data.yesterday,
-        ...data.earlier,
-      ])
-        if (seen.add(session.id) && _sessionMatches(session, query)) session,
+      for (final session in _sessions)
+        if (_sessionMatches(session, query)) session,
     ];
     final projects = <V2SidebarProject>[
-      for (final project in data.projects)
+      for (final project in _w.data.projects)
         if (project.name.toLowerCase().contains(query)) project,
     ];
 
@@ -436,23 +452,55 @@ class _SidebarState extends State<Sidebar> {
       );
     }
 
-    // The same two labels as the unfiltered list: a count next to "Sessions"
-    // changes no decision, so the section carries none.
+    // Same order as the unfiltered drawer — projects, then sessions — and a
+    // count on each section so the result size is visible before scrolling.
     final entries = <_SidebarEntry>[
-      if (sessions.isNotEmpty) const _SectionEntry('Sessions'),
-      for (final session in sessions) _SessionEntry(session),
-      if (projects.isNotEmpty) const _SectionEntry('Projects'),
+      if (projects.isNotEmpty)
+        _SectionEntry(
+          'Projects',
+          trailing: _countPill(
+            key: const ValueKey<String>('v2-sidebar-search-projects'),
+            count: projects.length,
+            noun: 'project',
+          ),
+        ),
       for (final project in projects) _ProjectEntry(project),
+      if (sessions.isNotEmpty)
+        _SectionEntry(
+          'Sessions',
+          trailing: _countPill(
+            key: const ValueKey<String>('v2-sidebar-search-sessions'),
+            count: sessions.length,
+            noun: 'session',
+          ),
+        ),
+      for (final session in sessions) _SessionEntry(session),
     ];
     return OFadeSlide(child: _sidebarList(entries));
   }
 
-  /// A chat matches on its own title or on the project it lives in, so
-  /// searching "Brand Voice" finds the chats filed under that project too.
+  static Widget _countPill({
+    required Key key,
+    required int count,
+    required String noun,
+  }) {
+    return OPill(
+      key: key,
+      label: '$count',
+      tone: OPillTone.neutral,
+      semanticLabel: count == 1 ? '1 $noun' : '$count ${noun}s',
+    );
+  }
+
+  /// A chat matches on its own title, on the project it lives in (so searching
+  /// "Brand Voice" finds the chats filed under that project) or on the message
+  /// text when the caller supplied it.
   static bool _sessionMatches(V2SidebarSession session, String query) {
     if (session.title.toLowerCase().contains(query)) return true;
     final project = session.projectName;
-    return project != null && project.toLowerCase().contains(query);
+    if (project != null && project.toLowerCase().contains(query)) return true;
+    final message = session.messageText;
+    return message != null && message.toLowerCase().contains(query);
   }
 }
 
@@ -479,16 +527,18 @@ class _ProfileHeader extends StatelessWidget {
         semanticLabel: 'Profile, ${data.name}, ${data.planLabel}',
         child: ConstrainedBox(
           constraints: const BoxConstraints(minHeight: OSpace.listRow),
-          child: Row(
-            children: [
-              OAvatar(
-                initials: data.initials ?? data.name,
-                size: 40,
-                semanticLabel: data.name,
-              ),
-              const SizedBox(width: OSpace.m),
-              Expanded(
-                child: ExcludeSemantics(
+          // The pressable owns the spoken row: name and plan are announced
+          // once, not once by the label and again by the avatar.
+          child: ExcludeSemantics(
+            child: Row(
+              children: [
+                OAvatar(
+                  initials: data.initials ?? data.name,
+                  size: 40,
+                  semanticLabel: data.name,
+                ),
+                const SizedBox(width: OSpace.m),
+                Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisSize: MainAxisSize.min,
@@ -504,8 +554,8 @@ class _ProfileHeader extends StatelessWidget {
                     ],
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -633,12 +683,15 @@ class _SessionRow extends StatelessWidget {
                   ),
                 ),
               ),
-              OIconButton(
-                icon: Icons.more_vert_rounded,
-                semanticLabel: 'Chat options for ${session.title}',
-                size: 18,
-                onPressed: onActions == null ? null : () => onActions!(session),
-              ),
+              // A menu button with no handler is removed, not disabled: the
+              // row still opens and still long-presses when those are wired.
+              if (onActions != null)
+                OIconButton(
+                  icon: Icons.more_vert_rounded,
+                  semanticLabel: 'Chat options for ${session.title}',
+                  size: 18,
+                  onPressed: () => onActions!(session),
+                ),
             ],
           ),
           // The accent edge overlays the row's padding, so an active row and
@@ -698,9 +751,9 @@ class _ProjectRow extends StatelessWidget {
           : null,
       child: OPressable(
         onTap: onTap == null ? null : () => onTap!(project),
-        semanticLabel:
-            '${project.name}, ${project.countLabel}'
-            '${canOpenMemory ? ', ${project.memorySemanticLabel}' : ''}',
+        // Name and count only: the memory control speaks for itself instead
+        // of repeating the file count in the row label.
+        semanticLabel: '${project.name}, ${project.countLabel}',
         child: ConstrainedBox(
           constraints: const BoxConstraints(minHeight: OSpace.listRow),
           child: Padding(

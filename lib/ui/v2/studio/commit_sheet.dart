@@ -147,9 +147,6 @@ class _V2CommitSheetState extends State<V2CommitSheet> {
       !_tooLong;
 
   String get _commitSemanticLabel {
-    if (widget.onCommit == null) {
-      return 'Commit & push, unavailable';
-    }
     if (!widget.data.hasChanges) return 'Commit & push, no changes to commit';
     if (_trimmed.isEmpty) return 'Commit & push, write a message first';
     if (_tooLong) {
@@ -163,8 +160,12 @@ class _V2CommitSheetState extends State<V2CommitSheet> {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     final data = widget.data;
+    // No commit handler means no commit control: the sheet can still review
+    // the files, but it never shows a button that cannot commit.
     final showFooter =
-        data.status == V2CommitSheetStatus.content && data.hasChanges;
+        data.status == V2CommitSheetStatus.content &&
+        data.hasChanges &&
+        widget.onCommit != null;
     return Material(
       color: c.surface,
       child: SafeArea(
@@ -270,8 +271,12 @@ class _V2CommitSheetState extends State<V2CommitSheet> {
                 const SizedBox(height: OSpace.m),
                 _SyncFirstCard(count: data.behindCount, onSync: widget.onSync),
               ],
-              const SizedBox(height: OSpace.l),
-              _buildMessageField(context, c),
+              // The message is the commit's input. With no commit handler the
+              // sheet is a read-only review, so the field is absent too.
+              if (widget.onCommit != null) ...[
+                const SizedBox(height: OSpace.l),
+                _buildMessageField(context, c),
+              ],
             ],
           ),
         ),

@@ -1,291 +1,189 @@
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
-import '../../design/o_motion.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'state_tiles.dart';
 
 // TODO(l10n): move user-facing copy to ARB keys in the localization pass.
 
-/// Copy for the calm system states used across chat.
+/// The live conditions that can stop a chat, in one small value object.
 ///
-/// The page renders one [V2StateTile] for each state. Every line can be
-/// overridden by the caller; the six built-in tile copies in `state_tiles.dart`
-/// supply the defaults for the newer states (storage, suspension and pending
-/// deletion) when a line is left null.
+/// [precedence] is the reading order: a dead connection leads because no
+/// server condition can be verified without one; a blocked account outranks an
+/// exhausted allowance, which outranks a short rate limit. The app update is a
+/// client-level notice and follows the chat conditions. Every flag maps to at
+/// most one [V2StateTileKind], so the screen can never render the same
+/// condition twice.
 @immutable
 class V2SystemStatesData {
   const V2SystemStatesData({
-    this.emptyTitle = 'Start with a hello',
-    this.emptyMessage =
-        'Ask a coding question, brainstorm ideas, or let Ovid browse the web for you.',
-    this.emptyActionLabel = 'Try an example prompt',
-    this.offlineTitle = 'You are offline',
-    this.offlineMessage =
-        'No internet connection detected. Your messages will send when you reconnect.',
-    this.offlineActionLabel = 'Retry connection',
-    this.errorTitle = 'Something went wrong',
-    this.errorMessage =
-        'Ovid could not finish this run because the service timed out. Your changes are safe.',
-    this.errorActionLabel = 'Try again',
-    this.errorDetailsLabel = 'View error details',
-    this.limitTitle = 'Daily limit reached',
-    this.limitMessage =
-        "You have used all 50M of today's free tokens. Your allowance resets "
-        'at the end of its 24-hour window.',
-    this.limitResetLabel = 'Resets soon',
-    this.limitActionLabel = 'See plans',
-    this.storageTitle,
-    this.storageMessage,
-    this.storageActionLabel,
-    this.abuseTitle,
-    this.abuseMessage,
-    this.abuseActionLabel,
-    this.deletionTitle,
-    this.deletionMessage,
-    this.deletionActionLabel,
-    this.footerNote =
-        'Your chats and files stay safe in every state. Nothing is lost.',
+    this.offline = false,
+    this.blocked = false,
+    this.allowanceUsed = false,
+    this.allowanceResetsAt,
+    this.rateLimitedUntil,
+    this.updateRequired = false,
   });
 
-  final String emptyTitle;
-  final String emptyMessage;
-  final String emptyActionLabel;
-  final String offlineTitle;
-  final String offlineMessage;
-  final String offlineActionLabel;
-  final String errorTitle;
-  final String errorMessage;
-  final String errorActionLabel;
-  final String errorDetailsLabel;
-  final String limitTitle;
-  final String limitMessage;
-  final String limitResetLabel;
-  final String limitActionLabel;
+  /// The device cannot reach Ovid; messages wait in the queue.
+  final bool offline;
 
-  /// Optional overrides for the storage-full tile. Null keeps the shared
-  /// [V2StateTileCopy.storageFull] line.
-  final String? storageTitle;
-  final String? storageMessage;
-  final String? storageActionLabel;
+  /// The account is suspended and needs support.
+  final bool blocked;
 
-  /// Optional overrides for the suspended-account tile.
-  final String? abuseTitle;
-  final String? abuseMessage;
-  final String? abuseActionLabel;
+  /// The plan allowance is spent. Clears automatically once
+  /// [allowanceResetsAt] has passed (or immediately when no reset is known).
+  final bool allowanceUsed;
 
-  /// Optional overrides for the pending-deletion tile.
-  final String? deletionTitle;
-  final String? deletionMessage;
-  final String? deletionActionLabel;
+  /// The server's allowance reset instant, when one is known.
+  final DateTime? allowanceResetsAt;
 
-  final String footerNote;
+  /// The instant the short rate-limit window closes. Null means no rate limit;
+  /// a past instant is already clear.
+  final DateTime? rateLimitedUntil;
+
+  /// This build is too old to keep chatting.
+  final bool updateRequired;
+
+  /// One condition, one tile, in the order a person should read them.
+  static const precedence = <V2StateTileKind>[
+    V2StateTileKind.offline,
+    V2StateTileKind.abuseBlocked,
+    V2StateTileKind.planLimited,
+    V2StateTileKind.rateLimited,
+    V2StateTileKind.updateRequired,
+  ];
+
+  /// Returns each active condition exactly once, in [precedence] order.
+  ///
+  /// Passing [now] makes the derived allowance and rate-limit windows
+  /// testable. A deadline in the past clears its condition instead of leaving
+  /// a zero-countdown tile behind.
+  List<V2StateTileKind> activeConditions({DateTime? now}) {
+    final at = now ?? DateTime.now();
+    final active = <V2StateTileKind>{
+      if (offline) V2StateTileKind.offline,
+      if (blocked) V2StateTileKind.abuseBlocked,
+      if (allowanceUsed &&
+          (allowanceResetsAt == null || allowanceResetsAt!.isAfter(at)))
+        V2StateTileKind.planLimited,
+      if (rateLimitedUntil != null && rateLimitedUntil!.isAfter(at))
+        V2StateTileKind.rateLimited,
+      if (updateRequired) V2StateTileKind.updateRequired,
+    };
+    return <V2StateTileKind>[
+      for (final kind in precedence)
+        if (active.contains(kind)) kind,
+    ];
+  }
 }
 
-/// A calm showcase of the system states used across chat.
+/// The conditions blocking chat, with one real exit per condition.
 ///
-/// It also keeps the friendly empty state, so the page shows every state a
-/// conversation can start or stop in.
-///
-/// Every action is optional: a tile whose handler is null renders without an
-/// action button instead of showing a control that cannot do anything. The
-/// gallery registry supplies none, so it stays a pure preview.
+/// This is deliberately not a gallery: a state is shown only while its
+/// condition is live, and the screen recovers to one calm "All clear" view
+/// when nothing is wrong. The host supplies the callbacks; a tile whose exit
+/// has no handler still shows the label but announces itself as disabled, so
+/// the preview never invents a route that does not exist.
 class V2SystemStatesPage extends StatelessWidget {
   const V2SystemStatesPage({
     super.key,
     this.data = const V2SystemStatesData(),
-    this.onTryExample,
     this.onRetryConnection,
-    this.onTryAgain,
-    this.onViewErrorDetails,
     this.onSeePlans,
-    this.onManageStorage,
-    this.onGetHelp,
-    this.onRestoreAccount,
+    this.onContactSupport,
+    this.onRetryRateLimit,
+    this.onOpenStore,
+    this.onBackToChat,
+    this.clock,
   });
 
   final V2SystemStatesData data;
-  final VoidCallback? onTryExample;
+
+  /// Offline: probe the connection again.
   final VoidCallback? onRetryConnection;
-  final VoidCallback? onTryAgain;
-  final VoidCallback? onViewErrorDetails;
+
+  /// Allowance used: open the plan chooser.
   final VoidCallback? onSeePlans;
-  final VoidCallback? onManageStorage;
-  final VoidCallback? onGetHelp;
-  final VoidCallback? onRestoreAccount;
+
+  /// Blocked: open the support channel.
+  final VoidCallback? onContactSupport;
+
+  /// Rate limited: retry once the countdown reaches zero.
+  final VoidCallback? onRetryRateLimit;
+
+  /// Update required: open the platform store listing.
+  final VoidCallback? onOpenStore;
+
+  /// Recovered: return to the conversation.
+  final VoidCallback? onBackToChat;
+
+  /// Clock source for the live countdowns. Defaults to [DateTime.now].
+  final DateTime Function()? clock;
 
   @override
   Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    // A null handler hides its button: the gallery must never render a next
-    // step that cannot run.
-    String labelFor(String label, VoidCallback? handler) =>
-        handler == null ? '' : label;
-    String labelOr(String? override, String fallback, VoidCallback? handler) =>
-        handler == null ? '' : (override ?? fallback);
-    return OScaffold(
-      appBar: const OAppBar(
-        title: 'System states',
-        subtitle: 'Calm feedback when things change',
-      ),
-      body: OFadeSlide(
-        child: OContent(
-          padding: false,
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(
-              OSpace.screen,
-              OSpace.l,
-              OSpace.screen,
-              OSpace.xxl,
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-              OStagger(
-                children: [
-                  _tile(
-                    V2StateTile(
-                      // The copy is fully custom, so the kind only supplies the
-                      // shared card layout.
-                      kind: V2StateTileKind.offline,
-                      copy: V2StateTileCopy(
-                        icon: Icons.waving_hand_rounded,
-                        title: data.emptyTitle,
-                        message: data.emptyMessage,
-                        actionLabel: labelFor(
-                          data.emptyActionLabel,
-                          onTryExample,
-                        ),
-                        actionVariant: OButtonVariant.secondary,
-                      ),
-                      onAction: onTryExample,
-                    ),
-                  ),
-                  _tile(
-                    V2StateTile.offline(
-                      copy: V2StateTileCopy.offline.copyWith(
-                        title: data.offlineTitle,
-                        message: data.offlineMessage,
-                        actionLabel: labelFor(
-                          data.offlineActionLabel,
-                          onRetryConnection,
-                        ),
-                      ),
-                      onAction: onRetryConnection,
-                    ),
-                  ),
-                  _tile(
-                    V2StateTile.planLimited(
-                      copy: V2StateTileCopy.planLimited.copyWith(
-                        title: data.limitTitle,
-                        message: data.limitMessage,
-                        actionLabel: labelFor(
-                          data.limitActionLabel,
-                          onSeePlans,
-                        ),
-                      ),
-                      detail: data.limitResetLabel,
-                      onAction: onSeePlans,
-                    ),
-                  ),
-                  _tile(
-                    V2StateTile.serverError(
-                      copy: V2StateTileCopy.serverError.copyWith(
-                        title: data.errorTitle,
-                        message: data.errorMessage,
-                        actionLabel: labelFor(
-                          data.errorActionLabel,
-                          onTryAgain,
-                        ),
-                        secondaryActionLabel: labelFor(
-                          data.errorDetailsLabel,
-                          onViewErrorDetails,
-                        ),
-                      ),
-                      onAction: onTryAgain,
-                      onSecondaryAction: onViewErrorDetails,
-                    ),
-                  ),
-                  _tile(
-                    V2StateTile.storageFull(
-                      copy: V2StateTileCopy.storageFull.copyWith(
-                        title: data.storageTitle,
-                        message: data.storageMessage,
-                        actionLabel: labelOr(
-                          data.storageActionLabel,
-                          V2StateTileCopy.storageFull.actionLabel,
-                          onManageStorage,
-                        ),
-                      ),
-                      onAction: onManageStorage,
-                    ),
-                  ),
-                  _tile(
-                    V2StateTile.abuseBlocked(
-                      copy: V2StateTileCopy.abuseBlocked.copyWith(
-                        title: data.abuseTitle,
-                        message: data.abuseMessage,
-                        actionLabel: labelOr(
-                          data.abuseActionLabel,
-                          V2StateTileCopy.abuseBlocked.actionLabel,
-                          onGetHelp,
-                        ),
-                      ),
-                      onAction: onGetHelp,
-                    ),
-                  ),
-                  _tile(
-                    V2StateTile.deletionPending(
-                      copy: V2StateTileCopy.deletionPending.copyWith(
-                        title: data.deletionTitle,
-                        message: data.deletionMessage,
-                        actionLabel: labelOr(
-                          data.deletionActionLabel,
-                          V2StateTileCopy.deletionPending.actionLabel,
-                          onRestoreAccount,
-                        ),
-                      ),
-                      onAction: onRestoreAccount,
-                    ),
-                  ),
-                ],
+    final now = clock?.call() ?? DateTime.now();
+    final kinds = data.activeConditions(now: now);
+    final Widget body;
+    if (kinds.isEmpty) {
+      body = OEmptyState(
+        icon: Icons.check_circle_outline_rounded,
+        title: 'All clear',
+        message: 'Ovid is ready when you are.',
+        action: onBackToChat == null
+            ? null
+            : OButton(
+                label: 'Back to chat',
+                variant: OButtonVariant.secondary,
+                onPressed: onBackToChat,
               ),
-              const SizedBox(height: OSpace.xl),
-              Container(
-                padding: const EdgeInsets.all(OSpace.m),
-                decoration: BoxDecoration(
-                  color: c.surfaceAlt,
-                  borderRadius: BorderRadius.circular(ORadius.m),
-                ),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Icon(
-                      Icons.check_circle_outline_rounded,
-                      size: 20,
-                      color: c.success,
-                    ),
-                    const SizedBox(width: OSpace.s),
-                    Expanded(
-                      child: Text(
-                        data.footerNote,
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-        ),
-      ),
+      );
+    } else {
+      body = ListView.separated(
+        padding: const EdgeInsets.only(top: OSpace.l, bottom: OSpace.xxl),
+        itemCount: kinds.length,
+        separatorBuilder: (_, _) => const SizedBox(height: OSpace.m),
+        itemBuilder: (context, index) => _buildTile(kinds[index]),
+      );
+    }
+
+    return OScreen(
+      title: 'System states',
+      subtitle: 'What is blocking chat',
+      child: body,
     );
   }
 
-  Widget _tile(Widget tile) => Padding(
-    padding: const EdgeInsets.only(bottom: OSpace.m),
-    child: tile,
-  );
+  Widget _buildTile(V2StateTileKind kind) {
+    return switch (kind) {
+      V2StateTileKind.offline => V2StateTile.offline(
+        clock: clock,
+        onAction: onRetryConnection,
+      ),
+      V2StateTileKind.planLimited => V2StateTile.planLimited(
+        deadline: data.allowanceResetsAt,
+        clock: clock,
+        onAction: onSeePlans,
+      ),
+      V2StateTileKind.abuseBlocked => V2StateTile.abuseBlocked(
+        clock: clock,
+        onAction: onContactSupport,
+      ),
+      V2StateTileKind.rateLimited => V2StateTile.rateLimited(
+        deadline: data.rateLimitedUntil,
+        clock: clock,
+        onAction: onRetryRateLimit,
+      ),
+      V2StateTileKind.updateRequired => V2StateTile.updateRequired(
+        clock: clock,
+        onAction: onOpenStore,
+      ),
+      // [V2SystemStatesData.precedence] only names the five live conditions
+      // above; the remaining kinds stay available to other screens through
+      // the tile component.
+      _ => V2StateTile(kind: kind, clock: clock),
+    };
+  }
 }

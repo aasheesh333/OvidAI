@@ -1,18 +1,14 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/app_info.dart';
-import 'package:ovid_ai/core/legal_links.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/settings_extra/about_page.dart';
 import 'package:ovid_ai/ui/v2/settings_extra/legal_page.dart';
 
-const _versioned = V2AboutPageData(
-  version: '2.4.1',
-  build: '418',
-  systemStatus: V2SystemStatus.operational,
-);
+const _versioned = V2AboutPageData(version: '2.4.1', build: '418');
 
 Future<void> _pump(
   WidgetTester tester,
@@ -42,8 +38,20 @@ Future<void> _pump(
   await tester.pumpAndSettle();
 }
 
-/// Pumps at the given size and text scale and returns every framework error
-/// (overflow, assertion, ...) raised while laying the page out.
+/// Taps a row that pushes a page which first renders skeletons. The skeleton
+/// pulse never settles, so pump the route and the asset read explicitly before
+/// waiting for the content.
+Future<void> _openAndSettle(WidgetTester tester, Finder target) async {
+  await tester.ensureVisible(target);
+  await tester.tap(target);
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 350));
+  await tester.pump(const Duration(milliseconds: 350));
+  await tester.pumpAndSettle();
+}
+
+/// Pumps at 320 dp and 200 % text and returns every framework error raised
+/// while laying the page out.
 Future<List<FlutterErrorDetails>> _pumpCatching(
   WidgetTester tester,
   V2AboutPageData data, {
@@ -79,18 +87,20 @@ Future<List<FlutterErrorDetails>> _pumpCatching(
 }
 
 void main() {
-  testWidgets('renders the build and legal links in light', (tester) async {
+  testWidgets('renders the app name, build and legal rows in light', (
+    tester,
+  ) async {
     await _pump(tester, _versioned);
 
     expect(find.text('About'), findsOneWidget);
-    expect(find.text('Version'), findsOneWidget);
-    expect(find.text('2.4.1 · build 418'), findsOneWidget);
+    expect(find.text('Ovid Si'), findsOneWidget);
+    expect(find.text('2.4.1 (build 418)'), findsOneWidget);
     expect(find.text('Privacy policy'), findsOneWidget);
     expect(find.text('Terms of service'), findsOneWidget);
     expect(find.text('Open-source licences'), findsOneWidget);
 
-    // No hero, tagline, footer, section chrome or duplicate account action.
-    expect(find.text('Ovid Si'), findsNothing);
+    // One identity line, not a second version row or a marketing block.
+    expect(find.text('Version'), findsNothing);
     expect(find.text('Chat. Code. Create.'), findsNothing);
     expect(find.text('Made for Android'), findsNothing);
     expect(find.text('BUILD'), findsNothing);
@@ -102,7 +112,7 @@ void main() {
   testWidgets('renders in dark', (tester) async {
     await _pump(tester, _versioned, dark: true);
 
-    expect(find.text('Version'), findsOneWidget);
+    expect(find.text('Ovid Si'), findsOneWidget);
     expect(find.text('Privacy policy'), findsOneWidget);
     expect(find.text('Open-source licences'), findsOneWidget);
   });
@@ -114,61 +124,90 @@ void main() {
 
     // Version and build come from core/app_info.dart (dart-define or the
     // pubspec), so the shipped build is always shown.
-    expect(
-      find.text('$kAppVersion · build $kAppBuildNumber'),
-      findsOneWidget,
-    );
+    expect(find.text('$kAppVersion (build $kAppBuildNumber)'), findsOneWidget);
     expect(find.textContaining('v2.4.1'), findsNothing);
     // Unknown status with no checker is not a control at all.
     expect(find.text('System status'), findsNothing);
     expect(find.text('Operational'), findsNothing);
   });
 
-  testWidgets('opens a legal row', (tester) async {
-    var privacyTaps = 0;
-    await _pump(tester, V2AboutPageData(onPrivacyPolicy: () => privacyTaps++));
+  testWidgets(
+    'external legal rows call the host and announce leaving the app',
+    (tester) async {
+      final handle = tester.ensureSemantics();
+      var privacy = 0;
+      var terms = 0;
+      await _pump(
+        tester,
+        V2AboutPageData(
+          onPrivacyPolicy: () => privacy++,
+          onTerms: () => terms++,
+        ),
+      );
 
-    await tester.tap(find.text('Privacy policy'));
+      final node = tester.getSemantics(find.text('Privacy policy'));
+      expect(node, isSemantics(isButton: true));
+      expect(node, isSemantics(hint: 'Opens in your browser'));
+      handle.dispose();
+
+      await tester.tap(find.text('Privacy policy'));
+      await tester.pumpAndSettle();
+      expect(privacy, 1);
+      expect(find.byType(LegalPage), findsNothing);
+
+      await tester.tap(find.text('Terms of service'));
+      await tester.pumpAndSettle();
+      expect(terms, 1);
+      expect(find.byType(LegalPage), findsNothing);
+    },
+  );
+
+  testWidgets('privacy row opens the real bundled document', (tester) async {
+    await _pump(tester, const V2AboutPageData());
+
+    await _openAndSettle(tester, find.text('Privacy policy'));
+
+    expect(find.byType(LegalPage), findsOneWidget);
+    expect(find.text('Last updated 21 October 2026'), findsOneWidget);
+    expect(find.text('The short version'), findsOneWidget);
+    expect(find.textContaining('Dhanuk Softwares'), findsWidgets);
+
+    await tester.tap(find.bySemanticsLabel('Back'));
     await tester.pumpAndSettle();
 
-    expect(privacyTaps, 1);
+    expect(find.byType(AboutPage), findsOneWidget);
+    expect(find.text('Privacy policy'), findsOneWidget);
   });
 
-  testWidgets('legal rows open a real destination without a callback', (
+  testWidgets('terms row opens the real bundled document', (tester) async {
+    await _pump(tester, const V2AboutPageData());
+
+    await _openAndSettle(tester, find.text('Terms of service'));
+
+    expect(find.byType(LegalPage), findsOneWidget);
+    expect(find.textContaining('Dhanuk Softwares'), findsWidgets);
+    await tester.scrollUntilVisible(
+      find.textContaining('Accepting these Terms'),
+      200,
+    );
+    expect(find.textContaining('Accepting these Terms'), findsOneWidget);
+  });
+
+  testWidgets('licences row opens the real Flutter licence registry', (
     tester,
   ) async {
-    final handle = tester.ensureSemantics();
-    final opened = <Uri>[];
-    await _pump(
-      tester,
-      V2AboutPageData(
-        openExternal: (uri) async {
-          opened.add(uri);
-          return true;
-        },
-      ),
-    );
+    LicenseRegistry.addLicense(() async* {
+      yield const LicenseEntryWithLineBreaks(<String>[
+        'ovid_test_package',
+      ], 'Ovid test licence text.');
+    });
+    await _pump(tester, const V2AboutPageData());
 
-    final node = tester.getSemantics(find.text('Privacy policy'));
-    // Enabled rows are buttons with a tap action, not disabled placeholders.
-    expect(node, isSemantics(isButton: true));
-    handle.dispose();
+    await _openAndSettle(tester, find.text('Open-source licences'));
 
-    await tester.tap(find.text('Privacy policy'));
-    await tester.pumpAndSettle();
-
-    expect(opened.single.toString(), LegalLinks.privacyPolicy);
-
-    await tester.tap(find.text('Terms of service'));
-    await tester.pumpAndSettle();
-    expect(opened.last.toString(), LegalLinks.terms);
-
-    // Licences are real data from the packages in this build.
-    await tester.ensureVisible(find.text('Open-source licences'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Open-source licences'));
-    await tester.pumpAndSettle();
-    expect(find.byType(LicensePage), findsOneWidget);
+    expect(find.byType(LicencesPage), findsOneWidget);
+    expect(find.text('ovid_test_package'), findsOneWidget);
+    expect(find.text('Ovid test licence text.'), findsOneWidget);
   });
 
   testWidgets('copy copies the real build label to the clipboard', (
@@ -201,10 +240,7 @@ void main() {
     await tester.pumpAndSettle();
 
     final setData = calls.firstWhere((c) => c.method == 'Clipboard.setData');
-    expect(
-      (setData.arguments as Map)['text'],
-      '2.4.1 · build 418',
-    );
+    expect((setData.arguments as Map)['text'], '2.4.1 (build 418)');
     expect(copies, 1);
   });
 
@@ -227,10 +263,7 @@ void main() {
 
   testWidgets('the minimal About has no support row', (tester) async {
     var contacts = 0;
-    await _pump(
-      tester,
-      V2AboutPageData(onContactSupport: () => contacts++),
-    );
+    await _pump(tester, V2AboutPageData(onContactSupport: () => contacts++));
 
     // Support lives in Account → Team & support. About keeps the build and
     // the three legal documents only.
@@ -260,14 +293,14 @@ void main() {
         );
 
         expect(errors, isEmpty, reason: errors.join('\n'));
-        expect(find.text('Version'), findsOneWidget);
+        expect(find.text('Ovid Si'), findsOneWidget);
         await tester.scrollUntilVisible(find.text('Open-source licences'), 200);
         expect(find.text('Open-source licences'), findsOneWidget);
       },
     );
   }
 
-  for (final width in <double>[600, 900]) {
+  for (final width in <double>[600, 900, 1280]) {
     testWidgets('content is centred and capped at $width dp', (tester) async {
       await _pump(tester, _versioned, size: Size(width, 1600));
 
@@ -287,104 +320,9 @@ void main() {
   testWidgets('reduced motion keeps every row', (tester) async {
     await _pump(tester, _versioned, reduceMotion: true);
 
-    expect(find.text('Version'), findsOneWidget);
+    expect(find.text('Ovid Si'), findsOneWidget);
     expect(find.text('Privacy policy'), findsOneWidget);
     expect(find.text('Terms of service'), findsOneWidget);
     expect(find.text('Open-source licences'), findsOneWidget);
-  });
-
-  test('the standard documents carry the published policy and terms', () {
-    const docs = V2AboutLegalDocuments.standard;
-
-    expect(docs.privacyPolicy.title, 'Privacy policy');
-    expect(docs.privacyPolicy.updatedAt, '21 October 2026');
-    expect(docs.terms.title, 'Terms of service');
-    expect(docs.terms.updatedAt, '21 October 2026');
-    expect(docs.licences.title, 'Open-source licences');
-    expect(docs.privacyPolicy.sections, isNotEmpty);
-    expect(docs.terms.sections, isNotEmpty);
-    expect(docs.licences.sections, isNotEmpty);
-
-    final privacyCopy = docs.privacyPolicy.sections
-        .map((section) => '${section.body} ${section.bullets.join(' ')}')
-        .join(' ');
-    expect(privacyCopy, contains('24-hour grace period'));
-    expect(privacyCopy, contains('Dhanuk Softwares'));
-    expect(privacyCopy, contains('support@ovidsi.com'));
-
-    final termsCopy = docs.terms.sections
-        .map((section) => '${section.body} ${section.bullets.join(' ')}')
-        .join(' ');
-    expect(termsCopy, contains('Google Play'));
-    expect(termsCopy, contains('24-hour grace period'));
-    expect(termsCopy, contains('50 subagents'));
-  });
-
-  testWidgets('privacy row opens the in-app document', (tester) async {
-    await _pump(
-      tester,
-      const V2AboutPageData(legalDocuments: V2AboutLegalDocuments.standard),
-    );
-
-    await tester.tap(find.text('Privacy policy'));
-    await tester.pumpAndSettle();
-
-    expect(find.byType(LegalPage), findsOneWidget);
-    expect(find.text('Last updated 21 October 2026'), findsOneWidget);
-    expect(find.text('The short version'), findsOneWidget);
-    expect(find.textContaining('Dhanuk Softwares'), findsWidgets);
-
-    await tester.tap(find.bySemanticsLabel('Back'));
-    await tester.pumpAndSettle();
-
-    expect(find.byType(AboutPage), findsOneWidget);
-    expect(find.text('Privacy policy'), findsOneWidget);
-  });
-
-  testWidgets('terms row opens the in-app document', (tester) async {
-    await _pump(
-      tester,
-      const V2AboutPageData(legalDocuments: V2AboutLegalDocuments.standard),
-    );
-
-    await tester.tap(find.text('Terms of service'));
-    await tester.pumpAndSettle();
-
-    expect(find.byType(LegalPage), findsOneWidget);
-    await tester.scrollUntilVisible(find.text('Accepting these Terms'), 200);
-    expect(find.text('Accepting these Terms'), findsOneWidget);
-  });
-
-  testWidgets('licences row opens the in-app document', (tester) async {
-    await _pump(
-      tester,
-      const V2AboutPageData(legalDocuments: V2AboutLegalDocuments.standard),
-    );
-
-    await tester.tap(find.text('Open-source licences'));
-    await tester.pumpAndSettle();
-
-    expect(find.byType(LegalPage), findsOneWidget);
-    expect(find.text('Flutter and the Dart SDK'), findsOneWidget);
-    expect(find.text('Flutter — BSD 3-Clause'), findsOneWidget);
-  });
-
-  testWidgets('the in-app document takes precedence over a URL callback', (
-    tester,
-  ) async {
-    var callbacks = 0;
-    await _pump(
-      tester,
-      V2AboutPageData(
-        legalDocuments: V2AboutLegalDocuments.standard,
-        onPrivacyPolicy: () => callbacks++,
-      ),
-    );
-
-    await tester.tap(find.text('Privacy policy'));
-    await tester.pumpAndSettle();
-
-    expect(find.byType(LegalPage), findsOneWidget);
-    expect(callbacks, 0);
   });
 }

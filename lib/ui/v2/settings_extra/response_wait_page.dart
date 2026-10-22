@@ -7,14 +7,28 @@ import '../../design/o_tokens.dart';
 
 // TODO(l10n): move the English copy in this screen to the ARB files.
 
-/// Three presets is enough to cover the common cases; the slider handles the
-/// rest in 30-second steps.
-const List<int> _waitPresets = <int>[30, 120, 300];
+/// The product's real bounds — `AppState.minResponseTimeoutSec` /
+/// `maxResponseTimeoutSec`. Anything outside this is not a wait Ovid honours.
+const int _minSeconds = 30;
+const int _maxSeconds = 600;
 
-/// The slider steps in 30-second increments between 30 s and 10 min.
+/// The slider moves in half minutes: (600 − 30) / 30.
+const int _stepSeconds = 30;
+const int _sliderDivisions = 19;
+
+/// The three answers that cover almost every reply. Each one is a slider
+/// stop, so a preset snaps the thumb instead of setting a value the slider
+/// cannot show.
+const List<int> _waitPresets = <int>[60, 120, 300];
+
+/// What actually happens at the limit. A surface, never a cancel: the run
+/// keeps going, the composer only says it is still working.
+const String _consequence = 'Ovid shows "Still working…" and keeps waiting.';
+
+/// The nearest slider stop for a raw drag value.
 int _snapWait(double value) {
-  final steps = ((value - 30) / 30).round();
-  return (30 + steps * 30).clamp(30, 600);
+  final steps = ((value - _minSeconds) / _stepSeconds).round();
+  return (_minSeconds + steps * _stepSeconds).clamp(_minSeconds, _maxSeconds);
 }
 
 String _waitLabel(int seconds) {
@@ -25,32 +39,42 @@ String _waitLabel(int seconds) {
   return '$minutes min $rest s';
 }
 
+/// Persists a wait. The future must fail when the value did not reach disk —
+/// that is what lets the page roll the thumb back instead of lying.
+typedef V2ResponseWaitSave = Future<void> Function(int seconds);
+
 /// Injected state for the Response wait limit screen.
 @immutable
 class V2ResponseWaitPageData {
   const V2ResponseWaitPageData({
-    this.seconds = 120,
-    this.loading = false,
+    this.seconds,
     this.errorMessage,
     this.onChanged,
     this.onPreset,
     this.onRetry,
   });
 
-  /// Wait time in seconds. The UI supports 30 seconds to 10 minutes.
-  final int seconds;
-  final bool loading;
+  /// The persisted wait in seconds. `null` means "not read yet": the page
+  /// shows its loading state rather than pretending a default was chosen.
+  final int? seconds;
+
+  /// Set when the stored value could not be read; the page offers [onRetry].
   final String? errorMessage;
 
-  final ValueChanged<int>? onChanged;
-  final ValueChanged<int>? onPreset;
+  /// Writes the slider value.
+  final V2ResponseWaitSave? onChanged;
+
+  /// Writes a preset. Kept apart from [onChanged] because the chips are a
+  /// discrete choice, and the caller may want to record it differently.
+  final V2ResponseWaitSave? onPreset;
+
   final VoidCallback? onRetry;
 }
 
-/// How long Ovid waits for a reply before it asks the user what to do.
+/// How long Ovid stays quiet before it flags a reply as still working.
 ///
-/// The page keeps the chosen wait locally so the slider and the chips move
-/// with the finger. The value still goes through [V2ResponseWaitPageData]'s
+/// The page keeps the chosen wait locally so the thumb and the chips move
+/// with the finger. The value goes through [V2ResponseWaitPageData]'s
 /// callbacks, which write `AppState.responseTimeoutSec` — the same field the
 /// chat's "Still working…" watchdog reads (persisted as
 /// `ovid_response_timeout_sec`).
@@ -64,13 +88,30 @@ class ResponseWaitPage extends StatefulWidget {
 }
 
 class _ResponseWaitPageState extends State<ResponseWaitPage> {
-  late int _seconds;
+  /// The value on screen. Leads the persisted value while a write is in
+  /// flight, then either stays (success) or falls back to [_saved] (failure).
+  int? _seconds;
 
-  /// The in-flight drag value. Committing only on drag end keeps one
-  /// SharedPreferences write per gesture instead of one per frame.
+  /// The last value the parent confirmed as persisted — the rollback target.
+  int? _saved;
+
+  /// The in-flight drag value. Committing only on drag end keeps one write
+  /// per gesture instead of one per frame.
   int? _dragging;
 
+  bool _saving = false;
+
+  /// Shown inline under the presets after a write fails.
+  String? _saveError;
+
+  /// Guards against an older write landing after a newer one.
+  int _saveToken = 0;
+
   V2ResponseWaitPageData get data => widget.data;
+
+  V2ResponseWaitSave? get _sliderSave => data.onChanged;
+
+  V2ResponseWaitSave? get _presetSave => data.onPreset ?? data.onChanged;
 
   @override
   void initState() {
@@ -81,65 +122,87 @@ class _ResponseWaitPageState extends State<ResponseWaitPage> {
   @override
   void didUpdateWidget(covariant ResponseWaitPage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (!identical(oldWidget.data, widget.data)) {
-      _adopt(widget.data, oldWidget.data);
-    }
+    if (identical(oldWidget.data, widget.data)) return;
+    // A write owns the value until it lands; the parent's pre-write value
+    // must not yank the thumb back mid-save.
+    if (_saving) return;
+    _adopt(widget.data, oldWidget.data);
   }
 
   void _adopt(V2ResponseWaitPageData next, V2ResponseWaitPageData? prev) {
-    if (prev == null || next.seconds != prev.seconds) {
-      _seconds = next.seconds.clamp(30, 600).toInt();
+    if (prev != null && next.seconds == prev.seconds) return;
+    final value = _readable(next.seconds);
+    _seconds = value;
+    _saved = value;
+    if (value != null) _saveError = null;
+  }
+
+  /// A value below the product minimum is a degenerate read, not a choice, so
+  /// it is treated as unset. The ceiling is the product's own maximum: the
+  /// state layer already clamps on load, so this is only defence.
+  static int? _readable(int? seconds) {
+    if (seconds == null || seconds < _minSeconds) return null;
+    return seconds > _maxSeconds ? _maxSeconds : seconds;
+  }
+
+  int? get _shown => _dragging ?? _seconds;
+
+  Future<void> _save(int seconds, V2ResponseWaitSave handler) async {
+    final previous = _seconds;
+    final token = ++_saveToken;
+    setState(() {
+      _dragging = null;
+      _seconds = seconds;
+      _saveError = null;
+      _saving = true;
+    });
+    try {
+      await handler(seconds);
+    } catch (_) {
+      if (!mounted || token != _saveToken) return;
+      final restored = _saved ?? previous;
+      setState(() {
+        _saving = false;
+        _seconds = restored;
+        _saveError = restored == null
+            ? 'Could not save.'
+            : 'Could not save. Still ${_waitLabel(restored)}.';
+      });
+      return;
     }
-  }
-
-  int get _shown => _dragging ?? _seconds;
-
-  void _commit(int seconds) {
-    final handler = data.onChanged;
-    if (handler == null) return;
-    setState(() {
-      _dragging = null;
-      _seconds = seconds;
-    });
-    handler(seconds);
-  }
-
-  void _pickPreset(int seconds) {
-    final handler = data.onPreset;
-    if (handler == null) return;
-    setState(() {
-      _dragging = null;
-      _seconds = seconds;
-    });
-    handler(seconds);
+    // Even a superseded write reached disk, so it is a valid rollback target
+    // if a newer write fails.
+    _saved = seconds;
+    if (!mounted || token != _saveToken) return;
+    setState(() => _saving = false);
   }
 
   @override
   Widget build(BuildContext context) {
     return OScreen(
       title: 'Response wait',
-      subtitle: 'Before Ovid asks you',
+      subtitle: 'When a reply goes quiet',
       child: _body(context),
     );
   }
 
   Widget _body(BuildContext context) {
-    final status = data.loading
-        ? OStatus.loading
-        : data.errorMessage != null
+    final seconds = _readable(_shown);
+    final status = data.errorMessage != null
         ? OStatus.error
+        : seconds == null
+        ? OStatus.loading
         : OStatus.content;
     return OStateView(
       status: status,
       errorMessage: data.errorMessage ?? '',
       onRetry: data.onRetry,
-      skeletonRows: 5,
-      child: _content(context),
+      skeletonRows: 4,
+      child: _content(context, seconds ?? _minSeconds),
     );
   }
 
-  Widget _content(BuildContext context) {
-    final seconds = _shown.clamp(30, 600).toInt();
+  Widget _content(BuildContext context, int seconds) {
     return ListView(
       padding: const EdgeInsets.only(top: OSpace.l, bottom: OSpace.xxl),
       children: [_waitCard(context, seconds)],
@@ -148,6 +211,7 @@ class _ResponseWaitPageState extends State<ResponseWaitPage> {
 
   Widget _waitCard(BuildContext context, int seconds) {
     final c = OColors.of(context);
+    final canDrag = _sliderSave != null;
     return OCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -158,30 +222,41 @@ class _ResponseWaitPageState extends State<ResponseWaitPage> {
             textAlign: TextAlign.center,
             style: OType.display.copyWith(color: c.text),
           ),
+          const SizedBox(height: OSpace.s),
+          Text(
+            _consequence,
+            key: const ValueKey<String>('response-wait-consequence'),
+            textAlign: TextAlign.center,
+            style: OType.bodySm.copyWith(color: c.textMuted),
+          ),
           const SizedBox(height: OSpace.l),
-          Semantics(
-            label: 'Response wait limit',
-            value: _waitLabel(seconds),
-            enabled: data.onChanged != null,
-            child: SizedBox(
-              height: OSpace.touch,
-              child: Slider(
-                value: seconds.toDouble(),
-                min: 30,
-                max: 600,
-                divisions: 19,
-                label: _waitLabel(seconds),
-                semanticFormatterCallback: (value) =>
-                    _waitLabel(_snapWait(value)),
-                activeColor: c.accentFill,
-                inactiveColor: c.surfaceRaised,
-                thumbColor: c.accentFill,
-                onChanged: data.onChanged == null
-                    ? null
-                    : (value) => setState(() => _dragging = _snapWait(value)),
-                onChangeEnd: data.onChanged == null
-                    ? null
-                    : (value) => _commit(_snapWait(value)),
+          MergeSemantics(
+            child: Semantics(
+              // The slider speaks its own value; the label carries the
+              // range, which the thumb alone cannot show.
+              label: 'Response wait limit, 30 seconds to 10 minutes',
+              enabled: canDrag,
+              child: SizedBox(
+                height: OSpace.touch,
+                child: Slider(
+                  value: seconds.toDouble(),
+                  min: _minSeconds.toDouble(),
+                  max: _maxSeconds.toDouble(),
+                  divisions: _sliderDivisions,
+                  // No `label`: the value indicator would repeat the readout
+                  // above, and so would the spoken value.
+                  semanticFormatterCallback: (value) =>
+                      _waitLabel(_snapWait(value)),
+                  activeColor: c.accentFill,
+                  inactiveColor: c.surfaceRaised,
+                  thumbColor: c.accentFill,
+                  onChanged: !canDrag
+                      ? null
+                      : (value) => setState(() => _dragging = _snapWait(value)),
+                  onChangeEnd: !canDrag
+                      ? null
+                      : (value) => _save(_snapWait(value), _sliderSave!),
+                ),
               ),
             ),
           ),
@@ -190,24 +265,43 @@ class _ResponseWaitPageState extends State<ResponseWaitPage> {
             spacing: OSpace.s,
             runSpacing: OSpace.s,
             children: [
-              for (final preset in _waitPresets)
-                _presetChip(context, preset, seconds),
+              for (final preset in _waitPresets) _presetChip(preset, seconds),
             ],
           ),
+          if (_saveError != null) ...[
+            const SizedBox(height: OSpace.m),
+            Semantics(
+              liveRegion: true,
+              child: Text(
+                _saveError!,
+                key: const ValueKey<String>('response-wait-save-error'),
+                textAlign: TextAlign.center,
+                style: OType.caption.copyWith(color: c.danger),
+              ),
+            ),
+          ],
         ],
       ),
     );
   }
 
-  Widget _presetChip(BuildContext context, int preset, int seconds) {
+  Widget _presetChip(int preset, int seconds) {
+    final handler = _presetSave;
     final selected = seconds == preset;
     final label = _waitLabel(preset);
     return OPressable(
-      onTap: data.onPreset == null ? null : () => _pickPreset(preset),
+      onTap: handler == null ? null : () => _save(preset, handler),
       semanticLabel: '$label wait time',
       selected: selected,
-      child: ExcludeSemantics(
-        child: OChip(label: label, selected: selected),
+      child: SizedBox(
+        // The chip draws at 34 dp; the touch target stays 48.
+        height: OSpace.touch,
+        child: Center(
+          widthFactor: 1,
+          child: ExcludeSemantics(
+            child: OChip(label: label, selected: selected),
+          ),
+        ),
       ),
     );
   }

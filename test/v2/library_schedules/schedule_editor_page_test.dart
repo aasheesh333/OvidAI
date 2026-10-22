@@ -2,9 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
+import 'package:ovid_ai/ui/design/o_screen.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/schedules/cadence_picker.dart';
 import 'package:ovid_ai/ui/v2/schedules/schedule_editor_page.dart';
+import 'package:ovid_ai/ui/v2/schedules/schedules_flow.dart';
 
 const _data = V2ScheduleEditorData(
   prompt:
@@ -399,4 +401,158 @@ void main() {
 
     semantics.dispose();
   });
+
+  testWidgets('retry reloads the schedule instead of leaving the page', (
+    tester,
+  ) async {
+    _phone(tester);
+    var reloads = 0;
+    await tester.pumpWidget(
+      _app(
+        ScheduleEditorScreen(
+          initial: const V2ScheduleEditorData(
+            status: V2ScheduleEditorStatus.error,
+          ),
+          onSave: (_) async => null,
+          onReload: () async {
+            reloads++;
+            return const V2ScheduleEditorData(prompt: 'Summarise the news.');
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text(
+        'We could not open this schedule. Check your connection and try again.',
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Try again'));
+    await tester.pumpAndSettle();
+
+    expect(reloads, 1);
+    // Still the editor, now with the reloaded prompt.
+    expect(find.text('Schedule'), findsOneWidget);
+    expect(find.text('Summarise the news.'), findsOneWidget);
+  });
+
+  testWidgets('deleting from the editor asks first and survives a failure', (
+    tester,
+  ) async {
+    _phone(tester);
+    final semantics = tester.ensureSemantics();
+    var deletes = 0;
+    await tester.pumpWidget(
+      _app(
+        ScheduleEditorScreen(
+          initial: const V2ScheduleEditorData(
+            prompt: 'Summarise the news.',
+            title: 'Morning briefing',
+          ),
+          onSave: (_) async => null,
+          onDelete: () async {
+            deletes++;
+            return false;
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.bySemanticsLabel('More options'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete schedule'));
+    await tester.pumpAndSettle();
+
+    // Nothing is deleted before the confirmation.
+    expect(deletes, 0);
+    expect(find.text('Delete “Morning briefing”?'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(TextButton, 'Delete'));
+    await tester.pumpAndSettle();
+
+    expect(deletes, 1);
+    // A rejected delete leaves the editor open rather than closing as if the
+    // row were gone.
+    expect(find.text('Schedule'), findsOneWidget);
+    expect(find.text('Summarise the news.'), findsOneWidget);
+    semantics.dispose();
+  });
+
+  testWidgets('a reloaded schedule replaces the draft', (tester) async {
+    _phone(tester);
+    Widget build(V2ScheduleEditorData data) =>
+        _app(ScheduleEditorPage(data: data));
+
+    await tester.pumpWidget(
+      build(const V2ScheduleEditorData(prompt: 'Old prompt')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Old prompt'), findsOneWidget);
+
+    await tester.pumpWidget(
+      build(
+        const V2ScheduleEditorData(
+          prompt: 'New prompt',
+          frequency: V2ScheduleFrequency.daily,
+          timeLabel: '6:30 PM',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('New prompt'), findsOneWidget);
+    expect(find.text('Old prompt'), findsNothing);
+    expect(find.text('6:30 PM'), findsOneWidget);
+    // Daily hides the weekday chips.
+    expect(find.text('REPEAT DAYS'), findsNothing);
+  });
+
+  for (final dark in [false, true]) {
+    testWidgets('centres and caps the editor from 600 to 1280 '
+        '(${dark ? 'dark' : 'light'})', (tester) async {
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      tester.view.devicePixelRatio = 1;
+
+      for (final width in const [600.0, 800.0, 1024.0, 1280.0]) {
+        for (final scale in const [1.0, 2.0]) {
+          tester.view.physicalSize = Size(width, 900);
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: dark ? OTheme.dark() : OTheme.light(),
+              home: MediaQuery(
+                data: MediaQueryData(
+                  size: Size(width, 900),
+                  textScaler: TextScaler.linear(scale),
+                ),
+                child: const ScheduleEditorPage(data: _data),
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final reason = '$width dp at ${scale}x';
+          expect(tester.takeException(), isNull, reason: reason);
+
+          final list = find.byType(ListView).first;
+          final size = tester.getSize(list);
+          final left = tester.getTopLeft(list).dx;
+          final cap = OBreakpoints.contentMaxWidth(width);
+          expect(
+            size.width,
+            lessThanOrEqualTo(cap + 0.5),
+            reason: '$reason: the form is wider than its band cap',
+          );
+          expect(
+            left,
+            closeTo((width - size.width) / 2, 1),
+            reason: '$reason: the form is not centred',
+          );
+        }
+      }
+    });
+  }
 }

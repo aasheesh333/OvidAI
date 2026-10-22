@@ -196,6 +196,29 @@ void main() {
       ]);
     });
 
+    test('matches real values as well as titles', () {
+      final data = _data(
+        sections: <V2SettingsSection>[
+          V2SettingsSection(
+            title: 'Data control',
+            items: [
+              V2SettingsItem(
+                id: 'storage',
+                label: 'Storage',
+                value: '1.2 of 3 GB',
+                icon: Icons.storage_rounded,
+                onTap: () {},
+              ),
+            ],
+          ),
+        ],
+      );
+
+      expect(data.search('1.2').single.item.id, 'storage');
+      expect(data.search('gb').single.item.id, 'storage');
+      expect(data.search('missing'), isEmpty);
+    });
+
     test('fromHub reuses the hub sections and state', () {
       final data = V2SettingsSearchData.fromHub(
         V2SettingsHubData(
@@ -252,19 +275,33 @@ void main() {
       );
 
       final account = data.sections.first.items;
+      expect(data.isActionable(account.first, hasHostHandler: true), isTrue);
+      expect(data.isActionable(account.last, hasHostHandler: true), isFalse);
       expect(
-        data.isActionable(account.first, hasHostHandler: true),
+        data.isActionable(data.sections[1].items.first, hasHostHandler: true),
         isTrue,
       );
-      expect(
-        data.isActionable(account.last, hasHostHandler: true),
-        isFalse,
-      );
-      expect(
-        data.isActionable(
-          data.sections[1].items.first,
-          hasHostHandler: true,
+    });
+
+    test('fromHub treats a host-opened connectors row as actionable', () {
+      final data = V2SettingsSearchData.fromHub(
+        V2SettingsHubData(
+          onAddConnector: () {},
+          models: const V2SettingsSection(
+            title: 'Models',
+            items: <V2SettingsItem>[
+              V2SettingsItem(
+                id: 'connectors',
+                label: 'Connectors',
+                icon: Icons.extension_rounded,
+              ),
+            ],
+          ),
         ),
+      );
+
+      expect(
+        data.isActionable(data.sections[2].items.single, hasHostHandler: false),
         isTrue,
       );
     });
@@ -313,9 +350,7 @@ void main() {
     expect(find.text('Storage'), findsNothing);
   });
 
-  testWidgets('section matches list every row in that section', (
-    tester,
-  ) async {
+  testWidgets('section matches list every row in that section', (tester) async {
     _phoneSize(tester);
     await tester.pumpWidget(_app(OTheme.light(), _data()));
     await tester.pumpAndSettle();
@@ -349,6 +384,44 @@ void main() {
     expect(opened.single.item.id, 'plan_billing');
     expect(opened.single.sectionTitle, 'Account');
     expect(tester.testTextInput.isVisible, isFalse);
+  });
+
+  testWidgets('a result shows its real value and announces it once', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    _phoneSize(tester);
+    final data = _data(
+      sections: <V2SettingsSection>[
+        V2SettingsSection(
+          title: 'Data control',
+          items: [
+            V2SettingsItem(
+              id: 'storage',
+              label: 'Storage',
+              value: '1.2 of 3 GB',
+              icon: Icons.storage_rounded,
+              onTap: () {},
+            ),
+          ],
+        ),
+      ],
+    );
+    await tester.pumpWidget(_app(OTheme.light(), data, onResultTap: (_) {}));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'storage');
+    await tester.pumpAndSettle();
+
+    expect(find.text('1.2 of 3 GB'), findsOneWidget);
+
+    // One node: title + value, enabled, and the tap belongs to it.
+    final node = tester
+        .getSemantics(find.byKey(const ValueKey('search-result-storage')))
+        .getSemanticsData();
+    expect(node.label, 'Storage, 1.2 of 3 GB');
+    expect(node.flagsCollection.isEnabled.toBoolOrNull(), isTrue);
+    handle.dispose();
   });
 
   testWidgets('a result with no callback still uses the row callback', (
@@ -549,6 +622,46 @@ void main() {
       tester.takeException(),
       isNull,
       reason: 'results overflowed at 320 dp / 200 % text',
+    );
+  });
+
+  testWidgets('a long result value fits 320 dp at 200% text', (tester) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    final data = _data(
+      initialQuery: 'storage',
+      sections: <V2SettingsSection>[
+        V2SettingsSection(
+          title: 'Data control',
+          items: [
+            V2SettingsItem(
+              id: 'storage',
+              label: 'Storage',
+              value: '1.2 GB of 15 GB used by chats and artifacts',
+              icon: Icons.storage_rounded,
+              onTap: () {},
+            ),
+          ],
+        ),
+      ],
+    );
+    await tester.pumpWidget(
+      _app(
+        OTheme.dark(),
+        data,
+        textScaler: const TextScaler.linear(2),
+        onResultTap: (_) {},
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Storage'), findsOneWidget);
+    expect(
+      tester.takeException(),
+      isNull,
+      reason: 'a long value overflowed at 320 dp / 200 % text',
     );
   });
 

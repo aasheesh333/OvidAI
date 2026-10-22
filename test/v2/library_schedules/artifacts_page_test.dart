@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
@@ -125,6 +126,19 @@ Future<void> _pickSource(WidgetTester tester, String label) async {
   await tester.pumpAndSettle();
 }
 
+/// Opens one picker chip by key and chooses [label] in its sheet.
+Future<void> _pick(WidgetTester tester, String key, String label) async {
+  final picker = find.byKey(ValueKey<String>(key));
+  await tester.ensureVisible(picker);
+  await tester.pumpAndSettle();
+  await tester.tap(picker);
+  await tester.pumpAndSettle();
+  await tester.tap(find.text(label).last);
+  await tester.pumpAndSettle();
+}
+
+const _clearKey = ValueKey<String>('artifact-filter-clear');
+
 void main() {
   testWidgets('renders one calm header and the artifact cards', (tester) async {
     _phone(tester);
@@ -246,9 +260,7 @@ void main() {
     expect(find.text('portfolio-index.html'), findsOneWidget);
   });
 
-  testWidgets('uses the shared filter bar as one row of chips', (
-    tester,
-  ) async {
+  testWidgets('uses the shared filter bar as one row of chips', (tester) async {
     _phone(tester);
     await tester.pumpWidget(_app(ArtifactsPage(data: _data())));
     await tester.pumpAndSettle();
@@ -413,10 +425,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('No matches'), findsOneWidget);
     // No paragraph under the title; the one action clears the filters.
-    expect(
-      find.text('Try another search or clear the filters.'),
-      findsNothing,
-    );
+    expect(find.text('Try another search or clear the filters.'), findsNothing);
 
     await tester.tap(find.text('Clear filters'));
     await tester.pumpAndSettle();
@@ -504,6 +513,238 @@ void main() {
       expect(name.maxLines, 1);
       expect(name.overflow, TextOverflow.ellipsis);
       expect(tester.takeException(), isNull);
+    }
+  });
+
+  testWidgets('session filter narrows the grid to one chat', (tester) async {
+    _phone(tester);
+    await tester.pumpWidget(_app(ArtifactsPage(data: _data())));
+    await tester.pumpAndSettle();
+
+    await _pick(tester, 'artifact-filter-session', 'Landing page redesign');
+
+    expect(find.text('portfolio-index.html'), findsOneWidget);
+    expect(find.text('market-analysis-q2.pdf'), findsNothing);
+    expect(find.text('token-usage-breakdown.png'), findsNothing);
+    expect(find.text('launch-metrics.csv'), findsNothing);
+  });
+
+  testWidgets('date filter narrows to today and Clear restores the library', (
+    tester,
+  ) async {
+    _phone(tester);
+    await tester.pumpWidget(_app(ArtifactsPage(data: _data())));
+    await tester.pumpAndSettle();
+
+    await _pick(tester, 'artifact-filter-date', 'Today');
+    expect(find.text('portfolio-index.html'), findsOneWidget);
+    expect(find.text('market-analysis-q2.pdf'), findsNothing);
+
+    final clear = find.byKey(_clearKey);
+    await tester.ensureVisible(clear);
+    await tester.pumpAndSettle();
+    await tester.tap(clear);
+    await tester.pumpAndSettle();
+
+    expect(find.text('market-analysis-q2.pdf'), findsOneWidget);
+    expect(find.byKey(_clearKey), findsNothing);
+  });
+
+  testWidgets('sort really reorders the grid', (tester) async {
+    _phone(tester);
+    await tester.pumpWidget(_app(ArtifactsPage(data: _data())));
+    await tester.pumpAndSettle();
+
+    // Newest first: the HTML page made today leads.
+    expect(
+      tester.getTopLeft(find.text('portfolio-index.html')).dy,
+      lessThan(tester.getTopLeft(find.text('market-analysis-q2.pdf')).dy),
+    );
+
+    await _pick(tester, 'artifact-filter-sort', 'Largest first');
+    expect(
+      tester.getTopLeft(find.text('market-analysis-q2.pdf')).dy,
+      lessThan(tester.getTopLeft(find.text('launch-metrics.csv')).dy),
+    );
+
+    await _pick(tester, 'artifact-filter-sort', 'Name A–Z');
+    expect(
+      tester.getTopLeft(find.text('launch-metrics.csv')).dy,
+      lessThan(tester.getTopLeft(find.text('portfolio-index.html')).dy),
+    );
+  });
+
+  testWidgets('Clear resets the search as well as the chips', (tester) async {
+    _phone(tester);
+    await tester.pumpWidget(_app(ArtifactsPage(data: _data())));
+    await tester.pumpAndSettle();
+
+    await _openSearch(tester);
+    await tester.enterText(find.byType(TextField), 'portfolio');
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(_typeKey('image')));
+    await tester.pumpAndSettle();
+    expect(find.text('No matches'), findsOneWidget);
+
+    final clear = find.byKey(_clearKey);
+    await tester.ensureVisible(clear);
+    await tester.pumpAndSettle();
+    await tester.tap(clear);
+    await tester.pumpAndSettle();
+
+    expect(find.text('market-analysis-q2.pdf'), findsOneWidget);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      isEmpty,
+    );
+    expect(find.byKey(_clearKey), findsNothing);
+  });
+
+  testWidgets('each card is a button that names the file and its type', (
+    tester,
+  ) async {
+    _phone(tester);
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(_app(ArtifactsPage(data: _data())));
+    await tester.pumpAndSettle();
+
+    final node = tester.getSemantics(find.text('portfolio-index.html'));
+    final data = node.getSemanticsData();
+    expect(data.flagsCollection.isButton, isTrue);
+    expect(data.hasAction(SemanticsAction.tap), isTrue);
+    expect(data.label, contains('portfolio-index.html'));
+    expect(data.label, contains('Code'));
+    // The card announces itself once; the visible copy is not repeated.
+    expect('portfolio-index.html'.allMatches(data.label).length, 1);
+    handle.dispose();
+  });
+
+  testWidgets('the search action is absent while there is no field', (
+    tester,
+  ) async {
+    final cases = <V2ArtifactsStatus, List<V2ArtifactItem>>{
+      V2ArtifactsStatus.loading: _artifacts,
+      V2ArtifactsStatus.error: _artifacts,
+      V2ArtifactsStatus.empty: const <V2ArtifactItem>[],
+    };
+    for (final entry in cases.entries) {
+      _phone(tester);
+      await tester.pumpWidget(
+        _app(
+          ArtifactsPage(
+            data: _data(status: entry.key, artifacts: entry.value),
+            onRetry: () {},
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(
+        find.descendant(
+          of: find.byType(AppBar),
+          matching: find.byIcon(Icons.search_rounded),
+        ),
+        findsNothing,
+        reason: entry.key.name,
+      );
+    }
+  });
+
+  testWidgets('the header search brings the field back and focuses it', (
+    tester,
+  ) async {
+    _smallPhone(tester);
+    await tester.pumpWidget(_app(ArtifactsPage(data: _data())));
+    await tester.pumpAndSettle();
+
+    await _scrollTo(tester, find.text('launch-metrics.csv'));
+    // The field has scrolled out of the viewport.
+    expect(find.byType(TextField), findsNothing);
+
+    await _openSearch(tester);
+    final field = find.byType(TextField);
+    expect(field, findsOneWidget);
+    expect(tester.getTopLeft(field).dy, greaterThanOrEqualTo(0));
+    expect(tester.widget<TextField>(field).focusNode?.hasFocus, isTrue);
+  });
+
+  testWidgets('the grid is lazy: a long library builds only what fits', (
+    tester,
+  ) async {
+    _smallPhone(tester);
+    final many = List<V2ArtifactItem>.generate(
+      60,
+      (i) => V2ArtifactItem(
+        id: 'm$i',
+        name: 'artifact-$i.txt',
+        kind: V2ArtifactKind.document,
+        createdAt: _now.subtract(Duration(hours: i)),
+        sizeLabel: '1 KB',
+        sizeBytes: 1024,
+      ),
+    );
+    await tester.pumpWidget(_app(ArtifactsPage(data: _data(artifacts: many))));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(OCard).evaluate().length, lessThan(20));
+    expect(find.text('artifact-59.txt'), findsNothing);
+  });
+
+  testWidgets('a content status with no rows is the empty state', (
+    tester,
+  ) async {
+    _phone(tester);
+    await tester.pumpWidget(
+      _app(ArtifactsPage(data: V2ArtifactsData(now: _now))),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('No artifacts yet'), findsOneWidget);
+    expect(find.byType(TextField), findsNothing);
+    expect(find.byType(ArtifactFilterBar), findsNothing);
+  });
+
+  testWidgets('the card menu offers no Delete without a delete path', (
+    tester,
+  ) async {
+    _phone(tester);
+    await tester.pumpWidget(_app(ArtifactsPage(data: _data())));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byIcon(Icons.more_vert_rounded).first);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Open'), findsOneWidget);
+    expect(find.text('Copy file name'), findsOneWidget);
+    expect(find.text('Delete'), findsNothing);
+  });
+
+  testWidgets('fits 320 to 1280 in both themes and text scales', (
+    tester,
+  ) async {
+    for (final width in <double>[320, 600, 1024, 1280]) {
+      for (final scale in <double>[1, 2]) {
+        for (final dark in <bool>[false, true]) {
+          _screen(tester, width);
+          await tester.pumpWidget(
+            _app(
+              ArtifactsPage(data: _data()),
+              dark: dark,
+              textScale: scale,
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          expect(
+            tester.takeException(),
+            isNull,
+            reason: '$width dp at ${scale}x (${dark ? 'dark' : 'light'})',
+          );
+          expect(find.text('Artifacts'), findsOneWidget);
+          expect(find.text('portfolio-index.html'), findsOneWidget);
+        }
+      }
     }
   });
 }

@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/design/o_tokens.dart';
+import 'package:ovid_ai/ui/v2/settings/plan_billing_page.dart';
 import 'package:ovid_ai/ui/v2/settings/plan_compare_table.dart';
 
 const _plans = V2PlanComparePlan.canonical;
@@ -242,10 +243,7 @@ void main() {
     final valueBefore = tester.getTopLeft(
       find.byKey(const ValueKey('plan-compare-cell-pro-storage')),
     );
-    expect(
-      find.byKey(const ValueKey('plan-compare-scroll')),
-      findsOneWidget,
-    );
+    expect(find.byKey(const ValueKey('plan-compare-scroll')), findsOneWidget);
 
     _tableScrollable(tester).position.jumpTo(220);
     await tester.pump();
@@ -425,5 +423,125 @@ void main() {
     await tester.pump();
 
     expect(retried, 1);
+  });
+
+  test('the comparison table cannot drift from the plan limits', () {
+    // Two canonical tables feed this screen: V2PlanLimits (cards, badges) and
+    // V2PlanComparePlan (the table). A drift here would show one storage or
+    // token cap on the card and another in the table.
+    for (final plan in V2PlanComparePlan.canonical) {
+      final limits = V2PlanLimits.forIdOrFree(plan.id);
+      final prices = V2PlanPrices.forPlan(plan.id);
+      expect(prices, isNotNull, reason: '${plan.id} has spec prices');
+      expect(plan.name, limits.name, reason: '${plan.id} name');
+      expect(plan.storageGb, limits.storageGb, reason: '${plan.id} storage');
+      expect(
+        plan.filesPerWindow,
+        limits.filesPerWindow,
+        reason: '${plan.id} files per window',
+      );
+      expect(
+        plan.fileWindowHours,
+        limits.fileWindowLabel == 'day'
+            ? 24
+            : int.parse(limits.fileWindowLabel.split(' ').first),
+        reason: '${plan.id} file window',
+      );
+      expect(
+        plan.filesPerProject,
+        limits.filesPerProject,
+        reason: '${plan.id} files per project',
+      );
+      expect(
+        plan.manualModels,
+        limits.manualModels,
+        reason: '${plan.id} model access',
+      );
+      expect(
+        plan.autoMultiplier,
+        limits.autoMultiplier,
+        reason: '${plan.id} auto multiplier',
+      );
+      expect(
+        plan.customConnectors,
+        limits.customConnectors,
+        reason: '${plan.id} connectors',
+      );
+      expect(
+        plan.dailyTokenCap,
+        limits.dailyTokenCap,
+        reason: '${plan.id} daily cap',
+      );
+      expect(
+        plan.monthlyTokenCap,
+        limits.monthlyTokenCap,
+        reason: '${plan.id} monthly cap',
+      );
+      expect(
+        plan.priceLabel,
+        '\$${prices!.monthlyUsd}',
+        reason: '${plan.id} price',
+      );
+    }
+  });
+
+  testWidgets('a plan that is not sold shows it in the price row', (
+    tester,
+  ) async {
+    const plans = <V2PlanComparePlan>[
+      V2PlanComparePlan(
+        id: 'go',
+        name: 'Ovid Go',
+        priceLabel: '—',
+        priceAvailable: false,
+        storageGb: 5,
+        filesPerWindow: 80,
+        fileWindowHours: 3,
+        filesPerProject: 100,
+        manualModels: false,
+        autoMultiplier: 1.5,
+        customConnectors: 5,
+        dailyTokenCap: 75000000,
+        monthlyTokenCap: 2250000000,
+      ),
+    ];
+    final semantics = tester.ensureSemantics();
+    await tester.pumpWidget(
+      _app(
+        PlanCompareTable(data: _data(plans: plans, currentPlanId: null)),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Not sold'), findsOneWidget);
+    expect(find.text('/ month'), findsNothing);
+    expect(
+      tester
+          .getSemantics(
+            find.byKey(const ValueKey('plan-compare-cell-go-price')),
+          )
+          .label,
+      'Ovid Go, Price: not sold for this billing period',
+    );
+    semantics.dispose();
+  });
+
+  testWidgets('the current column resolves by id or display name', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        PlanCompareTable(data: _data(currentPlanId: 'Ovid Plus')),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('plan-compare-current-plus')),
+      findsOneWidget,
+    );
+    expect(find.text('Current'), findsOneWidget);
   });
 }

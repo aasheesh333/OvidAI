@@ -6,7 +6,18 @@ import '../../design/o_tokens.dart';
 
 // TODO(l10n): extract this banner's English copy during the ARB pass.
 
-enum V2CollabTurnBannerStatus { loading, empty, error, ready }
+enum V2CollabTurnBannerStatus {
+  loading,
+  empty,
+  error,
+  ready,
+
+  /// The live socket is opening; no one may send yet.
+  connecting,
+
+  /// The socket dropped. The room is readable, but sending stays locked.
+  disconnected,
+}
 
 /// One person waiting for the turn in a shared live chat.
 @immutable
@@ -116,19 +127,30 @@ class V2CollabTurnBannerData {
 /// single action available (ask for the turn).
 ///
 /// Presentational only: the live adapter passes [V2CollabTurnBannerData] and
-/// owns the callbacks. The queue, countdown bar and rule paragraphs belong to
-/// the members page, not here.
-class CollabTurnBanner extends StatelessWidget {
+/// owns the callbacks. A request is in flight from the moment the action is
+/// pressed until the host answers; a refusal is shown in the banner instead of
+/// disappearing into a toast. The countdown itself is owned by the page: this
+/// banner must not announce every passing second.
+class CollabTurnBanner extends StatefulWidget {
   const CollabTurnBanner({
     super.key,
     required this.data,
     this.onRequestTurn,
+    this.onRequestTurnAsync,
     this.onViewQueue,
     this.onRetry,
   });
 
   final V2CollabTurnBannerData data;
+
+  /// Legacy synchronous request. Kept for hosts that already mutate their own
+  /// state in the callback.
   final VoidCallback? onRequestTurn;
+
+  /// Real request path. The returned string is a refusal reason, or null when
+  /// the request was accepted. The banner disables itself while the future is
+  /// pending and announces the refusal when it lands.
+  final Future<String?> Function()? onRequestTurnAsync;
 
   /// Retained for hosts that open the full member list. The one-line banner
   /// has no queue affordance.
@@ -137,73 +159,170 @@ class CollabTurnBanner extends StatelessWidget {
   final VoidCallback? onRetry;
 
   @override
+  State<CollabTurnBanner> createState() => _CollabTurnBannerState();
+}
+
+class _CollabTurnBannerState extends State<CollabTurnBanner> {
+  bool _requesting = false;
+  bool _accepted = false;
+  String? _refusal;
+
+  bool get _hasRequestHandler =>
+      widget.onRequestTurn != null || widget.onRequestTurnAsync != null;
+
+  @override
+  void didUpdateWidget(covariant CollabTurnBanner oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final old = oldWidget.data;
+    final data = widget.data;
+    // A new holder or a new turn starts a new request cycle. An accepted local
+    // request remains visible until the host's projection catches up.
+    if (old.holderName != data.holderName || old.isMyTurn != data.isMyTurn) {
+      _accepted = false;
+      _refusal = null;
+    }
+    if (data.turnRequested && !old.turnRequested) {
+      _accepted = false;
+      _refusal = null;
+    }
+    if (data.status != old.status &&
+        data.status != V2CollabTurnBannerStatus.ready) {
+      _refusal = null;
+    }
+  }
+
+  Future<void> _request() async {
+    if (_requesting || !_hasRequestHandler) return;
+    final async = widget.onRequestTurnAsync;
+    final sync = widget.onRequestTurn;
+    if (async == null) {
+      sync?.call();
+      return;
+    }
+    setState(() {
+      _requesting = true;
+      _refusal = null;
+    });
+    try {
+      final reason = await async();
+      if (!mounted) return;
+      final trimmed = reason?.trim();
+      setState(() {
+        if (trimmed == null || trimmed.isEmpty) {
+          _accepted = true;
+        } else {
+          _refusal = trimmed;
+        }
+      });
+    } catch (error) {
+      if (!mounted) return;
+      final reason = error is String && error.trim().isNotEmpty
+          ? error.trim()
+          : 'Could not request the turn.';
+      setState(() => _refusal = reason);
+    } finally {
+      if (mounted) setState(() => _requesting = false);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return switch (data.status) {
+    return switch (widget.data.status) {
       V2CollabTurnBannerStatus.loading => const _Banner(
         child: OSkeleton(width: 180, height: 16),
       ),
       V2CollabTurnBannerStatus.error => _line(
         context,
         icon: Icons.error_outline_rounded,
-        text: data.errorMessage,
+        text: widget.data.errorMessage,
         danger: true,
-        action: onRetry == null
+        action: widget.onRetry == null
             ? null
-            : _ActionText(label: 'Retry', onPressed: onRetry),
+            : _ActionText(label: 'Retry', onPressed: widget.onRetry),
       ),
-      V2CollabTurnBannerStatus.empty => _freeTurn(context),
-      V2CollabTurnBannerStatus.ready =>
-        data.hasTurn ? _turn(context) : _freeTurn(context),
+      V2CollabTurnBannerStatus.connecting => _line(
+        context,
+        icon: Icons.wifi_tethering_rounded,
+        text: 'Connecting',
+        semanticLabel: 'Connecting. Your messages are locked.',
+      ),
+      V2CollabTurnBannerStatus.disconnected => _line(
+        context,
+        icon: Icons.cloud_off_rounded,
+        text: 'Disconnected',
+        danger: true,
+        semanticLabel: 'Disconnected. Your messages are locked.',
+        action: widget.onRetry == null
+            ? null
+            : _ActionText(label: 'Retry', onPressed: widget.onRetry),
+      ),
+      V2CollabTurnBannerStatus.empty || V2CollabTurnBannerStatus.ready =>
+        widget.data.isMyTurn
+            ? _myTurn(context)
+            : (widget.data.hasTurn ? _holderTurn(context) : _freeTurn(context)),
     };
   }
 
   Widget _freeTurn(BuildContext context) {
+    // A free turn still has a request in flight: asking twice must not look
+    // like an untouched control.
+    final Widget? action;
+    if (_requesting) {
+      action = const _RequestingAction();
+    } else if (_accepted || widget.data.turnRequested) {
+      action = const _StatusText(label: 'In queue');
+    } else {
+      action = _requestAction(label: 'Take turn');
+    }
     return _line(
       context,
       icon: Icons.hourglass_bottom_rounded,
       text: 'Turn is free',
-      action: onRequestTurn == null
-          ? null
-          : _ActionText(
-              label: 'Request turn',
-              onPressed: onRequestTurn,
-            ),
+      action: action,
     );
   }
 
-  Widget _turn(BuildContext context) {
-    final time = data.timeLeftLabel.trim();
-    final text = data.isMyTurn
-        ? (time.isEmpty ? 'Your turn' : 'Your turn · $time')
-        : (time.isEmpty
-              ? '${data.holderName} has the turn'
-              : '${data.holderName} · $time');
-    final Widget? action;
-    if (data.isMyTurn) {
-      action = null;
-    } else if (data.turnRequested) {
-      action = Text(
-        'In queue',
-        style: OType.caption.copyWith(color: OColors.of(context).textMuted),
-      );
-    } else if (onRequestTurn != null) {
-      action = _ActionText(label: 'Request turn', onPressed: onRequestTurn);
-    } else {
-      action = null;
-    }
+  Widget _myTurn(BuildContext context) {
+    final time = widget.data.timeLeftLabel.trim();
+    final text = time.isEmpty ? 'Your turn' : 'Your turn · $time';
     return _line(
       context,
-      icon: data.isMyTurn
-          ? Icons.pan_tool_alt_rounded
-          : Icons.hourglass_bottom_rounded,
+      icon: Icons.pan_tool_alt_rounded,
       text: text,
-      accent: data.isMyTurn,
-      action: action,
-      semanticLabel: [
-        text,
-        if (data.myPositionLabel != null) data.myPositionLabel!,
-      ].join('. '),
+      accent: true,
+      semanticLabel: 'Your turn. Send a message.',
     );
+  }
+
+  Widget _holderTurn(BuildContext context) {
+    final data = widget.data;
+    final time = data.timeLeftLabel.trim();
+    final text = time.isEmpty
+        ? '${data.holderName} has the turn'
+        : '${data.holderName} · $time';
+    final Widget? action;
+    if (_requesting) {
+      action = const _RequestingAction();
+    } else if (_accepted || data.turnRequested) {
+      action = const _StatusText(label: 'In queue');
+    } else {
+      action = _requestAction(label: 'Request turn');
+    }
+    final position = data.myPositionLabel;
+    final spoken = ['${data.holderName} has the turn', ?position].join('. ');
+    return _line(
+      context,
+      icon: Icons.hourglass_bottom_rounded,
+      text: text,
+      semanticLabel: spoken,
+      action: action,
+    );
+  }
+
+  Widget? _requestAction({required String label}) {
+    if (_requesting) return const _RequestingAction();
+    if (!_hasRequestHandler) return null;
+    return _ActionText(label: label, onPressed: _request);
   }
 
   Widget _line(
@@ -216,19 +335,22 @@ class CollabTurnBanner extends StatelessWidget {
     String? semanticLabel,
   }) {
     final c = OColors.of(context);
-    final color = danger
-        ? c.danger
-        : (accent ? c.accent : c.textMuted);
+    final color = danger ? c.danger : (accent ? c.accent : c.textMuted);
+    final refusal = _refusal?.trim();
+    final base = (semanticLabel ?? text).trim();
+    final spoken = refusal == null || refusal.isEmpty
+        ? base
+        : '${base.endsWith('.') ? base : '$base.'} $refusal';
     return _Banner(
+      footer: refusal == null ? null : _RefusalLine(message: refusal),
       child: Semantics(
         container: true,
         explicitChildNodes: true,
-        label: semanticLabel ?? text,
+        liveRegion: true,
+        label: spoken,
         child: Row(
           children: [
-            ExcludeSemantics(
-              child: Icon(icon, size: 18, color: color),
-            ),
+            ExcludeSemantics(child: Icon(icon, size: 18, color: color)),
             const SizedBox(width: OSpace.s),
             Expanded(
               child: ExcludeSemantics(
@@ -243,12 +365,31 @@ class CollabTurnBanner extends StatelessWidget {
                 ),
               ),
             ),
-            if (action != null) ...[
-              const SizedBox(width: OSpace.xs),
-              action,
-            ],
+            if (action != null) ...[const SizedBox(width: OSpace.xs), action],
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Inline refusal. The banner's live region carries the full sentence; this
+/// visible copy is capped at two lines so a long server reason cannot grow the
+/// header without bound.
+class _RefusalLine extends StatelessWidget {
+  const _RefusalLine({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return ExcludeSemantics(
+      child: Text(
+        message,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: OType.caption.copyWith(color: c.danger),
       ),
     );
   }
@@ -276,7 +417,7 @@ class _ActionText extends StatelessWidget {
         child: ConstrainedBox(
           constraints: const BoxConstraints(
             minHeight: OSpace.touch,
-            maxWidth: 120,
+            maxWidth: 160,
           ),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: OSpace.s),
@@ -296,10 +437,66 @@ class _ActionText extends StatelessWidget {
   }
 }
 
+/// The in-flight state of a turn request: a 48 dp target-sized spinner, so the
+/// row does not jump when the action turns into progress.
+class _RequestingAction extends StatelessWidget {
+  const _RequestingAction();
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Semantics(
+      label: 'Requesting turn',
+      child: ExcludeSemantics(
+        child: SizedBox(
+          width: OSpace.touch,
+          height: OSpace.touch,
+          child: Center(
+            child: SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: c.textMuted,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _StatusText extends StatelessWidget {
+  const _StatusText({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Semantics(
+      label: label,
+      child: ExcludeSemantics(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: OSpace.s),
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: OType.caption.copyWith(color: c.textMuted),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _Banner extends StatelessWidget {
-  const _Banner({required this.child});
+  const _Banner({required this.child, this.footer});
 
   final Widget child;
+  final Widget? footer;
 
   @override
   Widget build(BuildContext context) {
@@ -315,10 +512,13 @@ class _Banner extends StatelessWidget {
         borderRadius: BorderRadius.circular(ORadius.m),
         border: Border.all(color: c.hairline),
       ),
-      child: Align(
-        alignment: Alignment.centerLeft,
-        heightFactor: 1,
-        child: child,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Align(alignment: Alignment.centerLeft, child: child),
+          if (footer != null) ...[const SizedBox(height: OSpace.xxs), footer!],
+        ],
       ),
     );
   }

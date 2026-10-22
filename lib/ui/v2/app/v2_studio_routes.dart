@@ -276,9 +276,12 @@ class V2StudioRoutes {
     required String repo,
     required bool portReady,
   }) {
+    // No preview client is wired yet. The screen says so plainly and draws no
+    // controls, rather than painting an empty frame that looks loaded.
     return V2LivePreviewData(
-      status: V2PreviewStatus.empty,
+      status: V2PreviewStatus.unavailable,
       siteName: portReady ? repo.trim() : '',
+      unavailableReason: 'Live preview is not connected yet.',
     );
   }
 }

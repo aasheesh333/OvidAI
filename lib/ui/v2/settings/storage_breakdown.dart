@@ -275,14 +275,21 @@ class StorageBreakdown extends StatelessWidget {
 
   Widget _content(BuildContext context) {
     final c = OColors.of(context);
-    final entries = _entries;
+    // A category with no bytes is omitted, never drawn as a 0-width segment or
+    // a "0%" legend row.
+    final entries = <V2StorageCategoryBytes>[
+      for (final entry in _entries)
+        if (entry.safeBytes > 0) entry,
+    ];
+    if (entries.isEmpty) return _empty();
     final used = _usedBytes;
     final amount = data.amountLabel.isNotEmpty
         ? data.amountLabel
         : formatStorageBytes(used);
+    // A capacity nobody reported is a dash, not "0 GB".
     final total = data.totalLabel.isNotEmpty
         ? data.totalLabel
-        : (data.totalBytes > 0 ? formatStorageBytes(data.totalBytes) : '');
+        : (data.totalBytes > 0 ? formatStorageBytes(data.totalBytes) : '—');
     final percentages = storagePercentageSplit([
       for (final entry in entries) entry.safeBytes,
     ]);
@@ -291,27 +298,7 @@ class StorageBreakdown extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: [
-            Expanded(
-              child: Text(
-                amount,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: OType.h2.copyWith(color: c.text),
-              ),
-            ),
-            if (total.isNotEmpty) ...[
-              const SizedBox(width: OSpace.s),
-              Text(
-                'of $total',
-                maxLines: 1,
-                style: OType.caption.copyWith(color: c.textMuted),
-              ),
-            ],
-          ],
-        ),
+        _Hero(amount: amount, total: total),
         const SizedBox(height: OSpace.s),
         _StorageBar(
           entries: entries,
@@ -337,6 +324,53 @@ class StorageBreakdown extends StatelessWidget {
   }
 }
 
+/// The hero number and its one caption. At large text the caption drops under
+/// the number instead of squeezing it, so a long GB string never overflows.
+class _Hero extends StatelessWidget {
+  const _Hero({required this.amount, required this.total});
+
+  final String amount;
+  final String total;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final amountText = Text(
+      amount,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: OType.h2.copyWith(color: c.text),
+    );
+    if (total.isEmpty) return amountText;
+    final caption = Text(
+      'of $total',
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: OType.caption.copyWith(color: c.textMuted),
+    );
+    final textScale = MediaQuery.textScalerOf(context).scale(14) / 14;
+    if (textScale > 1.3) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          amountText,
+          const SizedBox(height: OSpace.xxs),
+          caption,
+        ],
+      );
+    }
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        Expanded(child: amountText),
+        const SizedBox(width: OSpace.s),
+        Flexible(child: caption),
+      ],
+    );
+  }
+}
+
 /// The single bar: every category is one segment, so its width is its share of
 /// the total and the legend percentages always sum to 100.
 class _StorageBar extends StatelessWidget {
@@ -353,8 +387,8 @@ class _StorageBar extends StatelessWidget {
   final String total;
 
   String get _semanticLabel {
-    final buffer = StringBuffer('Storage: $amount');
-    buffer.write(total.isEmpty ? ' used' : ' used of $total');
+    final buffer = StringBuffer('Storage: $amount used');
+    if (total.isNotEmpty && total != '—') buffer.write(' of $total');
     for (var i = 0; i < entries.length; i++) {
       buffer.write(
         '. ${entries[i].category.label} ${_entrySizeLabel(entries[i])}, '
@@ -495,7 +529,7 @@ class _LegendRow extends StatelessWidget {
                         children: [
                           Expanded(child: label),
                           const SizedBox(width: OSpace.s),
-                          sizeText,
+                          Flexible(child: sizeText),
                           const SizedBox(width: OSpace.m),
                           percentText,
                         ],

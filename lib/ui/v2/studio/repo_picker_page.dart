@@ -104,26 +104,20 @@ class V2RepoPickerPage extends StatefulWidget {
   const V2RepoPickerPage({
     super.key,
     required this.data,
-    this.onSelectRepo,
     this.onConfirm,
     this.onLoadBranches,
     this.onConnectGithub,
     this.onOpenToken,
-    this.onOpenAdvanced,
     this.onSearch,
     this.onRetry,
   });
 
   final V2RepoPickerData data;
 
-  /// Fires when a repository row is tapped. Kept for callers that navigate as
-  /// soon as a repo is known; new wiring should use [onConfirm] instead.
-  final ValueChanged<V2Repo>? onSelectRepo;
-
   /// Fires when the user confirms a repository **and** a branch. This is the
-  /// only callback that should bind the folder for Studio mode. When null the
-  /// primary action stays disabled: a page that cannot bind must not pretend
-  /// it started a workspace.
+  /// only callback that binds the folder for Studio mode, so a repository tap
+  /// alone can never open the chat gate. When null the primary action is
+  /// absent: a page that cannot bind must not pretend it started a workspace.
   final void Function(V2Repo repo, String branch)? onConfirm;
 
   /// Loads the real branch list for a repository when the data snapshot did
@@ -131,7 +125,6 @@ class V2RepoPickerPage extends StatefulWidget {
   final Future<List<V2RepoBranch>> Function(V2Repo repo)? onLoadBranches;
   final VoidCallback? onConnectGithub;
   final VoidCallback? onOpenToken;
-  final VoidCallback? onOpenAdvanced;
   final ValueChanged<String>? onSearch;
   final VoidCallback? onRetry;
 
@@ -175,7 +168,6 @@ class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
       _loadingBranches = false;
       _branchError = null;
     });
-    widget.onSelectRepo?.call(repo);
     if (repo.branches.isEmpty && widget.onLoadBranches != null) {
       unawaited(_loadBranches(repo));
     }
@@ -271,8 +263,11 @@ class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
   Widget build(BuildContext context) {
     final data = widget.data;
     final repo = _selectedRepo;
+    // No confirm handler means no way to bind the folder, so there is no
+    // primary action at all — never a permanently disabled "Start".
     final showPrimary =
         repo != null &&
+        widget.onConfirm != null &&
         (data.status == V2RepoPickerStatus.content ||
             data.status == V2RepoPickerStatus.empty);
     return OScreen(
@@ -333,11 +328,13 @@ class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
                     icon: Icons.folder_open_rounded,
                     title: 'No repositories yet',
                     message: '',
-                    action: OButton(
-                      label: 'Refresh',
-                      icon: Icons.refresh_rounded,
-                      onPressed: widget.onRetry,
-                    ),
+                    action: widget.onRetry == null
+                        ? null
+                        : OButton(
+                            label: 'Refresh',
+                            icon: Icons.refresh_rounded,
+                            onPressed: widget.onRetry,
+                          ),
                   )
                 : OEmptyState(
                     compact: true,
@@ -374,14 +371,12 @@ class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
     return CustomScrollView(
       slivers: [
         if (_loadingBranches)
-          const SliverFillRemaining(
-            hasScrollBody: false,
-            child: Center(
-              child: SizedBox(
+          const SliverToBoxAdapter(
+            child: SizedBox(
+              height: 320,
+              child: OSkeletonList(
                 key: Key('repo-picker-branches-loading'),
-                width: 24,
-                height: 24,
-                child: CircularProgressIndicator(strokeWidth: 2),
+                rows: 4,
               ),
             ),
           )

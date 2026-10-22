@@ -169,12 +169,14 @@ class V2ConnectorConnection {
       category: pick('category', 'Custom'),
       kind: pick('kind', 'app'),
       endpoint: pick('endpoint', ''),
-      target: V2ConnectorTarget.values
-          .where((value) => value.name == json['target'])
-          .firstOrNull ?? V2ConnectorTarget.url,
-      auth: V2ConnectorAuth.values
-          .where((value) => value.name == json['auth'])
-          .firstOrNull ?? V2ConnectorAuth.none,
+      target: V2ConnectorTarget.values.firstWhere(
+        (value) => value.name == json['target'],
+        orElse: () => V2ConnectorTarget.url,
+      ),
+      auth: V2ConnectorAuth.values.firstWhere(
+        (value) => value.name == json['auth'],
+        orElse: () => V2ConnectorAuth.none,
+      ),
       enabled: pick('enabled', true),
       read: pick('read', true),
       write: pick('write', false),
@@ -298,8 +300,11 @@ class V2PrefsConnectorStore implements V2ConnectorStore {
       ..sort((a, b) {
         final at = a.connectedAt;
         final bt = b.connectedAt;
-        if (at == null || bt == null) return a.name.compareTo(b.name);
-        return bt.compareTo(at);
+        if (at == null && bt == null) return a.name.compareTo(b.name);
+        if (at == null) return 1;
+        if (bt == null) return -1;
+        final byDate = bt.compareTo(at);
+        return byDate != 0 ? byDate : a.name.compareTo(b.name);
       });
     return list;
   }

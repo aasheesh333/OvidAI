@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'connector_models.dart';
 import 'connector_store.dart';
@@ -153,6 +154,16 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
 
   V2ConnectorStore get _store => widget.store ?? v2ConnectorStore;
 
+  /// The way out of this pushed page. Null when the page is a root preview and
+  /// there is nothing to pop, so no control pretends to go back.
+  VoidCallback? get _close {
+    final external = widget.onBack;
+    if (external != null) return external;
+    return Navigator.of(context).canPop()
+        ? () => Navigator.of(context).maybePop()
+        : null;
+  }
+
   @override
   void didUpdateWidget(covariant ConnectorPermissionsPage oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -168,7 +179,10 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
   bool _isToolEnabled(V2ConnectorPermissionTool tool) =>
       tool.enabled && !_disabledTools.contains(tool.id);
 
-  Future<void> _setToolEnabled(V2ConnectorPermissionTool tool, bool value) async {
+  Future<void> _setToolEnabled(
+    V2ConnectorPermissionTool tool,
+    bool value,
+  ) async {
     setState(() {
       if (value) {
         _disabledTools.remove(tool.id);
@@ -232,23 +246,30 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
     final external = widget.onRevokePermission;
     if (external != null) {
       external(item.id);
-    } else {
-      await _persistRevoke(item.id);
+    } else if (!await _persistRevoke(item.id)) {
+      // The store refused: put the grant back rather than show a revoke that
+      // never happened.
+      if (!mounted) return;
+      setState(() => _revoked.remove(item.id));
+      showOSnack(context, 'Could not save that change. Try again.');
+      return;
     }
     if (!mounted) return;
     showOSnack(context, '“${item.name}” revoked.');
   }
 
-  Future<void> _persistRevoke(String permissionId) async {
+  /// Persists one revoked grant. Returns false when the store refused, so the
+  /// caller can roll the optimistic row back.
+  Future<bool> _persistRevoke(String permissionId) async {
     final kind = V2ConnectorPermissionKind.values
         .where((value) => value.name == permissionId)
         .firstOrNull;
-    if (kind == null) return;
+    if (kind == null) return false;
     try {
       await _store.setPermission(_data.connectorId, kind, false);
+      return true;
     } catch (_) {
-      if (!mounted) return;
-      showOSnack(context, 'Could not save that change. Try again.');
+      return false;
     }
   }
 
@@ -280,8 +301,20 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
     if (external != null) {
       external();
     } else {
+      final failed = <String>[];
       for (final item in _data.permissions) {
-        await _persistRevoke(item.id);
+        if (!await _persistRevoke(item.id)) failed.add(item.id);
+      }
+      if (failed.isNotEmpty) {
+        if (!mounted) return;
+        // Keep the rows that really were revoked and put the rest back.
+        setState(() {
+          for (final id in failed) {
+            _revoked.remove(id);
+          }
+        });
+        showOSnack(context, 'Could not revoke every permission. Try again.');
+        return;
       }
     }
     if (!mounted) return;
@@ -302,10 +335,7 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(
-            message,
-            style: OType.bodySm.copyWith(color: c.textMuted),
-          ),
+          Text(message, style: OType.bodySm.copyWith(color: c.textMuted)),
           const SizedBox(height: OSpace.l),
           OButton(
             label: confirmLabel,
@@ -328,17 +358,21 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
 
   @override
   Widget build(BuildContext context) {
+    final close = _close;
     return OScaffold(
       appBar: OAppBar(
         title: 'Permissions',
         subtitle: _data.connectorName,
-        leading: OIconButton(
-          icon: Icons.arrow_back_rounded,
-          semanticLabel: 'Back',
-          onPressed: widget.onBack ?? () => Navigator.maybePop(context),
-        ),
+        showBack: false,
+        leading: close == null
+            ? null
+            : OIconButton(
+                icon: Icons.arrow_back_rounded,
+                semanticLabel: 'Back',
+                onPressed: close,
+              ),
       ),
-      body: OFadeSlide(child: _body(context)),
+      body: OFadeSlide(child: OContent(maxWidth: 640, child: _body(context))),
     );
   }
 
@@ -356,16 +390,18 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
   }
 
   Widget _empty(BuildContext context) {
+    final close = _close;
     return OEmptyState(
       icon: Icons.verified_user_outlined,
       title: 'No permissions to review',
-      message:
-          '${_data.connectorName} has not asked for anything yet.',
-      action: OButton(
-        label: 'Back to connector',
-        icon: Icons.arrow_back_rounded,
-        onPressed: widget.onBack,
-      ),
+      message: '${_data.connectorName} has not asked for anything yet.',
+      action: close == null
+          ? null
+          : OButton(
+              label: 'Back to connector',
+              icon: Icons.arrow_back_rounded,
+              onPressed: close,
+            ),
     );
   }
 
@@ -378,12 +414,7 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
     ].where((scope) => _data.forScope(scope).isNotEmpty);
 
     return ListView(
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.l,
-        OSpace.s,
-        OSpace.l,
-        OSpace.xl,
-      ),
+      padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xl),
       children: [
         _summary(context),
         const SizedBox(height: OSpace.m),
@@ -489,9 +520,7 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
           const SizedBox(height: OSpace.s),
           Semantics(
             label: '$granted of $total permissions granted',
-            child: ExcludeSemantics(
-              child: OProgressBar(value: fraction),
-            ),
+            child: ExcludeSemantics(child: OProgressBar(value: fraction)),
           ),
           const SizedBox(height: OSpace.m),
           Row(
@@ -574,10 +603,7 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
     );
   }
 
-  Widget _permissionRow(
-    BuildContext context,
-    V2ConnectorPermissionItem item,
-  ) {
+  Widget _permissionRow(BuildContext context, V2ConnectorPermissionItem item) {
     final c = OColors.of(context);
     final granted = _isGranted(item);
     final tint = _scopeColor(item.scope, c);
@@ -704,15 +730,16 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
                     style: OType.bodySm.copyWith(color: c.textMuted),
                   ),
                   const SizedBox(height: OSpace.s),
-                  Align(
-                    alignment: AlignmentDirectional.centerStart,
-                    child: OButton(
-                      label: 'Back to connector',
-                      icon: Icons.arrow_back_rounded,
-                      variant: OButtonVariant.ghost,
-                      onPressed: widget.onBack,
+                  if (_close != null)
+                    Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: OButton(
+                        label: 'Back to connector',
+                        icon: Icons.arrow_back_rounded,
+                        variant: OButtonVariant.ghost,
+                        onPressed: _close,
+                      ),
                     ),
-                  ),
                 ],
               ),
             )
@@ -736,7 +763,9 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
     final enabled = _isToolEnabled(tool) && !blocked;
     final tint = _scopeColor(tool.scope, c);
 
-    return MergeSemantics(
+    return Semantics(
+      container: true,
+      explicitChildNodes: true,
       child: Padding(
         key: ValueKey('connector-permissions-tool-${tool.id}'),
         padding: const EdgeInsets.symmetric(
@@ -798,14 +827,17 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
               ),
             ),
             const SizedBox(width: OSpace.s),
-            SizedBox(
-              height: OSpace.touch,
-              child: Switch(
-                key: ValueKey('connector-permissions-tool-switch-${tool.id}'),
-                value: enabled,
-                onChanged: blocked
-                    ? null
-                    : (value) => _setToolEnabled(tool, value),
+            Semantics(
+              label: '${tool.name} tool',
+              child: SizedBox(
+                height: OSpace.touch,
+                child: Switch(
+                  key: ValueKey('connector-permissions-tool-switch-${tool.id}'),
+                  value: enabled,
+                  onChanged: blocked
+                      ? null
+                      : (value) => _setToolEnabled(tool, value),
+                ),
               ),
             ),
           ],
@@ -886,19 +918,13 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
               ),
               const SizedBox(width: OSpace.s),
               Expanded(
-                child: Text(
-                  title,
-                  style: OType.h3.copyWith(color: c.text),
-                ),
+                child: Text(title, style: OType.h3.copyWith(color: c.text)),
               ),
             ],
           ),
           const SizedBox(height: OSpace.m),
           if (items.isEmpty)
-            Text(
-              emptyLabel,
-              style: OType.bodySm.copyWith(color: c.textMuted),
-            )
+            Text(emptyLabel, style: OType.bodySm.copyWith(color: c.textMuted))
           else
             for (var i = 0; i < items.length; i++) ...[
               if (i > 0) const SizedBox(height: OSpace.s),
@@ -946,11 +972,7 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
                   color: c.danger.withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(ORadius.m),
                 ),
-                child: Icon(
-                  Icons.link_off_rounded,
-                  size: 20,
-                  color: c.danger,
-                ),
+                child: Icon(Icons.link_off_rounded, size: 20, color: c.danger),
               ),
               const SizedBox(width: OSpace.m),
               Expanded(

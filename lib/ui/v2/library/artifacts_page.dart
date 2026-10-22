@@ -111,6 +111,7 @@ class ArtifactsPage extends StatefulWidget {
 class _ArtifactsPageState extends State<ArtifactsPage> {
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _searchFocus = FocusNode();
+  final ScrollController _scroll = ScrollController();
   V2ArtifactFilters _filters = const V2ArtifactFilters();
   String _query = '';
 
@@ -118,10 +119,19 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
   void dispose() {
     _searchController.dispose();
     _searchFocus.dispose();
+    _scroll.dispose();
     super.dispose();
   }
 
   bool get _filtering => _query.trim().isNotEmpty || _filters.isActive;
+
+  /// A content status with no rows is an empty library, not a blank page: the
+  /// host may hand over its rows before it has loaded them.
+  V2ArtifactsStatus get _status =>
+      widget.data.status == V2ArtifactsStatus.content &&
+          widget.data.artifacts.isEmpty
+      ? V2ArtifactsStatus.empty
+      : widget.data.status;
 
   /// One filter option per chat title, with how many files it made.
   List<V2ArtifactSession> _sessionsFor(List<V2ArtifactItem> artifacts) {
@@ -248,19 +258,23 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    final status = _status;
     return OScreen(
       title: 'Artifacts',
       showBack: true,
       actions: [
-        OIconButton(
-          icon: Icons.search_rounded,
-          semanticLabel: 'Search artifacts',
-          onPressed: widget.onSearch ?? _focusSearch,
-        ),
+        // The field is part of the content state; a search action in the
+        // header would be a dead control while the library loads or fails.
+        if (widget.onSearch != null || status == V2ArtifactsStatus.content)
+          OIconButton(
+            icon: Icons.search_rounded,
+            semanticLabel: 'Search artifacts',
+            onPressed: widget.onSearch ?? _revealSearch,
+          ),
       ],
       child: OFadeSlide(
         child: OAnimatedSwap(
-          child: switch (widget.data.status) {
+          child: switch (status) {
             V2ArtifactsStatus.loading => const OSkeletonList(rows: 6),
             V2ArtifactsStatus.error => OErrorState(
               message: widget.data.errorMessage,
@@ -274,7 +288,19 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
     );
   }
 
-  void _focusSearch() => _searchFocus.requestFocus();
+  /// Brings the search field back into view (the list scrolls it away) and
+  /// focuses it, so the header action has a job beyond duplicating the icon.
+  void _revealSearch() {
+    if (_scroll.hasClients) {
+      final duration = OMove.duration(context, OMotion.base);
+      if (duration == Duration.zero) {
+        _scroll.jumpTo(0);
+      } else {
+        _scroll.animateTo(0, duration: duration, curve: OMotion.standard);
+      }
+    }
+    _searchFocus.requestFocus();
+  }
 
   /// Shown when the library itself is empty (status empty). Distinct from
   /// "No matches", which means artifacts exist but none pass the filters.
@@ -304,6 +330,7 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
         final textBlock = OSpace.m * 2 + OSpace.touch + textScale * 16 * 1.4;
 
         return CustomScrollView(
+          controller: _scroll,
           slivers: [
             SliverPadding(
               padding: const EdgeInsets.only(top: OSpace.s),
@@ -345,6 +372,8 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
                     ArtifactFilterBar(
                       filters: _filters,
                       sessions: sessions,
+                      clearActive: _query.trim().isNotEmpty,
+                      onClear: _clearFilters,
                       onChanged: (next) => setState(() => _filters = next),
                     ),
                     const SizedBox(height: OSpace.l),
@@ -404,7 +433,7 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
     return OCard(
       padding: EdgeInsets.zero,
       onTap: () => _open(item),
-      semanticLabel: '${item.name}, ${_typeName(item.kind)}, $time',
+      semanticLabel: '${item.name}, ${_kindLabel(item)}, $time',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -429,13 +458,17 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
                 Row(
                   children: [
                     Expanded(
-                      child: Text(
-                        item.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.bodySm.copyWith(
-                          color: c.text,
-                          fontWeight: FontWeight.w600,
+                      // The card's own label already names the file, its type
+                      // and the date; the visible copy is for the eye only.
+                      child: ExcludeSemantics(
+                        child: Text(
+                          item.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: OType.bodySm.copyWith(
+                            color: c.text,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ),
                     ),
@@ -449,18 +482,16 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
                 ),
                 Row(
                   children: [
-                    Icon(
-                      _kindGlyph(item.kind),
-                      size: 13,
-                      color: c.textFaint,
-                    ),
+                    Icon(_kindGlyph(item.kind), size: 13, color: c.textFaint),
                     const SizedBox(width: OSpace.xs),
                     Expanded(
-                      child: Text(
-                        meta,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.caption.copyWith(color: c.textMuted),
+                      child: ExcludeSemantics(
+                        child: Text(
+                          meta,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: OType.caption.copyWith(color: c.textMuted),
+                        ),
                       ),
                     ),
                   ],
@@ -494,6 +525,11 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
     V2ArtifactKind.data => 'Data',
   };
 
+  /// The singular family name a person reads, with HTML pages called pages
+  /// rather than documents (the filter bar makes the same distinction).
+  String _kindLabel(V2ArtifactItem item) =>
+      _isPage(item) ? 'Page' : _typeName(item.kind);
+
   /// Opening a card always goes somewhere real: the host callback when it has
   /// one, otherwise the library's own detail route built from the item.
   void _open(V2ArtifactItem item) {
@@ -513,7 +549,7 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
         builder: (_) => ArtifactDetailPage(
           data: V2ArtifactDetailData(
             name: item.name,
-            typeLabel: _filterLabel(item.kind),
+            typeLabel: _kindLabel(item),
             sizeLabel: item.sizeLabel,
             createdLabel:
                 'Created ${_dateLabel(item.createdAt, now).toLowerCase()}',
@@ -524,10 +560,7 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
             downloadUrl: link ?? '',
             shareUrl: link ?? '',
             details: <V2ArtifactDetailRow>[
-              V2ArtifactDetailRow(
-                label: 'Type',
-                value: _filterLabel(item.kind),
-              ),
+              V2ArtifactDetailRow(label: 'Type', value: _kindLabel(item)),
               V2ArtifactDetailRow(label: 'Size', value: item.sizeLabel),
               V2ArtifactDetailRow(
                 label: 'Added',
@@ -794,14 +827,6 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
       ),
     );
   }
-
-  String _filterLabel(V2ArtifactKind? kind) => switch (kind) {
-    null => 'All',
-    V2ArtifactKind.image => 'Images',
-    V2ArtifactKind.document => 'Documents',
-    V2ArtifactKind.code => 'Code',
-    V2ArtifactKind.data => 'Data',
-  };
 
   String _extension(String name) {
     final dot = name.lastIndexOf('.');

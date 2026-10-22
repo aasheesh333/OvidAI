@@ -88,8 +88,9 @@ void main() {
   ) async {
     await _pump(tester, title: 'Language & goal', onPrimary: () {});
 
-    expect(find.text('STEP 1 OF 3'), findsOneWidget);
-    expect(find.text('Setup'), findsOneWidget);
+    expect(find.text('STEP 1 OF 4'), findsOneWidget);
+    // The default chrome names no step: the header already does.
+    expect(find.text('Setup'), findsNothing);
     expect(find.text('Language & goal'), findsOneWidget);
     expect(find.text('Step body'), findsOneWidget);
     expect(find.text('Continue'), findsOneWidget);
@@ -99,7 +100,7 @@ void main() {
   testWidgets('renders in dark', (tester) async {
     await _pump(tester, dark: true, title: 'Language & goal', onPrimary: () {});
 
-    expect(find.text('STEP 1 OF 3'), findsOneWidget);
+    expect(find.text('STEP 1 OF 4'), findsOneWidget);
     expect(find.text('Continue'), findsOneWidget);
     final scaffold = tester.widget<Scaffold>(find.byType(Scaffold));
     expect(scaffold.backgroundColor, OColors.dark.bg);
@@ -367,7 +368,7 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.text('Language & goal'), findsOneWidget);
-    expect(find.text('STEP 1 OF 3'), findsOneWidget);
+    expect(find.text('STEP 1 OF 4'), findsOneWidget);
     expect(find.text('Continue'), findsOneWidget);
 
     for (final key in const [
@@ -447,7 +448,7 @@ void main() {
     expect(find.bySemanticsLabel('Close'), findsOneWidget);
     // The button's own node and the platform button node both carry the label.
     expect(find.bySemanticsLabel('Skip'), findsWidgets);
-    expect(find.bySemanticsLabel('Step 1 of 3'), findsOneWidget);
+    expect(find.bySemanticsLabel('Step 1 of 4'), findsOneWidget);
     expect(find.bySemanticsLabel('Continue'), findsWidgets);
 
     handle.dispose();

@@ -278,7 +278,10 @@ String formatArtifactBytes(int bytes) {
 
 /// Filter bar for the artifacts library: one horizontally scrolling row of
 /// chips — the type families, then the source, chat, date and sort pickers,
-/// then Clear while any filter is active.
+/// then Clear while anything is filtering.
+///
+/// The chat picker is omitted when no artifact came from a session, so the bar
+/// never offers a sheet with one option and nothing to pick.
 ///
 /// Presentational and controlled: [filters] is the single source of truth and
 /// every change is reported through [onChanged]. Picker choices open the
@@ -290,6 +293,8 @@ class ArtifactFilterBar extends StatelessWidget {
     this.summary = const V2ArtifactSizeSummary(),
     this.sessions = const <V2ArtifactSession>[],
     this.onChanged,
+    this.onClear,
+    this.clearActive = false,
     this.enabled = true,
   });
 
@@ -300,10 +305,20 @@ class ArtifactFilterBar extends StatelessWidget {
   final List<V2ArtifactSession> sessions;
   final ValueChanged<V2ArtifactFilters>? onChanged;
 
+  /// Clears everything the page owns, including a search query the bar cannot
+  /// see. When null, Clear resets only [filters].
+  final VoidCallback? onClear;
+
+  /// True when state outside the bar (the search query) is narrowing the list,
+  /// so Clear is offered even before a chip is picked.
+  final bool clearActive;
+
   /// False while the library is loading, so the controls announce as disabled.
   final bool enabled;
 
   bool get _interactive => enabled && onChanged != null;
+
+  bool get _canClear => filters.isActive || clearActive;
 
   V2ArtifactSession? get _selectedSession {
     final id = filters.sessionId;
@@ -362,17 +377,19 @@ class ArtifactFilterBar extends StatelessWidget {
               onTap: _interactive ? () => _pickSource(context) : null,
             ),
             const SizedBox(width: OSpace.s),
-            _FilterButton(
-              key: const ValueKey<String>('artifact-filter-session'),
-              icon: Icons.chat_bubble_outline_rounded,
-              label: _sessionLabel,
-              semanticLabel: 'Chat: $_sessionLabel',
-              hint: 'Opens the chat filter',
-              selected: filters.sessionId != null,
-              maxWidth: cap,
-              onTap: _interactive ? () => _pickSession(context) : null,
-            ),
-            const SizedBox(width: OSpace.s),
+            if (sessions.isNotEmpty || filters.sessionId != null) ...[
+              _FilterButton(
+                key: const ValueKey<String>('artifact-filter-session'),
+                icon: Icons.chat_bubble_outline_rounded,
+                label: _sessionLabel,
+                semanticLabel: 'Chat: $_sessionLabel',
+                hint: 'Opens the chat filter',
+                selected: filters.sessionId != null,
+                maxWidth: cap,
+                onTap: _interactive ? () => _pickSession(context) : null,
+              ),
+              const SizedBox(width: OSpace.s),
+            ],
             _FilterButton(
               key: const ValueKey<String>('artifact-filter-date'),
               icon: filters.date.icon,
@@ -394,14 +411,21 @@ class ArtifactFilterBar extends StatelessWidget {
               maxWidth: cap,
               onTap: _interactive ? () => _pickSort(context) : null,
             ),
-            if (_interactive && filters.isActive) ...[
+            if (_interactive && _canClear) ...[
               const SizedBox(width: OSpace.s),
               OChip(
                 key: const ValueKey<String>('artifact-filter-clear'),
                 label: 'Clear',
-                icon: Icons.close_rounded,
+                icon: Icons.filter_alt_off_rounded,
                 semanticLabel: 'Clear filters',
-                onTap: () => _change(const V2ArtifactFilters()),
+                onTap: () {
+                  final clear = onClear;
+                  if (clear != null) {
+                    clear();
+                    return;
+                  }
+                  _change(const V2ArtifactFilters());
+                },
               ),
             ],
           ],
@@ -555,7 +579,7 @@ class _FilterButton extends StatelessWidget {
     final fg = selected ? c.accent : (enabled ? c.text : c.textFaint);
     final visual = Container(
       height: OSpace.touch,
-      padding: const EdgeInsets.symmetric(horizontal: 14),
+      padding: const EdgeInsets.symmetric(horizontal: OSpace.m),
       decoration: BoxDecoration(
         color: selected ? c.accentSoft : c.surface,
         borderRadius: BorderRadius.circular(ORadius.m),
@@ -567,7 +591,7 @@ class _FilterButton extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(icon, size: 16, color: fg),
-          const SizedBox(width: 6),
+          const SizedBox(width: OSpace.s),
           Flexible(
             child: Text(
               label,
@@ -575,12 +599,11 @@ class _FilterButton extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
               style: OType.label.copyWith(
                 color: fg,
-                fontSize: 13,
                 fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
               ),
             ),
           ),
-          const SizedBox(width: 4),
+          const SizedBox(width: OSpace.xs),
           Icon(
             Icons.expand_more_rounded,
             size: 18,

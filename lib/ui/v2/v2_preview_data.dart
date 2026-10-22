@@ -1864,12 +1864,15 @@ V2CredentialsPageData previewCredentialsData() {
   );
 }
 
-/// A healthy account with a verified sign-in address.
+/// A healthy account with one day of real-looking usage.
 V2AccountHealthPageData previewAccountHealthPageData() {
   return const V2AccountHealthPageData(
-    emailVerified: true,
-    emailLabel: 'aarav@gmail.com',
+    planLabel: 'Plus',
     accountStatus: V2AccountStatus.active,
+    todayUsageLabel: '8.2K tokens',
+    todayUsageFraction: 0.16,
+    storageUsedLabel: '1.2 GB of 15 GB',
+    storageFraction: 0.08,
   );
 }
 
@@ -2007,28 +2010,20 @@ V2MemoryFilesPageData previewMemoryFilesData() {
   );
 }
 
-/// A published sandbox preview with real site copy and an expiry.
+/// A live sandbox preview in its honest "nothing to show yet" state.
+///
+/// The preview screen never paints a fake page: the demo frame carries a real
+/// URL and deadline, and the frame itself is supplied by the sandbox at
+/// runtime. A gallery preview therefore shows the connecting state, which is
+/// exactly what a user sees for the first second of a real preview.
 V2LivePreviewData previewLivePreviewData() {
   return V2LivePreviewData(
+    status: V2PreviewStatus.connecting,
     siteName: 'Ovid Studio',
-    url: 'preview.ovidsi.com/79f9b4c0e',
-    version: 'Version 4',
-    eyebrow: 'Sandbox preview',
-    headline: 'Ship a landing page before lunch.',
-    description:
-        'Ovid built this page from your brief. Every change lands here first.',
-    primaryCta: 'Open the app',
-    secondaryCta: 'Read the docs',
-    metrics: const <V2PreviewMetric>[
-      V2PreviewMetric(value: '12', label: 'sections', caption: 'One page'),
-      V2PreviewMetric(value: '48 KB', label: 'weight', caption: 'No images'),
-      V2PreviewMetric(value: '100', label: 'speed', caption: 'Fast'),
-    ],
-    featureTitle: 'One calm surface',
-    featureBody: 'One header, one action and room to breathe.',
-    featureBadge: 'New',
-    expiresLabel: 'Expires in 6 days',
+    url: 'https://preview.ovidsi.com/79f9b4c0e',
     expiresAt: DateTime(2026, 10, 28),
+    unavailableReason:
+        'The sandbox has not sent a frame yet. It usually appears in a second.',
   );
 }
 

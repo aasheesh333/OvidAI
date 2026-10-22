@@ -141,16 +141,18 @@ class V2UsageData {
       dailyUsedLabel.trim().isEmpty ? unknownLabel : dailyUsedLabel;
 
   /// The exact 24 h cap from the authoritative plan table when the caller did
-  /// not supply one.
+  /// not supply one. Compact, because it sits next to the hero number.
   String get limitText => dailyLimitLabel.trim().isEmpty
-      ? planLimits.dailyCapLabel
+      ? _compactCap(planLimits.dailyTokenCap)
       : dailyLimitLabel;
 
   String get monthlyUsedText =>
       monthlyUsedLabel.trim().isEmpty ? unknownLabel : monthlyUsedLabel;
 
+  /// The exact 30 day cap, compact. A caller-supplied label wins; otherwise the
+  /// plan table is the only source of truth.
   String get monthlyLimitText => monthlyLimitLabel.trim().isEmpty
-      ? planLimits.monthlyCapLabel
+      ? _compactCap(planLimits.monthlyTokenCap)
       : monthlyLimitLabel;
 
   String get monthlyPercentText =>
@@ -224,9 +226,13 @@ class V2UsageData {
 }
 
 class UsagePage extends StatelessWidget {
-  const UsagePage({super.key, required this.data});
+  const UsagePage({super.key, required this.data, this.clock});
 
   final V2UsageData data;
+
+  /// Clock source for the reset countdown. Defaults to [DateTime.now]; tests
+  /// inject one so a tick can be proven without waiting a real minute.
+  final DateTime Function()? clock;
 
   @override
   Widget build(BuildContext context) {
@@ -293,7 +299,7 @@ class UsagePage extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _UsageHero(data: data),
+          _UsageHero(data: data, clock: clock),
           const SizedBox(height: OSpace.l),
           _DailyTokensSection(data: data),
         ],
@@ -302,33 +308,39 @@ class UsagePage extends StatelessWidget {
   }
 }
 
-/// One hero number: today's tokens, the cap and the live reset. Everything
-/// else on the screen is the single activity chart.
+/// One hero number: today's tokens, the cap and the live reset, with the
+/// 30 day allowance as a single caption underneath. Everything else on the
+/// screen is the single activity chart.
 class _UsageHero extends StatelessWidget {
-  const _UsageHero({required this.data});
+  const _UsageHero({required this.data, this.clock});
 
   final V2UsageData data;
+  final DateTime Function()? clock;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     final fraction = data.dailyFraction.clamp(0.0, 1.0).toDouble();
-    final limit = data.dailyLimitLabel.trim().isNotEmpty
-        ? data.dailyLimitLabel
-        : _compactCap(data.planLimits.dailyTokenCap);
+    final limit = data.limitText;
+    // A missing count is `—`, and an unknown count must not paint an empty
+    // progress track: a 0-width bar reads as "no usage" when the truth is
+    // "not loaded".
+    final hasDaily = data.dailyUsedLabel.trim().isNotEmpty;
     final fallback = data.resetLabel.isNotEmpty
         ? data.resetLabel
         : (data.resetsAtLabel.isEmpty ? '' : 'Resets at ${data.resetsAtLabel}');
+    final monthlyUsed = data.monthlyUsedText;
+    final monthlyLimit = data.monthlyLimitText;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Text('Tokens today', style: OType.caption.copyWith(color: c.textMuted)),
         const SizedBox(height: OSpace.xs),
         Semantics(
-          label: data.dailyUsedLabel.trim().isEmpty
-              ? 'Today\'s token usage is not available. '
-                    'The limit is $limit tokens.'
-              : '${data.usedText} of $limit tokens used today',
+          label: hasDaily
+              ? '${data.usedText} of $limit tokens used today'
+              : 'Today\'s token usage is not available. '
+                    'The limit is $limit tokens.',
           child: ExcludeSemantics(
             child: Text(
               data.usedText,
@@ -344,16 +356,36 @@ class _UsageHero extends StatelessWidget {
           overflow: TextOverflow.ellipsis,
           style: OType.bodySm.copyWith(color: c.textMuted),
         ),
-        const SizedBox(height: OSpace.m),
-        OProgressBar(value: fraction, height: 8),
+        if (hasDaily) ...[
+          const SizedBox(height: OSpace.m),
+          OProgressBar(value: fraction, height: 8),
+        ],
         if (fallback.isNotEmpty || data.resetsAt != null) ...[
           const SizedBox(height: OSpace.s),
           _ResetCountdown(
             resetsAt: data.resetsAt,
             fallback: fallback,
+            clock: clock,
             style: OType.caption.copyWith(color: c.textMuted),
           ),
         ],
+        const SizedBox(height: OSpace.m),
+        // The second real number: the 30 day allowance from `/usage/history`.
+        // It stays a caption under the one hero instead of a second card.
+        Semantics(
+          label: data.monthlyUsedLabel.trim().isEmpty
+              ? 'This month\'s token usage is not available. '
+                    'The limit is $monthlyLimit tokens.'
+              : '$monthlyUsed of $monthlyLimit tokens used this month',
+          child: ExcludeSemantics(
+            child: Text(
+              'This month: $monthlyUsed of $monthlyLimit',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: OType.caption.copyWith(color: c.textMuted),
+            ),
+          ),
+        ),
       ],
     );
   }
@@ -369,11 +401,13 @@ class _ResetCountdown extends StatefulWidget {
     required this.resetsAt,
     required this.fallback,
     required this.style,
+    this.clock,
   });
 
   final DateTime? resetsAt;
   final String fallback;
   final TextStyle style;
+  final DateTime Function()? clock;
 
   @override
   State<_ResetCountdown> createState() => _ResetCountdownState();
@@ -381,6 +415,8 @@ class _ResetCountdown extends StatefulWidget {
 
 class _ResetCountdownState extends State<_ResetCountdown> {
   Timer? _timer;
+
+  DateTime get _now => widget.clock?.call() ?? DateTime.now();
 
   @override
   void initState() {
@@ -391,17 +427,28 @@ class _ResetCountdownState extends State<_ResetCountdown> {
   @override
   void didUpdateWidget(_ResetCountdown oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.resetsAt != widget.resetsAt) _syncTimer();
+    if (oldWidget.resetsAt != widget.resetsAt ||
+        oldWidget.clock != widget.clock) {
+      _syncTimer();
+    }
   }
 
   void _syncTimer() {
     _timer?.cancel();
     _timer = null;
-    if (widget.resetsAt == null) return;
+    final at = widget.resetsAt;
+    // A window that has already reset has nothing left to tick. Keeping the
+    // periodic timer alive would wake the device once a minute forever.
+    if (at == null || !at.isAfter(_now)) return;
     // Minute resolution is all the copy shows, so one tick a minute is enough
     // and keeps the page from waking the device every second.
     _timer = Timer.periodic(const Duration(minutes: 1), (_) {
-      if (mounted) setState(() {});
+      if (!mounted) return;
+      if (!at.isAfter(_now)) {
+        _timer?.cancel();
+        _timer = null;
+      }
+      setState(() {});
     });
   }
 
@@ -416,7 +463,7 @@ class _ResetCountdownState extends State<_ResetCountdown> {
     final resetsAt = widget.resetsAt;
     final label = resetsAt == null
         ? widget.fallback
-        : 'Resets ${formatTimeUntil(resetsAt)}';
+        : 'Resets ${formatTimeUntil(resetsAt, now: _now)}';
     return Text(
       label,
       maxLines: 1,
@@ -477,14 +524,15 @@ String _compactCap(int value) {
 }
 
 V2TokenChartPoint _tokenPoint(V2UsageDay day) {
+  // Only a real count may reach the chart. Falling back to the bar fraction
+  // would invent a token total in the screen-reader summary.
   final parsed = day.tokens > 0
       ? day.tokens.toDouble()
       : _tokensFromLabel(day.valueLabel);
   return V2TokenChartPoint(
     id: day.id,
     label: day.label,
-    // A day without an absolute count still keeps its relative height.
-    value: parsed > 0 ? parsed : day.fraction * 1000000,
+    value: parsed,
     valueLabel: day.valueLabel,
   );
 }

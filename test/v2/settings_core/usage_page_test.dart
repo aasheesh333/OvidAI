@@ -103,8 +103,11 @@ V2UsageData _usageData({
   );
 }
 
-Widget _app(ThemeData theme, V2UsageData data) {
-  return MaterialApp(theme: theme, home: UsagePage(data: data));
+Widget _app(ThemeData theme, V2UsageData data, {DateTime Function()? clock}) {
+  return MaterialApp(
+    theme: theme,
+    home: UsagePage(data: data, clock: clock),
+  );
 }
 
 Widget _scaledApp(ThemeData theme, V2UsageData data, double scale) {
@@ -165,6 +168,139 @@ void main() {
     expect(find.byType(V2ImageUsageChart), findsNothing);
     expect(find.textContaining('Free and Go use Auto'), findsNothing);
     expect(find.text('Upgrade plan'), findsNothing);
+  });
+
+  testWidgets('monthly total comes from the ledger, missing is a dash', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    await tester.pumpWidget(_app(OTheme.light(), _usageData()));
+    await tester.pumpAndSettle();
+
+    expect(find.text('This month: 1.02B of 1.5B'), findsOneWidget);
+
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        V2UsageData(
+          planId: 'free',
+          dailyUsedLabel: '12.4M',
+          dailyLimitLabel: '50M',
+          dailyFraction: 0.248,
+          days: _days,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The monthly cap still comes from the plan table, but the unknown used
+    // value is a dash, never a fabricated zero.
+    expect(find.text('This month: — of 1.5B'), findsOneWidget);
+  });
+
+  testWidgets('an unknown daily count paints no progress and no zero', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        V2UsageData(
+          planId: 'free',
+          monthlyUsedLabel: '1.02B',
+          monthlyLimitLabel: '1.5B',
+          days: _days,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('—'), findsOneWidget);
+    expect(find.byType(OProgressBar), findsNothing);
+    expect(find.text('0'), findsNothing);
+    expect(find.text('This month: 1.02B of 1.5B'), findsOneWidget);
+  });
+
+  testWidgets('the reset countdown ticks and stops at the window', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    final start = DateTime(2026, 10, 22, 12);
+    var now = start;
+
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        V2UsageData(
+          planId: 'free',
+          dailyUsedLabel: '12.4M',
+          dailyLimitLabel: '50M',
+          dailyFraction: 0.248,
+          resetsAt: start.add(const Duration(minutes: 2)),
+          days: _days,
+        ),
+        clock: () => now,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Resets in 2 m'), findsOneWidget);
+
+    now = now.add(const Duration(minutes: 1));
+    await tester.pump(const Duration(minutes: 1));
+    expect(find.text('Resets in 1 m'), findsOneWidget);
+
+    now = now.add(const Duration(minutes: 1));
+    await tester.pump(const Duration(minutes: 1));
+    expect(find.text('Resets now'), findsOneWidget);
+  });
+
+  testWidgets('an empty window still offers the 7/30 switch', (tester) async {
+    _phoneSize(tester);
+    final ranges = <V2UsageRange>[];
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        V2UsageData(
+          planId: 'free',
+          dailyUsedLabel: '12.4M',
+          dailyLimitLabel: '50M',
+          dailyFraction: 0.248,
+          monthlyUsedLabel: '1.02B',
+          days: const [],
+          onRangeChanged: ranges.add,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('No token activity yet'), findsOneWidget);
+    await tester.tap(find.text('30 days'));
+    await tester.pump();
+
+    expect(ranges, [V2UsageRange.thirtyDays]);
+  });
+
+  testWidgets('a day without a real count is not invented', (tester) async {
+    _phoneSize(tester);
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        V2UsageData(
+          planId: 'free',
+          dailyUsedLabel: '12.4M',
+          dailyLimitLabel: '50M',
+          dailyFraction: 0.248,
+          days: const [V2UsageDay(id: 'mon', label: 'Mon', fraction: 0.5)],
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final chart = tester.widget<V2DailyTokensChart>(
+      find.byType(V2DailyTokensChart),
+    );
+    expect(chart.points.single.value, 0);
+    expect(find.text('No token activity yet'), findsOneWidget);
   });
 
   testWidgets('renders correctly in dark', (tester) async {
@@ -329,9 +465,7 @@ void main() {
           dailyUsedLabel: '12.4M',
           dailyLimitLabel: '50M',
           dailyFraction: 0.248,
-          resetsAt: DateTime.now().add(
-            const Duration(hours: 6, minutes: 12),
-          ),
+          resetsAt: DateTime.now().add(const Duration(hours: 6, minutes: 12)),
           days: _days,
         ),
       ),
@@ -397,6 +531,34 @@ void main() {
       ),
     );
     handle.dispose();
+  });
+
+  testWidgets('paints every band width in both themes and text scales', (
+    tester,
+  ) async {
+    for (final theme in [OTheme.light(), OTheme.dark()]) {
+      for (final scale in [1.0, 2.0]) {
+        for (final width in [320.0, 360.0, 412.0, 600.0, 1024.0, 1280.0]) {
+          _size(tester, Size(width, 900));
+          await tester.pumpWidget(
+            _scaledApp(
+              theme,
+              _usageData(onRangeChanged: (_) {}, onUpgrade: () {}),
+              scale,
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          expect(
+            tester.takeException(),
+            isNull,
+            reason: '${width}dp at ${scale}x',
+          );
+          expect(find.text('Tokens today'), findsOneWidget);
+          expect(find.byType(V2DailyTokensChart), findsOneWidget);
+        }
+      }
+    }
   });
 
   testWidgets('600 dp centres the hero and the chart at 640', (tester) async {

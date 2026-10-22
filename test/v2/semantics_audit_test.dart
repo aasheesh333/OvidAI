@@ -384,9 +384,39 @@ void main() {
       handle.dispose();
     });
 
-    testWidgets('a disabled switch announces disabled', (tester) async {
+    testWidgets('a toggle without a handler is not rendered', (tester) async {
       final handle = tester.ensureSemantics();
       await _pump(tester, SettingsHubPage(data: hub()));
+      // A switch the host never wired cannot act, so the hub removes the row
+      // instead of leaving a dead control on screen.
+      expect(find.byType(Switch), findsNothing);
+      expect(find.text('Show reasoning'), findsNothing);
+      handle.dispose();
+    });
+
+    testWidgets('a temporarily disabled switch announces disabled', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      await _pump(
+        tester,
+        SettingsHubPage(
+          data: V2SettingsHubData(
+            chat: const V2SettingsSection(
+              title: 'Chat',
+              items: <V2SettingsItem>[
+                V2SettingsItem(
+                  id: 'show_reasoning',
+                  label: 'Show reasoning',
+                  icon: Icons.psychology_outlined,
+                  enabled: false,
+                ),
+              ],
+            ),
+            onReasoningChanged: (_) {},
+          ),
+        ),
+      );
       final semantics = tester.getSemantics(find.byType(Switch));
       final flags = semantics.getSemanticsData().flagsCollection;
       expect(flags.isToggled, ui.Tristate.isTrue);

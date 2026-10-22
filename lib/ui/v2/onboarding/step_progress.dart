@@ -16,10 +16,14 @@ abstract final class V2OnboardingTour {
   static const int plan = 4;
   static const int totalSteps = 4;
 
-  /// Step chrome for [step]. No trailing label: the header already names the
-  /// step, so repeating it beside the bars would be a second title.
-  static V2OnboardingStepData data(int step) => V2OnboardingStepData(
-    step: step,
+  /// Step chrome for the first step. It is also the default on the shared
+  /// frame, so a caller that forgets to pass [V2OnboardingStepData] still sees
+  /// the real tour ("Step 1 of 4") instead of a fictional shorter one.
+  ///
+  /// No trailing label: the header already names the step, so repeating it
+  /// beside the bars would be a second title.
+  static const V2OnboardingStepData welcomeStep = V2OnboardingStepData(
+    step: welcome,
     totalSteps: totalSteps,
     trailingLabel: '',
   );
@@ -32,16 +36,17 @@ abstract final class V2OnboardingTour {
 @immutable
 class V2OnboardingStepData {
   const V2OnboardingStepData({
-    this.step = 1,
-    this.totalSteps = 3,
-    this.trailingLabel = 'Setup',
+    this.step = V2OnboardingTour.welcome,
+    this.totalSteps = V2OnboardingTour.totalSteps,
+    this.trailingLabel = '',
   });
 
   final int step;
   final int totalSteps;
 
-  /// Short right-aligned label next to "STEP 1 OF 3", e.g. the step name.
-  /// Empty hides it.
+  /// Short right-aligned label next to "STEP 1 OF 4", e.g. the step name.
+  /// Empty hides it, which is the default because the header already names
+  /// the step.
   final String trailingLabel;
 
   int get steps => totalSteps < 1 ? 1 : totalSteps;
@@ -103,15 +108,15 @@ class OnboardingIdentity extends StatelessWidget {
   }
 }
 
-/// Segmented step indicator: "STEP 1 OF 3" plus one filled bar per step.
+/// Segmented step indicator: "STEP 1 OF 4" plus one filled bar per step.
 ///
-/// The whole block is a single semantics node labelled "Step 1 of 3"; the
+/// The whole block is a single semantics node labelled "Step 1 of 4"; the
 /// visual text and bars are excluded so a screen reader does not repeat the
 /// step twice.
 class OnboardingStepProgress extends StatelessWidget {
   const OnboardingStepProgress({
     super.key,
-    this.data = const V2OnboardingStepData(),
+    this.data = V2OnboardingTour.welcomeStep,
   });
 
   final V2OnboardingStepData data;
@@ -193,7 +198,7 @@ class OnboardingStepScaffold extends StatelessWidget {
   const OnboardingStepScaffold({
     super.key,
     required this.child,
-    this.step = const V2OnboardingStepData(),
+    this.step = V2OnboardingTour.welcomeStep,
     this.title,
     this.subtitle,
     this.onBack,
@@ -216,6 +221,7 @@ class OnboardingStepScaffold extends StatelessWidget {
     this.error,
     this.dismissKeyboard = false,
     this.scrollable = true,
+    this.centerBody = false,
   });
 
   final Widget child;
@@ -273,15 +279,15 @@ class OnboardingStepScaffold extends StatelessWidget {
   /// not nest a viewport inside a scroll view.
   final bool scrollable;
 
+  /// Vertically centres a short body between the step indicator and the
+  /// footer. Content taller than the space still scrolls from the top instead
+  /// of clipping, so large text loses nothing.
+  final bool centerBody;
+
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final Widget body = scrollable
-        ? SingleChildScrollView(
-            padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xl),
-            child: OFadeSlide(child: child),
-          )
-        : child;
+    final Widget body = scrollable ? _scrollingBody() : child;
     return OScaffold(
       appBar: OAppBar(
         title: title ?? '',
@@ -331,6 +337,33 @@ class OnboardingStepScaffold extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+
+  Widget _scrollingBody() {
+    const padding = EdgeInsets.only(top: OSpace.s, bottom: OSpace.xl);
+    if (!centerBody) {
+      return SingleChildScrollView(
+        padding: padding,
+        child: OFadeSlide(child: child),
+      );
+    }
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final available = constraints.maxHeight - padding.vertical;
+        return SingleChildScrollView(
+          padding: padding,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight: available > 0 ? available : 0,
+            ),
+            child: Align(
+              alignment: Alignment.center,
+              child: OFadeSlide(child: child),
+            ),
+          ),
+        );
+      },
     );
   }
 

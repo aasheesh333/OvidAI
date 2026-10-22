@@ -227,7 +227,7 @@ void main() {
       AddConnectorPage(data: _data(plan: V2ConnectorPlan.pro, used: 20)),
     );
     expect(
-      find.text('All 20 custom slots used on Plus and Pro.'),
+      find.text('All 20 custom slots used on Pro.'),
       findsOneWidget,
     );
   });

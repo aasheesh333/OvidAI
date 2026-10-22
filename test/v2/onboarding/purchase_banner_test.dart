@@ -22,8 +22,9 @@ Future<void> _pump(
   double textScale = 1,
   bool disableAnimations = false,
 }) async {
-  await tester.binding.setSurfaceSize(Size(width, height));
-  addTearDown(() => tester.binding.setSurfaceSize(null));
+  tester.view.physicalSize = Size(width, height);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
   await tester.pumpWidget(
     MaterialApp(
       theme: dark ? OTheme.dark() : OTheme.light(),
@@ -220,6 +221,35 @@ void main() {
     await tester.tap(find.byKey(const Key('purchase-banner-manage')));
     await tester.pump();
     expect(managed, 1);
+  });
+
+  testWidgets('nothing-to-restore is a real answer, not a failure', (
+    tester,
+  ) async {
+    var retries = 0;
+    await _pump(
+      tester,
+      data: const V2PurchaseBannerData(
+        status: V2PurchaseBannerStatus.nothingToRestore,
+      ),
+      onRetry: () => retries++,
+    );
+
+    expect(find.text('No purchase found'), findsOneWidget);
+    expect(
+      find.text('No active subscription is linked to this account.'),
+      findsOneWidget,
+    );
+    // Nothing failed, so there is nothing to retry.
+    expect(find.byKey(const Key('purchase-banner-retry')), findsNothing);
+    expect(find.text('Purchase did not finish'), findsNothing);
+
+    final flags = tester
+        .getSemantics(find.byKey(const Key('purchase-banner-status')))
+        .getSemanticsData()
+        .flagsCollection;
+    expect(flags.isLiveRegion, isTrue);
+    expect(retries, 0);
   });
 
   testWidgets('hidden status renders nothing', (tester) async {

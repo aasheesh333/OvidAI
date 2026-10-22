@@ -18,6 +18,7 @@ class V2ModelOption {
     required this.speed,
     required this.costHint,
     this.locked = false,
+    this.advanced = false,
     this.tag,
     this.tagTone = OPillTone.accent,
     this.icon = Icons.auto_awesome_rounded,
@@ -26,9 +27,22 @@ class V2ModelOption {
   final String id;
   final String name;
   final String subtitle;
+
+  /// Searchable only: the row shows one meta line and the cost, so speed is
+  /// not drawn but a query still matches it.
   final String speed;
   final String costHint;
+
+  /// A per-row gate. The plan gate ([V2ModelPickerData.autoOnly]) is applied
+  /// on top, so a Free/Go caller cannot leak a row by leaving this false.
   final bool locked;
+
+  /// Section the row belongs to. Separate from [locked] so a Free plan does
+  /// not relabel every gated row as "Advanced reasoning".
+  final bool advanced;
+
+  /// Optional recommendation shown beside the name on an unlocked row. A
+  /// locked row shows the plan gate instead.
   final String? tag;
   final OPillTone tagTone;
   final IconData icon;
@@ -43,12 +57,9 @@ class V2ModelPickerData {
     this.planLabel = 'Free',
     this.autoName = 'Auto',
     this.autoSubtitle = 'Smart routing',
-    this.autoDescription =
-        'Automatically picks the fastest, smartest model for your question.',
-    this.autoTag = 'Recommended',
     this.searchHint = 'Search models',
     this.manageLabel = 'Manage models',
-    this.freePlanNote = 'Free plan uses Auto only.',
+    this.freePlanNote,
     this.standardLabel = 'Standard models',
     this.advancedLabel = 'Advanced reasoning',
     this.manualModelsAllowed = true,
@@ -68,16 +79,14 @@ class V2ModelPickerData {
   /// The one description line on the Auto card.
   final String autoSubtitle;
 
-  /// Kept so callers keep compiling. The minimal card draws [autoSubtitle]
-  /// only; there is no second paragraph and no tag.
-  final String autoDescription;
-  final String autoTag;
   final String searchHint;
   final String manageLabel;
 
-  /// Kept for callers. The plan gate lives on the locked rows, so the sheet
-  /// draws no footer note.
-  final String freePlanNote;
+  /// Optional override for the header subtitle while the plan is Auto-only.
+  /// When omitted the sheet names the actual plan, so a Go caller never reads
+  /// "Free plan". On a paid plan the rows speak for themselves and no
+  /// subtitle is drawn.
+  final String? freePlanNote;
   final String standardLabel;
   final String advancedLabel;
 
@@ -86,8 +95,8 @@ class V2ModelPickerData {
   /// visible but are greyed out and cannot be selected.
   final bool manualModelsAllowed;
 
-  /// Kept for callers. The minimal sheet shows the gate as a row tag instead
-  /// of an upgrade paragraph.
+  /// Spoken explanation attached to every locked row. Screen readers hear the
+  /// label first ("locked, Plus plan") and then this hint.
   final String upgradeHint;
 
   /// Plan a manual model requires, used by the locked-row tag and its spoken
@@ -96,7 +105,16 @@ class V2ModelPickerData {
   final bool loading;
   final String? errorMessage;
 
-  bool get autoSelected => selectedId == 'auto';
+  /// True when Auto is the model that will actually run: it was picked
+  /// explicitly, or the remembered manual pick is no longer selectable (a
+  /// downgrade, or a row the caller gated).
+  bool get autoSelected {
+    if (selectedId == 'auto') return true;
+    for (final model in models) {
+      if (model.id == selectedId) return autoOnly || model.locked;
+    }
+    return true;
+  }
 
   /// True when the plan can only use Auto, regardless of per-row flags. The
   /// explicit [manualModelsAllowed] gate wins, and an Auto-only plan label is
@@ -108,6 +126,17 @@ class V2ModelPickerData {
       planLabel == 'Free plan' ||
       planLabel == 'Go' ||
       planLabel == 'Starter';
+
+  /// The one-line gate explanation, named for the actual plan so a Go caller
+  /// never reads "Free plan". [freePlanNote] wins when the caller supplies it.
+  String get planNote {
+    final override = freePlanNote;
+    if (override != null && override.isNotEmpty) return override;
+    final label = planLabel.toLowerCase().endsWith('plan')
+        ? planLabel
+        : '$planLabel plan';
+    return '$label uses Auto only.';
+  }
 }
 
 /// Bottom-sheet contents for choosing a model. Search, Auto recommendation,
@@ -147,9 +176,11 @@ class _V2ModelPickerSheetState extends State<V2ModelPickerSheet> {
     setState(() => _query = '');
   }
 
+  String get _normalizedQuery => _query.trim().toLowerCase();
+
   bool _matches(V2ModelOption model) {
-    if (_query.trim().isEmpty) return true;
-    final q = _query.toLowerCase();
+    final q = _normalizedQuery;
+    if (q.isEmpty) return true;
     return model.name.toLowerCase().contains(q) ||
         model.subtitle.toLowerCase().contains(q) ||
         model.speed.toLowerCase().contains(q) ||
@@ -157,8 +188,8 @@ class _V2ModelPickerSheetState extends State<V2ModelPickerSheet> {
   }
 
   bool get _autoMatches {
-    if (_query.trim().isEmpty) return true;
-    final q = _query.toLowerCase();
+    final q = _normalizedQuery;
+    if (q.isEmpty) return true;
     final d = widget.data;
     return d.autoName.toLowerCase().contains(q) ||
         d.autoSubtitle.toLowerCase().contains(q);
@@ -172,14 +203,15 @@ class _V2ModelPickerSheetState extends State<V2ModelPickerSheet> {
     final showAuto = _autoMatches;
     final hasResults = showAuto || models.isNotEmpty;
 
-    return Material(
-      color: c.surface,
-      // A sheet body never stretches past the contract's 560 dp dialog cap,
-      // even when a gallery or test renders it outside showV2ChatSheet.
-      child: Center(
-        heightFactor: 1,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 560),
+    // The 560 dp cap belongs to the surface, not just the column inside it:
+    // rendered outside showV2ChatSheet (gallery, tests) the sheet must still
+    // look like a dialog rather than a full-width page.
+    return Center(
+      heightFactor: 1,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 560),
+        child: Material(
+          color: c.surface,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -193,6 +225,8 @@ class _V2ModelPickerSheetState extends State<V2ModelPickerSheet> {
                 ),
                 child: OSheetHeader(
                   title: 'Select model',
+                  // One line of context only while the plan gates the list.
+                  subtitle: data.autoOnly ? data.planNote : null,
                   onClose: widget.onClose ?? () => Navigator.maybePop(context),
                   closeLabel: 'Close model picker',
                   padding: EdgeInsets.zero,
@@ -274,7 +308,7 @@ class _V2ModelPickerSheetState extends State<V2ModelPickerSheet> {
           compact: true,
           icon: Icons.search_off_rounded,
           title: 'No models found',
-          message: 'Try another name.',
+          message: 'Try a name, speed or cost.',
           action: OButton(
             label: 'Clear search',
             variant: OButtonVariant.secondary,
@@ -289,23 +323,25 @@ class _V2ModelPickerSheetState extends State<V2ModelPickerSheet> {
       rows.add(_AutoCard(data: data, onTap: () => widget.onSelect('auto')));
     }
 
-    Widget row(V2ModelOption model) => _ModelRow(
-      model: model,
-      selected: data.selectedId == model.id,
-      // The plan gate wins over the row flag: on an Auto-only plan every
-      // manual model is locked even if the caller left it unlocked.
-      locked: data.autoOnly || model.locked,
-      planLabel: data.lockedPlanLabel,
-      onTap: (data.autoOnly || model.locked)
-          ? null
-          : () => widget.onSelect(model.id),
-    );
+    Widget row(V2ModelOption model) {
+      final locked = data.autoOnly || model.locked;
+      return _ModelRow(
+        model: model,
+        selected: data.selectedId == model.id,
+        // The plan gate wins over the row flag: on an Auto-only plan every
+        // manual model is locked even if the caller left it unlocked.
+        locked: locked,
+        planLabel: data.lockedPlanLabel,
+        hint: locked ? data.upgradeHint : null,
+        onTap: locked ? null : () => widget.onSelect(model.id),
+      );
+    }
 
     // Grouped by tier so the labels always read Standard then Advanced, even
     // when the caller interleaves the two. Rows sit on the sheet surface with
     // one hairline between them, indented to the name.
-    final standard = models.where((model) => !model.locked).toList();
-    final advanced = models.where((model) => model.locked).toList();
+    final standard = models.where((model) => !model.advanced).toList();
+    final advanced = models.where((model) => model.advanced).toList();
     void addGroup(String label, List<V2ModelOption> group) {
       if (group.isEmpty) return;
       rows.add(
@@ -357,11 +393,13 @@ class _AutoCard extends StatelessWidget {
     final selected = data.autoSelected;
     // A row like the models below it: the recommendation shows as the accent
     // tile and the check, not as a filled card on the sheet's surface.
-    return Semantics(
+    return OPressable(
+      onTap: onTap,
       selected: selected,
-      child: OPressable(
-        onTap: onTap,
-        semanticLabel: '${data.autoName}, ${data.autoSubtitle}',
+      // One spoken node: name, state and availability. Excluding the child
+      // stops the visible name and subtitle from being read twice.
+      semanticLabel: '${data.autoName}, ${data.autoSubtitle}, available',
+      child: ExcludeSemantics(
         child: ConstrainedBox(
           constraints: const BoxConstraints(minHeight: OSpace.listRow),
           child: Padding(
@@ -371,19 +409,17 @@ class _AutoCard extends StatelessWidget {
             ),
             child: Row(
               children: [
-                ExcludeSemantics(
-                  child: Container(
-                    width: OSpace.iconTile,
-                    height: OSpace.iconTile,
-                    decoration: BoxDecoration(
-                      color: c.accentSoft,
-                      borderRadius: BorderRadius.circular(ORadius.m),
-                    ),
-                    child: Icon(
-                      Icons.auto_awesome_rounded,
-                      size: 19,
-                      color: c.accent,
-                    ),
+                Container(
+                  width: OSpace.iconTile,
+                  height: OSpace.iconTile,
+                  decoration: BoxDecoration(
+                    color: c.accentSoft,
+                    borderRadius: BorderRadius.circular(ORadius.m),
+                  ),
+                  child: Icon(
+                    Icons.auto_awesome_rounded,
+                    size: 19,
+                    color: c.accent,
                   ),
                 ),
                 const SizedBox(width: OSpace.m),
@@ -425,6 +461,7 @@ class _ModelRow extends StatelessWidget {
     required this.selected,
     required this.locked,
     required this.planLabel,
+    required this.hint,
     required this.onTap,
   });
 
@@ -432,14 +469,16 @@ class _ModelRow extends StatelessWidget {
   final bool selected;
   final bool locked;
   final String planLabel;
+  final String? hint;
   final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     // One meta line, then the cost. A locked row carries the plan gate as its
-    // only tag; the caller's tag is dropped when it would repeat the gate.
-    final gateTag = locked ? planLabel : null;
+    // only tag; the caller's recommendation is shown only when it is reachable.
+    final tag = locked ? planLabel : model.tag;
+    final tagTone = locked ? OPillTone.accent : model.tagTone;
     final row = ConstrainedBox(
       constraints: const BoxConstraints(minHeight: OSpace.listRow),
       child: Padding(
@@ -449,19 +488,17 @@ class _ModelRow extends StatelessWidget {
         ),
         child: Row(
           children: [
-            ExcludeSemantics(
-              child: Container(
-                width: OSpace.iconTile,
-                height: OSpace.iconTile,
-                decoration: BoxDecoration(
-                  color: c.surfaceAlt,
-                  borderRadius: BorderRadius.circular(ORadius.m),
-                ),
-                child: Icon(
-                  locked ? Icons.lock_outline_rounded : model.icon,
-                  size: 19,
-                  color: locked ? c.textFaint : c.textMuted,
-                ),
+            Container(
+              width: OSpace.iconTile,
+              height: OSpace.iconTile,
+              decoration: BoxDecoration(
+                color: c.surfaceAlt,
+                borderRadius: BorderRadius.circular(ORadius.m),
+              ),
+              child: Icon(
+                locked ? Icons.lock_outline_rounded : model.icon,
+                size: 19,
+                color: locked ? c.textFaint : c.textMuted,
               ),
             ),
             const SizedBox(width: OSpace.m),
@@ -484,8 +521,7 @@ class _ModelRow extends StatelessWidget {
                           fontWeight: FontWeight.w500,
                         ),
                       ),
-                      if (gateTag != null)
-                        OPill(label: gateTag, tone: OPillTone.accent),
+                      if (tag != null) OPill(label: tag, tone: tagTone),
                     ],
                   ),
                   const SizedBox(height: OSpace.xxs),
@@ -522,18 +558,20 @@ class _ModelRow extends StatelessWidget {
 
     if (onTap == null) {
       return Semantics(
-        label: '${model.name}, locked, $planLabel',
+        label: '${model.name}, ${model.subtitle}, locked, $planLabel',
+        hint: hint,
         enabled: false,
+        // One node: the visible name, meta line, gate pill and lock glyph are
+        // already covered by the label.
+        excludeSemantics: true,
         child: row,
       );
     }
-    return Semantics(
+    return OPressable(
+      onTap: onTap,
       selected: selected,
-      child: OPressable(
-        onTap: onTap,
-        semanticLabel: '${model.name}, ${model.subtitle}',
-        child: row,
-      ),
+      semanticLabel: '${model.name}, ${model.subtitle}, available',
+      child: ExcludeSemantics(child: row),
     );
   }
 }

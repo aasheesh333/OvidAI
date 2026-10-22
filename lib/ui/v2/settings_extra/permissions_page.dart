@@ -9,9 +9,32 @@ import '../settings/settings_rows.dart';
 
 enum V2PermissionsStatus { loading, ready, empty, error }
 
-enum V2PermissionAccess { granted, notAsked, blocked }
+/// What the operating system reports for one permission.
+///
+/// These are the four answers `permission_handler` can give, kept distinct
+/// because the action differs: a permission that can still be asked for shows
+/// the system dialog, a permanently denied one can only be changed in the OS
+/// settings, and a granted one has no action at all.
+enum V2PermissionAccess {
+  /// Never requested. The system dialog can still be shown.
+  notAsked,
 
-/// One device permission Ovid may need, with a plain-language reason.
+  /// Requested once and refused. The system dialog can be shown again.
+  denied,
+
+  /// Refused for good (or restricted by device policy). Only the OS settings
+  /// screen can change it, so asking again would be a no-op.
+  permanentlyDenied,
+
+  /// The OS granted it.
+  granted;
+
+  /// The pre-split name for [permanentlyDenied]. Call sites that predate the
+  /// four-state model keep compiling; new code uses [permanentlyDenied].
+  static const V2PermissionAccess blocked = permanentlyDenied;
+}
+
+/// One device permission Ovid may need, with the real OS state.
 @immutable
 class V2PermissionItem {
   const V2PermissionItem({
@@ -24,6 +47,9 @@ class V2PermissionItem {
 
   final String id;
   final String name;
+
+  /// Why the permission exists. Not rendered: the row is name + state on one
+  /// line (contract §3), so this stays as caller-side documentation.
   final String reason;
   final V2PermissionAccess status;
   final IconData icon;
@@ -44,10 +70,13 @@ class V2PermissionsPageData {
   });
 
   final V2PermissionsStatus status;
+
+  /// The permissions the app actually asks for, each carrying the state the
+  /// platform reported when this snapshot was read. Never a stored guess.
   final List<V2PermissionItem> permissions;
 
-  /// Called with the permission id when the user taps Allow. The caller runs
-  /// the real OS request dialog.
+  /// Called with the permission id when the user taps an askable row. The
+  /// caller runs the real OS request dialog.
   final ValueChanged<String>? onRequest;
   final VoidCallback? onOpenSettings;
 
@@ -65,11 +94,11 @@ class V2PermissionsPageData {
 }
 
 /// Camera, microphone, photos, notifications and files: one row each, with
-/// the real status and one action.
+/// the real status and at most one action.
 ///
-/// Every row must reflect what Android reports. The page itself only renders
-/// the injected status; the route reloads it when the app resumes so a grant
-/// made in system settings shows up without reopening the screen.
+/// Every row reflects what Android reports. The page only renders the injected
+/// snapshot; the route re-reads it when the app resumes, so a grant made in
+/// system settings shows up without reopening the screen.
 class PermissionsPage extends StatefulWidget {
   const PermissionsPage({super.key, required this.data});
 
@@ -95,6 +124,8 @@ class _PermissionsPageState extends State<PermissionsPage>
     super.dispose();
   }
 
+  /// A permission changed outside the app (the request dialog or the OS
+  /// settings screen) is only visible after re-reading the platform.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) data.onRefresh?.call();
@@ -104,6 +135,8 @@ class _PermissionsPageState extends State<PermissionsPage>
   Widget build(BuildContext context) {
     return OScreen(
       title: 'Permissions',
+      // One 640 dp column: rows never stretch into a desktop line.
+      maxWidth: 640,
       actions: [
         if (data.onRefresh != null)
           OIconButton(
@@ -130,8 +163,8 @@ class _PermissionsPageState extends State<PermissionsPage>
       status: status,
       errorMessage: data.errorMessage,
       onRetry: data.onRetry,
-      emptyTitle: 'No permissions to review',
-      emptyBody: 'Nothing has needed access yet.',
+      emptyTitle: 'No permissions found',
+      emptyBody: 'The system reported no permissions.',
       emptyActionLabel: 'Open settings',
       onEmptyAction: data.onOpenSettings,
       skeletonRows: 5,
@@ -149,36 +182,78 @@ class _PermissionsPageState extends State<PermissionsPage>
     );
   }
 
-  /// One permission, one action. A not-asked permission asks; anything else
-  /// opens its Android settings page. The status pill is the row's value.
+  /// One permission, one line: name and the state the OS reported. The row is
+  /// the action only when there is something left to do — ask, or open the OS
+  /// settings for a permission that can no longer be asked for. A granted
+  /// permission has no action, so it is announced as plain information.
   Widget _permissionRow(BuildContext context, V2PermissionItem item) {
-    final (statusLabel, tone) = switch (item.status) {
-      V2PermissionAccess.granted => ('Granted', OPillTone.success),
-      V2PermissionAccess.notAsked => ('Not asked', OPillTone.neutral),
-      V2PermissionAccess.blocked => ('Blocked', OPillTone.danger),
+    final view = _rowView(item);
+    final rowKey = switch (item.status) {
+      V2PermissionAccess.notAsked ||
+      V2PermissionAccess.denied => 'permission-request-${item.id}',
+      V2PermissionAccess.permanentlyDenied => 'permission-settings-${item.id}',
+      V2PermissionAccess.granted => 'permission-status-${item.id}',
     };
-    final canOpen =
-        data.onOpenSettingsFor != null || data.onOpenSettings != null;
-    final notAsked = item.status == V2PermissionAccess.notAsked;
-    final onTap = notAsked
-        ? (data.onRequest == null ? null : () => _request(item.id))
-        : (canOpen ? () => _openSettings(item.id) : null);
-
-    return V2SettingsRow(
-      key: ValueKey<String>(
-        notAsked
-            ? 'permission-request-${item.id}'
-            : 'permission-settings-${item.id}',
+    return Semantics(
+      container: true,
+      // One node per row: "Camera, not asked, Requests camera access, button".
+      // Without excludeSemantics TalkBack reads the title and the pill twice.
+      label: '${item.name}, ${view.state}',
+      hint: view.hint,
+      button: view.onTap == null ? null : true,
+      enabled: view.onTap == null ? null : true,
+      onTap: view.onTap,
+      excludeSemantics: true,
+      child: V2SettingsRow(
+        key: ValueKey<String>(rowKey),
+        icon: item.icon,
+        danger: item.status == V2PermissionAccess.permanentlyDenied,
+        title: item.name,
+        showChevron: false,
+        stacksTrailing: true,
+        onTap: view.onTap,
+        trailing: OPill(label: view.label, tone: view.tone, dot: true),
       ),
-      icon: item.icon,
-      danger: item.status == V2PermissionAccess.blocked,
-      title: item.name,
-      showChevron: false,
-      stacksTrailing: true,
-      enabled: onTap != null || item.status == V2PermissionAccess.granted,
-      onTap: onTap,
-      trailing: OPill(label: statusLabel, tone: tone, dot: true),
     );
+  }
+
+  /// Maps the real state to its visible pill, spoken state and only legal
+  /// action. Nothing here can act when the platform offers no next step.
+  _PermissionRowView _rowView(V2PermissionItem item) {
+    final canRequest = data.onRequest != null;
+    final canOpenSettings =
+        data.onOpenSettingsFor != null || data.onOpenSettings != null;
+    final askHint = canRequest
+        ? 'Requests ${item.name.toLowerCase()} access'
+        : null;
+    return switch (item.status) {
+      V2PermissionAccess.notAsked => _PermissionRowView(
+        label: 'Not asked',
+        state: 'not asked',
+        tone: OPillTone.neutral,
+        hint: askHint,
+        onTap: canRequest ? () => _request(item.id) : null,
+      ),
+      V2PermissionAccess.denied => _PermissionRowView(
+        label: 'Denied',
+        state: 'denied',
+        tone: OPillTone.warn,
+        hint: askHint,
+        onTap: canRequest ? () => _request(item.id) : null,
+      ),
+      V2PermissionAccess.permanentlyDenied => _PermissionRowView(
+        label: 'Blocked',
+        state: 'blocked in system settings',
+        tone: OPillTone.danger,
+        hint: canOpenSettings ? 'Opens app settings to allow access' : null,
+        onTap: canOpenSettings ? () => _openSettings(item.id) : null,
+      ),
+      V2PermissionAccess.granted => const _PermissionRowView(
+        label: 'Granted',
+        state: 'granted',
+        tone: OPillTone.success,
+      ),
+    };
   }
 
   /// Asks the OS for one permission, then reloads so the row shows the real
@@ -196,4 +271,27 @@ class _PermissionsPageState extends State<PermissionsPage>
     }
     data.onOpenSettings?.call();
   }
+}
+
+/// The rendered form of one permission state.
+@immutable
+class _PermissionRowView {
+  const _PermissionRowView({
+    required this.label,
+    required this.state,
+    required this.tone,
+    this.hint,
+    this.onTap,
+  });
+
+  /// The pill: three words at most (contract §3).
+  final String label;
+
+  /// The spoken state, part of the row's semantics label.
+  final String state;
+  final OPillTone tone;
+
+  /// What the action will do, announced with the row.
+  final String? hint;
+  final VoidCallback? onTap;
 }

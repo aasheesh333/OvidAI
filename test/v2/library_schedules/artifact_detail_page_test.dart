@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -545,6 +547,168 @@ void main() {
           tester.view.physicalSize.width / tester.view.devicePixelRatio;
       expect(box.width, lessThanOrEqualTo(width));
       expect(tester.takeException(), isNull);
+    }
+  });
+
+  testWidgets('the preview announces its kind', (tester) async {
+    final handle = tester.ensureSemantics();
+    _phone(tester);
+    final cases = <V2ArtifactDetailData, Pattern>{
+      _codeData: RegExp('Code preview'),
+      _documentData: RegExp('Document, metadata only'),
+      _imageData: RegExp('Image preview of token-usage-breakdown.png'),
+    };
+    for (final entry in cases.entries) {
+      await tester.pumpWidget(_app(ArtifactDetailPage(data: entry.key)));
+      await tester.pumpAndSettle();
+      expect(
+        find.bySemanticsLabel(entry.value),
+        findsOneWidget,
+        reason: entry.key.name,
+      );
+    }
+    handle.dispose();
+  });
+
+  testWidgets('Download writes a real file and says so', (tester) async {
+    // Real file I/O only runs in the real async zone; the widget-test zone
+    // fakes timers, so the temp directory is created inside runAsync.
+    final dir = (await tester.runAsync(
+      () => Directory.systemTemp.createTemp('ovid-artifact-test'),
+    ))!;
+    final source = File('${dir.path}/notes.txt')
+      ..writeAsStringSync('first line\nsecond line');
+    V2TranscriptIo.setDownloadDirectoryOverride(dir.path);
+    addTearDown(() {
+      V2TranscriptIo.reset();
+      if (dir.existsSync()) dir.deleteSync(recursive: true);
+    });
+
+    _phone(tester);
+    await tester.pumpWidget(
+      _app(
+        ArtifactDetailPage(
+          data: V2ArtifactDetailData(
+            name: 'notes.txt',
+            previewKind: V2ArtifactPreviewKind.document,
+            documentText: 'first line\nsecond line',
+            downloadUrl: source.uri.toString(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The whole download interaction runs in the real async zone: reading and
+    // writing the file are real I/O, which only resumes there.
+    await tester.runAsync(() async {
+      await tester.tap(find.byIcon(Icons.more_vert_rounded));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.text('Download'), findsOneWidget);
+      await tester.tap(find.text('Download'));
+      await tester.pump();
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      await tester.pump();
+    });
+    await tester.pumpAndSettle();
+
+    final saved = File('${dir.path}/Ovid/notes.txt');
+    expect(saved.existsSync(), isTrue);
+    expect(saved.readAsStringSync(), 'first line\nsecond line');
+    expect(find.text('Saved notes.txt'), findsOneWidget);
+  });
+
+  testWidgets('loading, error, missing and content all render', (tester) async {
+    _phone(tester);
+    await tester.pumpWidget(
+      _app(
+        ArtifactDetailPage(
+          data: const V2ArtifactDetailData(
+            status: V2ArtifactDetailStatus.loading,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.byType(OSkeletonList), findsOneWidget);
+
+    await tester.pumpWidget(
+      _app(
+        ArtifactDetailPage(
+          data: const V2ArtifactDetailData(
+            status: V2ArtifactDetailStatus.error,
+          ),
+          onRetry: () {},
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Something went wrong'), findsOneWidget);
+    expect(find.text('Try again'), findsOneWidget);
+
+    await tester.pumpWidget(
+      _app(
+        ArtifactDetailPage(
+          data: const V2ArtifactDetailData(
+            status: V2ArtifactDetailStatus.missing,
+          ),
+          onBackToArtifacts: () {},
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('This artifact is gone'), findsOneWidget);
+    expect(find.text('Back'), findsOneWidget);
+
+    await tester.pumpWidget(_app(const ArtifactDetailPage(data: _codeData)));
+    await tester.pumpAndSettle();
+    expect(find.byType(V2ArtifactPreview), findsOneWidget);
+    expect(find.text('Lines of code'), findsOneWidget);
+  });
+
+  testWidgets('fits 320 to 1280 in both themes and text scales', (
+    tester,
+  ) async {
+    for (final width in <double>[320, 600, 1024, 1280]) {
+      for (final scale in <double>[1, 2]) {
+        for (final dark in <bool>[false, true]) {
+          tester.view.physicalSize = Size(width, 900);
+          tester.view.devicePixelRatio = 1;
+          addTearDown(tester.view.resetPhysicalSize);
+          addTearDown(tester.view.resetDevicePixelRatio);
+
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: dark ? OTheme.dark() : OTheme.light(),
+              builder: (context, child) => MediaQuery(
+                data: MediaQuery.of(
+                  context,
+                ).copyWith(textScaler: TextScaler.linear(scale)),
+                child: child!,
+              ),
+              home: ArtifactDetailPage(
+                data: _codeData,
+                onDownload: () {},
+                onOpenExternally: () {},
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          expect(
+            tester.takeException(),
+            isNull,
+            reason: '$width dp at ${scale}x (${dark ? 'dark' : 'light'})',
+          );
+          expect(find.text('portfolio-index.html'), findsWidgets);
+          // The body is centred and capped, never stretched.
+          expect(
+            tester.getSize(find.byType(V2ArtifactPreview)).width,
+            lessThanOrEqualTo(720),
+          );
+        }
+      }
     }
   });
 }

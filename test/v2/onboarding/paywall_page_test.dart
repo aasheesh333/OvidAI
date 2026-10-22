@@ -1,4 +1,8 @@
+import 'dart:async';
+import 'dart:ui' show Tristate;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
@@ -12,16 +16,22 @@ Future<void> _pump(
   V2PaywallData data = const V2PaywallData(trialDays: 7),
   ValueChanged<String>? onPlanSelected,
   ValueChanged<V2Currency>? onCurrencyChanged,
+  ValueChanged<V2PaywallPeriod>? onPeriodChanged,
+  Future<void> Function(V2PaywallPurchase)? onPurchase,
   ValueChanged<String>? onStartTrial,
   VoidCallback? onContinueFree,
   VoidCallback? onRetry,
+  Future<V2PaywallRestoreResult> Function()? onRestorePurchases,
   VoidCallback? onManageSubscription,
+  VoidCallback? onClose,
   double width = 400,
+  double height = 800,
   double textScale = 1,
   bool disableAnimations = false,
 }) async {
-  await tester.binding.setSurfaceSize(Size(width, 800));
-  addTearDown(() => tester.binding.setSurfaceSize(null));
+  tester.view.physicalSize = Size(width, height);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
   await tester.pumpWidget(
     MaterialApp(
       theme: dark ? OTheme.dark() : OTheme.light(),
@@ -36,10 +46,14 @@ Future<void> _pump(
         data: data,
         onPlanSelected: onPlanSelected,
         onCurrencyChanged: onCurrencyChanged,
+        onPeriodChanged: onPeriodChanged,
+        onPurchase: onPurchase,
         onStartTrial: onStartTrial,
         onContinueFree: onContinueFree,
         onRetry: onRetry,
+        onRestorePurchases: onRestorePurchases,
         onManageSubscription: onManageSubscription,
+        onClose: onClose,
       ),
     ),
   );
@@ -50,277 +64,806 @@ Future<void> _pump(
   }
 }
 
+Finder _cta(String id) => find.byKey(Key('paywall-cta-$id'));
+
+Future<void> _tapCta(WidgetTester tester, String id) async {
+  await tester.ensureVisible(_cta(id));
+  await tester.tap(_cta(id));
+  await tester.pumpAndSettle();
+}
+
+Future<void> _tapPeriod(WidgetTester tester, String period) async {
+  final toggle = find.byKey(Key('paywall-period-$period'));
+  await tester.ensureVisible(toggle);
+  await tester.pumpAndSettle();
+  await tester.tap(toggle);
+  await tester.pumpAndSettle();
+}
+
+SemanticsData _semantics(WidgetTester tester, Finder finder) =>
+    tester.getSemantics(finder).getSemanticsData();
+
+int _words(String value) =>
+    value.trim().split(RegExp(r'\s+')).where((w) => w.isNotEmpty).length;
+
+bool _isHorizontalScroll(Widget widget) =>
+    widget is SingleChildScrollView &&
+    widget.scrollDirection == Axis.horizontal;
+
 void main() {
-  testWidgets('paywall renders every plan in USD in light', (tester) async {
-    await _pump(tester);
+  group('prices', () {
+    testWidgets('monthly prices are exact in USD and INR', (tester) async {
+      await _pump(tester, onPurchase: (_) async {});
 
-    expect(find.text('Ovid Free'), findsOneWidget);
-    expect(find.text('Ovid Go'), findsOneWidget);
-    expect(find.text('Ovid Plus'), findsOneWidget);
-    expect(find.text('Ovid Pro'), findsOneWidget);
-    expect(find.text('\$0'), findsOneWidget);
-    expect(find.text('\$5'), findsOneWidget);
-    expect(find.text('\$18'), findsOneWidget);
-    expect(find.text('\$99'), findsOneWidget);
-    expect(find.text('Start free trial'), findsOneWidget);
-    expect(find.text('Cancel anytime. Billed by Google Play.'), findsOneWidget);
-    // Every plan is already on this screen; a second compare destination
-    // would only repeat it.
-    expect(find.text('Compare all plans'), findsNothing);
-    // A tour step, not a pushed route: no dead back arrow.
-    expect(find.byIcon(Icons.arrow_back_rounded), findsNothing);
+      expect(find.text('Ovid Free'), findsOneWidget);
+      expect(find.text('Ovid Go'), findsOneWidget);
+      expect(find.text('Ovid Plus'), findsOneWidget);
+      expect(find.text('Ovid Pro'), findsOneWidget);
+      expect(find.text(r'$0'), findsOneWidget);
+      expect(find.text(r'$5'), findsOneWidget);
+      expect(find.text(r'$18'), findsOneWidget);
+      expect(find.text(r'$99'), findsOneWidget);
+      expect(find.text('/ month'), findsNWidgets(3));
+      expect(find.text('forever'), findsOneWidget);
+      expect(find.text('Start free trial'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('paywall-currency-inr')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('₹0'), findsOneWidget);
+      expect(find.text('₹499'), findsOneWidget);
+      expect(find.text('₹1,799'), findsOneWidget);
+      expect(find.text('₹9,999'), findsOneWidget);
+      expect(find.text(r'$18'), findsNothing);
+    });
+
+    testWidgets('yearly prices are ten months, never twelve', (tester) async {
+      await _pump(tester, onPurchase: (_) async {});
+
+      await _tapPeriod(tester, 'yearly');
+
+      expect(find.text(r'$50'), findsOneWidget);
+      expect(find.text(r'$180'), findsOneWidget);
+      expect(find.text(r'$990'), findsOneWidget);
+      expect(find.text('/ year'), findsNWidgets(3));
+      expect(find.text('forever'), findsOneWidget);
+      // Twelve months would be these numbers; the UI must never make them up.
+      expect(find.text(r'$60'), findsNothing);
+      expect(find.text(r'$216'), findsNothing);
+      expect(find.text(r'$1,188'), findsNothing);
+
+      await tester.tap(find.byKey(const Key('paywall-currency-inr')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('₹4,990'), findsOneWidget);
+      expect(find.text('₹17,990'), findsOneWidget);
+      expect(find.text('₹99,990'), findsOneWidget);
+    });
+
+    test('the default yearly prices are exactly ten monthly payments', () {
+      const data = V2PaywallData();
+      for (final plan in data.plans) {
+        for (final currency in V2Currency.values) {
+          final monthly = plan.amountFor(currency, V2PaywallPeriod.monthly)!;
+          final yearly = plan.amountFor(currency, V2PaywallPeriod.yearly)!;
+          expect(
+            yearly,
+            monthly * 10,
+            reason: '${plan.id} ${currency.name} yearly',
+          );
+        }
+      }
+    });
+
+    test('a missing yearly price resolves to null, not monthly × 12', () {
+      const plan = V2PlanOption(
+        id: 'go',
+        name: 'Ovid Go',
+        priceUsd: 5,
+        priceInr: 499,
+        storageGb: 5,
+        autoOnly: true,
+      );
+      expect(plan.amountFor(V2Currency.usd, V2PaywallPeriod.yearly), isNull);
+      expect(plan.hasPrice(V2Currency.inr, V2PaywallPeriod.yearly), isFalse);
+      expect(plan.priceFor(V2Currency.usd, V2PaywallPeriod.yearly), '—');
+    });
   });
 
-  testWidgets('no configured trial means no trial promise', (tester) async {
-    // trialDays defaults to 0 because nothing in the app reads a Play
-    // introductory offer yet. The CTA must not invent a 7-day trial.
-    await _pump(tester, data: const V2PaywallData());
-
-    expect(find.text('Start free trial'), findsNothing);
-    expect(find.textContaining('free trial'), findsNothing);
-    expect(find.text('Subscribe'), findsOneWidget);
-  });
-
-  testWidgets('Free and Go say they are Auto-only', (tester) async {
-    await _pump(tester);
-
-    // The product rule is stated on the card, not implied.
-    expect(find.text('Auto only'), findsNWidgets(2));
-    expect(find.text('Auto + manual'), findsNWidgets(2));
-    expect(find.byKey(const Key('plan-access-free')), findsOneWidget);
-    expect(find.byKey(const Key('plan-access-go')), findsOneWidget);
-  });
-
-  testWidgets('the Free card continues without buying anything', (
-    tester,
-  ) async {
-    var freeContinues = 0;
-    final purchases = <String>[];
-    await _pump(
+  group('plan gating', () {
+    testWidgets('Free and Go say they are Auto-only on the card', (
       tester,
-      onContinueFree: () => freeContinues++,
-      onStartTrial: purchases.add,
-    );
+    ) async {
+      await _pump(tester, onPurchase: (_) async {});
 
-    await tester.ensureVisible(find.text('Ovid Free'));
-    await tester.tap(find.text('Ovid Free'));
-    await tester.pumpAndSettle();
+      expect(find.text('Auto only'), findsNWidgets(2));
+      expect(find.text('Auto + manual'), findsNWidgets(2));
+      expect(find.byKey(const Key('plan-access-free')), findsOneWidget);
+      expect(find.byKey(const Key('plan-access-go')), findsOneWidget);
+      // The limit is stated on the card, not only implied by the pill.
+      expect(find.text('Manual models locked'), findsNWidgets(2));
+    });
 
-    // The CTA becomes the Free action instead of a trial purchase.
-    final cta = find.byKey(const Key('paywall-trial'));
-    expect(find.text('Continue with Free'), findsOneWidget);
-    // The redundant secondary link is hidden while the CTA already says it.
-    expect(find.byKey(const Key('paywall-continue-free')), findsNothing);
-
-    await tester.ensureVisible(cta);
-    await tester.tap(cta);
-    await tester.pump();
-
-    expect(freeContinues, 1);
-    expect(purchases, isEmpty);
+    test('every card stays inside the copy budget', () {
+      const data = V2PaywallData();
+      for (final plan in data.plans) {
+        expect(plan.features.length, lessThanOrEqualTo(3), reason: plan.id);
+        for (final feature in plan.features) {
+          expect(
+            _words(feature),
+            lessThanOrEqualTo(4),
+            reason: '${plan.id}: "$feature"',
+          );
+        }
+        expect(_words(plan.name), lessThanOrEqualTo(3), reason: plan.id);
+        expect(_words(plan.modelAccessLabel), lessThanOrEqualTo(3));
+      }
+    });
   });
 
-  testWidgets('Continue with Free proceeds from a paid selection', (
-    tester,
-  ) async {
-    var freeContinues = 0;
-    await _pump(tester, onContinueFree: () => freeContinues++);
+  group('buy path', () {
+    testWidgets('monthly purchase carries the matching product id', (
+      tester,
+    ) async {
+      final purchases = <V2PaywallPurchase>[];
+      await _pump(
+        tester,
+        onPurchase: (purchase) async => purchases.add(purchase),
+      );
 
-    await tester.ensureVisible(find.byKey(const Key('paywall-continue-free')));
-    await tester.tap(find.byKey(const Key('paywall-continue-free')));
-    await tester.pump();
+      await _tapCta(tester, 'plus');
+      await _tapCta(tester, 'go');
+      await _tapCta(tester, 'pro');
 
-    expect(freeContinues, 1);
+      expect([for (final p in purchases) p.planId], ['plus', 'go', 'pro']);
+      expect([for (final p in purchases) p.tier], ['7x', '3x', '15x']);
+      expect(
+        [for (final p in purchases) p.productId],
+        ['ovid_pro_monthly', 'ovid_plus_monthly', 'ovid_max_monthly'],
+      );
+      expect([
+        for (final p in purchases) p.period,
+      ], everyElement(V2PaywallPeriod.monthly));
+    });
+
+    testWidgets('yearly purchase carries the yearly product id', (
+      tester,
+    ) async {
+      final purchases = <V2PaywallPurchase>[];
+      await _pump(
+        tester,
+        onPurchase: (purchase) async => purchases.add(purchase),
+      );
+
+      await _tapPeriod(tester, 'yearly');
+      await _tapCta(tester, 'go');
+      await _tapCta(tester, 'plus');
+      await _tapCta(tester, 'pro');
+
+      expect(
+        [for (final p in purchases) p.productId],
+        ['ovid_plus_yearly', 'ovid_pro_yearly', 'ovid_max_yearly'],
+      );
+      expect([
+        for (final p in purchases) p.period,
+      ], everyElement(V2PaywallPeriod.yearly));
+    });
+
+    testWidgets('a period without a product is unavailable and does nothing', (
+      tester,
+    ) async {
+      final purchases = <V2PaywallPurchase>[];
+      const data = V2PaywallData(
+        selectedPlanId: 'team',
+        trialDays: 7,
+        plans: [
+          V2PlanOption(
+            id: 'team',
+            name: 'Ovid Team',
+            priceUsd: 30,
+            priceInr: 2999,
+            priceUsdYearly: 300,
+            priceInrYearly: 29990,
+            storageGb: 20,
+            features: ['20 GB storage'],
+          ),
+        ],
+      );
+      await _pump(
+        tester,
+        data: data,
+        onPurchase: (purchase) async => purchases.add(purchase),
+      );
+
+      await _tapPeriod(tester, 'yearly');
+
+      expect(find.text('Not available'), findsNWidgets(2));
+      expect(find.text('Yearly is not sold for this plan.'), findsNWidgets(2));
+      final cta = tester.widget<OButton>(_cta('team'));
+      expect(cta.onPressed, isNull);
+
+      await tester.tap(_cta('team'), warnIfMissed: false);
+      await tester.pumpAndSettle();
+      expect(purchases, isEmpty);
+    });
+
+    testWidgets('a period without a price is unavailable and does nothing', (
+      tester,
+    ) async {
+      final purchases = <V2PaywallPurchase>[];
+      const data = V2PaywallData(
+        selectedPlanId: 'go',
+        plans: [
+          V2PlanOption(
+            id: 'go',
+            name: 'Ovid Go',
+            priceUsd: 5,
+            priceInr: 499,
+            storageGb: 5,
+            autoOnly: true,
+            features: ['5 GB storage'],
+          ),
+        ],
+      );
+      await _pump(
+        tester,
+        data: data,
+        onPurchase: (purchase) async => purchases.add(purchase),
+      );
+
+      await _tapPeriod(tester, 'yearly');
+
+      expect(find.text('Not available'), findsNWidgets(2));
+      expect(find.text('No yearly price for this plan.'), findsNWidgets(2));
+      expect(tester.widget<OButton>(_cta('go')).onPressed, isNull);
+      await tester.tap(_cta('go'), warnIfMissed: false);
+      await tester.pumpAndSettle();
+      expect(purchases, isEmpty);
+    });
+
+    testWidgets('the Free card continues without buying anything', (
+      tester,
+    ) async {
+      var freeContinues = 0;
+      final purchases = <V2PaywallPurchase>[];
+      await _pump(
+        tester,
+        onContinueFree: () => freeContinues++,
+        onPurchase: (purchase) async => purchases.add(purchase),
+      );
+
+      await _tapCta(tester, 'free');
+
+      expect(freeContinues, 1);
+      expect(purchases, isEmpty);
+    });
+
+    testWidgets('the footer buys the selected plan', (tester) async {
+      final purchases = <V2PaywallPurchase>[];
+      await _pump(
+        tester,
+        data: const V2PaywallData(),
+        onPurchase: (purchase) async => purchases.add(purchase),
+      );
+
+      await tester.ensureVisible(find.text('Ovid Go'));
+      await tester.tap(find.text('Ovid Go'));
+      await tester.pumpAndSettle();
+      expect(find.text('Subscribe'), findsOneWidget);
+
+      await tester.ensureVisible(find.byKey(const Key('paywall-trial')));
+      await tester.tap(find.byKey(const Key('paywall-trial')));
+      await tester.pumpAndSettle();
+
+      expect(purchases, hasLength(1));
+      expect(purchases.single.planId, 'go');
+      expect(purchases.single.productId, 'ovid_plus_monthly');
+    });
+
+    testWidgets('legacy callback is monthly-only and never buys yearly', (
+      tester,
+    ) async {
+      final trials = <String>[];
+      await _pump(tester, onStartTrial: trials.add);
+
+      await _tapCta(tester, 'go');
+      expect(trials, ['go']);
+
+      await _tapPeriod(tester, 'yearly');
+      expect(tester.widget<OButton>(_cta('go')).onPressed, isNull);
+      await tester.tap(_cta('go'), warnIfMissed: false);
+      await tester.pumpAndSettle();
+
+      expect(trials, ['go']);
+      expect(find.text('Yearly checkout is not connected.'), findsWidgets);
+    });
   });
 
-  testWidgets('paywall renders correctly in dark', (tester) async {
-    await _pump(tester, dark: true);
+  group('restore', () {
+    testWidgets('restored reports the real outcome', (tester) async {
+      var restores = 0;
+      await _pump(
+        tester,
+        onRestorePurchases: () async {
+          restores++;
+          return V2PaywallRestoreResult.restored;
+        },
+      );
 
-    expect(find.text('Ovid Go'), findsOneWidget);
-    expect(find.text('Ovid Plus'), findsOneWidget);
-    expect(find.text('Ovid Pro'), findsOneWidget);
-    expect(find.text('Start free trial'), findsOneWidget);
+      await tester.ensureVisible(find.byKey(const Key('paywall-restore')));
+      await tester.tap(find.byKey(const Key('paywall-restore')));
+      await tester.pumpAndSettle();
+
+      expect(restores, 1);
+      expect(find.text('Purchase restored'), findsOneWidget);
+      expect(find.text('Your subscription is active again.'), findsOneWidget);
+      expect(find.byKey(const Key('purchase-banner-retry')), findsNothing);
+    });
+
+    testWidgets('nothing found is reported as nothing, not a failure', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        onRestorePurchases: () async => V2PaywallRestoreResult.nothingToRestore,
+      );
+
+      await tester.ensureVisible(find.byKey(const Key('paywall-restore')));
+      await tester.tap(find.byKey(const Key('paywall-restore')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('No purchase found'), findsOneWidget);
+      expect(
+        find.text('No active subscription is linked to this account.'),
+        findsOneWidget,
+      );
+      expect(find.text('Purchase restored'), findsNothing);
+      expect(find.byKey(const Key('purchase-banner-retry')), findsNothing);
+    });
+
+    testWidgets('a failed restore retries the restore, not a purchase', (
+      tester,
+    ) async {
+      var restores = 0;
+      var purchases = 0;
+      await _pump(
+        tester,
+        onPurchase: (_) async => purchases++,
+        onRestorePurchases: () async {
+          restores++;
+          return V2PaywallRestoreResult.failed;
+        },
+      );
+
+      await tester.ensureVisible(find.byKey(const Key('paywall-restore')));
+      await tester.tap(find.byKey(const Key('paywall-restore')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Purchase did not finish'), findsOneWidget);
+      expect(find.text('The restore did not finish.'), findsOneWidget);
+      await tester.ensureVisible(
+        find.byKey(const Key('purchase-banner-retry')),
+      );
+      await tester.tap(find.byKey(const Key('purchase-banner-retry')));
+      await tester.pumpAndSettle();
+
+      expect(restores, 2);
+      expect(purchases, 0);
+    });
+
+    testWidgets('a thrown restore is reported as failed', (tester) async {
+      await _pump(
+        tester,
+        onRestorePurchases: () async => throw StateError('store offline'),
+      );
+
+      await tester.ensureVisible(find.byKey(const Key('paywall-restore')));
+      await tester.tap(find.byKey(const Key('paywall-restore')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Purchase did not finish'), findsOneWidget);
+      expect(find.text('The restore did not finish.'), findsOneWidget);
+    });
+
+    testWidgets('restore is in flight once and cannot be tapped twice', (
+      tester,
+    ) async {
+      var restores = 0;
+      final completer = Completer<V2PaywallRestoreResult>();
+      await _pump(
+        tester,
+        onRestorePurchases: () {
+          restores++;
+          return completer.future;
+        },
+      );
+
+      await tester.ensureVisible(find.byKey(const Key('paywall-restore')));
+      await tester.tap(find.byKey(const Key('paywall-restore')));
+      await tester.pump();
+      expect(find.byType(CircularProgressIndicator), findsWidgets);
+      await tester.tap(
+        find.byKey(const Key('paywall-restore')),
+        warnIfMissed: false,
+      );
+      await tester.pump();
+      expect(restores, 1);
+
+      completer.complete(V2PaywallRestoreResult.restored);
+      await tester.pumpAndSettle();
+      expect(find.text('Purchase restored'), findsOneWidget);
+    });
+
+    testWidgets('restore is present but disabled with no service', (
+      tester,
+    ) async {
+      await _pump(tester);
+
+      final restore = tester.widget<OButton>(
+        find.byKey(const Key('paywall-restore')),
+      );
+      expect(restore.onPressed, isNull);
+      final flags = _semantics(
+        tester,
+        find.byKey(const Key('paywall-restore')),
+      ).flagsCollection;
+      expect(flags.isEnabled, Tristate.isFalse);
+    });
   });
 
-  testWidgets('320 dp wide at 200 % text lays out without overflow', (
-    tester,
-  ) async {
-    await _pump(tester, width: 320, textScale: 2);
+  group('states', () {
+    testWidgets('loading shows skeletons and no footer or restore', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: OTheme.light(),
+          home: const PaywallPage(data: V2PaywallData(loading: true)),
+        ),
+      );
+      await tester.pump();
 
-    expect(tester.takeException(), isNull);
-    expect(find.text('Ovid Go'), findsOneWidget);
-    expect(find.text('Ovid Plus'), findsOneWidget);
-    expect(find.text('Ovid Pro'), findsOneWidget);
-    expect(find.text('Start free trial'), findsOneWidget);
-    expect(find.text('Compare all plans'), findsNothing);
+      expect(find.byType(OSkeletonList), findsOneWidget);
+      expect(find.byKey(const Key('paywall-trial')), findsNothing);
+      expect(find.byKey(const Key('paywall-restore')), findsNothing);
+    });
 
-    // Scroll the whole body to force every off-screen section to lay out.
-    await tester.drag(
-      find.byType(SingleChildScrollView),
-      const Offset(0, -4000),
-    );
-    await tester.pumpAndSettle();
-    expect(tester.takeException(), isNull);
-    expect(find.byKey(const Key('paywall-trial')), findsOneWidget);
+    testWidgets('purchasing disables every buy control and never double taps', (
+      tester,
+    ) async {
+      var purchases = 0;
+      final completer = Completer<void>();
+      await _pump(
+        tester,
+        data: const V2PaywallData(),
+        onPurchase: (_) {
+          purchases++;
+          return completer.future;
+        },
+        settle: false,
+      );
+
+      await tester.ensureVisible(_cta('plus'));
+      await tester.tap(_cta('plus'));
+      await tester.pump();
+      expect(purchases, 1);
+      expect(find.byType(CircularProgressIndicator), findsWidgets);
+      expect(tester.widget<OButton>(_cta('plus')).onPressed, isNull);
+      expect(tester.widget<OButton>(_cta('go')).onPressed, isNull);
+      expect(
+        _semantics(tester, _cta('plus')).label,
+        contains('purchase in progress'),
+      );
+
+      await tester.tap(_cta('plus'), warnIfMissed: false);
+      await tester.pump();
+      expect(purchases, 1);
+
+      completer.complete();
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('host purchasing state disables the footer and cards', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        data: const V2PaywallData(purchasing: true),
+        onPurchase: (_) async {},
+        settle: false,
+      );
+
+      expect(find.byType(CircularProgressIndicator), findsWidgets);
+      final footer = tester.widget<OButton>(
+        find.byKey(const Key('paywall-trial')),
+      );
+      expect(footer.onPressed, isNull);
+      expect(tester.widget<OButton>(_cta('plus')).onPressed, isNull);
+    });
+
+    testWidgets('empty plans state offers a retry', (tester) async {
+      var retries = 0;
+      await _pump(
+        tester,
+        data: const V2PaywallData(plans: []),
+        onRetry: () => retries++,
+      );
+
+      expect(find.text('No plans right now'), findsOneWidget);
+      await tester.tap(find.text('Try again'));
+      await tester.pump();
+      expect(retries, 1);
+    });
+
+    testWidgets('error state explains the problem and retries', (tester) async {
+      var retries = 0;
+      await _pump(
+        tester,
+        data: const V2PaywallData(
+          plans: [],
+          error: 'We could not load plans. Check your connection.',
+        ),
+        onRetry: () => retries++,
+      );
+
+      expect(
+        find.text('We could not load plans. Check your connection.'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Try again'));
+      await tester.pump();
+      expect(retries, 1);
+    });
+
+    testWidgets('inline error keeps the plans and retries without buying', (
+      tester,
+    ) async {
+      var retries = 0;
+      var purchases = 0;
+      await _pump(
+        tester,
+        data: const V2PaywallData(error: 'Your last purchase did not finish.'),
+        onRetry: () => retries++,
+        onPurchase: (_) async => purchases++,
+      );
+
+      expect(find.text('Ovid Plus'), findsOneWidget);
+      expect(find.text('Your last purchase did not finish.'), findsOneWidget);
+
+      await tester.ensureVisible(find.text('Try again'));
+      await tester.tap(find.text('Try again'));
+      await tester.pump();
+
+      expect(retries, 1);
+      expect(purchases, 0);
+    });
+
+    testWidgets('already subscribed turns the CTA into Manage', (tester) async {
+      var managed = 0;
+      var purchases = 0;
+      await _pump(
+        tester,
+        data: const V2PaywallData(currentPlanId: '7x'),
+        onManageSubscription: () => managed++,
+        onPurchase: (_) async => purchases++,
+      );
+
+      final footer = tester.widget<OButton>(
+        find.byKey(const Key('paywall-trial')),
+      );
+      expect(footer.label, 'Manage');
+      await tester.tap(find.byKey(const Key('paywall-trial')));
+      await tester.pump();
+      expect(managed, 1);
+
+      expect(tester.widget<OButton>(_cta('plus')).label, 'Current plan');
+      expect(tester.widget<OButton>(_cta('plus')).onPressed, isNull);
+      expect(tester.widget<OButton>(_cta('go')).label, 'Manage');
+      expect(tester.widget<OButton>(_cta('go')).onPressed, isNotNull);
+      expect(purchases, 0);
+
+      await tester.ensureVisible(_cta('go'));
+      await tester.tap(_cta('go'));
+      await tester.pump();
+      expect(managed, 2);
+    });
+
+    testWidgets('no purchase callback leaves the CTA disabled', (tester) async {
+      await _pump(tester);
+
+      final footer = tester.widget<OButton>(
+        find.byKey(const Key('paywall-trial')),
+      );
+      expect(footer.onPressed, isNull);
+      expect(tester.widget<OButton>(_cta('plus')).onPressed, isNull);
+    });
   });
 
-  testWidgets('320 dp wide at 200 % text renders in dark too', (tester) async {
-    await _pump(tester, width: 320, textScale: 2, dark: true);
+  group('semantics', () {
+    testWidgets('each card is a group with name, price, period and CTA', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        data: const V2PaywallData(),
+        onPurchase: (_) async {},
+      );
 
-    expect(tester.takeException(), isNull);
-    expect(find.text('Ovid Plus'), findsOneWidget);
+      final group = _semantics(
+        tester,
+        find.byKey(const Key('paywall-plan-plus')),
+      );
+      expect(group.label, contains('Ovid Plus'));
+      expect(group.label, contains(r'$18'));
+      expect(group.label, contains('per month'));
+      expect(group.label, contains('Auto + manual'));
+      expect(group.flagsCollection.isSelected, Tristate.isTrue);
 
-    await tester.drag(
-      find.byType(SingleChildScrollView),
-      const Offset(0, -4000),
-    );
-    await tester.pumpAndSettle();
-    expect(tester.takeException(), isNull);
+      final cta = _semantics(tester, _cta('plus'));
+      expect(cta.label, contains('Choose Plus'));
+      expect(cta.label, contains('Ovid Plus'));
+      expect(cta.label, contains(r'$18'));
+      expect(cta.label, contains('per month'));
+      expect(cta.flagsCollection.isEnabled, Tristate.isTrue);
+      expect(cta.flagsCollection.isButton, isTrue);
+    });
+
+    testWidgets('a disabled CTA announces the reason', (tester) async {
+      const real = V2PaywallData(
+        selectedPlanId: 'team',
+        plans: [
+          V2PlanOption(
+            id: 'team',
+            name: 'Ovid Team',
+            priceUsd: 30,
+            priceInr: 2999,
+            priceUsdYearly: 300,
+            priceInrYearly: 29990,
+            storageGb: 20,
+          ),
+        ],
+      );
+      await _pump(tester, data: real, onPurchase: (_) async {});
+      await _tapPeriod(tester, 'yearly');
+
+      final cta = _semantics(tester, _cta('team'));
+      expect(cta.flagsCollection.isEnabled, Tristate.isFalse);
+      expect(cta.label, contains('Not available'));
+      expect(cta.label, contains('Yearly is not sold for this plan.'));
+    });
+
+    testWidgets('toggles announce selection and mutual exclusion', (
+      tester,
+    ) async {
+      await _pump(tester, onPurchase: (_) async {});
+
+      final yearly = _semantics(
+        tester,
+        find.byKey(const Key('paywall-period-yearly')),
+      );
+      expect(yearly.flagsCollection.isSelected, Tristate.isFalse);
+      expect(yearly.flagsCollection.isInMutuallyExclusiveGroup, isTrue);
+
+      final monthly = _semantics(
+        tester,
+        find.byKey(const Key('paywall-period-monthly')),
+      );
+      expect(monthly.flagsCollection.isSelected, Tristate.isTrue);
+      expect(monthly.flagsCollection.isInMutuallyExclusiveGroup, isTrue);
+    });
+  });
+
+  group('responsive', () {
+    testWidgets('cards are one column on a phone and two on a tablet', (
+      tester,
+    ) async {
+      await _pump(tester, width: 320, height: 900, onPurchase: (_) async {});
+      final phoneFree = tester.getRect(
+        find.byKey(const Key('paywall-plan-free')),
+      );
+      final phoneGo = tester.getRect(find.byKey(const Key('paywall-plan-go')));
+      expect(phoneFree.left, phoneGo.left);
+      expect(phoneFree.top, lessThan(phoneGo.top));
+
+      await _pump(tester, width: 600, height: 900, onPurchase: (_) async {});
+      final tabletFree = tester.getRect(
+        find.byKey(const Key('paywall-plan-free')),
+      );
+      final tabletGo = tester.getRect(find.byKey(const Key('paywall-plan-go')));
+      expect(tabletFree.top, tabletGo.top);
+      expect(tabletFree.left, lessThan(tabletGo.left));
+    });
+
+    testWidgets('every supported width and text scale survives both themes', (
+      tester,
+    ) async {
+      for (final width in const [320.0, 600.0, 900.0, 1280.0]) {
+        for (final scale in const [1.0, 2.0]) {
+          for (final dark in const [false, true]) {
+            await _pump(
+              tester,
+              width: width,
+              textScale: scale,
+              dark: dark,
+              onPurchase: (_) async {},
+              onRestorePurchases: () async =>
+                  V2PaywallRestoreResult.nothingToRestore,
+            );
+
+            expect(
+              tester.takeException(),
+              isNull,
+              reason: '$width dp / ${scale}x / ${dark ? 'dark' : 'light'}',
+            );
+            expect(
+              find.byWidgetPredicate(_isHorizontalScroll),
+              findsNothing,
+              reason: '$width dp must not scroll horizontally',
+            );
+
+            await tester.drag(
+              find.byType(SingleChildScrollView),
+              const Offset(0, -4000),
+            );
+            await tester.pumpAndSettle();
+            expect(
+              tester.takeException(),
+              isNull,
+              reason: '$width dp / ${scale}x scrolled',
+            );
+            expect(find.byKey(const Key('paywall-trial')), findsOneWidget);
+          }
+        }
+      }
+    });
+
+    testWidgets('content stays inside the 640/720 caps', (tester) async {
+      for (final width in const [600.0, 900.0, 1280.0]) {
+        await _pump(tester, width: width, onPurchase: (_) async {});
+        final free = tester.getRect(find.byKey(const Key('paywall-plan-free')));
+        final pro = tester.getRect(find.byKey(const Key('paywall-plan-pro')));
+        final gridWidth = pro.right - free.left;
+        expect(gridWidth, lessThanOrEqualTo(720), reason: '$width dp');
+        if (width >= 900) {
+          expect(gridWidth, lessThanOrEqualTo(640 + 0.5), reason: '$width dp');
+        }
+      }
+    });
+
+    testWidgets('every action keeps a 48 dp touch target', (tester) async {
+      await _pump(
+        tester,
+        width: 320,
+        textScale: 2,
+        onPurchase: (_) async {},
+        onRestorePurchases: () async => V2PaywallRestoreResult.restored,
+      );
+
+      for (final key in const [
+        Key('paywall-period-monthly'),
+        Key('paywall-period-yearly'),
+        Key('paywall-currency-usd'),
+        Key('paywall-currency-inr'),
+        Key('paywall-cta-free'),
+        Key('paywall-cta-plus'),
+        Key('paywall-restore'),
+        Key('paywall-trial'),
+      ]) {
+        await tester.ensureVisible(find.byKey(key));
+        await tester.pumpAndSettle();
+        final size = tester.getSize(find.byKey(key));
+        expect(size.height, greaterThanOrEqualTo(48), reason: '$key height');
+        expect(size.width, greaterThanOrEqualTo(48), reason: '$key width');
+      }
+    });
   });
 
   testWidgets('reduced motion keeps every section visible', (tester) async {
-    await _pump(tester, disableAnimations: true);
+    await _pump(tester, disableAnimations: true, onPurchase: (_) async {});
 
     expect(find.text('Upgrade'), findsOneWidget);
     expect(find.text('Ovid Plus'), findsOneWidget);
     expect(find.byKey(const Key('paywall-trial')), findsOneWidget);
-  });
-
-  testWidgets('currency toggle swaps every price to INR', (tester) async {
-    var currencyChanges = <V2Currency>[];
-    await _pump(tester, onCurrencyChanged: currencyChanges.add);
-
-    await tester.tap(find.byKey(const Key('paywall-currency-inr')));
-    await tester.pumpAndSettle();
-
-    expect(find.text('₹499'), findsOneWidget);
-    expect(find.text('₹1,799'), findsOneWidget);
-    expect(find.text('₹9,999'), findsOneWidget);
-    expect(find.text('\$18'), findsNothing);
-    expect(currencyChanges, [V2Currency.inr]);
-  });
-
-  testWidgets('selecting a plan and starting the trial calls back', (
-    tester,
-  ) async {
-    String? selected;
-    String? trialPlan;
-    await _pump(
-      tester,
-      onPlanSelected: (id) => selected = id,
-      onStartTrial: (id) => trialPlan = id,
-    );
-
-    await tester.ensureVisible(find.text('Ovid Go'));
-    await tester.tap(find.text('Ovid Go'));
-    await tester.pump();
-    expect(selected, 'go');
-
-    await tester.ensureVisible(find.byKey(const Key('paywall-trial')));
-    await tester.tap(find.byKey(const Key('paywall-trial')));
-    await tester.pump();
-    expect(trialPlan, 'go');
-  });
-
-  testWidgets('loading shows skeletons and no trial button', (tester) async {
-    await tester.pumpWidget(
-      MaterialApp(
-        theme: OTheme.light(),
-        home: const PaywallPage(data: V2PaywallData(loading: true)),
-      ),
-    );
-    await tester.pump();
-
-    expect(find.byType(OSkeletonList), findsOneWidget);
-    expect(find.byKey(const Key('paywall-trial')), findsNothing);
-  });
-
-  testWidgets('purchasing state shows a spinner and disables the trial', (
-    tester,
-  ) async {
-    await _pump(
-      tester,
-      data: const V2PaywallData(purchasing: true),
-      onStartTrial: (_) {},
-      settle: false,
-    );
-
-    expect(find.byType(CircularProgressIndicator), findsOneWidget);
-    final trial = tester.widget<FilledButton>(find.byType(FilledButton));
-    expect(trial.onPressed, isNull);
-  });
-
-  testWidgets('empty plans state offers a retry', (tester) async {
-    var retries = 0;
-    await _pump(
-      tester,
-      data: const V2PaywallData(plans: []),
-      onRetry: () => retries++,
-    );
-
-    expect(find.text('No plans right now'), findsOneWidget);
-    await tester.tap(find.text('Try again'));
-    await tester.pump();
-
-    expect(retries, 1);
-  });
-
-  testWidgets('error state explains the problem and retries', (tester) async {
-    var retries = 0;
-    await _pump(
-      tester,
-      data: const V2PaywallData(
-        plans: [],
-        error: 'We could not load plans. Check your connection.',
-      ),
-      onRetry: () => retries++,
-    );
-
-    expect(
-      find.text('We could not load plans. Check your connection.'),
-      findsOneWidget,
-    );
-    await tester.tap(find.text('Try again'));
-    await tester.pump();
-
-    expect(retries, 1);
-  });
-
-  testWidgets('inline error keeps the plans and retries without buying', (
-    tester,
-  ) async {
-    var retries = 0;
-    String? trialPlan;
-    await _pump(
-      tester,
-      data: const V2PaywallData(error: 'Your last purchase did not finish.'),
-      onRetry: () => retries++,
-      onStartTrial: (id) => trialPlan = id,
-    );
-
-    expect(find.text('Ovid Plus'), findsOneWidget);
-    expect(find.text('Your last purchase did not finish.'), findsOneWidget);
-
-    await tester.ensureVisible(find.text('Try again'));
-    await tester.tap(find.text('Try again'));
-    await tester.pump();
-
-    expect(retries, 1);
-    expect(trialPlan, isNull);
-  });
-
-  testWidgets('trial CTA is disabled when no purchase callback is wired', (
-    tester,
-  ) async {
-    await _pump(tester);
-
-    final trial = tester.widget<FilledButton>(
-      find.descendant(
-        of: find.byKey(const Key('paywall-trial')),
-        matching: find.byType(FilledButton),
-      ),
-    );
-    expect(trial.onPressed, isNull);
   });
 
   testWidgets('test-mode note is shown when purchases are simulated', (
@@ -333,7 +876,7 @@ void main() {
           data: const V2PaywallData(
             testModeNote: 'Test mode: purchases are simulated.',
           ),
-          onStartTrial: (_) {},
+          onPurchase: (_) async {},
         ),
       ),
     );
@@ -343,25 +886,11 @@ void main() {
     expect(find.text('Test Store mode'), findsOneWidget);
   });
 
-  testWidgets('currency tabs keep a 48 dp touch target', (tester) async {
-    await _pump(tester);
-
-    for (final key in const [
-      Key('paywall-currency-usd'),
-      Key('paywall-currency-inr'),
-    ]) {
-      final size = tester.getSize(find.byKey(key));
-      expect(size.height, greaterThanOrEqualTo(48), reason: '$key height');
-      expect(size.width, greaterThanOrEqualTo(48), reason: '$key width');
-    }
-  });
-
   group('purchase banner', () {
     testWidgets('no banner is painted when no purchase status is given', (
       tester,
     ) async {
-      await _pump(tester);
-
+      await _pump(tester, onPurchase: (_) async {});
       expect(find.byKey(const Key('purchase-banner-card')), findsNothing);
     });
 
@@ -375,12 +904,11 @@ void main() {
           purchaseStatus: V2PurchaseBannerStatus.testStore,
         ),
         onRetry: () => retries++,
+        onPurchase: (_) async {},
       );
 
       expect(find.byKey(const Key('purchase-banner-card')), findsOneWidget);
       expect(find.text('Test Store mode'), findsOneWidget);
-      expect(find.text('Ovid Plus'), findsOneWidget);
-      // Simulated purchases must not offer a retry that looks like a rebuy.
       expect(find.byKey(const Key('purchase-banner-retry')), findsNothing);
       expect(retries, 0);
     });
@@ -398,6 +926,7 @@ void main() {
         ),
         onRetry: () => retries++,
         onManageSubscription: () => managed++,
+        onPurchase: (_) async {},
       );
 
       expect(find.text('Purchase did not finish'), findsOneWidget);
@@ -418,42 +947,23 @@ void main() {
       expect(managed, 1);
     });
 
-    testWidgets('pending status names the selected plan and offers no retry', (
+    testWidgets('nothing-to-restore status is a real, non-error answer', (
       tester,
     ) async {
       await _pump(
         tester,
         data: const V2PaywallData(
-          purchaseStatus: V2PurchaseBannerStatus.pending,
+          purchaseStatus: V2PurchaseBannerStatus.nothingToRestore,
         ),
+        onPurchase: (_) async {},
       );
 
-      expect(find.text('Finishing your purchase'), findsOneWidget);
+      expect(find.text('No purchase found'), findsOneWidget);
       expect(
-        find.text(
-          'Your Ovid Plus purchase is still being confirmed with the store. '
-          'This can take a moment.',
-        ),
+        find.text('No active subscription is linked to this account.'),
         findsOneWidget,
       );
       expect(find.byKey(const Key('purchase-banner-retry')), findsNothing);
-    });
-
-    testWidgets('restored status confirms the plan is active again', (
-      tester,
-    ) async {
-      await _pump(
-        tester,
-        data: const V2PaywallData(
-          purchaseStatus: V2PurchaseBannerStatus.restored,
-        ),
-      );
-
-      expect(find.text('Purchase restored'), findsOneWidget);
-      expect(
-        find.text('Your Ovid Plus subscription is active again.'),
-        findsOneWidget,
-      );
     });
 
     testWidgets('banner survives 320 dp at 200 % text in dark', (tester) async {
@@ -468,6 +978,7 @@ void main() {
         ),
         onRetry: () {},
         onManageSubscription: () {},
+        onPurchase: (_) async {},
       );
 
       expect(tester.takeException(), isNull);

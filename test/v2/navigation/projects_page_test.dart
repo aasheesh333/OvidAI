@@ -8,29 +8,30 @@ const _project = V2Project(
   id: 'pr1',
   name: 'Mobile App Redesign',
   chatCount: 12,
-  storageLabel: '340 MB',
   shared: true,
-  memberInitials: <String>['Alex Rivera', 'Sam Lee', 'Priya Patel', 'Noah Kim'],
-  updatedLabel: 'Updated 4m ago',
 );
 
 const _brandProject = V2Project(
   id: 'pr2',
   name: 'Brand Voice Guidelines',
   chatCount: 4,
-  storageLabel: '18 MB',
-  colorKey: 'coral',
-  updatedLabel: 'Yesterday',
 );
 
-V2ProjectsData _contentData() =>
-    const V2ProjectsData(projects: <V2Project>[_project, _brandProject]);
+const _longProject = V2Project(
+  id: 'long',
+  name: 'Website redesign for the international launch campaign',
+  chatCount: 1234,
+  shared: true,
+);
+
+V2ProjectsData _contentData([
+  List<V2Project> projects = const <V2Project>[_project, _brandProject],
+]) => V2ProjectsData(projects: projects);
 
 Widget _app(Widget child, {ThemeData? theme}) =>
     MaterialApp(theme: theme ?? OTheme.light(), home: child);
 
-/// Phone-width surface at 200 % text, the accessibility stress case.
-Widget _narrow(Widget child, {ThemeData? theme, double textScale = 2}) {
+Widget _scaled(Widget child, {required double textScale, ThemeData? theme}) {
   return MaterialApp(
     theme: theme ?? OTheme.light(),
     home: Builder(
@@ -44,35 +45,58 @@ Widget _narrow(Widget child, {ThemeData? theme, double textScale = 2}) {
   );
 }
 
-void _useNarrowScreen(WidgetTester tester) {
-  tester.view.physicalSize = const Size(320, 640);
+void _useScreen(
+  WidgetTester tester, {
+  required double width,
+  double height = 800,
+}) {
+  tester.view.physicalSize = Size(width, height);
   tester.view.devicePixelRatio = 1;
+}
+
+void _resetScreen(WidgetTester tester) {
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
 }
 
+Future<void> _openMenu(WidgetTester tester, String projectId) async {
+  await tester.tap(find.byKey(ValueKey<String>('v2-project-menu-$projectId')));
+  await tester.pumpAndSettle();
+}
+
 void main() {
-  testWidgets('projects page renders explainer and project card in light', (
+  testWidgets('content shows one header and one-line project rows', (
     tester,
   ) async {
-    await tester.pumpWidget(_app(ProjectsPage(data: _contentData())));
+    await tester.pumpWidget(
+      _app(
+        ProjectsPage(
+          data: _contentData(),
+          onProjectTap: (_) {},
+          deleteProject: (_) async => const V2ProjectMutation.ok(),
+        ),
+      ),
+    );
     await tester.pumpAndSettle();
 
     expect(find.text('Projects'), findsOneWidget);
+    expect(find.text('PROJECTS'), findsNothing);
+    expect(find.text('Mobile App Redesign'), findsOneWidget);
+    expect(find.text('12 chats'), findsOneWidget);
+    expect(find.text('Shared'), findsOneWidget);
+    expect(find.text('Brand Voice Guidelines'), findsOneWidget);
+    expect(find.text('4 chats'), findsOneWidget);
+    expect(find.text('Personal'), findsNothing);
+    expect(find.text('340 MB'), findsNothing);
+    expect(find.text('Updated 4m ago'), findsNothing);
+    expect(find.text('Group chats that share files and memory.'), findsNothing);
     expect(
-      find.text('Group chats that share files and memory.'),
+      find.byKey(const ValueKey<String>('v2-project-menu-pr1')),
       findsOneWidget,
     );
-    expect(find.text('PROJECTS'), findsOneWidget);
-    expect(find.text('Mobile App Redesign'), findsOneWidget);
-    expect(find.text('Shared'), findsOneWidget);
-    expect(find.text('Personal'), findsOneWidget);
-    expect(find.text('12 chats · 340 MB'), findsOneWidget);
-    expect(find.text('Updated 4m ago'), findsOneWidget);
-    expect(find.text('+1'), findsOneWidget);
   });
 
-  testWidgets('projects page renders in dark', (tester) async {
+  testWidgets('content renders in dark', (tester) async {
     await tester.pumpWidget(
       _app(ProjectsPage(data: _contentData()), theme: OTheme.dark()),
     );
@@ -82,16 +106,41 @@ void main() {
     expect(find.text('Shared'), findsOneWidget);
   });
 
-  testWidgets('empty state opens the New project sheet', (tester) async {
+  testWidgets('long names stay on one line and ellipsize', (tester) async {
     await tester.pumpWidget(
-      _app(ProjectsPage(data: const V2ProjectsData(), onCreateProject: (_) {})),
+      _app(ProjectsPage(data: _contentData(const <V2Project>[_longProject]))),
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('No projects yet'), findsOneWidget);
-    await tester.tap(find.text('New project'));
+    final name = tester.widget<Text>(
+      find.byKey(const ValueKey<String>('v2-project-name-long')),
+    );
+    expect(name.maxLines, 1);
+    expect(name.overflow, TextOverflow.ellipsis);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('empty state offers create when the caller can persist', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        ProjectsPage(
+          data: const V2ProjectsData(),
+          createProject: (_) async => const V2ProjectMutation.ok(),
+        ),
+      ),
+    );
     await tester.pumpAndSettle();
 
+    expect(find.text('No projects'), findsOneWidget);
+    expect(find.text('Projects group chats and memory.'), findsOneWidget);
+    expect(find.byKey(const Key('v2-empty-new-project')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('v2-empty-new-project')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('New project'), findsWidgets);
     expect(find.text('Project name'), findsOneWidget);
     expect(find.text('Create project'), findsOneWidget);
   });
@@ -102,12 +151,13 @@ void main() {
     await tester.pumpWidget(_app(const ProjectsPage(data: V2ProjectsData())));
     await tester.pumpAndSettle();
 
-    expect(find.text('New'), findsNothing);
+    expect(find.text('No projects'), findsOneWidget);
+    expect(find.byKey(const Key('v2-empty-new-project')), findsNothing);
+    expect(find.byKey(const Key('v2-new-project')), findsNothing);
     expect(find.text('New project'), findsNothing);
-    expect(find.text('No projects yet'), findsOneWidget);
   });
 
-  testWidgets('project options only render when wired', (tester) async {
+  testWidgets('row menu only renders when an action is wired', (tester) async {
     await tester.pumpWidget(_app(ProjectsPage(data: _contentData())));
     await tester.pumpAndSettle();
 
@@ -130,10 +180,9 @@ void main() {
     expect(tapped?.id, 'pr1');
   });
 
-  testWidgets('project options reports the project to the caller', (
+  testWidgets('the legacy actions hook still opens from the row', (
     tester,
   ) async {
-    final semantics = tester.ensureSemantics();
     V2Project? actions;
     await tester.pumpWidget(
       _app(
@@ -145,88 +194,375 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(
-      find.bySemanticsLabel('Project options for Mobile App Redesign'),
-    );
+    await _openMenu(tester, 'pr1');
     expect(actions?.id, 'pr1');
-    semantics.dispose();
   });
 
-  testWidgets('filter narrows the list and clear search restores it', (
+  testWidgets('create rejects empty and duplicate names, then inserts', (
     tester,
   ) async {
-    await tester.pumpWidget(_app(ProjectsPage(data: _contentData())));
-    await tester.pumpAndSettle();
-
-    await tester.enterText(find.byKey(const Key('v2-project-filter')), 'brand');
-    await tester.pumpAndSettle();
-
-    expect(find.text('Brand Voice Guidelines'), findsOneWidget);
-    expect(find.text('Mobile App Redesign'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
-
-    await tester.enterText(
-      find.byKey(const Key('v2-project-filter')),
-      'nothing here',
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('No projects match'), findsOneWidget);
-    await tester.tap(find.text('Clear search'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Mobile App Redesign'), findsOneWidget);
-    expect(find.text('Brand Voice Guidelines'), findsOneWidget);
-  });
-
-  testWidgets('New project sheet collects a name and colour', (tester) async {
-    final semantics = tester.ensureSemantics();
-    V2ProjectDraft? created;
+    V2ProjectDraft? draft;
     await tester.pumpWidget(
       _app(
         ProjectsPage(
           data: _contentData(),
-          onCreateProject: (draft) => created = draft,
+          createProject: (value) async {
+            draft = value;
+            return const V2ProjectMutation.ok(
+              project: V2Project(id: 'pr3', name: 'Brand site', chatCount: 0),
+            );
+          },
         ),
       ),
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('New'));
+    await tester.tap(find.byKey(const Key('v2-new-project')));
     await tester.pumpAndSettle();
 
-    // The CTA is disabled until the project has a name.
-    await tester.tap(find.byKey(const Key('v2-create-project')));
+    var create = tester.widget<OButton>(
+      find.byKey(const Key('v2-create-project')),
+    );
+    expect(create.onPressed, isNull, reason: 'an empty name cannot be saved');
+
+    await tester.enterText(
+      find.byKey(const Key('v2-project-name-field')),
+      '   ',
+    );
     await tester.pump();
-    expect(created, isNull);
+    create = tester.widget<OButton>(find.byKey(const Key('v2-create-project')));
+    expect(create.onPressed, isNull, reason: 'whitespace is not a name');
+
+    await tester.enterText(
+      find.byKey(const Key('v2-project-name-field')),
+      ' mobile app redesign ',
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('v2-create-project')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('That name is already in use.'), findsOneWidget);
+    expect(draft, isNull);
+    expect(find.text('Create project'), findsOneWidget);
 
     await tester.enterText(
       find.byKey(const Key('v2-project-name-field')),
       'Brand site',
     );
     await tester.pump();
-    await tester.tap(find.byKey(const Key('v2-project-color-emerald')));
+    await tester.tap(find.byKey(const Key('v2-create-project')));
+    await tester.pumpAndSettle();
+
+    expect(draft?.name, 'Brand site');
+    expect(find.text('Brand site'), findsOneWidget);
+    expect(find.text('0 chats'), findsOneWidget);
+    expect(find.text('No projects'), findsNothing);
+  });
+
+  testWidgets('create inserts a project from an empty list', (tester) async {
+    await tester.pumpWidget(
+      _app(
+        ProjectsPage(
+          data: const V2ProjectsData(),
+          createProject: (_) async => const V2ProjectMutation.ok(
+            project: V2Project(id: 'pr3', name: 'Brand site', chatCount: 0),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('v2-empty-new-project')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('v2-project-name-field')),
+      'Brand site',
+    );
     await tester.pump();
-    expect(find.bySemanticsLabel('Emerald colour, selected'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('v2-create-project')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('No projects'), findsNothing);
+    expect(find.text('Brand site'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('v2-project-pr3')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('create reports a persistence failure inline and stays open', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        ProjectsPage(
+          data: const V2ProjectsData(),
+          createProject: (_) async =>
+              const V2ProjectMutation.failed('Could not reach the server.'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('v2-empty-new-project')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('v2-project-name-field')),
+      'Brand site',
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('v2-create-project')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Could not reach the server.'), findsOneWidget);
+    expect(find.text('Create project'), findsOneWidget);
+    expect(find.byKey(const ValueKey<String>('v2-project-pr3')), findsNothing);
+  });
+
+  testWidgets('the legacy create hook still reaches the caller', (
+    tester,
+  ) async {
+    V2ProjectDraft? created;
+    await tester.pumpWidget(
+      _app(
+        ProjectsPage(
+          data: const V2ProjectsData(),
+          onCreateProject: (draft) => created = draft,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('v2-empty-new-project')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('v2-project-name-field')),
+      'Brand site',
+    );
+    await tester.pump();
     await tester.tap(find.byKey(const Key('v2-create-project')));
     await tester.pumpAndSettle();
 
     expect(created?.name, 'Brand site');
-    expect(created?.colorKey, 'emerald');
+  });
+
+  testWidgets('rename persists and updates the row', (tester) async {
+    V2Project? renamedProject;
+    String? renamedTo;
+    await tester.pumpWidget(
+      _app(
+        ProjectsPage(
+          data: _contentData(),
+          renameProject: (project, name) async {
+            renamedProject = project;
+            renamedTo = name;
+            return const V2ProjectMutation.ok();
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await _openMenu(tester, 'pr1');
+    expect(find.text('Rename'), findsOneWidget);
+    await tester.tap(find.text('Rename'));
+    await tester.pumpAndSettle();
+
+    final field = tester.widget<TextField>(
+      find.byKey(const Key('v2-project-name-field')),
+    );
+    expect(field.controller?.text, 'Mobile App Redesign');
+
+    await tester.enterText(
+      find.byKey(const Key('v2-project-name-field')),
+      'Customer app',
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('v2-rename-project')));
+    await tester.pumpAndSettle();
+
+    expect(renamedProject?.id, 'pr1');
+    expect(renamedTo, 'Customer app');
+    expect(find.text('Customer app'), findsOneWidget);
+    expect(find.text('Mobile App Redesign'), findsNothing);
+  });
+
+  testWidgets('rename rejects a duplicate other project name', (tester) async {
+    var called = false;
+    await tester.pumpWidget(
+      _app(
+        ProjectsPage(
+          data: _contentData(),
+          renameProject: (project, name) async {
+            called = true;
+            return const V2ProjectMutation.ok();
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await _openMenu(tester, 'pr1');
+    await tester.tap(find.text('Rename'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('v2-project-name-field')),
+      'Brand Voice Guidelines',
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('v2-rename-project')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('That name is already in use.'), findsOneWidget);
+    expect(called, isFalse);
+  });
+
+  testWidgets('failed rename rolls the row back and reports inline', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        ProjectsPage(
+          data: _contentData(),
+          renameProject: (project, name) async =>
+              const V2ProjectMutation.failed('Name was rejected.'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await _openMenu(tester, 'pr1');
+    await tester.tap(find.text('Rename'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('v2-project-name-field')),
+      'Rejected name',
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('v2-rename-project')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Name was rejected.'), findsOneWidget);
+    final rowName = tester.widget<Text>(
+      find.byKey(const ValueKey<String>('v2-project-name-pr1')),
+    );
+    expect(rowName.data, 'Mobile App Redesign');
+
+    await tester.tap(find.byIcon(Icons.close_rounded));
+    await tester.pumpAndSettle();
+    expect(find.text('Mobile App Redesign'), findsOneWidget);
+  });
+
+  testWidgets('memory action reports the project to the caller', (
+    tester,
+  ) async {
+    V2Project? opened;
+    await tester.pumpWidget(
+      _app(
+        ProjectsPage(
+          data: _contentData(),
+          onProjectMemory: (project) => opened = project,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await _openMenu(tester, 'pr1');
+    expect(find.text('Project memory'), findsOneWidget);
+    await tester.tap(find.text('Project memory'));
+    await tester.pumpAndSettle();
+
+    expect(opened?.id, 'pr1');
+  });
+
+  testWidgets('delete names the project, asks first, then removes the row', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    V2Project? deleted;
+    await tester.pumpWidget(
+      _app(
+        ProjectsPage(
+          data: _contentData(const <V2Project>[_project]),
+          deleteProject: (project) async {
+            deleted = project;
+            return const V2ProjectMutation.ok();
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await _openMenu(tester, 'pr1');
+    await tester.tap(find.text('Delete project'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Delete project?'), findsOneWidget);
+    expect(find.textContaining('"Mobile App Redesign"'), findsOneWidget);
+    expect(
+      find.bySemanticsLabel('Delete Mobile App Redesign, destructive'),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Keep project'));
+    await tester.pumpAndSettle();
+    expect(deleted, isNull);
+    expect(
+      find.byKey(const ValueKey<String>('v2-project-pr1')),
+      findsOneWidget,
+    );
+
+    await _openMenu(tester, 'pr1');
+    await tester.tap(find.text('Delete project'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('v2-delete-project-confirm')));
+    await tester.pumpAndSettle();
+
+    expect(deleted?.id, 'pr1');
+    expect(find.byKey(const ValueKey<String>('v2-project-pr1')), findsNothing);
+    expect(find.text('No projects'), findsOneWidget);
     semantics.dispose();
   });
 
-  testWidgets('loading state shows a skeleton list', (tester) async {
+  testWidgets('failed delete restores the row and reports why', (tester) async {
     await tester.pumpWidget(
       _app(
-        const ProjectsPage(
-          data: V2ProjectsData(status: V2ProjectsStatus.loading),
+        ProjectsPage(
+          data: _contentData(),
+          deleteProject: (project) async =>
+              const V2ProjectMutation.failed('Server refused.'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await _openMenu(tester, 'pr1');
+    await tester.tap(find.text('Delete project'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('v2-delete-project-confirm')));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey<String>('v2-project-pr1')),
+      findsOneWidget,
+    );
+    expect(find.text('Server refused.'), findsOneWidget);
+  });
+
+  testWidgets('loading state shows a skeleton and no actions', (tester) async {
+    await tester.pumpWidget(
+      _app(
+        ProjectsPage(
+          data: const V2ProjectsData(status: V2ProjectsStatus.loading),
+          createProject: (_) async => const V2ProjectMutation.ok(),
         ),
       ),
     );
     await tester.pump();
 
     expect(find.byType(OSkeletonList), findsOneWidget);
+    expect(find.byKey(const Key('v2-new-project')), findsNothing);
+    expect(find.byKey(const Key('v2-empty-new-project')), findsNothing);
   });
 
   testWidgets('error state retries through the caller', (tester) async {
@@ -250,59 +586,160 @@ void main() {
     expect(retried, 1);
   });
 
-  testWidgets('content fits a 320 dp screen at 200 % text', (tester) async {
-    _useNarrowScreen(tester);
-    await tester.pumpWidget(_narrow(ProjectsPage(data: _contentData())));
-    await tester.pumpAndSettle();
-
-    expect(tester.takeException(), isNull);
-    // The list sits below the fold at this size; it must still be built.
-    expect(
-      find.text('Mobile App Redesign', skipOffstage: false),
-      findsOneWidget,
-    );
-  });
-
-  testWidgets('empty state fits a 320 dp screen at 200 % text', (tester) async {
-    _useNarrowScreen(tester);
-    await tester.pumpWidget(
-      _narrow(const ProjectsPage(data: V2ProjectsData())),
-    );
-    await tester.pumpAndSettle();
-
-    expect(tester.takeException(), isNull);
-    expect(find.text('No projects yet', skipOffstage: false), findsOneWidget);
-  });
-
-  testWidgets('New project sheet fits a 320 dp screen at 200 % text', (
+  testWidgets('row semantics announce name, count and share state', (
     tester,
   ) async {
-    _useNarrowScreen(tester);
+    final semantics = tester.ensureSemantics();
     await tester.pumpWidget(
-      _narrow(
-        ProjectsPage(data: const V2ProjectsData(), onCreateProject: (_) {}),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text('New'));
-    await tester.pumpAndSettle();
-
-    expect(tester.takeException(), isNull);
-    expect(find.text('Create project'), findsOneWidget);
-  });
-
-  testWidgets('error state fits a 320 dp screen at 200 % text', (tester) async {
-    _useNarrowScreen(tester);
-    await tester.pumpWidget(
-      _narrow(
-        const ProjectsPage(
-          data: V2ProjectsData(status: V2ProjectsStatus.error),
+      _app(
+        ProjectsPage(
+          data: _contentData(),
+          onProjectTap: (_) {},
+          onProjectMemory: (_) {},
         ),
       ),
     );
     await tester.pumpAndSettle();
 
+    expect(
+      tester.getSemantics(
+        find.bySemanticsLabel('Mobile App Redesign, 12 chats, shared'),
+      ),
+      isSemantics(
+        label: 'Mobile App Redesign, 12 chats, shared',
+        isButton: true,
+        hasEnabledState: true,
+        isEnabled: true,
+      ),
+    );
+    expect(
+      find.bySemanticsLabel('Project options for Mobile App Redesign'),
+      findsOneWidget,
+    );
+    semantics.dispose();
+  });
+
+  testWidgets('every state fits 320 dp at 200 % text in light and dark', (
+    tester,
+  ) async {
+    _useScreen(tester, width: 320, height: 640);
+    _resetScreen(tester);
+
+    const states = <V2ProjectsData>[
+      V2ProjectsData(status: V2ProjectsStatus.loading),
+      V2ProjectsData(),
+      V2ProjectsData(status: V2ProjectsStatus.error, errorMessage: 'Offline.'),
+      V2ProjectsData(projects: <V2Project>[_project, _brandProject]),
+    ];
+
+    for (final dark in <bool>[false, true]) {
+      for (final data in states) {
+        await tester.pumpWidget(
+          _scaled(
+            ProjectsPage(data: data, onRetry: () {}),
+            textScale: 2,
+            theme: dark ? OTheme.dark() : OTheme.light(),
+          ),
+        );
+        // Loading skeletons animate forever, so settle one frame rather than
+        // waiting for an animation count to reach zero.
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(
+          tester.takeException(),
+          isNull,
+          reason: '${data.status} in ${dark ? 'dark' : 'light'}',
+        );
+      }
+    }
+  });
+
+  testWidgets('rows fit 320 to 1280 at 100 % and 200 % in both themes', (
+    tester,
+  ) async {
+    _resetScreen(tester);
+
+    for (final width in <double>[320, 360, 412, 600, 800, 1024, 1280]) {
+      for (final scale in <double>[1, 2]) {
+        for (final dark in <bool>[false, true]) {
+          _useScreen(tester, width: width);
+          await tester.pumpWidget(
+            _scaled(
+              ProjectsPage(
+                data: _contentData(const <V2Project>[_longProject]),
+                onProjectTap: (_) {},
+                onProjectMemory: (_) {},
+              ),
+              textScale: scale,
+              theme: dark ? OTheme.dark() : OTheme.light(),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          expect(
+            tester.takeException(),
+            isNull,
+            reason:
+                '${width.toInt()} dp / ${scale}x / '
+                '${dark ? 'dark' : 'light'}',
+          );
+          final row = tester.getRect(
+            find.byKey(const ValueKey<String>('v2-project-long')),
+          );
+          final cap = width >= 900
+              ? 720.0
+              : width >= 600
+              ? 640.0
+              : width;
+          expect(
+            row.width,
+            lessThanOrEqualTo(cap),
+            reason: 'the row must sit inside the ${cap.toInt()} dp cap',
+          );
+        }
+      }
+    }
+  });
+
+  testWidgets('create and delete sheets fit 320 dp at 200 % text', (
+    tester,
+  ) async {
+    _useScreen(tester, width: 320, height: 640);
+    _resetScreen(tester);
+
+    await tester.pumpWidget(
+      _scaled(
+        ProjectsPage(
+          data: const V2ProjectsData(),
+          createProject: (_) async =>
+              const V2ProjectMutation.failed('Could not reach the server.'),
+        ),
+        textScale: 2,
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('v2-empty-new-project')));
+    await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
+    expect(find.text('Create project'), findsOneWidget);
+
+    await tester.tap(find.byIcon(Icons.close_rounded));
+    await tester.pumpAndSettle();
+
+    await tester.pumpWidget(
+      _scaled(
+        ProjectsPage(
+          data: _contentData(const <V2Project>[_project]),
+          deleteProject: (_) async => const V2ProjectMutation.ok(),
+        ),
+        textScale: 2,
+      ),
+    );
+    await tester.pumpAndSettle();
+    await _openMenu(tester, 'pr1');
+    await tester.tap(find.text('Delete project'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.text('Delete project?'), findsOneWidget);
   });
 }

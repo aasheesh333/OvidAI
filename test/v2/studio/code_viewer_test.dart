@@ -94,7 +94,7 @@ void main() {
     expect(find.text('2'), findsOneWidget);
   });
 
-  testWidgets('copy is wired and disabled when there is no content', (
+  testWidgets('copy is wired, disabled for empty content, absent when unwired', (
     tester,
   ) async {
     var copies = 0;
@@ -107,10 +107,12 @@ void main() {
     expect(copies, 1);
 
     final handle = tester.ensureSemantics();
+    // Wired but nothing to copy: disabled, not a dead enabled control.
     await tester.pumpWidget(
       _app(
-        const V2CodeViewerPage(
-          data: V2CodeViewerData(status: V2CodeViewerStatus.empty),
+        V2CodeViewerPage(
+          data: const V2CodeViewerData(status: V2CodeViewerStatus.empty),
+          onCopy: () {},
         ),
       ),
     );
@@ -120,6 +122,17 @@ void main() {
       tester.getSemantics(find.byKey(const Key('v2-code-viewer-copy'))),
       isSemantics(isButton: true, isEnabled: false),
     );
+
+    // No handler at all: the action is removed rather than shown disabled.
+    await tester.pumpWidget(
+      _app(
+        const V2CodeViewerPage(
+          data: V2CodeViewerData(status: V2CodeViewerStatus.empty),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('v2-code-viewer-copy')), findsNothing);
     handle.dispose();
   });
 
@@ -184,7 +197,9 @@ void main() {
 
   testWidgets('diff mode marks added and removed lines', (tester) async {
     final handle = tester.ensureSemantics();
-    await tester.pumpWidget(_app(const V2CodeViewerPage(data: _diff)));
+    await tester.pumpWidget(
+      _app(V2CodeViewerPage(data: _diff, onCopy: () {})),
+    );
     await tester.pumpAndSettle();
 
     expect(find.text('demo.dart'), findsOneWidget);
@@ -240,18 +255,16 @@ void main() {
     handle.dispose();
   });
 
-  testWidgets('external open is disabled when it is not wired', (tester) async {
-    final handle = tester.ensureSemantics();
+  testWidgets('external open is absent when it is not wired', (tester) async {
     await tester.pumpWidget(_app(V2CodeViewerPage(data: _huge())));
     await tester.pumpAndSettle();
 
+    // The cap is still explained; the dead button is gone.
+    expect(find.text('10 of 30 lines'), findsOneWidget);
     expect(
-      tester.getSemantics(
-        find.byKey(const Key('v2-code-viewer-open-externally')),
-      ),
-      isSemantics(isButton: true, isEnabled: false),
+      find.byKey(const Key('v2-code-viewer-open-externally')),
+      findsNothing,
     );
-    handle.dispose();
   });
 
   testWidgets('loading, empty and error states stay reachable', (tester) async {

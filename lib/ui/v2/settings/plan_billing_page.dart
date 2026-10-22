@@ -184,6 +184,81 @@ String formatMultiplier(num value) => value == value.roundToDouble()
     ? value.toInt().toString()
     : value.toString();
 
+/// The authoritative prices from the product spec (§11): Go $5 / ₹499,
+/// Plus $18 / ₹1,799, Pro $99 / ₹9,999, Free $0.
+///
+/// Yearly is ten monthly payments (two months free), the same rule
+/// `V2SettingsRoutes` applies when it builds the live plan list. This table is
+/// the fallback for a caller that omits a price; it is never used to override
+/// a price the caller (or the store) supplies. A period without a known price
+/// resolves to null and the card disables its CTA instead of inventing
+/// `monthly × 12`, which is a number the store would never charge.
+@immutable
+class V2PlanPrices {
+  const V2PlanPrices({
+    required this.monthlyUsd,
+    required this.monthlyInr,
+    required this.yearlyUsd,
+    required this.yearlyInr,
+  });
+
+  final int monthlyUsd;
+  final int monthlyInr;
+  final int yearlyUsd;
+  final int yearlyInr;
+
+  int monthly(V2Currency currency) =>
+      currency == V2Currency.inr ? monthlyInr : monthlyUsd;
+
+  int yearly(V2Currency currency) =>
+      currency == V2Currency.inr ? yearlyInr : yearlyUsd;
+
+  static const free = V2PlanPrices(
+    monthlyUsd: 0,
+    monthlyInr: 0,
+    yearlyUsd: 0,
+    yearlyInr: 0,
+  );
+
+  static const go = V2PlanPrices(
+    monthlyUsd: 5,
+    monthlyInr: 499,
+    yearlyUsd: 50,
+    yearlyInr: 4990,
+  );
+
+  static const plus = V2PlanPrices(
+    monthlyUsd: 18,
+    monthlyInr: 1799,
+    yearlyUsd: 180,
+    yearlyInr: 17990,
+  );
+
+  static const pro = V2PlanPrices(
+    monthlyUsd: 99,
+    monthlyInr: 9999,
+    yearlyUsd: 990,
+    yearlyInr: 99990,
+  );
+
+  static const plans = <V2PlanPrices>[free, go, plus, pro];
+
+  /// Resolves a plan id (`go`, `3x`) or a display name (`Ovid Plus`) to the
+  /// canonical price row.
+  static V2PlanPrices? forPlan(String id, [String? name]) {
+    final canonical =
+        V2PlanLimits.forId(id) ??
+        (name == null ? null : V2PlanLimits.forId(name));
+    return switch (canonical?.id) {
+      'free' => free,
+      'go' => go,
+      'plus' => plus,
+      'pro' => pro,
+      _ => null,
+    };
+  }
+}
+
 @immutable
 class V2Plan {
   const V2Plan({
@@ -257,18 +332,40 @@ class V2Plan {
     return base;
   }
 
-  int amount(V2Currency currency, V2BillingPeriod period) {
-    final monthly = currency == V2Currency.inr ? priceInr : priceUsd;
-    if (period == V2BillingPeriod.monthly) return monthly;
+  /// The product-spec prices for this plan, when it is one of the four plans
+  /// the spec prices. Custom/server plans have no canonical row.
+  V2PlanPrices? get canonicalPrices => V2PlanPrices.forPlan(id, name);
+
+  /// The price for [period], or null when neither the caller nor the product
+  /// spec knows one. Free is always 0, never null.
+  ///
+  /// A yearly request never borrows the monthly price (and never multiplies
+  /// it): a plan with no yearly price is not sold yearly.
+  int? amount(V2Currency currency, V2BillingPeriod period) {
+    if (canonicalId == 'free') return 0;
+    final canonical = canonicalPrices;
+    if (period == V2BillingPeriod.monthly) {
+      final monthly = currency == V2Currency.inr ? priceInr : priceUsd;
+      if (monthly > 0) return monthly;
+      final fallback = canonical?.monthly(currency) ?? 0;
+      return fallback > 0 ? fallback : null;
+    }
     final yearly = currency == V2Currency.inr ? priceInrYearly : priceUsdYearly;
-    return yearly > 0 ? yearly : monthly * 12;
+    if (yearly > 0) return yearly;
+    final fallback = canonical?.yearly(currency) ?? 0;
+    return fallback > 0 ? fallback : null;
   }
 
+  bool hasPrice(V2Currency currency, V2BillingPeriod period) =>
+      amount(currency, period) != null;
+
+  /// `$18`, `₹1,799`, or `—` when this period has no price at all.
   String priceLabel(
     V2Currency currency, {
     V2BillingPeriod period = V2BillingPeriod.monthly,
   }) {
     final amount = this.amount(currency, period);
+    if (amount == null) return '—';
     final symbol = currency == V2Currency.inr ? '₹' : r'$';
     return '$symbol${_groupDigits(amount)}';
   }
@@ -276,13 +373,17 @@ class V2Plan {
   String periodSuffix(V2BillingPeriod period) =>
       period == V2BillingPeriod.monthly ? '/ month' : '/ year';
 
+  /// `per month` / `per year`, for a spoken price.
+  String periodPhrase(V2BillingPeriod period) =>
+      period == V2BillingPeriod.monthly ? 'per month' : 'per year';
+
+  /// The CTA names the plan, never the direction. "Upgrade to Plus" is wrong
+  /// on a Pro account; the card's own name already says which plan is bought.
   String get actionLabel =>
       ctaLabel ??
       (canonicalId == 'free'
           // A paid account downgrades/cancels in Play, it never "selects Free".
-          ? 'Manage in Google Play'
-          : popular
-          ? 'Upgrade to $name'
+          ? 'Manage in Play'
           : 'Select $name');
 }
 
@@ -385,9 +486,6 @@ class V2PlanBillingData {
     this.currentPlanId = 'free',
     this.plans = const [],
     this.history = const [],
-    this.legalNote =
-        'Subscriptions renew automatically each month until canceled. '
-        'You can cancel anytime from Google Play Store subscriptions.',
     this.onCurrencyChanged,
     this.onPeriodChanged,
     this.onPurchase,
@@ -403,8 +501,10 @@ class V2PlanBillingData {
   final V2BillingPeriod period;
   final String currentPlanId;
   final List<V2Plan> plans;
+
+  /// Receipts to show. Empty hides the section: this screen has no receipts
+  /// source, so an empty list means "unknown", not "this account never paid".
   final List<V2BillingHistoryEntry> history;
-  final String legalNote;
   final ValueChanged<V2Currency>? onCurrencyChanged;
   final ValueChanged<V2BillingPeriod>? onPeriodChanged;
 
@@ -412,6 +512,10 @@ class V2PlanBillingData {
   /// the period currently selected on screen, so the caller never has to guess
   /// a tier (the old screen hard-coded Plus here).
   final ValueChanged<V2PlanPurchase>? onPurchase;
+
+  /// Re-reads owned subscriptions from the store. The owner reports the real
+  /// outcome (restored, found but unconfirmed, or the store's error) because
+  /// only it can see the result; this page only supplies the entry point.
   final VoidCallback? onRestorePurchases;
   final ValueChanged<V2BillingHistoryEntry>? onHistoryTap;
   final VoidCallback? onRetry;
@@ -448,6 +552,7 @@ class PlanBillingPage extends StatelessWidget {
       name: plan.name,
       priceLabel: plan.priceLabel(data.currency, period: data.period),
       pricePeriodLabel: plan.periodSuffix(data.period),
+      priceAvailable: plan.hasPrice(data.currency, data.period),
       storageGb: limits.storageGb,
       filesPerWindow: limits.filesPerWindow,
       fileWindowHours: _fileWindowHours(limits.fileWindowLabel),
@@ -494,7 +599,7 @@ class PlanBillingPage extends StatelessWidget {
     return OEmptyState(
       icon: Icons.sell_outlined,
       title: 'No plans to show',
-      message: 'Check your connection and try again.',
+      message: 'No plans are on sale right now.',
       action: data.onRetry == null
           ? null
           : OButton(
@@ -506,7 +611,6 @@ class PlanBillingPage extends StatelessWidget {
   }
 
   Widget _content(BuildContext context) {
-    final c = OColors.of(context);
     return SingleChildScrollView(
       padding: const EdgeInsets.only(top: OSpace.l, bottom: OSpace.xxl),
       child: Column(
@@ -557,23 +661,19 @@ class PlanBillingPage extends StatelessWidget {
           OSectionHeader(label: 'Plan limits', padding: EdgeInsets.zero),
           const SizedBox(height: OSpace.s),
           PlanCompareTable(data: _compareData()),
-          const SizedBox(height: OSpace.l),
-          OSectionHeader(label: 'Payment history', padding: EdgeInsets.zero),
-          if (data.history.isEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: OSpace.m),
-              child: Text(
-                'No payments yet',
-                style: OType.bodySm.copyWith(color: c.textMuted),
-              ),
-            )
-          else
+          // Receipts have no source on this screen yet. An always-empty
+          // "Payment history" block claimed "No payments yet" even for a paid
+          // account, so it is shown only when the caller has real entries.
+          if (data.history.isNotEmpty) ...[
+            const SizedBox(height: OSpace.l),
+            OSectionHeader(label: 'Payment history', padding: EdgeInsets.zero),
             V2SettingsRowList(
               rows: [
                 for (final entry in data.history)
                   _HistoryRow(entry: entry, onTap: data.onHistoryTap),
               ],
             ),
+          ],
         ],
       ),
     );
@@ -600,7 +700,7 @@ class _CurrencyToggle extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Flexible(
-            child: _CurrencyOption(
+            child: _ToggleOption(
               label: 'USD (\$)',
               selected: value == V2Currency.usd,
               onTap: onChanged == null
@@ -609,7 +709,7 @@ class _CurrencyToggle extends StatelessWidget {
             ),
           ),
           Flexible(
-            child: _CurrencyOption(
+            child: _ToggleOption(
               label: 'INR (₹)',
               selected: value == V2Currency.inr,
               onTap: onChanged == null
@@ -618,57 +718,6 @@ class _CurrencyToggle extends StatelessWidget {
             ),
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _CurrencyOption extends StatelessWidget {
-  const _CurrencyOption({
-    required this.label,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final String label;
-  final bool selected;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return OPressable(
-      onTap: onTap,
-      child: Semantics(
-        label: label,
-        button: true,
-        selected: selected,
-        enabled: onTap != null,
-        excludeSemantics: true,
-        child: AnimatedContainer(
-          duration: OMotion.fast,
-          curve: OMotion.standard,
-          constraints: const BoxConstraints(minHeight: OSpace.touch),
-          padding: const EdgeInsets.symmetric(
-            horizontal: OSpace.m,
-            vertical: OSpace.xs,
-          ),
-          decoration: BoxDecoration(
-            color: selected ? c.accentFill : c.surfaceAlt,
-            borderRadius: BorderRadius.circular(ORadius.pill),
-          ),
-          child: Center(
-            widthFactor: 1,
-            heightFactor: 1,
-            child: Text(
-              label,
-              textAlign: TextAlign.center,
-              style: OType.label.copyWith(
-                color: selected ? c.onAccent : c.textMuted,
-              ),
-            ),
-          ),
-        ),
       ),
     );
   }
@@ -694,7 +743,7 @@ class _BillingPeriodToggle extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Flexible(
-            child: _PeriodOption(
+            child: _ToggleOption(
               label: 'Monthly',
               selected: value == V2BillingPeriod.monthly,
               onTap: onChanged == null
@@ -703,7 +752,7 @@ class _BillingPeriodToggle extends StatelessWidget {
             ),
           ),
           Flexible(
-            child: _PeriodOption(
+            child: _ToggleOption(
               label: 'Yearly',
               selected: value == V2BillingPeriod.yearly,
               onTap: onChanged == null
@@ -717,8 +766,10 @@ class _BillingPeriodToggle extends StatelessWidget {
   }
 }
 
-class _PeriodOption extends StatelessWidget {
-  const _PeriodOption({
+/// One option of a two-state toggle. Both toggles on this page are radio
+/// groups, so the option announces its selection and that it is one of a set.
+class _ToggleOption extends StatelessWidget {
+  const _ToggleOption({
     required this.label,
     required this.selected,
     required this.onTap,
@@ -737,6 +788,7 @@ class _PeriodOption extends StatelessWidget {
         label: label,
         button: true,
         selected: selected,
+        inMutuallyExclusiveGroup: true,
         enabled: onTap != null,
         excludeSemantics: true,
         child: AnimatedContainer(
@@ -788,14 +840,30 @@ class _PlanCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    final price = plan.amount(currency, period);
+    final priceLabel = plan.priceLabel(currency, period: period);
     final productId = plan.productIdFor(period);
+    final free = plan.canonicalId == 'free';
     // Free is a Play management action, not a product: it has no SKU by design.
-    // Every other plan must have a product for the selected period; without
-    // one the CTA is disabled instead of charging a different period's SKU.
-    final missingProduct =
-        !current && plan.canonicalId != 'free' && productId == null;
-    final canBuy = !current && onPurchase != null && !missingProduct;
+    // Every other plan must have both a product for the selected period and a
+    // price for it; without either the CTA is disabled instead of charging a
+    // different period's SKU or an invented amount.
+    final missingProduct = !current && !free && productId == null;
+    final missingPrice = !current && !free && !missingProduct && price == null;
+    final unavailable = missingProduct || missingPrice;
+    final canBuy = !current && onPurchase != null && !unavailable;
     final periodWord = period == V2BillingPeriod.yearly ? 'yearly' : 'monthly';
+    final reason = missingProduct
+        ? '${plan.name} is not sold with $periodWord billing right now.'
+        : missingPrice
+        ? 'No $periodWord price for ${plan.name}.'
+        : null;
+    // The card is one group for a screen reader: name and price first, then
+    // the CTA (which announces its own enabled/disabled state). The name and
+    // price texts are excluded so they are not read twice.
+    final groupLabel = price == null
+        ? '${plan.name}, price unavailable'
+        : '${plan.name}, $priceLabel ${plan.periodPhrase(period)}';
     // The current plan is marked with a 2 dp accent edge; the popular plan
     // keeps the soft accent tint. They never compete: current wins.
     final decoration = BoxDecoration(
@@ -810,84 +878,98 @@ class _PlanCard extends StatelessWidget {
         width: current ? 2 : 1,
       ),
     );
-    return Container(
-      key: ValueKey<String>('plan-card-${plan.id}'),
-      decoration: decoration,
-      padding: const EdgeInsets.all(OSpace.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: Text(
-                  plan.name,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.h2.copyWith(color: c.text),
-                ),
-              ),
-              const SizedBox(width: OSpace.s),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    plan.priceLabel(currency, period: period),
-                    maxLines: 1,
-                    style: OType.h2.copyWith(
-                      color: plan.popular ? c.accent : c.text,
+    return Semantics(
+      key: ValueKey<String>('plan-group-${plan.id}'),
+      container: true,
+      explicitChildNodes: true,
+      label: current ? '$groupLabel, current plan' : groupLabel,
+      child: Container(
+        key: ValueKey<String>('plan-card-${plan.id}'),
+        decoration: decoration,
+        padding: const EdgeInsets.all(OSpace.l),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: ExcludeSemantics(
+                    child: Text(
+                      plan.name,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: OType.h2.copyWith(color: c.text),
                     ),
                   ),
-                  Text(
-                    plan.periodSuffix(period),
-                    maxLines: 1,
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                ],
+                ),
+                const SizedBox(width: OSpace.s),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    ExcludeSemantics(
+                      child: Text(
+                        priceLabel,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: OType.h2.copyWith(
+                          color: plan.popular ? c.accent : c.text,
+                        ),
+                      ),
+                    ),
+                    ExcludeSemantics(
+                      child: Text(
+                        plan.periodSuffix(period),
+                        maxLines: 1,
+                        style: OType.caption.copyWith(color: c.textMuted),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            if (plan.tagline.isNotEmpty) ...[
+              const SizedBox(height: OSpace.xs),
+              Text(
+                plan.tagline,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: OType.caption.copyWith(color: c.textMuted),
               ),
             ],
-          ),
-          if (plan.tagline.isNotEmpty) ...[
-            const SizedBox(height: OSpace.xs),
-            Text(
-              plan.tagline,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: OType.caption.copyWith(color: c.textMuted),
+            const SizedBox(height: OSpace.l),
+            OButton(
+              key: ValueKey<String>('plan-cta-${plan.id}'),
+              label: current
+                  ? 'Current plan'
+                  : unavailable
+                  ? 'Not available'
+                  : plan.actionLabel,
+              variant: plan.popular
+                  ? OButtonVariant.primary
+                  : OButtonVariant.secondary,
+              expand: true,
+              // The current plan can never be bought again. A disabled CTA is
+              // the honest state: tapping it would only re-purchase a plan the
+              // account already owns.
+              onPressed: canBuy
+                  ? () =>
+                        onPurchase!(V2PlanPurchase(plan: plan, period: period))
+                  : null,
             ),
+            if (reason != null) ...[
+              const SizedBox(height: OSpace.xs),
+              Text(
+                reason,
+                key: ValueKey<String>('plan-unavailable-${plan.id}'),
+                textAlign: TextAlign.center,
+                style: OType.caption.copyWith(color: c.textMuted),
+              ),
+            ],
           ],
-          const SizedBox(height: OSpace.l),
-          OButton(
-            key: ValueKey<String>('plan-cta-${plan.id}'),
-            label: current
-                ? 'Current plan'
-                : missingProduct
-                ? 'Not available'
-                : plan.actionLabel,
-            variant: plan.popular
-                ? OButtonVariant.primary
-                : OButtonVariant.secondary,
-            expand: true,
-            // The current plan can never be bought again. A disabled CTA is
-            // the honest state: tapping it would only re-purchase a plan the
-            // account already owns.
-            onPressed: canBuy
-                ? () => onPurchase!(V2PlanPurchase(plan: plan, period: period))
-                : null,
-          ),
-          if (missingProduct) ...[
-            const SizedBox(height: OSpace.xs),
-            Text(
-              '${plan.name} is not sold with $periodWord billing right now.',
-              key: ValueKey<String>('plan-unavailable-${plan.id}'),
-              textAlign: TextAlign.center,
-              style: OType.caption.copyWith(color: c.textMuted),
-            ),
-          ],
-        ],
+        ),
       ),
     );
   }
@@ -909,17 +991,33 @@ class _HistoryRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    // "Paid" is the quiet default. Any other verdict (refunded, failed) is
+    // shown, so a row never reads as a completed payment when it is not one.
+    final status = entry.statusLabel.trim();
+    final showStatus = status.isNotEmpty && status.toLowerCase() != 'paid';
     return V2SettingsRow(
       icon: Icons.receipt_long_outlined,
       title: entry.title,
       subtitle: entry.dateLabel,
       showChevron: false,
-      trailing: Text(
-        entry.amountLabel,
-        style: OType.bodySm.copyWith(
-          color: c.text,
-          fontWeight: FontWeight.w600,
-        ),
+      trailing: Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            entry.amountLabel,
+            style: OType.bodySm.copyWith(
+              color: c.text,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          if (showStatus)
+            Text(
+              status,
+              key: ValueKey<String>('payment-status-${entry.id}'),
+              style: OType.caption.copyWith(color: c.textMuted),
+            ),
+        ],
       ),
       onTap: onTap == null ? null : () => onTap!(entry),
     );

@@ -107,7 +107,7 @@ void main() {
     // The connector name is the header, not a second body heading.
     expect(find.text('GitHub'), findsOneWidget);
     expect(find.text('Connector details'), findsNothing);
-    expect(find.text('On'), findsOneWidget);
+    expect(find.text('Connected'), findsOneWidget);
 
     // One test button, no endpoint paragraph or safety card.
     expect(find.text('Test connection'), findsOneWidget);

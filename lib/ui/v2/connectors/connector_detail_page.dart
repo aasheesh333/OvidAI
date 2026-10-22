@@ -265,7 +265,10 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
   }
 
   void _togglePermission(V2ConnectorPermission permission, bool value) {
-    setState(() => _granted[permission.id] = value);
+    setState(() {
+      _granted[permission.id] = value;
+      _actionError = null;
+    });
     final external = widget.onPermissionChanged;
     if (external != null) {
       external(permission.id, value);
@@ -694,18 +697,27 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
         Row(
           key: const Key('connector-enabled-card'),
           children: [
-            OPill(
-              label: _enabled ? 'On' : 'Paused',
-              tone: _enabled ? OPillTone.success : OPillTone.neutral,
-              dot: _enabled,
+            Expanded(
+              child: Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: OPill(
+                  label: _enabled ? 'Connected' : 'Paused',
+                  tone: _enabled ? OPillTone.success : OPillTone.neutral,
+                  dot: _enabled,
+                ),
+              ),
             ),
-            const Spacer(),
+            const SizedBox(width: OSpace.s),
             MergeSemantics(
               child: Semantics(
-                label: 'Enabled',
+                label: '${data.name} connector',
                 child: SizedBox(
                   height: OSpace.touch,
-                  child: Switch(value: _enabled, onChanged: _toggleEnabled),
+                  child: Switch(
+                    key: const Key('connector-enabled-switch'),
+                    value: _enabled,
+                    onChanged: _toggleEnabled,
+                  ),
                 ),
               ),
             ),
@@ -729,10 +741,13 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
         ],
         if (_actionError != null) ...[
           const SizedBox(height: OSpace.s),
-          Text(
-            _actionError!,
-            key: const Key('connector-action-error'),
-            style: OType.caption.copyWith(color: c.danger),
+          Semantics(
+            liveRegion: true,
+            child: Text(
+              _actionError!,
+              key: const Key('connector-action-error'),
+              style: OType.caption.copyWith(color: c.danger),
+            ),
           ),
         ],
         if (permissions.isNotEmpty) ...[
@@ -775,7 +790,9 @@ class _PermissionRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    return MergeSemantics(
+    return Semantics(
+      container: true,
+      explicitChildNodes: true,
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: OSpace.s),
         child: Row(

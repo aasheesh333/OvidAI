@@ -82,6 +82,16 @@ class V2HttpConnectorProbe implements V2ConnectorProbe {
     final httpClient = client ?? http.Client();
     final ownsClient = client == null;
     final key = apiKey?.trim() ?? '';
+    // A credential is never sent in clear text to a remote host. Loopback is
+    // the one exception, because a local development server cannot hold a TLS
+    // certificate and the key never leaves the machine.
+    if (key.isNotEmpty && uri.scheme != 'https' && !_isLoopback(uri.host)) {
+      return V2ConnectorTestReport(
+        ok: false,
+        message:
+            'That URL is not HTTPS, so the key was not sent. Use https://.',
+      );
+    }
     try {
       final request = http.Request('GET', uri);
       request.headers['Accept'] = 'application/json';
@@ -91,7 +101,11 @@ class V2HttpConnectorProbe implements V2ConnectorProbe {
       final streamed = await httpClient.send(request).timeout(timeout);
       // Drain the body so the socket can close, but the status is the answer.
       await streamed.stream.drain<void>().timeout(timeout);
-      return _reportFor(uri, streamed.statusCode, authenticated: key.isNotEmpty);
+      return _reportFor(
+        uri,
+        streamed.statusCode,
+        authenticated: key.isNotEmpty,
+      );
     } on TimeoutException {
       return V2ConnectorTestReport(
         ok: false,
@@ -131,8 +145,7 @@ class V2HttpConnectorProbe implements V2ConnectorProbe {
       return V2ConnectorTestReport(
         ok: true,
         statusCode: status,
-        message:
-            'Reached $host, but that path does not accept GET (HTTP 405).',
+        message: 'Reached $host, but that path does not accept GET (HTTP 405).',
       );
     }
     if (status == 401 || status == 403) {
@@ -149,7 +162,8 @@ class V2HttpConnectorProbe implements V2ConnectorProbe {
       return V2ConnectorTestReport(
         ok: false,
         statusCode: status,
-        message: 'The server answered, but nothing is served at that path '
+        message:
+            'The server answered, but nothing is served at that path '
             '(HTTP 404).',
       );
     }
@@ -172,6 +186,16 @@ class V2HttpConnectorProbe implements V2ConnectorProbe {
       statusCode: status,
       message: 'The server answered HTTP $status.',
     );
+  }
+
+  /// True for the addresses that never leave the machine.
+  bool _isLoopback(String host) {
+    final normalized = host.trim().toLowerCase();
+    return normalized == 'localhost' ||
+        normalized == '::1' ||
+        normalized == '[::1]' ||
+        normalized == '127.0.0.1' ||
+        normalized.startsWith('127.');
   }
 
   /// Keeps a failure readable: one line, no stack, no Dart type prefix.

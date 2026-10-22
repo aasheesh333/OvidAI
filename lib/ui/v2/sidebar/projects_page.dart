@@ -29,196 +29,383 @@ class V2Project {
     required this.id,
     required this.name,
     required this.chatCount,
-    required this.storageLabel,
     this.shared = false,
-    this.memberInitials = const <String>[],
-    this.updatedLabel = '',
-    this.colorKey = 'violet',
+    // Transitional arguments: the shell still builds its snapshot with the
+    // old card fields. Rows show only name, count and share state, so these
+    // are accepted but never read. Drop them with the shell migration.
+    String? storageLabel,
+    List<String> memberInitials = const <String>[],
+    String? updatedLabel,
+    String? colorKey,
   });
 
   final String id;
   final String name;
   final int chatCount;
-  final String storageLabel;
   final bool shared;
-  final List<String> memberInitials;
-  final String updatedLabel;
-  final String colorKey;
 
   String get chatLabel => chatCount == 1 ? '1 chat' : '$chatCount chats';
+
+  V2Project copyWith({String? name}) => V2Project(
+    id: id,
+    name: name ?? this.name,
+    chatCount: chatCount,
+    shared: shared,
+  );
 }
 
 /// A draft produced by the New project sheet.
 @immutable
 class V2ProjectDraft {
-  const V2ProjectDraft({required this.name, required this.colorKey});
+  const V2ProjectDraft({required this.name});
 
   final String name;
-  final String colorKey;
 }
 
-/// Projects list with a shared-memory explainer, filter and New project sheet.
+/// Result of a create, rename or delete write.
+///
+/// [error] is shown inline in the sheet (create/rename) or in a snackbar
+/// (delete); a failed write is never silently swallowed.
+@immutable
+class V2ProjectMutation {
+  const V2ProjectMutation.ok({this.project}) : error = null;
+
+  const V2ProjectMutation.failed(String this.error) : project = null;
+
+  final V2Project? project;
+  final String? error;
+
+  bool get ok => error == null;
+}
+
+typedef V2CreateProject =
+    Future<V2ProjectMutation> Function(V2ProjectDraft draft);
+typedef V2RenameProject =
+    Future<V2ProjectMutation> Function(V2Project project, String name);
+typedef V2DeleteProject = Future<V2ProjectMutation> Function(V2Project project);
+
+/// Projects list: create, open, project memory, rename and delete.
+///
+/// The screen owns its visible list while it is open: the caller passes a
+/// snapshot, and every successful write is applied locally so a create,
+/// rename or delete is visible without waiting for the page to be reopened.
+/// A failed write is rolled back to the previous list.
 class ProjectsPage extends StatefulWidget {
   const ProjectsPage({
     super.key,
     required this.data,
     this.onProjectTap,
+    this.onProjectMemory,
+    this.createProject,
+    this.renameProject,
+    this.deleteProject,
+    this.onRetry,
     this.onProjectActions,
     this.onCreateProject,
-    this.onRetry,
   });
 
   final V2ProjectsData data;
+
+  /// Opens the project (chats and its memory).
   final ValueChanged<V2Project>? onProjectTap;
-  final ValueChanged<V2Project>? onProjectActions;
-  final ValueChanged<V2ProjectDraft>? onCreateProject;
+
+  /// Opens the project's memory directly.
+  final ValueChanged<V2Project>? onProjectMemory;
+
+  /// Persisted create. Returns the stored project so the row can be inserted,
+  /// or an error so the sheet can report it inline.
+  final V2CreateProject? createProject;
+
+  /// Persisted rename. Returns an error to keep the sheet open and roll the
+  /// optimistic row name back.
+  final V2RenameProject? renameProject;
+
+  /// Persisted delete. Returns an error to restore the optimistically removed
+  /// row.
+  final V2DeleteProject? deleteProject;
+
   final VoidCallback? onRetry;
+
+  /// Transitional hook for the current shell; prefer [renameProject],
+  /// [deleteProject] and [onProjectMemory].
+  final ValueChanged<V2Project>? onProjectActions;
+
+  /// Transitional create hook for the current shell; prefer [createProject].
+  final ValueChanged<V2ProjectDraft>? onCreateProject;
 
   @override
   State<ProjectsPage> createState() => _ProjectsPageState();
 }
 
 class _ProjectsPageState extends State<ProjectsPage> {
-  final _search = TextEditingController();
-  String _query = '';
+  late List<V2Project> _projects;
 
   @override
-  void dispose() {
-    _search.dispose();
-    super.dispose();
+  void initState() {
+    super.initState();
+    _projects = List<V2Project>.of(widget.data.projects);
   }
 
-  List<V2Project> get _visible {
-    final query = _query.trim().toLowerCase();
-    if (query.isEmpty) return widget.data.projects;
-    return widget.data.projects
-        .where((project) => project.name.toLowerCase().contains(query))
-        .toList(growable: false);
+  @override
+  void didUpdateWidget(covariant ProjectsPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // A caller that rebuilds with a fresh snapshot (a controller update) wins;
+    // a plain rebuild with the same snapshot must not discard local writes.
+    if (!identical(oldWidget.data.projects, widget.data.projects)) {
+      _projects = List<V2Project>.of(widget.data.projects);
+    }
   }
 
-  /// Creation is only offered when the caller can persist the draft; otherwise
-  /// the sheet would close as if a project had been made.
-  bool get _canCreate => widget.onCreateProject != null;
+  bool get _canCreate =>
+      widget.createProject != null || widget.onCreateProject != null;
+
+  bool get _hasActions =>
+      widget.onProjectActions != null ||
+      widget.onProjectMemory != null ||
+      widget.renameProject != null ||
+      widget.deleteProject != null;
+
+  List<String> _names({String? exceptId}) => <String>[
+    for (final project in _projects)
+      if (project.id != exceptId) project.name,
+  ];
 
   void _openNewProject() {
-    final create = widget.onCreateProject;
-    if (create == null) return;
+    if (!_canCreate) return;
     showOSheet<void>(
       context,
       title: 'New project',
-      builder: (sheetContext) =>
-          _NewProjectSheet(onCreate: (draft) => create(draft)),
+      builder: (sheetContext) => _ProjectNameSheet(
+        existingNames: _names(),
+        submitLabel: 'Create project',
+        submitKey: const Key('v2-create-project'),
+        onSubmit: _createProject,
+      ),
     );
   }
 
-  void _clearSearch() {
-    _search.clear();
-    setState(() => _query = '');
+  Future<String?> _createProject(String name) async {
+    final create = widget.createProject;
+    if (create != null) {
+      try {
+        final result = await create(V2ProjectDraft(name: name));
+        if (!mounted) return null;
+        final project = result.project;
+        if (!result.ok || project == null) {
+          return result.error ?? 'Could not create project.';
+        }
+        setState(() {
+          _projects = <V2Project>[
+            for (final existing in _projects)
+              if (existing.id != project.id) existing,
+            project,
+          ];
+        });
+        return null;
+      } catch (_) {
+        return 'Could not create project.';
+      }
+    }
+    final legacy = widget.onCreateProject;
+    if (legacy == null) return 'Could not create project.';
+    try {
+      await Future<void>.sync(() => legacy(V2ProjectDraft(name: name)));
+      return null;
+    } catch (_) {
+      return 'Could not create project.';
+    }
+  }
+
+  Future<void> _openProjectMenu(V2Project project) async {
+    final memory = widget.onProjectMemory;
+    final rename = widget.renameProject;
+    final delete = widget.deleteProject;
+    if (memory == null && rename == null && delete == null) {
+      widget.onProjectActions?.call(project);
+      return;
+    }
+    final action = await showOSheet<String>(
+      context,
+      title: project.name,
+      builder: (sheetContext) => SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(OSpace.s, 0, OSpace.s, OSpace.l),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (memory != null)
+              _MenuRow(
+                icon: Icons.psychology_outlined,
+                label: 'Project memory',
+                semanticLabel: 'Project memory for ${project.name}',
+                onTap: () => Navigator.of(sheetContext).pop('memory'),
+              ),
+            if (rename != null)
+              _MenuRow(
+                icon: Icons.edit_outlined,
+                label: 'Rename',
+                semanticLabel: 'Rename ${project.name}',
+                onTap: () => Navigator.of(sheetContext).pop('rename'),
+              ),
+            if (delete != null)
+              _MenuRow(
+                icon: Icons.delete_outline_rounded,
+                label: 'Delete project',
+                semanticLabel: 'Delete ${project.name}, destructive',
+                danger: true,
+                onTap: () => Navigator.of(sheetContext).pop('delete'),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || action == null) return;
+    switch (action) {
+      case 'memory':
+        widget.onProjectMemory?.call(project);
+      case 'rename':
+        await _openRename(project);
+      case 'delete':
+        await _confirmDelete(project);
+    }
+  }
+
+  Future<void> _openRename(V2Project project) async {
+    if (widget.renameProject == null) return;
+    await showOSheet<void>(
+      context,
+      title: 'Rename project',
+      builder: (sheetContext) => _ProjectNameSheet(
+        initialName: project.name,
+        existingNames: _names(exceptId: project.id),
+        submitLabel: 'Save',
+        submitKey: const Key('v2-rename-project'),
+        onSubmit: (name) => _renameProject(project, name),
+      ),
+    );
+  }
+
+  Future<String?> _renameProject(V2Project project, String name) async {
+    final rename = widget.renameProject;
+    if (rename == null) return 'Could not rename project.';
+    final previous = _projects;
+    setState(() {
+      _projects = <V2Project>[
+        for (final existing in _projects)
+          existing.id == project.id ? existing.copyWith(name: name) : existing,
+      ];
+    });
+    try {
+      final result = await rename(project, name);
+      if (!mounted) return null;
+      if (!result.ok) {
+        setState(() => _projects = previous);
+        return result.error ?? 'Could not rename project.';
+      }
+      return null;
+    } catch (_) {
+      if (mounted) setState(() => _projects = previous);
+      return 'Could not rename project.';
+    }
+  }
+
+  Future<void> _confirmDelete(V2Project project) async {
+    if (widget.deleteProject == null) return;
+    final confirmed = await showOSheet<bool>(
+      context,
+      title: 'Delete project?',
+      builder: (sheetContext) {
+        final c = OColors.of(sheetContext);
+        return SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.l),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                '"${project.name}" and its memory will be removed. '
+                'Chats stay.',
+                style: OType.bodySm.copyWith(color: c.textMuted),
+              ),
+              const SizedBox(height: OSpace.l),
+              OButton(
+                key: const Key('v2-delete-project-confirm'),
+                label: 'Delete project',
+                semanticLabel: 'Delete ${project.name}, destructive',
+                icon: Icons.delete_outline_rounded,
+                variant: OButtonVariant.dangerFill,
+                expand: true,
+                onPressed: () => Navigator.of(sheetContext).pop(true),
+              ),
+              const SizedBox(height: OSpace.s),
+              OButton(
+                label: 'Keep project',
+                variant: OButtonVariant.secondary,
+                expand: true,
+                onPressed: () => Navigator.of(sheetContext).pop(false),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    if (confirmed != true || !mounted) return;
+    final index = _projects.indexWhere((item) => item.id == project.id);
+    if (index < 0) return;
+    final delete = widget.deleteProject;
+    if (delete == null) return;
+    final previous = _projects;
+    setState(() {
+      _projects = List<V2Project>.of(_projects)..removeAt(index);
+    });
+    try {
+      final result = await delete(project);
+      if (!mounted) return;
+      if (!result.ok) {
+        setState(() => _projects = previous);
+        showOSnack(context, result.error ?? 'Could not delete project.');
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _projects = previous);
+      showOSnack(context, 'Could not delete project.');
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    return OScaffold(
-      appBar: const OAppBar(title: 'Projects'),
-      body: OFadeSlide(
-        // The whole page scrolls so the filter, explainer and list still fit
-        // when the text is scaled up on a narrow phone. The column stops at the
-        // breakpoint cap so a desktop does not stretch the filter row.
-        child: OContent(
-          padding: false,
-          child: CustomScrollView(
-            slivers: [
-              SliverPadding(
-                padding: const EdgeInsets.symmetric(horizontal: OSpace.screen),
-                sliver: SliverToBoxAdapter(child: _buildHeader(context)),
-              ),
-              ..._buildBodySlivers(context),
-            ],
+    final showContent =
+        widget.data.status == V2ProjectsStatus.content && _projects.isNotEmpty;
+    return OScreen(
+      title: 'Projects',
+      actions: [
+        if (_canCreate && showContent)
+          OIconButton(
+            key: const Key('v2-new-project'),
+            icon: Icons.add_rounded,
+            semanticLabel: 'New project',
+            onPressed: _openNewProject,
           ),
+      ],
+      child: OFadeSlide(
+        child: CustomScrollView(
+          key: const Key('v2-projects-scroll'),
+          slivers: _buildSlivers(context),
         ),
       ),
     );
   }
 
-  Widget _buildHeader(BuildContext context) {
-    final c = OColors.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const SizedBox(height: OSpace.s),
-        Row(
-          children: [
-            Expanded(
-              child: OSearchField(
-                key: const Key('v2-project-filter'),
-                controller: _search,
-                hint: 'Filter projects',
-                onChanged: (value) => setState(() => _query = value),
-              ),
-            ),
-            const SizedBox(width: OSpace.s),
-            if (_canCreate)
-              OButton(
-                label: 'New',
-                icon: Icons.add_rounded,
-                onPressed: _openNewProject,
-              ),
-          ],
-        ),
-        const SizedBox(height: OSpace.l),
-        OCard(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  color: c.accentSoft,
-                  borderRadius: BorderRadius.circular(ORadius.m),
-                ),
-                child: Icon(
-                  Icons.folder_special_rounded,
-                  size: 24,
-                  color: c.accent,
-                ),
-              ),
-              const SizedBox(width: OSpace.m),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Shared project memory',
-                      style: OType.bodyStrong.copyWith(color: c.text),
-                    ),
-                    const SizedBox(height: OSpace.xs),
-                    Text(
-                      'Group chats that share files and memory.',
-                      style: OType.bodySm.copyWith(color: c.textMuted),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: OSpace.m),
-      ],
-    );
-  }
-
-  List<Widget> _buildBodySlivers(BuildContext context) {
+  List<Widget> _buildSlivers(BuildContext context) {
     switch (widget.data.status) {
       case V2ProjectsStatus.loading:
-        return const [
+        return const <Widget>[
           SliverFillRemaining(
             hasScrollBody: true,
             child: OSkeletonList(rows: 4),
           ),
         ];
       case V2ProjectsStatus.error:
-        return [
+        return <Widget>[
           SliverFillRemaining(
             hasScrollBody: false,
             child: OErrorState(
@@ -231,16 +418,17 @@ class _ProjectsPageState extends State<ProjectsPage> {
           ),
         ];
       case V2ProjectsStatus.content:
-        if (widget.data.projects.isEmpty) {
-          return [
+        if (_projects.isEmpty) {
+          return <Widget>[
             SliverFillRemaining(
               hasScrollBody: false,
               child: OEmptyState(
                 icon: Icons.create_new_folder_outlined,
-                title: 'No projects yet',
-                message: 'Group chats that share files and memory.',
+                title: 'No projects',
+                message: 'Projects group chats and memory.',
                 action: _canCreate
                     ? OButton(
+                        key: const Key('v2-empty-new-project'),
                         label: 'New project',
                         icon: Icons.add_rounded,
                         onPressed: _openNewProject,
@@ -250,264 +438,237 @@ class _ProjectsPageState extends State<ProjectsPage> {
             ),
           ];
         }
-        final visible = _visible;
-        if (visible.isEmpty) {
-          return [
-            SliverFillRemaining(
-              hasScrollBody: false,
-              child: OEmptyState(
-                compact: true,
-                icon: Icons.search_off_rounded,
-                title: 'No projects match',
-                message: 'Try a different name.',
-                action: OButton(label: 'Clear search', onPressed: _clearSearch),
-              ),
+        return <Widget>[
+          SliverPadding(
+            padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xl),
+            sliver: SliverList.builder(
+              itemCount: _projects.length,
+              itemBuilder: (context, index) {
+                final project = _projects[index];
+                return _ProjectRow(
+                  key: ValueKey<String>('v2-project-${project.id}'),
+                  project: project,
+                  showDivider: index < _projects.length - 1,
+                  onTap: widget.onProjectTap == null
+                      ? null
+                      : () => widget.onProjectTap!(project),
+                  onMenu: _hasActions ? () => _openProjectMenu(project) : null,
+                );
+              },
             ),
-          ];
-        }
-        return [_buildListSliver(visible)];
+          ),
+        ];
     }
   }
+}
 
-  Widget _buildListSliver(List<V2Project> visible) {
-    const staggeredRows = 8;
-    Widget row(V2Project project) => Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.m),
-      child: _ProjectCard(
-        project: project,
-        onTap: widget.onProjectTap,
-        onActions: widget.onProjectActions,
-      ),
-    );
-    return SliverPadding(
-      padding: const EdgeInsets.symmetric(horizontal: OSpace.screen),
-      sliver: SliverList(
-        delegate: SliverChildBuilderDelegate(
-          (context, index) {
-            if (index == 0) {
-              return OSectionHeader(
-                label: 'Projects',
-                trailing: OPill(
-                  label: '${visible.length}',
-                  tone: OPillTone.accent,
+class _ProjectRow extends StatelessWidget {
+  const _ProjectRow({
+    super.key,
+    required this.project,
+    required this.showDivider,
+    this.onTap,
+    this.onMenu,
+  });
+
+  final V2Project project;
+  final bool showDivider;
+  final VoidCallback? onTap;
+  final VoidCallback? onMenu;
+
+  String get _semanticLabel =>
+      '${project.name}, ${project.chatLabel}'
+      '${project.shared ? ', shared' : ''}';
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final row = ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: OSpace.listRow),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: OSpace.s,
+          vertical: OSpace.s,
+        ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            // At a phone width the full "12 chats" line and the Shared pill do
+            // not leave a usable name, and at a large text scale they no longer
+            // fit at all. Keep the row one line: show a compact count and a
+            // shared glyph instead of letting any child overflow its box.
+            final scaled = MediaQuery.textScalerOf(context).scale(14);
+            final compact =
+                constraints.maxWidth < 340 ||
+                (scaled > 20 && constraints.maxWidth < 380);
+            return Row(
+              children: [
+                Expanded(
+                  child: ExcludeSemantics(
+                    child: Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            project.name,
+                            key: ValueKey<String>(
+                              'v2-project-name-${project.id}',
+                            ),
+                            maxLines: 1,
+                            softWrap: false,
+                            overflow: TextOverflow.ellipsis,
+                            style: OType.bodySm.copyWith(
+                              color: c.text,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                        if (project.shared) ...[
+                          const SizedBox(width: OSpace.s),
+                          if (compact)
+                            Icon(Icons.group_rounded, size: 16, color: c.accent)
+                          else
+                            const OPill(
+                              label: 'Shared',
+                              tone: OPillTone.accent,
+                            ),
+                        ],
+                      ],
+                    ),
+                  ),
                 ),
-                padding: const EdgeInsets.fromLTRB(0, OSpace.s, 0, OSpace.s),
-              );
-            }
-            final rowIndex = index - 1;
-            if (rowIndex >= visible.length) {
-              return const SizedBox(height: OSpace.xl);
-            }
-            final project = visible[rowIndex];
-            // Only the first screenful animates; later rows are built lazily
-            // as they scroll in, so they must not each start a timer.
-            if (rowIndex >= staggeredRows) return row(project);
-            final delay = OMotion.stagger * rowIndex;
-            return OFadeSlide(
-              delay: delay > const Duration(milliseconds: 400)
-                  ? const Duration(milliseconds: 400)
-                  : delay,
-              child: row(project),
+                const SizedBox(width: OSpace.s),
+                ExcludeSemantics(
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (compact) ...[
+                        Icon(
+                          Icons.chat_bubble_outline_rounded,
+                          size: 14,
+                          color: c.textMuted,
+                        ),
+                        const SizedBox(width: OSpace.xs),
+                        Text(
+                          '${project.chatCount}',
+                          maxLines: 1,
+                          style: OType.caption.copyWith(color: c.textMuted),
+                        ),
+                      ] else
+                        Text(
+                          project.chatLabel,
+                          maxLines: 1,
+                          softWrap: false,
+                          overflow: TextOverflow.ellipsis,
+                          style: OType.caption.copyWith(color: c.textMuted),
+                        ),
+                    ],
+                  ),
+                ),
+                if (onMenu != null) ...[
+                  const SizedBox(width: OSpace.xs),
+                  OIconButton(
+                    key: ValueKey<String>('v2-project-menu-${project.id}'),
+                    icon: Icons.more_vert_rounded,
+                    semanticLabel: 'Project options for ${project.name}',
+                    size: 18,
+                    onPressed: onMenu,
+                  ),
+                ],
+              ],
             );
           },
-          childCount: visible.length + 2,
+        ),
+      ),
+    );
+
+    final content = onTap == null
+        ? Semantics(
+            label: _semanticLabel,
+            container: true,
+            explicitChildNodes: true,
+            child: row,
+          )
+        : OPressable(onTap: onTap, semanticLabel: _semanticLabel, child: row);
+
+    return Container(
+      decoration: showDivider
+          ? BoxDecoration(
+              border: Border(bottom: BorderSide(color: c.hairline)),
+            )
+          : null,
+      child: content,
+    );
+  }
+}
+
+class _MenuRow extends StatelessWidget {
+  const _MenuRow({
+    required this.icon,
+    required this.label,
+    required this.semanticLabel,
+    required this.onTap,
+    this.danger = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final String semanticLabel;
+  final VoidCallback onTap;
+  final bool danger;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: semanticLabel,
+      button: true,
+      enabled: true,
+      container: true,
+      onTap: onTap,
+      child: ExcludeSemantics(
+        child: OListRow(
+          title: label,
+          icon: icon,
+          danger: danger,
+          showChevron: false,
+          onTap: onTap,
         ),
       ),
     );
   }
 }
 
-class _ProjectCard extends StatelessWidget {
-  const _ProjectCard({required this.project, this.onTap, this.onActions});
+class _ProjectNameSheet extends StatefulWidget {
+  const _ProjectNameSheet({
+    required this.existingNames,
+    required this.submitLabel,
+    required this.submitKey,
+    required this.onSubmit,
+    this.initialName = '',
+  });
 
-  final V2Project project;
-  final ValueChanged<V2Project>? onTap;
-  final ValueChanged<V2Project>? onActions;
+  final List<String> existingNames;
+  final String initialName;
+  final String submitLabel;
+  final Key submitKey;
+
+  /// Returns an error to show inline, or null when the write succeeded and
+  /// the sheet can close.
+  final Future<String?> Function(String name) onSubmit;
 
   @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final accent = _projectColor(c, project.colorKey);
-    return OCard(
-      padding: const EdgeInsets.all(OSpace.m),
-      onTap: onTap == null ? null : () => onTap!(project),
-      semanticLabel:
-          '${project.name}, ${project.chatLabel}, ${project.storageLabel}'
-          '${project.shared ? ', shared' : ''}',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  color: accent.withValues(alpha: 0.14),
-                  borderRadius: BorderRadius.circular(ORadius.m),
-                ),
-                child: Icon(Icons.folder_rounded, size: 22, color: accent),
-              ),
-              const SizedBox(width: OSpace.m),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Wraps instead of overflowing when the name and pill no
-                    // longer fit side by side at large text sizes.
-                    Wrap(
-                      spacing: OSpace.s,
-                      runSpacing: OSpace.xs,
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      children: [
-                        Text(
-                          project.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: OType.bodyStrong.copyWith(color: c.text),
-                        ),
-                        OPill(
-                          label: project.shared ? 'Shared' : 'Personal',
-                          tone: project.shared
-                              ? OPillTone.accent
-                              : OPillTone.neutral,
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      '${project.chatLabel} · ${project.storageLabel}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: OType.caption.copyWith(color: c.textMuted),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: OSpace.xs),
-              if (onActions != null)
-                OIconButton(
-                  icon: Icons.more_vert_rounded,
-                  semanticLabel: 'Project options for ${project.name}',
-                  size: 18,
-                  onPressed: () => onActions!(project),
-                ),
-            ],
-          ),
-          const SizedBox(height: OSpace.m),
-          Wrap(
-            alignment: WrapAlignment.spaceBetween,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: OSpace.s,
-            runSpacing: OSpace.xs,
-            children: [
-              _MemberStack(names: project.memberInitials, color: accent),
-              if (project.updatedLabel.isNotEmpty)
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.sync_rounded, size: 14, color: c.textFaint),
-                    const SizedBox(width: OSpace.xs),
-                    Flexible(
-                      child: Text(
-                        project.updatedLabel,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ),
-                  ],
-                ),
-            ],
-          ),
-        ],
-      ),
-    );
+  State<_ProjectNameSheet> createState() => _ProjectNameSheetState();
+}
+
+class _ProjectNameSheetState extends State<_ProjectNameSheet> {
+  late final TextEditingController _name;
+  String? _fieldError;
+  String? _saveError;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _name = TextEditingController(text: widget.initialName);
   }
-}
-
-class _MemberStack extends StatelessWidget {
-  const _MemberStack({required this.names, required this.color});
-
-  final List<String> names;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    // Grow the circles with the text size so initials stay readable.
-    final avatar = MediaQuery.textScalerOf(
-      context,
-    ).scale(28).clamp(28.0, 44.0).toDouble();
-    final step = avatar * (20 / 28);
-    if (names.isEmpty) {
-      return Text(
-        'Only you',
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: OType.caption.copyWith(color: c.textFaint),
-      );
-    }
-    final shown = names.take(3).toList(growable: false);
-    final extra = names.length - shown.length;
-    final width = avatar + (shown.length - 1) * step + (extra > 0 ? step : 0.0);
-    return SizedBox(
-      width: width,
-      height: avatar,
-      child: Stack(
-        children: [
-          for (var i = 0; i < shown.length; i++)
-            Positioned(
-              left: i * step,
-              child: OAvatar(initials: shown[i], size: avatar),
-            ),
-          if (extra > 0)
-            Positioned(
-              left: shown.length * step,
-              child: Container(
-                width: avatar,
-                height: avatar,
-                decoration: BoxDecoration(
-                  color: c.surfaceRaised,
-                  shape: BoxShape.circle,
-                  border: Border.all(color: c.surface, width: 2),
-                ),
-                alignment: Alignment.center,
-                child: Text(
-                  '+$extra',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _NewProjectSheet extends StatefulWidget {
-  const _NewProjectSheet({required this.onCreate});
-
-  final ValueChanged<V2ProjectDraft> onCreate;
-
-  @override
-  State<_NewProjectSheet> createState() => _NewProjectSheetState();
-}
-
-class _NewProjectSheetState extends State<_NewProjectSheet> {
-  static const _colorChoices = <(String, String)>[
-    ('violet', 'Violet'),
-    ('purple', 'Purple'),
-    ('emerald', 'Emerald'),
-    ('amber', 'Amber'),
-    ('coral', 'Coral'),
-    ('slate', 'Slate'),
-  ];
-
-  final _name = TextEditingController();
-  String _colorKey = 'violet';
 
   @override
   void dispose() {
@@ -515,17 +676,60 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
     super.dispose();
   }
 
+  bool get _canSubmit => !_saving && _name.text.trim().isNotEmpty;
+
+  void _onChanged(String _) {
+    setState(() {
+      _fieldError = null;
+      _saveError = null;
+    });
+  }
+
+  Future<void> _submit() async {
+    if (_saving) return;
+    final name = _name.text.trim();
+    if (name.isEmpty) {
+      setState(() => _fieldError = 'Enter a project name.');
+      return;
+    }
+    if (name.length > 80) {
+      setState(() => _fieldError = 'Keep it under 80 characters.');
+      return;
+    }
+    final lower = name.toLowerCase();
+    if (widget.existingNames.any(
+      (other) => other.trim().toLowerCase() == lower,
+    )) {
+      setState(() => _fieldError = 'That name is already in use.');
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _fieldError = null;
+      _saveError = null;
+    });
+    String? error;
+    try {
+      error = await widget.onSubmit(name);
+    } catch (_) {
+      error = 'Could not save project.';
+    }
+    if (!mounted) return;
+    if (error == null) {
+      Navigator.of(context).pop();
+      return;
+    }
+    setState(() {
+      _saving = false;
+      _saveError = error;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final canCreate = _name.text.trim().isNotEmpty;
     return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.l,
-        OSpace.s,
-        OSpace.l,
-        OSpace.l,
-      ),
+      padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.l),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
@@ -534,107 +738,37 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
             key: const Key('v2-project-name-field'),
             controller: _name,
             autofocus: true,
-            maxLength: 40,
             textCapitalization: TextCapitalization.sentences,
+            textInputAction: TextInputAction.done,
             style: OType.bodySm.copyWith(color: c.text),
-            onChanged: (_) => setState(() {}),
-            decoration: const InputDecoration(
+            onChanged: _onChanged,
+            onSubmitted: (_) => _submit(),
+            decoration: InputDecoration(
               labelText: 'Project name',
-              hintText: 'e.g. Website redesign 2025',
+              errorText: _fieldError,
             ),
           ),
-          const SizedBox(height: OSpace.s),
-          Text('Colour', style: OType.caption.copyWith(color: c.textMuted)),
-          const SizedBox(height: OSpace.s),
-          Wrap(
-            spacing: OSpace.s,
-            runSpacing: OSpace.s,
-            children: [
-              for (final choice in _colorChoices)
-                OPressable(
-                  key: ValueKey<String>('v2-project-color-${choice.$1}'),
-                  onTap: () => setState(() => _colorKey = choice.$1),
-                  semanticLabel:
-                      '${choice.$2} colour'
-                      '${_colorKey == choice.$1 ? ', selected' : ''}',
-                  child: SizedBox(
-                    width: OSpace.touch,
-                    height: OSpace.touch,
-                    child: Center(
-                      child: Container(
-                        width: 36,
-                        height: 36,
-                        decoration: BoxDecoration(
-                          color: _projectColor(c, choice.$1),
-                          shape: BoxShape.circle,
-                          border: _colorKey == choice.$1
-                              ? Border.all(color: c.text, width: 2)
-                              : null,
-                        ),
-                        child: _colorKey == choice.$1
-                            ? Icon(
-                                Icons.check_rounded,
-                                size: 18,
-                                color: c.onAccent,
-                              )
-                            : null,
-                      ),
-                    ),
-                  ),
-                ),
-            ],
-          ),
-          const SizedBox(height: OSpace.l),
-          Container(
-            padding: const EdgeInsets.all(OSpace.m),
-            decoration: BoxDecoration(
-              color: c.surfaceAlt,
-              borderRadius: BorderRadius.circular(ORadius.m),
+          if (_saveError != null) ...[
+            const SizedBox(height: OSpace.s),
+            Semantics(
+              liveRegion: true,
+              child: Text(
+                _saveError!,
+                key: const Key('v2-project-save-error'),
+                style: OType.bodySm.copyWith(color: c.danger),
+              ),
             ),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(Icons.auto_awesome_rounded, size: 18, color: c.accent),
-                const SizedBox(width: OSpace.s),
-                Expanded(
-                  child: Text(
-                    'Chats in this project share files and memory.',
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                ),
-              ],
-            ),
-          ),
+          ],
           const SizedBox(height: OSpace.l),
           OButton(
-            key: const Key('v2-create-project'),
-            label: 'Create project',
-            icon: Icons.add_rounded,
+            key: widget.submitKey,
+            label: widget.submitLabel,
+            loading: _saving,
             expand: true,
-            onPressed: canCreate
-                ? () {
-                    final draft = V2ProjectDraft(
-                      name: _name.text.trim(),
-                      colorKey: _colorKey,
-                    );
-                    widget.onCreate(draft);
-                    Navigator.of(context).pop();
-                  }
-                : null,
+            onPressed: _canSubmit ? _submit : null,
           ),
         ],
       ),
     );
   }
-}
-
-Color _projectColor(OColors c, String key) {
-  return switch (key) {
-    'purple' => c.accentFill,
-    'emerald' => c.success,
-    'amber' => c.warn,
-    'coral' => c.danger,
-    'slate' => c.textMuted,
-    _ => c.accent,
-  };
 }

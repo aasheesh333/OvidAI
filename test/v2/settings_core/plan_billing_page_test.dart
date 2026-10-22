@@ -346,7 +346,7 @@ void main() {
     final cta = tester.widget<OButton>(
       find.byKey(const ValueKey<String>('plan-cta-free')),
     );
-    expect(cta.label, 'Manage in Google Play');
+    expect(cta.label, 'Manage in Play');
     await tester.tap(find.byKey(const ValueKey<String>('plan-cta-free')));
     await tester.pump();
 
@@ -506,15 +506,55 @@ void main() {
     expect(tapped?.id, 'inv_plus_09');
   });
 
-  testWidgets('an empty history is a single line, not a card with an action', (
+  testWidgets('an empty history hides the section instead of claiming none', (
     tester,
   ) async {
     await tester.pumpWidget(_app(OTheme.light(), _billingData()));
     await tester.pumpAndSettle();
 
-    expect(find.text('No payments yet'), findsOneWidget);
+    // No receipts source exists on this screen, so an empty list means
+    // "unknown". Saying "No payments yet" to a paid account would be a lie.
+    expect(find.text('PAYMENT HISTORY'), findsNothing);
+    expect(find.text('No payments yet'), findsNothing);
     expect(find.text('See plans'), findsNothing);
-    expect(find.textContaining('receipts will appear'), findsNothing);
+  });
+
+  testWidgets('a non-paid receipt shows its real status at 320 dp / 200 %', (
+    tester,
+  ) async {
+    _size(tester, const Size(320, 640));
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: OTheme.dark(),
+        home: MediaQuery(
+          data: const MediaQueryData(
+            size: Size(320, 640),
+            textScaler: TextScaler.linear(2),
+          ),
+          child: PlanBillingPage(
+            data: _billingData(
+              history: const [
+                V2BillingHistoryEntry(
+                  id: 'inv_refund',
+                  title: 'Plus plan',
+                  dateLabel: 'Sep 18, 2026',
+                  amountLabel: r'$18.00',
+                  statusLabel: 'Refunded',
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('PAYMENT HISTORY'), findsOneWidget);
+    expect(find.text('Refunded'), findsOneWidget);
+    // A paid row stays quiet: the default verdict is not repeated.
+    expect(find.text('Paid'), findsNothing);
   });
 
   testWidgets('restore purchases is the header action', (tester) async {
@@ -655,7 +695,9 @@ void main() {
 
   testWidgets('600 dp centres the cards in a two-column grid', (tester) async {
     _size(tester, const Size(800, 1000));
-    await tester.pumpWidget(_app(OTheme.light(), _billingData()));
+    await tester.pumpWidget(
+      _app(OTheme.light(), _billingData(onPurchase: (_) {})),
+    );
     await tester.pumpAndSettle();
 
     // Four cards, one CTA each, and no feature bullet list on the card.
@@ -718,5 +760,503 @@ void main() {
       expect(find.byKey(ValueKey('plan-card-$id')), findsOneWidget);
       expect(find.byKey(ValueKey('plan-cta-$id')), findsOneWidget);
     }
+  });
+
+  test('the product spec prices are the canonical table', () {
+    // Go $5 / ₹499, Plus $18 / ₹1,799, Pro $99 / ₹9,999, Free $0.
+    expect(
+      [
+        for (final prices in V2PlanPrices.plans)
+          (
+            prices.monthlyUsd,
+            prices.monthlyInr,
+            prices.yearlyUsd,
+            prices.yearlyInr,
+          ),
+      ],
+      const [
+        (0, 0, 0, 0),
+        (5, 499, 50, 4990),
+        (18, 1799, 180, 17990),
+        (99, 9999, 990, 99990),
+      ],
+    );
+    // Yearly is ten monthly payments, not twelve.
+    for (final prices in V2PlanPrices.plans) {
+      expect(prices.yearlyUsd, prices.monthlyUsd * 10);
+      expect(prices.yearlyInr, prices.monthlyInr * 10);
+    }
+  });
+
+  test('a period without a price resolves to null, never monthly × 12', () {
+    // A canonical plan with no yearly price falls back to the spec price.
+    const go = V2Plan(
+      id: 'go',
+      name: 'Go',
+      tagline: '',
+      priceUsd: 5,
+      priceInr: 499,
+    );
+    expect(go.amount(V2Currency.usd, V2BillingPeriod.yearly), 50);
+    expect(go.amount(V2Currency.inr, V2BillingPeriod.yearly), 4990);
+    expect(go.hasPrice(V2Currency.usd, V2BillingPeriod.yearly), isTrue);
+    expect(
+      go.priceLabel(V2Currency.usd, period: V2BillingPeriod.yearly),
+      r'$50',
+    );
+
+    // A plan the spec does not price has no yearly amount at all.
+    const team = V2Plan(
+      id: 'team',
+      name: 'Team',
+      tagline: '',
+      priceUsd: 30,
+      priceInr: 2999,
+    );
+    expect(team.amount(V2Currency.usd, V2BillingPeriod.monthly), 30);
+    expect(team.amount(V2Currency.usd, V2BillingPeriod.yearly), isNull);
+    expect(team.hasPrice(V2Currency.inr, V2BillingPeriod.yearly), isFalse);
+    expect(
+      team.priceLabel(V2Currency.inr, period: V2BillingPeriod.yearly),
+      '—',
+    );
+
+    // Free is a real zero, in both periods.
+    const free = V2Plan(
+      id: 'free',
+      name: 'Free',
+      tagline: '',
+      priceUsd: 0,
+      priceInr: 0,
+    );
+    for (final period in V2BillingPeriod.values) {
+      expect(free.amount(V2Currency.usd, period), 0);
+      expect(free.priceLabel(V2Currency.inr, period: period), '₹0');
+    }
+  });
+
+  testWidgets(
+    'every plan shows the spec price in both currencies and periods',
+    (tester) async {
+      _phoneSize(tester);
+      var currency = V2Currency.usd;
+      var period = V2BillingPeriod.monthly;
+      late StateSetter setState;
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: OTheme.light(),
+          home: StatefulBuilder(
+            builder: (context, setter) {
+              setState = setter;
+              return PlanBillingPage(
+                data: _billingData(
+                  currency: currency,
+                  period: period,
+                  onPurchase: (_) {},
+                  onCurrencyChanged: (value) =>
+                      setState(() => currency = value),
+                  onPeriodChanged: (value) => setState(() => period = value),
+                ),
+              );
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      Future<void> expectPrices(
+        Map<String, String> monthly,
+        Map<String, String> yearly,
+      ) async {
+        for (final entry in monthly.entries) {
+          expect(
+            _inCard(entry.key, entry.value),
+            findsOneWidget,
+            reason: 'card ${entry.key} ${entry.value}',
+          );
+        }
+        await tester.tap(find.text('Yearly'));
+        await tester.pumpAndSettle();
+        for (final entry in yearly.entries) {
+          expect(
+            _inCard(entry.key, entry.value),
+            findsOneWidget,
+            reason: 'card ${entry.key} ${entry.value} (yearly)',
+          );
+          expect(
+            _inTable(entry.value),
+            findsOneWidget,
+            reason: 'table ${entry.key} ${entry.value} (yearly)',
+          );
+        }
+        expect(_inCard('go', '/ year'), findsOneWidget);
+        await tester.tap(find.text('Monthly'));
+        await tester.pumpAndSettle();
+      }
+
+      await expectPrices(
+        const {'free': r'$0', 'go': r'$5', 'plus': r'$18', 'pro': r'$99'},
+        const {'free': r'$0', 'go': r'$50', 'plus': r'$180', 'pro': r'$990'},
+      );
+
+      await tester.tap(find.text('INR (₹)'));
+      await tester.pumpAndSettle();
+
+      await expectPrices(
+        const {'free': '₹0', 'go': '₹499', 'plus': '₹1,799', 'pro': '₹9,999'},
+        const {
+          'free': '₹0',
+          'go': '₹4,990',
+          'plus': '₹17,990',
+          'pro': '₹99,990',
+        },
+      );
+    },
+  );
+
+  testWidgets('a yearly selection buys only the yearly SKU', (tester) async {
+    _phoneSize(tester);
+    final purchases = <V2PlanPurchase>[];
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        _billingData(period: V2BillingPeriod.yearly, onPurchase: purchases.add),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    for (final entry in const {
+      'go': ('3x', 'ovid_plus_yearly'),
+      'plus': ('7x', 'ovid_pro_yearly'),
+      'pro': ('15x', 'ovid_max_yearly'),
+    }.entries) {
+      final cta = find.byKey(ValueKey<String>('plan-cta-${entry.key}'));
+      await tester.ensureVisible(cta);
+      await tester.pumpAndSettle();
+      await tester.tap(cta);
+      await tester.pump();
+
+      final purchase = purchases.last;
+      expect(purchase.period, V2BillingPeriod.yearly);
+      expect(purchase.tier, entry.value.$1);
+      expect(purchase.productId, entry.value.$2);
+      expect(purchase.productId, isNot(endsWith('_monthly')));
+    }
+    expect(purchases, hasLength(3));
+  });
+
+  testWidgets('a plan without a yearly price still sells its yearly SKU', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    final purchases = <V2PlanPurchase>[];
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        _billingData(
+          period: V2BillingPeriod.yearly,
+          plans: const [
+            V2Plan(
+              id: 'go',
+              name: 'Go',
+              tagline: 'Everyday work',
+              priceUsd: 5,
+              priceInr: 499,
+            ),
+          ],
+          onPurchase: purchases.add,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The spec price fills the gap; $60 (monthly × 12) would be wrong.
+    expect(_inCard('go', r'$50'), findsOneWidget);
+    expect(_inCard('go', r'$60'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey<String>('plan-cta-go')));
+    await tester.pump();
+
+    expect(purchases.single.productId, 'ovid_plus_yearly');
+    expect(purchases.single.period, V2BillingPeriod.yearly);
+  });
+
+  testWidgets('the current plan stays disabled in yearly mode too', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    final purchases = <V2PlanPurchase>[];
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        _billingData(
+          period: V2BillingPeriod.yearly,
+          currentPlanId: 'plus',
+          onPurchase: purchases.add,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final current = tester.widget<OButton>(
+      find.byKey(const ValueKey<String>('plan-cta-plus')),
+    );
+    expect(current.label, 'Current plan');
+    expect(current.onPressed, isNull);
+
+    await tester.tap(find.byKey(const ValueKey<String>('plan-cta-go')));
+    await tester.pump();
+    expect(purchases.single.planId, 'go');
+    expect(purchases.single.productId, 'ovid_plus_yearly');
+  });
+
+  testWidgets('each card is a group naming the plan, price and CTA state', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        _billingData(currentPlanId: 'plus', onPurchase: (_) {}),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final go = tester.getSemantics(
+      find.byKey(const ValueKey<String>('plan-group-go')),
+    );
+    expect(go.label, r'Go, $5 per month');
+    final goCta = tester.getSemantics(
+      find.byKey(const ValueKey<String>('plan-cta-go')),
+    );
+    expect(goCta.label, 'Select Go');
+    expect(goCta.flagsCollection.isEnabled, Tristate.isTrue);
+
+    final plus = tester.getSemantics(
+      find.byKey(const ValueKey<String>('plan-group-plus')),
+    );
+    expect(plus.label, r'Plus, $18 per month, current plan');
+    final plusCta = tester.getSemantics(
+      find.byKey(const ValueKey<String>('plan-cta-plus')),
+    );
+    expect(plusCta.label, 'Current plan');
+    expect(plusCta.flagsCollection.isEnabled, Tristate.isFalse);
+
+    // The card's name and price are not read a second time as loose text.
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey<String>('plan-group-go')),
+        matching: find.bySemanticsLabel(RegExp(r'^Go$')),
+      ),
+      findsNothing,
+    );
+
+    semantics.dispose();
+  });
+
+  testWidgets('restore is hidden when no store is wired, and labelled', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    await tester.pumpWidget(_app(OTheme.light(), _billingData()));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('restore-purchases')), findsNothing);
+
+    await tester.pumpWidget(
+      _app(OTheme.light(), _billingData(onRestorePurchases: () {})),
+    );
+    await tester.pumpAndSettle();
+
+    final restore = find.byKey(const ValueKey('restore-purchases'));
+    expect(restore, findsOneWidget);
+    expect(tester.getSemantics(restore).label, 'Restore purchases');
+    expect(tester.getSize(restore).height, greaterThanOrEqualTo(48));
+
+    semantics.dispose();
+  });
+
+  testWidgets('loading shows a skeleton, not an empty claim', (tester) async {
+    await tester.pumpWidget(
+      _app(OTheme.light(), _billingData(status: V2PlanBillingStatus.loading)),
+    );
+    await tester.pump();
+
+    expect(find.byType(OSkeletonList), findsOneWidget);
+    expect(find.text('No plans to show'), findsNothing);
+    expect(find.text('Plan & billing'), findsOneWidget);
+  });
+
+  testWidgets('320 dp at 200 % text holds the longest INR prices', (
+    tester,
+  ) async {
+    for (final dark in [false, true]) {
+      _size(tester, const Size(320, 640));
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: dark ? OTheme.dark() : OTheme.light(),
+          home: MediaQuery(
+            data: const MediaQueryData(
+              size: Size(320, 640),
+              textScaler: TextScaler.linear(2),
+            ),
+            child: PlanBillingPage(
+              data: _billingData(
+                currency: V2Currency.inr,
+                currentPlanId: 'plus',
+                plans: const [
+                  V2Plan(
+                    id: 'free',
+                    name: 'Free',
+                    tagline: 'Start here',
+                    priceUsd: 0,
+                    priceInr: 0,
+                  ),
+                  V2Plan(
+                    id: 'go',
+                    name: 'Ovid Go',
+                    tagline: 'Everyday building',
+                    priceUsd: 5,
+                    priceInr: 499,
+                  ),
+                  V2Plan(
+                    id: 'plus',
+                    name: 'Ovid Plus',
+                    tagline: 'Power tools for fast work',
+                    priceUsd: 18,
+                    priceInr: 1799,
+                    popular: true,
+                  ),
+                  V2Plan(
+                    id: 'pro',
+                    name: 'Ovid Pro',
+                    tagline: 'Heavy compute for teams',
+                    priceUsd: 99,
+                    priceInr: 9999,
+                  ),
+                ],
+                onPurchase: (_) {},
+                onRestorePurchases: () {},
+                onRetry: () {},
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+
+      expect(tester.takeException(), isNull, reason: 'dark: $dark');
+      expect(find.text('₹9,999'), findsNWidgets(2));
+      await tester.pumpWidget(const SizedBox.shrink());
+    }
+  });
+
+  testWidgets('an unsold period keeps its reason at 320 dp / 200 %', (
+    tester,
+  ) async {
+    _size(tester, const Size(320, 640));
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: OTheme.light(),
+        home: MediaQuery(
+          data: const MediaQueryData(
+            size: Size(320, 640),
+            textScaler: TextScaler.linear(2),
+          ),
+          child: PlanBillingPage(
+            data: _billingData(
+              period: V2BillingPeriod.yearly,
+              plans: const [
+                V2Plan(
+                  id: 'team',
+                  name: 'Ovid Business',
+                  tagline: 'For bigger teams',
+                  priceUsd: 30,
+                  priceInr: 2999,
+                ),
+              ],
+              onPurchase: (_) {},
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
+
+    expect(tester.takeException(), isNull);
+    final cta = tester.widget<OButton>(
+      find.byKey(const ValueKey<String>('plan-cta-team')),
+    );
+    expect(cta.onPressed, isNull);
+    expect(cta.label, 'Not available');
+    expect(
+      find.text('Ovid Business is not sold with yearly billing right now.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('1280 dp at 200 % text keeps the 720 cap and two columns', (
+    tester,
+  ) async {
+    _size(tester, const Size(1280, 1200));
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: OTheme.dark(),
+        home: MediaQuery(
+          data: const MediaQueryData(
+            size: Size(1280, 1200),
+            textScaler: TextScaler.linear(2),
+          ),
+          child: PlanBillingPage(data: _billingData(onPurchase: (_) {})),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
+
+    expect(tester.takeException(), isNull);
+    final table = tester.getSize(
+      find.byKey(const ValueKey('plan-compare-table')),
+    );
+    expect(table.width, lessThanOrEqualTo(720));
+    final free = tester.getSize(find.byKey(const ValueKey('plan-card-free')));
+    expect(free.width, lessThan(360));
+    expect(
+      tester.getTopLeft(find.byKey(const ValueKey('plan-card-go'))).dy,
+      closeTo(
+        tester.getTopLeft(find.byKey(const ValueKey('plan-card-free'))).dy,
+        0.5,
+      ),
+    );
+  });
+
+  testWidgets('599 dp is one-up, 600 dp is two-up', (tester) async {
+    _size(tester, const Size(599, 1000));
+    await tester.pumpWidget(
+      _app(OTheme.light(), _billingData(onPurchase: (_) {})),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.getTopLeft(find.byKey(const ValueKey('plan-card-go'))).dy,
+      greaterThan(
+        tester.getTopLeft(find.byKey(const ValueKey('plan-card-free'))).dy,
+      ),
+    );
+
+    _size(tester, const Size(600, 1000));
+    await tester.pumpWidget(
+      _app(OTheme.light(), _billingData(onPurchase: (_) {})),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.getTopLeft(find.byKey(const ValueKey('plan-card-go'))).dy,
+      closeTo(
+        tester.getTopLeft(find.byKey(const ValueKey('plan-card-free'))).dy,
+        0.5,
+      ),
+    );
   });
 }

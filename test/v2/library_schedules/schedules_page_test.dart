@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
+import 'package:ovid_ai/ui/design/o_screen.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/schedules/schedules_page.dart';
 
@@ -519,6 +520,93 @@ void main() {
         expect(tester.takeException(), isNull);
         expect(find.text('Run now'), findsOneWidget);
         expect(find.text('Delete'), findsOneWidget);
+      },
+    );
+  }
+
+  testWidgets('a row announces its prompt, cadence, next run and pause', (
+    tester,
+  ) async {
+    _phone(tester);
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(
+      _app(
+        SchedulesPage(
+          data: const V2SchedulesData(schedules: _schedules),
+          onScheduleTap: _ignore,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.bySemanticsLabel(
+        RegExp(
+          r'^Browses 5 top tech sites and writes a short summary\. '
+          r'Every weekday at 9:00 AM\. Next run, Tomorrow, 9:00 AM',
+        ),
+      ),
+      findsOneWidget,
+    );
+    // The paused row says so instead of leaving the state to the switch alone.
+    expect(
+      find.bySemanticsLabel(
+        RegExp(
+          r'^Captures scores and saves a report\. Daily at 2:00 AM\. '
+          r'Paused',
+        ),
+      ),
+      findsOneWidget,
+    );
+    handle.dispose();
+  });
+
+  for (final dark in [false, true]) {
+    testWidgets(
+      'centres and caps the list from 600 to 1280 (${dark ? 'dark' : 'light'})',
+      (tester) async {
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        tester.view.devicePixelRatio = 1;
+
+        for (final width in const [600.0, 800.0, 1024.0, 1280.0]) {
+          for (final scale in const [1.0, 2.0]) {
+            tester.view.physicalSize = Size(width, 900);
+            await tester.pumpWidget(
+              MaterialApp(
+                theme: dark ? OTheme.dark() : OTheme.light(),
+                home: MediaQuery(
+                  data: MediaQueryData(
+                    size: Size(width, 900),
+                    textScaler: TextScaler.linear(scale),
+                  ),
+                  child: const SchedulesPage(
+                    data: V2SchedulesData(schedules: _schedules),
+                  ),
+                ),
+              ),
+            );
+            await tester.pumpAndSettle();
+
+            final reason = '$width dp at ${scale}x';
+            expect(tester.takeException(), isNull, reason: reason);
+
+            final list = find.byType(ListView).first;
+            final size = tester.getSize(list);
+            final left = tester.getTopLeft(list).dx;
+            final cap = OBreakpoints.contentMaxWidth(width);
+            expect(
+              size.width,
+              lessThanOrEqualTo(cap + 0.5),
+              reason: '$reason: the list is wider than its band cap',
+            );
+            expect(
+              left,
+              closeTo((width - size.width) / 2, 1),
+              reason: '$reason: the list is not centred',
+            );
+          }
+        }
       },
     );
   }

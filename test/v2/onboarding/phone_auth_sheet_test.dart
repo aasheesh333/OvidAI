@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
+import 'package:ovid_ai/ui/design/o_tokens.dart';
 import 'package:ovid_ai/ui/v2/onboarding/phone_auth_sheet.dart';
+import 'package:ovid_ai/ui/widgets/external_link.dart';
 
 Future<void> _pump(
   WidgetTester tester, {
@@ -16,8 +18,6 @@ Future<void> _pump(
   VoidCallback? onChangeNumber,
   VoidCallback? onClose,
   VoidCallback? onRetry,
-  VoidCallback? onTerms,
-  VoidCallback? onPrivacy,
   bool dark = false,
   bool settle = true,
   double width = 400,
@@ -49,8 +49,6 @@ Future<void> _pump(
           onChangeNumber: onChangeNumber,
           onClose: onClose,
           onRetry: onRetry,
-          onTerms: onTerms,
-          onPrivacy: onPrivacy,
         ),
       ),
     ),
@@ -60,6 +58,12 @@ Future<void> _pump(
   } else {
     await tester.pump();
   }
+}
+
+/// Stops a running resend ticker before the test ends.
+Future<void> _unmount(WidgetTester tester) async {
+  await tester.pumpWidget(const SizedBox.shrink());
+  await tester.pump();
 }
 
 VoidCallback? _onPressed(WidgetTester tester, Key key) =>
@@ -82,19 +86,22 @@ void _expectNoTextPastEdge(WidgetTester tester) {
 
 void main() {
   group('phone step', () {
-    testWidgets('renders the number form and terms note in light', (
+    testWidgets('renders the number form and legal note in light', (
       tester,
     ) async {
       await _pump(tester, onClose: () {});
 
-      expect(find.text('Sign in with your phone'), findsOneWidget);
+      expect(find.text('Phone sign-in'), findsOneWidget);
+      expect(find.text('We text you a 6-digit code.'), findsOneWidget);
       expect(find.text('Phone number'), findsOneWidget);
       expect(find.text('IN'), findsOneWidget);
       expect(find.text('+91'), findsOneWidget);
       expect(find.text('98765 43210'), findsOneWidget);
       expect(find.text('Send code'), findsOneWidget);
       expect(find.byKey(const Key('phone-auth-terms')), findsOneWidget);
-      expect(find.text('By continuing, you agree to our '), findsOneWidget);
+      expect(find.text('By continuing, you agree to'), findsOneWidget);
+      expect(find.text('Terms'), findsOneWidget);
+      expect(find.text('Privacy Policy'), findsOneWidget);
       expect(find.byKey(const Key('phone-auth-close')), findsOneWidget);
       expect(find.byKey(const Key('phone-auth-code')), findsNothing);
     });
@@ -111,7 +118,7 @@ void main() {
     testWidgets('renders in dark', (tester) async {
       await _pump(tester, dark: true);
 
-      expect(find.text('Sign in with your phone'), findsOneWidget);
+      expect(find.text('Phone sign-in'), findsOneWidget);
       expect(find.text('Send code'), findsOneWidget);
       expect(find.byKey(const Key('phone-auth-terms')), findsOneWidget);
     });
@@ -140,6 +147,34 @@ void main() {
       await tester.pump();
 
       expect(sent, '98765 43210');
+    });
+
+    testWidgets('an invalid number is rejected before a request is sent', (
+      tester,
+    ) async {
+      var sends = 0;
+      await _pump(tester, onSendCode: (_) => sends++);
+
+      await tester.enterText(find.byKey(const Key('phone-auth-phone')), '123');
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('phone-auth-send')));
+      await tester.pump();
+
+      expect(sends, 0);
+      expect(find.text('Enter a valid number.'), findsOneWidget);
+      // A validation problem is corrected in the field, not retried blindly.
+      expect(find.text('Try again'), findsNothing);
+
+      await tester.enterText(
+        find.byKey(const Key('phone-auth-phone')),
+        '98765 43210',
+      );
+      await tester.pump();
+      expect(find.text('Enter a valid number.'), findsNothing);
+
+      await tester.tap(find.byKey(const Key('phone-auth-send')));
+      await tester.pump();
+      expect(sends, 1);
     });
 
     testWidgets('country picker searches and reports the selection', (
@@ -195,6 +230,7 @@ void main() {
 
     testWidgets('error is announced and retried', (tester) async {
       var retries = 0;
+      final handle = tester.ensureSemantics();
       await _pump(
         tester,
         data: const V2PhoneAuthData(
@@ -208,12 +244,19 @@ void main() {
         find.text('That number does not look right. Check it and try again.'),
         findsOneWidget,
       );
-      expect(find.byKey(const Key('phone-auth-error')), findsOneWidget);
+      expect(
+        tester
+            .getSemantics(find.byKey(const Key('phone-auth-error')))
+            .flagsCollection
+            .isLiveRegion,
+        isTrue,
+      );
 
       await tester.tap(find.text('Try again'));
       await tester.pump();
 
       expect(retries, 1);
+      handle.dispose();
     });
 
     testWidgets('retry falls back to sending when no handler is wired', (
@@ -245,19 +288,79 @@ void main() {
       expect(closes, 1);
     });
 
-    testWidgets('terms and privacy links call their handlers', (tester) async {
-      var terms = 0;
-      var privacy = 0;
-      final handle = tester.ensureSemantics();
-      await _pump(tester, onTerms: () => terms++, onPrivacy: () => privacy++);
+    testWidgets('legal links open the real documents', (tester) async {
+      final opened = <Uri>[];
+      externalLinkLauncherForTest = (uri) async {
+        opened.add(uri);
+        return true;
+      };
+      addTearDown(() => externalLinkLauncherForTest = null);
 
-      await tester.tap(find.bySemanticsLabel('Terms'));
-      await tester.tap(find.bySemanticsLabel('Privacy Policy'));
+      await _pump(tester, onClose: () {});
+
+      await tester.ensureVisible(find.text('Terms'));
+      await tester.tap(find.text('Terms'));
+      await tester.pump();
+      await tester.ensureVisible(find.text('Privacy Policy'));
+      await tester.tap(find.text('Privacy Policy'));
       await tester.pump();
 
-      expect(terms, 1);
-      expect(privacy, 1);
-      handle.dispose();
+      expect(opened, hasLength(2));
+      expect(opened[0].path, '/terms');
+      expect(opened[1].path, '/privacy');
+    });
+
+    testWidgets('legal links disappear when no URL is configured', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: OTheme.light(),
+          home: const Scaffold(
+            body: V2LegalNote(termsUrl: '', privacyUrl: ''),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('Terms'), findsNothing);
+      expect(find.text('Privacy Policy'), findsNothing);
+      expect(find.text('By continuing, you agree to'), findsNothing);
+    });
+
+    testWidgets('keyboard inset adds scroll room below the last control', (
+      tester,
+    ) async {
+      // A Scaffold removes the bottom view inset from its body, so mount the
+      // sheet the way a bottom-sheet route does: inside a plain Material.
+      await tester.binding.setSurfaceSize(const Size(400, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: OTheme.light(),
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(viewInsets: const EdgeInsets.only(bottom: 300)),
+            child: child!,
+          ),
+          home: Material(child: V2PhoneAuthSheet(onSendCode: (_) {})),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final scroll = tester.widget<SingleChildScrollView>(
+        find.descendant(
+          of: find.byType(V2PhoneAuthSheet),
+          matching: find.byType(SingleChildScrollView),
+        ),
+      );
+      final padding = scroll.padding!.resolve(TextDirection.ltr);
+      expect(padding.bottom, greaterThanOrEqualTo(OSpace.xl + 300));
+
+      await tester.ensureVisible(find.byKey(const Key('phone-auth-send')));
+      await tester.pump();
+      expect(tester.takeException(), isNull);
     });
   });
 
@@ -265,41 +368,63 @@ void main() {
     const codeData = V2PhoneAuthData(
       step: V2PhoneAuthStep.code,
       phone: '98765 43210',
-      resendSeconds: 45,
     );
 
-    testWidgets('renders the code entry and resend timer', (tester) async {
-      await _pump(tester, data: codeData);
+    testWidgets('renders the code entry and the destination number', (
+      tester,
+    ) async {
+      await _pump(tester, data: codeData, onChangeNumber: () {});
 
       expect(find.text('Enter your code'), findsOneWidget);
-      expect(
-        find.text('We sent a 6-digit code to +91 98765 43210.'),
-        findsOneWidget,
-      );
+      expect(find.text('Sent to +91 98765 43210'), findsOneWidget);
       expect(find.text('Verification code'), findsOneWidget);
       expect(find.text('Enter all 6 digits'), findsOneWidget);
       expect(find.byKey(const Key('phone-auth-code')), findsOneWidget);
-      expect(find.text('Resend code in 45s'), findsOneWidget);
       expect(find.byKey(const Key('phone-auth-resend')), findsNothing);
+      expect(find.byKey(const Key('phone-auth-resend-timer')), findsNothing);
       expect(_onPressed(tester, const Key('phone-auth-verify')), isNull);
+      expect(find.byKey(const Key('phone-auth-back')), findsOneWidget);
     });
 
-    testWidgets('six digits enable verify and verify reports the code', (
+    testWidgets('six digits enable verify and its button reports the code', (
       tester,
     ) async {
-      String? changed;
       String? verified;
+      await _pump(
+        tester,
+        data: const V2PhoneAuthData(
+          step: V2PhoneAuthStep.code,
+          phone: '98765 43210',
+          code: '123456',
+        ),
+        onVerify: (value) => verified = value,
+      );
+
+      expect(_onPressed(tester, const Key('phone-auth-verify')), isNotNull);
+      expect(find.text('1'), findsOneWidget);
+      expect(find.text('6'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('phone-auth-verify')));
+      await tester.pump();
+
+      expect(verified, '123456');
+    });
+
+    testWidgets('the sixth digit auto-submits exactly once', (tester) async {
+      String? changed;
+      final verified = <String>[];
       await _pump(
         tester,
         data: codeData,
         onCodeChanged: (value) => changed = value,
-        onVerify: (value) => verified = value,
+        onVerify: verified.add,
       );
 
       await tester.enterText(find.byKey(const Key('phone-auth-code')), '12345');
       await tester.pump();
 
       expect(changed, '12345');
+      expect(verified, isEmpty);
       expect(_onPressed(tester, const Key('phone-auth-verify')), isNull);
 
       await tester.enterText(
@@ -308,13 +433,18 @@ void main() {
       );
       await tester.pump();
 
+      expect(changed, '123456');
+      expect(verified, ['123456']);
+
+      // A rebuild, or the same six digits arriving again, must not resubmit.
+      await tester.pump();
+      expect(verified, ['123456']);
+
+      // The explicit button stays wired for assistive tech and can retry.
       expect(_onPressed(tester, const Key('phone-auth-verify')), isNotNull);
       await tester.tap(find.byKey(const Key('phone-auth-verify')));
       await tester.pump();
-
-      expect(verified, '123456');
-      expect(find.text('1'), findsOneWidget);
-      expect(find.text('6'), findsOneWidget);
+      expect(verified, ['123456', '123456']);
     });
 
     testWidgets('non-digits never reach the field', (tester) async {
@@ -335,7 +465,7 @@ void main() {
       expect(_onPressed(tester, const Key('phone-auth-verify')), isNull);
     });
 
-    testWidgets('resend is available once the timer reaches zero', (
+    testWidgets('resend timer ticks down and then becomes a button', (
       tester,
     ) async {
       var resends = 0;
@@ -344,9 +474,85 @@ void main() {
         data: const V2PhoneAuthData(
           step: V2PhoneAuthStep.code,
           phone: '98765 43210',
+          resendSeconds: 3,
         ),
         onResend: () => resends++,
+        settle: false,
       );
+
+      expect(find.text('Resend code in 3s'), findsOneWidget);
+
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('Resend code in 2s'), findsOneWidget);
+
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('Resend code in 1s'), findsOneWidget);
+
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.byKey(const Key('phone-auth-resend-timer')), findsNothing);
+      expect(find.byKey(const Key('phone-auth-resend')), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('phone-auth-resend')));
+      await tester.pump();
+
+      expect(resends, 1);
+      // A resend starts a fresh window so the button cannot be spammed.
+      expect(find.byKey(const Key('phone-auth-resend')), findsNothing);
+      expect(find.text('Resend code in 1:00'), findsOneWidget);
+
+      await _unmount(tester);
+    });
+
+    testWidgets('host countdown updates restart the visible timer', (
+      tester,
+    ) async {
+      var data = const V2PhoneAuthData(
+        step: V2PhoneAuthStep.code,
+        phone: '98765 43210',
+        resendSeconds: 3,
+      );
+      late StateSetter host;
+
+      await tester.binding.setSurfaceSize(const Size(400, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: OTheme.light(),
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setState) {
+                host = setState;
+                return V2PhoneAuthSheet(data: data, onResend: () {});
+              },
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('Resend code in 3s'), findsOneWidget);
+
+      host(
+        () => data = const V2PhoneAuthData(
+          step: V2PhoneAuthStep.code,
+          phone: '98765 43210',
+          resendSeconds: 10,
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('Resend code in 10s'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('Resend code in 9s'), findsOneWidget);
+
+      await _unmount(tester);
+    });
+
+    testWidgets('resend is available once the timer reaches zero', (
+      tester,
+    ) async {
+      var resends = 0;
+      await _pump(tester, data: codeData, onResend: () => resends++);
 
       expect(find.byKey(const Key('phone-auth-resend-timer')), findsNothing);
       await tester.tap(find.byKey(const Key('phone-auth-resend')));
@@ -356,14 +562,7 @@ void main() {
     });
 
     testWidgets('resend is absent when no handler is wired', (tester) async {
-      await _pump(
-        tester,
-        data: const V2PhoneAuthData(
-          step: V2PhoneAuthStep.code,
-          phone: '98765 43210',
-        ),
-        onVerify: (_) {},
-      );
+      await _pump(tester, data: codeData, onVerify: (_) {});
 
       // A button with no handler is a dead control, so it is not rendered.
       expect(find.byKey(const Key('phone-auth-resend')), findsNothing);
@@ -378,13 +577,17 @@ void main() {
           phone: '98765 43210',
           resendSeconds: 65,
         ),
+        onResend: () {},
+        settle: false,
       );
 
       expect(find.text('Resend code in 1:05'), findsOneWidget);
+      await _unmount(tester);
     });
 
     testWidgets('a wrong code shows an error and retries', (tester) async {
       var retries = 0;
+      final handle = tester.ensureSemantics();
       await _pump(
         tester,
         data: const V2PhoneAuthData(
@@ -399,10 +602,18 @@ void main() {
         find.text('That code did not work. Check it and try again.'),
         findsOneWidget,
       );
+      expect(
+        tester
+            .getSemantics(find.byKey(const Key('phone-auth-error')))
+            .flagsCollection
+            .isLiveRegion,
+        isTrue,
+      );
       await tester.tap(find.text('Try again'));
       await tester.pump();
 
       expect(retries, 1);
+      handle.dispose();
     });
 
     testWidgets('change number and close report', (tester) async {
@@ -416,11 +627,10 @@ void main() {
       );
 
       await tester.tap(find.byKey(const Key('phone-auth-back')));
-      await tester.tap(find.byKey(const Key('phone-auth-change')));
       await tester.tap(find.byKey(const Key('phone-auth-close')));
       await tester.pump();
 
-      expect(changes, 2);
+      expect(changes, 1);
       expect(closes, 1);
     });
 
@@ -434,6 +644,16 @@ void main() {
       await tester.pump();
 
       expect(closes, 1);
+    });
+
+    testWidgets('back is absent when there is no change or close handler', (
+      tester,
+    ) async {
+      await _pump(tester, data: codeData);
+
+      // A back arrow that cannot change the number or close the sheet is a
+      // dead control, so the header renders no leading action.
+      expect(find.byKey(const Key('phone-auth-back')), findsNothing);
     });
   });
 
@@ -480,7 +700,7 @@ void main() {
       handle.dispose();
     });
 
-    testWidgets('code step disables entry and announces resend progress', (
+    testWidgets('code step disables entry while the code is verified', (
       tester,
     ) async {
       await _pump(
@@ -488,6 +708,7 @@ void main() {
         data: const V2PhoneAuthData(
           step: V2PhoneAuthStep.code,
           phone: '98765 43210',
+          code: '123456',
           loading: true,
         ),
         settle: false,
@@ -495,19 +716,21 @@ void main() {
       );
 
       expect(find.text('Verifying…'), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
       expect(
         tester
             .widget<TextField>(find.byKey(const Key('phone-auth-code-field')))
             .enabled,
         isFalse,
       );
-      expect(find.text('One moment…'), findsOneWidget);
       expect(_onPressed(tester, const Key('phone-auth-verify')), isNull);
     });
   });
 
   group('accessibility and narrow screens', () {
-    testWidgets('country and code field carry explicit labels', (tester) async {
+    testWidgets('the code field carries an explicit label and value', (
+      tester,
+    ) async {
       final handle = tester.ensureSemantics();
       await _pump(
         tester,
@@ -516,7 +739,6 @@ void main() {
           phone: '98765 43210',
           code: '123456',
         ),
-        onCountryChanged: (_) {},
       );
 
       expect(
@@ -530,6 +752,47 @@ void main() {
       handle.dispose();
     });
 
+    testWidgets('country button carries its country and dial code', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      await _pump(tester, onCountryChanged: (_) {});
+
+      expect(
+        tester.getSemantics(find.byKey(const Key('phone-auth-country'))).label,
+        'Country code, India, +91',
+      );
+      handle.dispose();
+    });
+
+    testWidgets('copy stays inside the header and button budgets', (
+      tester,
+    ) async {
+      int words(String text) =>
+          text.trim().split(RegExp(r'\s+')).where((w) => w.isNotEmpty).length;
+
+      await _pump(tester, onSendCode: (_) {});
+
+      expect(words('Phone sign-in'), lessThanOrEqualTo(3));
+      expect(words('We text you a 6-digit code.'), lessThanOrEqualTo(6));
+      expect(words('Send code'), lessThanOrEqualTo(3));
+
+      await _unmount(tester);
+
+      await _pump(
+        tester,
+        data: const V2PhoneAuthData(
+          step: V2PhoneAuthStep.code,
+          phone: '98765 43210',
+        ),
+        onVerify: (_) {},
+      );
+
+      expect(words('Enter your code'), lessThanOrEqualTo(3));
+      expect(words('Sent to +91 98765 43210'), lessThanOrEqualTo(6));
+      expect(words('Verify and continue'), lessThanOrEqualTo(3));
+    });
+
     testWidgets('phone step fits 320 dp at 200% text in light', (tester) async {
       await _pump(
         tester,
@@ -540,7 +803,7 @@ void main() {
       );
 
       expect(tester.takeException(), isNull);
-      expect(find.text('Sign in with your phone'), findsOneWidget);
+      expect(find.text('Phone sign-in'), findsOneWidget);
       _expectNoTextPastEdge(tester);
 
       await tester.ensureVisible(find.byKey(const Key('phone-auth-send')));
@@ -560,7 +823,6 @@ void main() {
           step: V2PhoneAuthStep.code,
           phone: '98765 43210',
           error: 'That code did not work. Check the six digits and try again.',
-          resendSeconds: 59,
         ),
         onRetry: () {},
         onResend: () {},
@@ -595,6 +857,35 @@ void main() {
       await tester.pump();
       expect(tester.takeException(), isNull);
       expect(find.text('No countries found'), findsOneWidget);
+    });
+
+    testWidgets('wide window keeps the sheet column capped', (tester) async {
+      await _pump(tester, width: 1280, onSendCode: (_) {});
+
+      expect(tester.takeException(), isNull);
+      expect(
+        tester.getRect(find.byKey(const Key('phone-auth-send'))).width,
+        lessThanOrEqualTo(460.5),
+      );
+    });
+
+    testWidgets('wide dark window at 200% keeps the sheet capped', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        dark: true,
+        width: 1280,
+        height: 900,
+        textScale: 2,
+        onSendCode: (_) {},
+      );
+
+      expect(tester.takeException(), isNull);
+      expect(
+        tester.getRect(find.byKey(const Key('phone-auth-send'))).width,
+        lessThanOrEqualTo(460.5),
+      );
     });
 
     testWidgets('reduced motion still renders every control', (tester) async {

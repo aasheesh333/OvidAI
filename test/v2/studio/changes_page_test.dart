@@ -106,7 +106,9 @@ void main() {
   testWidgets('the commit action lives in the header, not a bottom bar', (
     tester,
   ) async {
-    await tester.pumpWidget(_app(const V2ChangesPage(data: _data)));
+    await tester.pumpWidget(
+      _app(V2ChangesPage(data: _data, onCommit: (_) {})),
+    );
     await tester.pumpAndSettle();
 
     final header = tester.widget<OAppBar>(find.byType(OAppBar));
@@ -251,27 +253,15 @@ void main() {
     expect(find.text('<h1 class="hero-title">Ovid Si</h1>'), findsOneWidget);
   });
 
-  testWidgets('an unwired commit can be reviewed but never submitted', (
-    tester,
-  ) async {
-    final handle = tester.ensureSemantics();
-
+  testWidgets('an unwired commit draws no control at all', (tester) async {
     await tester.pumpWidget(_app(const V2ChangesPage(data: _data)));
     await tester.pumpAndSettle();
-    await _openCommitSheet(tester);
 
-    await tester.enterText(find.byKey(_messageKey), 'fix: hero typography');
-    await tester.pump();
-
-    expect(
-      tester.getSemantics(find.byKey(_submitKey)),
-      isSemantics(isButton: true, isEnabled: false),
-    );
-    expect(
-      find.textContaining('committing is not available yet'),
-      findsNothing,
-    );
-    handle.dispose();
+    // The diff is still reviewable, but there is no commit path, so the
+    // header shows no check mark instead of a disabled one.
+    expect(find.byKey(_openSheetKey), findsNothing);
+    expect(find.text('<h1 class="hero-title">Ovid Si</h1>'), findsOneWidget);
+    expect(find.textContaining('not available'), findsNothing);
   });
 
   testWidgets('collapsed file expands to show its diff', (tester) async {
@@ -291,7 +281,9 @@ void main() {
   testWidgets('the commit action opens the shared commit sheet', (
     tester,
   ) async {
-    await tester.pumpWidget(_app(const V2ChangesPage(data: _data)));
+    await tester.pumpWidget(
+      _app(V2ChangesPage(data: _data, onCommit: (_) {})),
+    );
     await tester.pumpAndSettle();
 
     await _openCommitSheet(tester);
@@ -304,7 +296,9 @@ void main() {
   testWidgets('the sheet maps changed files, branch and sync state', (
     tester,
   ) async {
-    await tester.pumpWidget(_app(const V2ChangesPage(data: _data)));
+    await tester.pumpWidget(
+      _app(V2ChangesPage(data: _data, onCommit: (_) {})),
+    );
     await tester.pumpAndSettle();
     await _openCommitSheet(tester);
 
@@ -365,5 +359,100 @@ void main() {
     expect(find.byType(V2CommitSheet), findsNothing);
     expect(commits, 0);
     expect(find.text('Changes'), findsOneWidget);
+  });
+
+  testWidgets('a successful async commit reports success', (tester) async {
+    final calls = <String>[];
+    await tester.pumpWidget(
+      _app(
+        V2ChangesPage(
+          data: _data,
+          onCommitAsync: (message) async {
+            calls.add(message);
+            return null;
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await _openCommitSheet(tester);
+    await tester.enterText(find.byKey(_messageKey), 'fix: hero typography');
+    await tester.pump();
+    await tester.tap(find.byKey(_submitKey));
+    await tester.pumpAndSettle();
+
+    expect(calls, <String>['fix: hero typography']);
+    expect(find.text('Committed.'), findsOneWidget);
+  });
+
+  testWidgets('a failed async commit reports the real error', (tester) async {
+    await tester.pumpWidget(
+      _app(
+        V2ChangesPage(
+          data: _data,
+          onCommitAsync: (_) async => 'Push rejected by the remote.',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await _openCommitSheet(tester);
+    await tester.enterText(find.byKey(_messageKey), 'fix: hero typography');
+    await tester.pump();
+    await tester.tap(find.byKey(_submitKey));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Push rejected by the remote.'), findsOneWidget);
+    expect(find.text('Committed.'), findsNothing);
+  });
+
+  testWidgets('a throwing async commit is never reported as success', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        V2ChangesPage(
+          data: _data,
+          onCommitAsync: (_) async => throw StateError('offline'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await _openCommitSheet(tester);
+    await tester.enterText(find.byKey(_messageKey), 'fix: hero typography');
+    await tester.pump();
+    await tester.tap(find.byKey(_submitKey));
+    await tester.pumpAndSettle();
+
+    expect(find.text('The commit did not finish.'), findsOneWidget);
+    expect(find.text('Committed.'), findsNothing);
+  });
+
+  testWidgets('diff lines read in order with their change kind', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(_app(const V2ChangesPage(data: _data)));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.bySemanticsLabel('Line 42: <section class="hero-container">'),
+      findsOneWidget,
+    );
+    expect(
+      find.bySemanticsLabel(
+        'Removed line 44: <h1 class="hero-title">Old Platform Title</h1>',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.bySemanticsLabel(
+        'Added line 44: <h1 class="hero-title">Ovid Si</h1>',
+      ),
+      findsOneWidget,
+    );
+    handle.dispose();
   });
 }

@@ -113,9 +113,12 @@ class V2FileTreeData {
 
 /// A searchable, expandable workspace file tree.
 ///
-/// The widget is presentational: data and callbacks are injected. It renders a
-/// plain [Column] rather than owning a scroll view, so it works both inside a
-/// page scroll view and inside a bounded explorer panel.
+/// The widget is presentational: data and callbacks are injected. By default it
+/// renders a plain [Column] rather than owning a scroll view, so it works inside
+/// a page scroll view. Pass [scrollable] when the parent gives it a bounded
+/// height (the Studio explorer pane); the tree then owns its scroll and builds
+/// rows lazily, so a repository with thousands of files costs only the visible
+/// rows.
 ///
 /// Search is keyboard-free by design: the field never autofocuses, filtering
 /// happens on every character, and tapping a row dismisses the keyboard. While
@@ -130,9 +133,14 @@ class V2FileTree extends StatefulWidget {
     this.onRetry,
     this.onRefresh,
     this.onQueryChanged,
+    this.scrollable = false,
   });
 
   final V2FileTreeData data;
+
+  /// When true the tree fills the height it is given and lazily builds its
+  /// rows. The parent must supply a bounded height.
+  final bool scrollable;
 
   /// Called with the full path (or name when path is null) of a tapped file.
   final ValueChanged<String>? onSelectFile;
@@ -299,44 +307,68 @@ class _V2FileTreeState extends State<V2FileTree> {
     final visible = searching
         ? _filterNodes(widget.data.nodes, query.toLowerCase())
         : widget.data.nodes;
-    final rows = _buildRows(
-      visible,
-      forceExpanded: searching,
-      searching: searching,
+    final rows = _flattenRows(visible, forceExpanded: searching);
+    final search = Padding(
+      padding: const EdgeInsets.fromLTRB(OSpace.s, OSpace.s, OSpace.s, 0),
+      child: OSearchField(
+        controller: _search,
+        hint: widget.data.searchHint,
+        autofocus: false,
+        onChanged: _onQueryChanged,
+        onSubmitted: (_) => FocusManager.instance.primaryFocus?.unfocus(),
+        trailing: _query.isEmpty
+            ? null
+            : OIconButton(
+                icon: Icons.close_rounded,
+                semanticLabel: 'Clear search',
+                size: 18,
+                onPressed: _clearSearch,
+              ),
+      ),
     );
 
+    if (widget.scrollable) {
+      // The explorer pane owns the scroll, so only visible rows are built.
+      return CustomScrollView(
+        key: const Key('v2-file-tree-scroll'),
+        slivers: [
+          SliverToBoxAdapter(child: search),
+          if (rows.isEmpty)
+            SliverFillRemaining(
+              hasScrollBody: false,
+              child: _NoMatches(onClear: _clearSearch),
+            )
+          else
+            SliverList.builder(
+              itemCount: rows.length,
+              itemBuilder: (context, index) => _buildRow(
+                rows[index],
+                searching: searching,
+              ),
+            ),
+          const SliverToBoxAdapter(child: SizedBox(height: OSpace.l)),
+        ],
+      );
+    }
+
+    final rowWidgets = [
+      for (final row in rows) _buildRow(row, searching: searching),
+    ];
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(OSpace.s, OSpace.s, OSpace.s, 0),
-          child: OSearchField(
-            controller: _search,
-            hint: widget.data.searchHint,
-            autofocus: false,
-            onChanged: _onQueryChanged,
-            onSubmitted: (_) => FocusManager.instance.primaryFocus?.unfocus(),
-            trailing: _query.isEmpty
-                ? null
-                : OIconButton(
-                    icon: Icons.close_rounded,
-                    semanticLabel: 'Clear search',
-                    size: 18,
-                    onPressed: _clearSearch,
-                  ),
-          ),
-        ),
+        search,
         if (rows.isEmpty)
           _NoMatches(onClear: _clearSearch)
         else if (searching)
           Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: rows,
+            children: rowWidgets,
           )
         else
-          OStagger(children: rows),
+          OStagger(children: rowWidgets),
       ],
     );
   }
@@ -377,10 +409,9 @@ class _V2FileTreeState extends State<V2FileTree> {
     return result;
   }
 
-  List<Widget> _buildRows(
+  List<_TreeRowData> _flattenRows(
     List<V2FileTreeEntry> nodes, {
     required bool forceExpanded,
-    required bool searching,
   }) {
     // Post-order file counts, computed once per build rather than per row.
     final fileCounts = <String, int>{};
@@ -422,26 +453,26 @@ class _V2FileTreeState extends State<V2FileTree> {
     for (final node in nodes) {
       walk(node, 0);
     }
+    return rows;
+  }
 
-    return [
-      for (final row in rows)
-        _FileTreeRow(
-          key: ValueKey<String>('v2-file-tree-row-${row.entry.id}'),
-          entry: row.entry,
-          depth: row.depth,
-          expanded: row.expanded,
-          selected:
-              !row.entry.isFolder &&
-              widget.data.selectedPath != null &&
-              (row.entry.path ?? row.entry.name) == widget.data.selectedPath,
-          fileCount: row.fileCount,
-          searching: searching,
-          interactive:
-              row.entry.canExpand ||
-              (!row.entry.isFolder && widget.onSelectFile != null),
-          onTap: () => _activate(row.entry, searching: searching),
-        ),
-    ];
+  Widget _buildRow(_TreeRowData row, {required bool searching}) {
+    return _FileTreeRow(
+      key: ValueKey<String>('v2-file-tree-row-${row.entry.id}'),
+      entry: row.entry,
+      depth: row.depth,
+      expanded: row.expanded,
+      selected:
+          !row.entry.isFolder &&
+          widget.data.selectedPath != null &&
+          (row.entry.path ?? row.entry.name) == widget.data.selectedPath,
+      fileCount: row.fileCount,
+      searching: searching,
+      interactive:
+          row.entry.canExpand ||
+          (!row.entry.isFolder && widget.onSelectFile != null),
+      onTap: () => _activate(row.entry, searching: searching),
+    );
   }
 }
 
@@ -574,7 +605,11 @@ class _FileTreeRow extends StatelessWidget {
     }
     final change = entry.change;
     final suffix = change == null ? '' : ', ${change.semanticLabel}';
-    return '${entry.name}, ${language.label}$suffix';
+    // The visual indent carries the folder; the spoken label must carry the
+    // path, or two files with the same name are indistinguishable.
+    final path = entry.path;
+    final name = path == null || path.isEmpty ? entry.name : path;
+    return '$name, ${language.label}$suffix';
   }
 }
 

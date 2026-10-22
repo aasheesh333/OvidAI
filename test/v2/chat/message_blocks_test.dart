@@ -199,6 +199,50 @@ void main() {
       expect(link.isDownload, isFalse);
       expect((blocks[1] as V2FileBlock).fileName, 'data.csv');
     });
+
+    test('parses a pipe table with alignment and escaped pipes', () {
+      final blocks = parseV2MessageBlocks(
+        '| Name | Qty |\n'
+        '|:---|---:|\n'
+        '| Apples | 3 |\n'
+        '| A \\| B | 4 |\n'
+        '\n'
+        'After',
+      );
+
+      expect(blocks, hasLength(2));
+      final table = blocks[0] as V2TableBlock;
+      expect(table.headers, ['Name', 'Qty']);
+      expect(table.align, [V2TableAlign.start, V2TableAlign.end]);
+      expect(table.rows, [
+        ['Apples', '3'],
+        ['A | B', '4'],
+      ]);
+      expect(blocks[1], isA<V2ParagraphBlock>());
+    });
+
+    test('a ragged table keeps every cell under its header', () {
+      final table =
+          parseV2MessageBlocks(
+                '| a | b | c |\n'
+                '|---|---|---|\n'
+                '| 1 |\n'
+                '| 1 | 2 | 3 | 4 |',
+              ).single
+              as V2TableBlock;
+
+      expect(table.rows, [
+        ['1', '', ''],
+        ['1', '2', '3'],
+      ]);
+    });
+
+    test('a pipe line without a separator stays a paragraph', () {
+      expect(
+        parseV2MessageBlocks('| not | a table |').single,
+        isA<V2ParagraphBlock>(),
+      );
+    });
   });
 
   group('V2MessageBlocks', () {
@@ -240,6 +284,46 @@ void main() {
         return found;
       });
       expect(bold, isTrue, reason: 'inline bold should stay bold');
+    });
+
+    testWidgets('renders a table with a header and real cell content', (
+      tester,
+    ) async {
+      String? opened;
+      await tester.pumpWidget(
+        _blocksApp(
+          '| Item | Value |\n'
+          '|:---|:---:|\n'
+          '| **Total** | `42` |\n'
+          '| [Docs](https://example.com/docs) | 7 |',
+          onOpenLink: (url) => opened = url,
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byType(Table), findsOneWidget);
+      expect(find.text('Item', findRichText: true), findsOneWidget);
+      expect(find.text('Value', findRichText: true), findsOneWidget);
+      expect(find.textContaining('Total', findRichText: true), findsOneWidget);
+      expect(find.textContaining('42', findRichText: true), findsOneWidget);
+
+      // Inline links inside a cell stay real controls.
+      final rich = tester.widget<RichText>(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is RichText && widget.text.toPlainText().contains('Docs'),
+        ),
+      );
+      TapGestureRecognizer? recognizer;
+      (rich.text as TextSpan).visitChildren((span) {
+        if (span is TextSpan && span.text == 'Docs') {
+          recognizer = span.recognizer as TapGestureRecognizer?;
+        }
+        return true;
+      });
+      expect(recognizer, isNotNull);
+      recognizer!.onTap!();
+      expect(opened, 'https://example.com/docs');
     });
 
     testWidgets('code block copies and confirms for two seconds', (
@@ -649,6 +733,41 @@ void main() {
           reason: 'a row paints past its box (${dark ? 'dark' : 'light'})',
         );
       }
+    }
+  });
+
+  testWidgets('a wide table scrolls inside its card at 320 dp / 200 %', (
+    tester,
+  ) async {
+    _narrowPhone(tester);
+    final hash = 'a' * 90;
+    final markdown =
+        '| $hash | Second | Third |\n'
+        '|---|---|---|\n'
+        '| $hash | $hash | $hash |\n'
+        '| one | two | three |';
+
+    for (final dark in [false, true]) {
+      await tester.pumpWidget(_blocksApp(markdown, dark: dark, textScale: 2));
+      await tester.pump();
+
+      expect(
+        tester.takeException(),
+        isNull,
+        reason: 'table overflow (${dark ? 'dark' : 'light'})',
+      );
+      // The table is wider than the phone, so it lives in a horizontal pan
+      // surface instead of clipping a column.
+      final scroller = find
+          .ancestor(
+            of: find.byType(Table),
+            matching: find.byType(SingleChildScrollView),
+          )
+          .first;
+      expect(
+        tester.widget<SingleChildScrollView>(scroller).scrollDirection,
+        Axis.horizontal,
+      );
     }
   });
 }

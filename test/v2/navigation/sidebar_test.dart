@@ -1,8 +1,10 @@
 import 'dart:ui' show Tristate;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show SemanticsNode;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
+import 'package:ovid_ai/ui/design/o_screen.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/design/o_tokens.dart';
 import 'package:ovid_ai/ui/v2/sidebar/project_detail_page.dart';
@@ -91,6 +93,28 @@ void _useScreen(WidgetTester tester, double width, {double height = 900}) {
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
+}
+
+/// Labels in the order TalkBack receives them, top to bottom.
+List<String> _readingOrder(WidgetTester tester) {
+  final root = tester.binding.renderViews.first.owner?.semanticsOwner
+      ?.rootSemanticsNode;
+  final labels = <String>[];
+  void walk(SemanticsNode node) {
+    final label = node.getSemanticsData().label.trim();
+    if (label.isNotEmpty) {
+      labels.addAll(
+        label.split('\n').where((line) => line.trim().isNotEmpty),
+      );
+    }
+    node.visitChildren((child) {
+      walk(child);
+      return true;
+    });
+  }
+
+  if (root != null) walk(root);
+  return labels;
 }
 
 void main() {
@@ -315,6 +339,27 @@ void main() {
         isEnabled: false,
       ),
     );
+    // A chat menu with no handler is removed, never left as a dead control.
+    expect(
+      find.bySemanticsLabel(RegExp('Chat options for Next.js Portfolio Setup')),
+      findsNothing,
+    );
+    expect(find.byIcon(Icons.more_vert_rounded), findsNothing);
+    handle.dispose();
+  });
+
+  testWidgets('a wired chat menu is an enabled button', (tester) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(
+      _app(
+        Sidebar(
+          data: _contentData(),
+          onSessionActions: (_) {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
     expect(
       tester.getSemantics(
         find.bySemanticsLabel(
@@ -325,7 +370,7 @@ void main() {
         label: 'Chat options for Next.js Portfolio Setup',
         isButton: true,
         hasEnabledState: true,
-        isEnabled: false,
+        isEnabled: true,
       ),
     );
     handle.dispose();
@@ -1068,5 +1113,382 @@ void main() {
       expect(tester.takeException(), isNull);
       expect(find.text('Next.js Portfolio Setup'), findsOneWidget);
     }
+  });
+
+  testWidgets('inline search keeps drawer order and counts each section', (
+    tester,
+  ) async {
+    const projectChat = V2SidebarSession(
+      id: 't9',
+      title: 'Kickoff notes',
+      modelLabel: 'Auto',
+      projectName: 'Mobile App Redesign',
+    );
+    await tester.pumpWidget(
+      _app(
+        const Sidebar(
+          data: V2SidebarData(
+            name: 'Alex Rivera',
+            today: <V2SidebarSession>[_today, projectChat],
+            projects: <V2SidebarProject>[_project],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // "mobile" matches the project name and the chat filed under it, so both
+    // sections show a count.
+    await tester.enterText(
+      find.byKey(const Key('v2-sidebar-search')),
+      'mobile',
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey<String>('v2-sidebar-search-projects')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('v2-sidebar-search-sessions')),
+      findsOneWidget,
+    );
+    expect(
+      tester.getTopLeft(find.text('PROJECTS')).dy,
+      lessThan(tester.getTopLeft(find.text('SESSIONS')).dy),
+    );
+    expect(
+      tester.getSemantics(
+        find.byKey(const ValueKey<String>('v2-sidebar-search-projects')),
+      ).label,
+      '1 project',
+    );
+    expect(
+      tester.getSemantics(
+        find.byKey(const ValueKey<String>('v2-sidebar-search-sessions')),
+      ).label,
+      '1 session',
+    );
+
+    // A query that only matches a chat drops the empty Projects section and
+    // its count.
+    await tester.enterText(
+      find.byKey(const Key('v2-sidebar-search')),
+      'landing',
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey<String>('v2-sidebar-search-projects')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('v2-sidebar-search-sessions')),
+      findsOneWidget,
+    );
+
+    // Clearing restores the unfiltered drawer with no count pills.
+    await tester.tap(find.byIcon(Icons.close_rounded));
+    await tester.pumpAndSettle();
+    expect(find.text('PROJECTS'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('v2-sidebar-search-sessions')),
+      findsNothing,
+    );
+  });
+
+  testWidgets('search matches message text without drawing it on the row', (
+    tester,
+  ) async {
+    const withMessage = V2SidebarSession(
+      id: 'm1',
+      title: 'Untitled chat',
+      modelLabel: 'Auto',
+      timeLabel: '1h ago',
+      messageText: 'Deploy the billing service on Friday',
+    );
+    await tester.pumpWidget(
+      _app(
+        const Sidebar(
+          data: V2SidebarData(
+            name: 'Alex Rivera',
+            today: <V2SidebarSession>[withMessage],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Message text is searchable only, never a second row line.
+    expect(find.text('Deploy the billing service on Friday'), findsNothing);
+
+    await tester.enterText(
+      find.byKey(const Key('v2-sidebar-search')),
+      'billing',
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Untitled chat'), findsOneWidget);
+    expect(find.text('Deploy the billing service on Friday'), findsNothing);
+  });
+
+  testWidgets('profile row announces name and plan exactly once', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(_app(Sidebar(data: _contentData())));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.bySemanticsLabel('Profile, Alex Rivera, Free plan'),
+      findsOneWidget,
+    );
+    // The avatar is decoration inside the labelled row, not a second node.
+    expect(find.bySemanticsLabel('Alex Rivera'), findsNothing);
+    handle.dispose();
+  });
+
+  testWidgets('project row speaks name and count, memory speaks for itself', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(
+      _app(
+        Sidebar(
+          data: const V2SidebarData(
+            name: 'Alex Rivera',
+            projects: <V2SidebarProject>[_project],
+          ),
+          onProjectMemory: (_) {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.bySemanticsLabel('Mobile App Redesign, 3 chats'),
+      findsOneWidget,
+    );
+    expect(
+      find.bySemanticsLabel('Mobile App Redesign, 3 chats, 3 memory files'),
+      findsNothing,
+    );
+    expect(
+      find.bySemanticsLabel('Memory for Mobile App Redesign, 3 memory files'),
+      findsOneWidget,
+    );
+    handle.dispose();
+  });
+
+  testWidgets('drawer never covers the whole narrow window', (tester) async {
+    for (final (width, expected) in <(double, double)>[
+      (320, 320 * Sidebar.drawerWidthFraction),
+      (360, 360 * Sidebar.drawerWidthFraction),
+      (412, Sidebar.drawerWidth),
+      (900, Sidebar.drawerWidth),
+    ]) {
+      _useScreen(tester, width);
+      await tester.pumpWidget(_app(Sidebar(data: _contentData())));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.getSize(find.byKey(const Key('v2-sidebar-surface'))).width,
+        closeTo(expected, 0.01),
+        reason: '$width dp',
+      );
+      expect(tester.takeException(), isNull, reason: '$width dp');
+    }
+  });
+
+  testWidgets('sessions without projects still offer New project', (
+    tester,
+  ) async {
+    var newProjects = 0;
+    await tester.pumpWidget(
+      _app(
+        Sidebar(
+          data: const V2SidebarData(
+            name: 'Alex Rivera',
+            today: <V2SidebarSession>[_today],
+          ),
+          onNewProject: () => newProjects++,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('PROJECTS'), findsOneWidget);
+    await tester.tap(
+      find.descendant(
+        of: find.byType(OSectionHeader),
+        matching: find.byIcon(Icons.add_rounded),
+      ),
+    );
+    expect(newProjects, 1);
+  });
+
+  testWidgets('duplicate session ids render once', (tester) async {
+    await tester.pumpWidget(
+      _app(
+        const Sidebar(
+          data: V2SidebarData(
+            name: 'Alex Rivera',
+            pinned: <V2SidebarSession>[_pinned],
+            today: <V2SidebarSession>[_pinned],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Next.js Portfolio Setup'), findsOneWidget);
+  });
+
+  testWidgets('reads profile → actions → projects → sessions → footer', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(
+      _app(
+        Sidebar(
+          data: _contentData(),
+          onSessionActions: (_) {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final labels = _readingOrder(tester);
+    const anchors = <String>[
+      'Profile, Alex Rivera, Free plan',
+      'New chat',
+      'Search',
+      'PROJECTS',
+      'Mobile App Redesign, 3 chats',
+      'SESSIONS',
+      'Next.js Portfolio Setup',
+      'Schedule',
+      'Artifacts',
+      'Settings',
+    ];
+    var previous = -1;
+    for (final anchor in anchors) {
+      final index = labels.indexWhere((label) => label.contains(anchor));
+      expect(
+        index,
+        greaterThan(previous),
+        reason: 'reading order broke at "$anchor". Labels: $labels',
+      );
+      previous = index;
+    }
+    handle.dispose();
+  });
+
+  testWidgets('fits 320 → 1280 dp at 100 % and 200 % text in both themes', (
+    tester,
+  ) async {
+    const longTitle =
+        'Rewrite the entire onboarding flow, the pricing page, the billing '
+        'emails and every empty state for the new release, with screenshots';
+    final data = V2SidebarData(
+      name: 'Alexandra Catherine Rivera-Washington',
+      planLabel: 'Business annual plan',
+      pinned: const <V2SidebarSession>[
+        V2SidebarSession(
+          id: 'p1',
+          title: longTitle,
+          modelLabel: 'Auto',
+          pinned: true,
+          timeLabel: '2h ago',
+        ),
+      ],
+      projects: const <V2SidebarProject>[
+        V2SidebarProject(
+          id: 'pr1',
+          name: 'Mobile App Redesign With A Very Long Project Name',
+          chatCount: 123,
+          memoryFileCount: 3,
+        ),
+      ],
+      today: const <V2SidebarSession>[_today],
+      scheduleNextRun: 'Next run tomorrow at 9:00 AM in your local timezone',
+      activeSessionId: 't1',
+    );
+
+    for (final width in <double>[
+      320,
+      360,
+      412,
+      600,
+      800,
+      900,
+      1024,
+      1280,
+    ]) {
+      for (final scale in <double>[1, 2]) {
+        for (final theme in <ThemeData>[OTheme.light(), OTheme.dark()]) {
+          tester.view.physicalSize = Size(width, 900);
+          tester.view.devicePixelRatio = 1;
+          addTearDown(tester.view.resetPhysicalSize);
+          addTearDown(tester.view.resetDevicePixelRatio);
+
+          await tester.pumpWidget(
+            _narrow(
+              Sidebar(
+                data: data,
+                layout: width < OBreakpoints.tablet
+                    ? SidebarLayout.drawer
+                    : SidebarLayout.rail,
+              ),
+              theme: theme,
+              textScale: scale,
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          expect(
+            tester.takeException(),
+            isNull,
+            reason: '$width dp at ${scale}x, ${theme.brightness}',
+          );
+        }
+      }
+    }
+  });
+
+  testWidgets('every state and search fits a 280 dp rail at 200 % text', (
+    tester,
+  ) async {
+    _useScreen(tester, 600);
+
+    for (final data in <V2SidebarData>[
+      const V2SidebarData(
+        name: 'Alex Rivera',
+        status: V2SidebarStatus.loading,
+      ),
+      const V2SidebarData(
+        name: 'Alex Rivera',
+        status: V2SidebarStatus.error,
+        errorMessage: 'You are offline.',
+      ),
+      const V2SidebarData(name: 'Alex Rivera'),
+      _contentData(),
+    ]) {
+      await tester.pumpWidget(
+        _narrow(Sidebar(data: data, layout: SidebarLayout.rail)),
+      );
+      await tester.pump();
+      expect(tester.takeException(), isNull, reason: data.status.name);
+    }
+
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('v2-sidebar-search')),
+      'landing',
+    );
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(
+      find.byKey(const ValueKey<String>('v2-sidebar-search-sessions')),
+      findsOneWidget,
+    );
   });
 }

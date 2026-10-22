@@ -239,6 +239,37 @@ void main() {
     }
   });
 
+  testWidgets('stays capped from 320 dp to 1280 dp at both text scales', (
+    tester,
+  ) async {
+    const widths = <double>[320, 412, 600, 800, 1024, 1280];
+    for (final width in widths) {
+      for (final scale in [1.0, 2.0]) {
+        for (final dark in [false, true]) {
+          await _pumpChip(
+            tester,
+            label: 'Ovid Pro 1.5 Extended Reasoning',
+            autoOnly: true,
+            subagentCount: 12,
+            dark: dark,
+            size: Size(width, 800),
+            textScale: scale,
+          );
+
+          final reason = '${width.toInt()} dp @ ${scale}x dark: $dark';
+          expect(tester.takeException(), isNull, reason: reason);
+          final chip = tester.getSize(find.byType(V2ModelChip));
+          expect(
+            chip.width,
+            lessThanOrEqualTo(v2ModelChipMaxWidth),
+            reason: reason,
+          );
+          expect(chip.height, greaterThanOrEqualTo(48), reason: reason);
+        }
+      }
+    }
+  });
+
   testWidgets('disabled chip is announced and ignores taps', (tester) async {
     final handle = tester.ensureSemantics();
     var taps = 0;

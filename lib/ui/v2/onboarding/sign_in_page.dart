@@ -13,9 +13,24 @@ import 'step_progress.dart';
 class V2SignInData {
   const V2SignInData({this.loading = false, this.error});
 
+  /// A provider request is running. The host sets this while the Google
+  /// account picker or the phone flow is open.
   final bool loading;
+
+  /// The provider's own failure message, shown verbatim. Cancellation is not
+  /// an error: the host maps it to null, and [isCancellation] is a second
+  /// guard for hosts that pass the raw sentinel through.
   final String? error;
+
+  bool get isCancellation {
+    final value = error?.trim().toLowerCase();
+    return value == 'cancelled' || value == 'canceled';
+  }
 }
+
+/// Which provider the person chose in this build. The host owns the request;
+/// this only decides which button paints the in-flight spinner.
+enum _SignInProvider { google, phone }
 
 /// Third step of the tour. Same shell as every other step: one header, the
 /// step indicator, a scrolling body and the primary action pinned at the
@@ -51,11 +66,10 @@ class SignInPage extends StatefulWidget {
   final V2SignInData data;
   final VoidCallback? onGoogle;
 
-  /// Opens [V2PhoneAuthSheet]. Null disables the phone action.
+  /// Opens the phone flow. Null disables the phone action.
   ///
-  /// The sheet is only used when the host drives it through
-  /// [onSendPhoneCode]; the send / verify / resend actions then forward to
-  /// [onSendPhoneCode], [onVerifyPhoneCode] and [onResendPhoneCode]. A host
+  /// When [onSendPhoneCode] is also supplied this page hosts
+  /// [V2PhoneAuthSheet] and forwards every sheet action to the host. A host
   /// that only supplies [onPhone] owns its own OTP UI, so this button invokes
   /// it directly instead of asking for the number twice.
   final VoidCallback? onPhone;
@@ -102,9 +116,16 @@ class _SignInPageState extends State<SignInPage> {
   );
   bool _phoneSheetOpen = false;
 
+  /// The provider the person tapped most recently in this sheet. The host's
+  /// [V2SignInData.loading] is a single flag, so this is what keeps the
+  /// spinner on the button that started the request instead of on both.
+  _SignInProvider? _inflight;
+  _SignInProvider? _lastAction;
+
   @override
   void didUpdateWidget(covariant SignInPage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!widget.data.loading) _inflight = null;
     if (_phoneSheetOpen) {
       final next = widget.phoneData ?? const V2PhoneAuthData();
       final previous = oldWidget.phoneData ?? const V2PhoneAuthData();
@@ -124,6 +145,39 @@ class _SignInPageState extends State<SignInPage> {
   void dispose() {
     _phoneSheet.dispose();
     super.dispose();
+  }
+
+  void _begin(_SignInProvider provider, VoidCallback? action) {
+    if (action == null || widget.data.loading || _inflight != null) return;
+    setState(() {
+      _inflight = provider;
+      _lastAction = provider;
+    });
+    action();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      // A host that opens its own UI may never flip [V2SignInData.loading]
+      // (the legacy phone dialog does). Clear the local flag then, so a
+      // control cannot stay disabled after the hand-off.
+      if (!widget.data.loading && _inflight == provider) {
+        setState(() => _inflight = null);
+      }
+    });
+  }
+
+  void _retry() {
+    if (widget.data.loading) return;
+    final action = _lastAction;
+    if (action != null) {
+      setState(() => _inflight = action);
+    }
+    widget.onRetry?.call();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (!widget.data.loading && _inflight == action) {
+        setState(() => _inflight = null);
+      }
+    });
   }
 
   Future<void> _openPhoneSheet() async {
@@ -150,7 +204,7 @@ class _SignInPageState extends State<SignInPage> {
             onSendCode: (phone) => widget.onSendPhoneCode?.call(phone),
             onVerify: widget.onVerifyPhoneCode,
             onResend: widget.onResendPhoneCode,
-            onChangeNumber: () => _changePhoneNumber(),
+            onChangeNumber: _changePhoneNumber,
             onClose: () => Navigator.of(sheetContext).pop(),
           ),
         ),
@@ -177,10 +231,17 @@ class _SignInPageState extends State<SignInPage> {
   @override
   Widget build(BuildContext context) {
     final data = widget.data;
+    final error = data.isCancellation ? null : data.error;
+    // Until the host exposes a per-provider flag, a screen that is busy
+    // without a local tap (a retry, or a host that starts in a loading state)
+    // keeps the original behaviour: the primary carries the progress.
+    final phoneBusy = data.loading && _inflight == _SignInProvider.phone;
+    final googleBusy = data.loading && !phoneBusy;
+
     return OnboardingStepScaffold(
       step: widget.step,
       title: 'Sign in',
-      onBack: widget.onBack,
+      onBack: data.loading ? null : widget.onBack,
       backKey: const Key('sign-in-back'),
       primaryKey: const Key('sign-in-submit'),
       // Google is the filled action, pinned to the same bottom edge as every
@@ -190,8 +251,8 @@ class _SignInPageState extends State<SignInPage> {
       primaryIcon: Icons.g_mobiledata_rounded,
       onPrimary: data.loading || widget.onGoogle == null
           ? null
-          : widget.onGoogle,
-      primaryLoading: data.loading,
+          : () => _begin(_SignInProvider.google, widget.onGoogle),
+      primaryLoading: googleBusy,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -207,14 +268,21 @@ class _SignInPageState extends State<SignInPage> {
             variant: OButtonVariant.secondary,
             icon: Icons.phone_iphone_rounded,
             expand: true,
+            loading: phoneBusy,
             onPressed: data.loading || widget.onPhone == null
                 ? null
-                : _openPhoneSheet,
+                : () => _begin(_SignInProvider.phone, _openPhoneSheet),
           ),
-          if (data.error != null) ...[
+          if (error != null) ...[
             const SizedBox(height: OSpace.l),
-            _InlineError(message: data.error!, onRetry: widget.onRetry),
+            _InlineError(
+              message: error,
+              onRetry: widget.onRetry == null || data.loading ? null : _retry,
+            ),
           ],
+          // The documents live here as well as in Settings: a person creating
+          // an account has to be able to read them before choosing a provider.
+          const V2LegalNote(key: Key('sign-in-legal')),
         ],
       ),
     );
@@ -256,6 +324,7 @@ class _InlineError extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     return Semantics(
+      key: const Key('sign-in-error'),
       liveRegion: true,
       child: Container(
         padding: const EdgeInsets.fromLTRB(

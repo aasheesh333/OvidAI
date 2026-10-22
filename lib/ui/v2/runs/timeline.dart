@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
@@ -30,12 +31,35 @@ enum V2TimelineStatus {
   };
 }
 
+/// One labelled block inside an expanded [V2TimelineItem].
+///
+/// The timeline never formats the value: it belongs to the run. [label] is
+/// optional so a plain excerpt can be shown without inventing a section name.
+@immutable
+class V2TimelineDetail {
+  const V2TimelineDetail({
+    required this.value,
+    this.label,
+    this.mono = false,
+    this.onTap,
+  });
+
+  final String? label;
+  final String value;
+
+  /// Renders the value in the monospace face (tool names, paths, commands).
+  final bool mono;
+
+  /// When set, the value is a real control (e.g. a source that opens in the
+  /// browser) instead of static text.
+  final VoidCallback? onTap;
+}
+
 /// One row on a [V2Timeline].
 ///
-/// [title] is required. The row is one line: the title and, when supplied,
-/// [durationLabel]. Extra fields are retained so existing callers keep
-/// compiling; the minimal timeline does not render prose, footers or an
-/// expandable detail panel.
+/// [title] is required. [description] stays visible under the title. A row is
+/// expandable only when it carries real detail in [details] or
+/// [expandedDetail]; a row without detail is a plain, non-interactive line.
 @immutable
 class V2TimelineItem {
   const V2TimelineItem({
@@ -48,18 +72,20 @@ class V2TimelineItem {
     this.statusLabel,
     this.icon,
     this.expandedDetail,
-    this.footer,
+    this.details = const <V2TimelineDetail>[],
     this.initiallyExpanded = false,
+    this.errorMessage,
+    this.tapHint,
   });
 
   /// Stable identity. Used for keys and passed back through
-  /// [V2Timeline.onItemTap].
+  /// [V2Timeline.onItemTap] and [V2Timeline.onExpandedChanged].
   final String id;
 
   /// The step or event name.
   final String title;
 
-  /// Retained for callers. Not rendered: the row is one line.
+  /// One or two lines that are always visible under [title].
   final String? description;
 
   /// Clock label for when the step happened, e.g. "10:41".
@@ -70,51 +96,76 @@ class V2TimelineItem {
 
   final V2TimelineStatus status;
 
-  /// Overrides the default [V2TimelineStatus.label] in the accessibility
-  /// label.
+  /// Overrides the default [V2TimelineStatus.label].
   final String? statusLabel;
 
   /// Node glyph. When null a glyph is chosen from [status].
   final IconData? icon;
 
-  /// Retained for callers. Not rendered.
+  /// Extra plain-English detail revealed by tapping the row.
+  ///
+  /// Kept alongside [details] for callers that only have one paragraph.
   final String? expandedDetail;
 
-  /// Retained for callers. Not rendered.
-  final Widget? footer;
+  /// Labelled blocks revealed by tapping the row.
+  final List<V2TimelineDetail> details;
 
-  /// Retained for callers. The minimal row has no expansion.
+  /// Whether an expandable row starts open.
   final bool initiallyExpanded;
 
-  /// True when tapping the row can reveal [expandedDetail].
-  bool get isExpandable => expandedDetail != null;
+  /// The failure reason, shown once under the row and never repeated in the
+  /// expanded detail.
+  final String? errorMessage;
 
-  /// The status word shown and announced; empty for a bare neutral node.
-  String get effectiveStatusLabel => statusLabel ?? status.label;
+  /// What tapping a non-expandable row does, e.g. "Open subagent".
+  final String? tapHint;
 
-  /// The full label a screen reader announces for the row.
-  ///
-  /// Order is time, title, status, duration so the list reads chronologically.
-  String get semanticLabel {
-    final parts = <String>[
-      if (timeLabel != null && timeLabel!.isNotEmpty) timeLabel!,
-      title,
-      if (effectiveStatusLabel.isNotEmpty) effectiveStatusLabel,
-      if (durationLabel != null && durationLabel!.isNotEmpty) durationLabel!,
-    ];
-    return parts.join(', ');
+  /// True when tapping the row can reveal detail.
+  bool get isExpandable =>
+      (expandedDetail?.trim().isNotEmpty ?? false) ||
+      details.any((detail) => detail.value.trim().isNotEmpty);
+
+  /// The rows rendered inside the expansion panel, in order.
+  List<V2TimelineDetail> get expansionDetails => <V2TimelineDetail>[
+    if (expandedDetail?.trim().isNotEmpty ?? false)
+      V2TimelineDetail(value: expandedDetail!.trim()),
+    for (final detail in details)
+      if (detail.value.trim().isNotEmpty) detail,
+  ];
+
+  /// The status word announced by a screen reader; empty for a bare neutral
+  /// node.
+  String get effectiveStatusLabel {
+    final override = statusLabel?.trim();
+    if (override != null && override.isNotEmpty) return override;
+    return status.label;
   }
+
+  /// Time, title, status and duration, in reading order.
+  String get semanticLabel => <String>[
+    if (timeLabel != null && timeLabel!.trim().isNotEmpty) timeLabel!.trim(),
+    title,
+    if (effectiveStatusLabel.isNotEmpty) effectiveStatusLabel,
+    if (durationLabel != null && durationLabel!.trim().isNotEmpty)
+      durationLabel!.trim(),
+  ].join(', ');
 }
 
-/// Called when a row is tapped.
+/// Called when an expandable row opens or closes.
 typedef V2TimelineExpansionChanged = void Function(String id, bool expanded);
 
-/// A reusable one-line vertical timeline.
+/// A reusable vertical timeline.
 ///
-/// Renders one row per item: a status glyph, the title and the duration.
+/// Renders a node per item joined by a hairline connector, with the item's
+/// time, status, duration, description and optional expandable detail. The
+/// last item's connector is omitted. Rows with real detail toggle that detail
+/// on tap; non-expandable rows are tappable only when [onItemTap] is supplied.
+///
 /// The component is presentational and theme-aware: it reads every colour from
 /// [OColors], uses the shared type and spacing tokens, keeps a 48 dp minimum
-/// tap target, and lays out at 320 dp with 200 % text.
+/// tap target, and lays out at 320 dp with 200 % text. It returns a [Column],
+/// not a scrollable, so a host can place it inside its own list; hosts with
+/// long histories should build [V2TimelineRow]s from a lazy list instead.
 class V2Timeline extends StatelessWidget {
   const V2Timeline({
     super.key,
@@ -130,7 +181,7 @@ class V2Timeline extends StatelessWidget {
   /// Fires for every row tap with the item id.
   final ValueChanged<String>? onItemTap;
 
-  /// Retained for callers. The minimal row has no expansion.
+  /// Fires after an expandable row opens or closes.
   final V2TimelineExpansionChanged? onExpandedChanged;
 
   /// Optional label for the whole list, e.g. "Execution trajectory".
@@ -141,12 +192,19 @@ class V2Timeline extends StatelessWidget {
     if (items.isEmpty) return const SizedBox.shrink();
 
     final list = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        for (final item in items)
-          _V2TimelineRow(
-            key: ValueKey(item.id),
-            item: item,
-            onTap: onItemTap == null ? null : () => onItemTap!(item.id),
+        for (var i = 0; i < items.length; i++)
+          V2TimelineRow(
+            key: ValueKey<String>(items[i].id),
+            item: items[i],
+            index: i,
+            total: items.length,
+            isLast: i == items.length - 1,
+            onTap: onItemTap == null ? null : () => onItemTap!(items[i].id),
+            onExpandedChanged: onExpandedChanged == null
+                ? null
+                : (expanded) => onExpandedChanged!(items[i].id, expanded),
           ),
       ],
     );
@@ -161,77 +219,409 @@ class V2Timeline extends StatelessWidget {
   }
 }
 
-class _V2TimelineRow extends StatelessWidget {
-  const _V2TimelineRow({
+/// One row of a [V2Timeline].
+///
+/// Public so a long history can render these from a `ListView.builder` while
+/// keeping the same node, status, expansion and semantics as [V2Timeline].
+///
+/// Expansion is uncontrolled by default. Pass [expanded] to keep it in the
+/// host's state (a lazy list recycles rows, and a host that wants an open row
+/// to survive scrolling must own the flag); [onExpandedChanged] reports the
+/// requested value either way.
+class V2TimelineRow extends StatefulWidget {
+  const V2TimelineRow({
     super.key,
     required this.item,
+    required this.index,
+    required this.total,
+    this.isLast = false,
+    this.expanded,
+    this.onExpandedChanged,
     this.onTap,
+    this.positionLabel,
   });
 
   final V2TimelineItem item;
+
+  /// Zero-based position in the timeline, used for the announced order.
+  final int index;
+  final int total;
+  final bool isLast;
+
+  /// Overrides the "Step N of M" announcement, e.g. "Subagent 1 of 2".
+  final String? positionLabel;
+
+  /// Controlled expansion state. Null lets the row own it.
+  final bool? expanded;
+  final ValueChanged<bool>? onExpandedChanged;
+
+  /// Runs when the row is tapped. Expandable rows toggle their detail and
+  /// still report the tap; non-expandable rows report the tap alone.
   final VoidCallback? onTap;
+
+  @override
+  State<V2TimelineRow> createState() => _V2TimelineRowState();
+}
+
+class _V2TimelineRowState extends State<V2TimelineRow> {
+  late bool _expanded = widget.item.initiallyExpanded;
+
+  bool get _isExpanded =>
+      widget.item.isExpandable && (widget.expanded ?? _expanded);
+
+  bool get _canTap => widget.item.isExpandable || widget.onTap != null;
+
+  @override
+  void didUpdateWidget(covariant V2TimelineRow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.item.id != widget.item.id) {
+      _expanded = widget.item.initiallyExpanded;
+      return;
+    }
+    // A row that stops being expandable must not keep a stale open state.
+    if (!widget.item.isExpandable) _expanded = false;
+  }
+
+  void _handleTap() {
+    final item = widget.item;
+    if (item.isExpandable) {
+      final next = !_isExpanded;
+      if (widget.expanded == null) setState(() => _expanded = next);
+      widget.onExpandedChanged?.call(next);
+    }
+    widget.onTap?.call();
+  }
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    final item = widget.item;
     final statusColor = _statusColor(c, item.status);
-    final content = ConstrainedBox(
-      constraints: const BoxConstraints(minHeight: OSpace.listRow),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: OSpace.m),
-        child: Row(
-          children: [
-            ExcludeSemantics(
-              child: Icon(
-                item.icon ?? _iconFor(item.status),
-                key: ValueKey('v2-timeline-node-${item.id}'),
-                size: 18,
-                color: statusColor,
+    final expanded = _isExpanded;
+
+    return IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
+            width: 26,
+            child: Column(
+              children: [
+                _node(context, c, item, statusColor),
+                if (!widget.isLast)
+                  Expanded(
+                    child: Container(
+                      key: ValueKey<String>('v2-timeline-connector-${item.id}'),
+                      width: 2,
+                      color: c.hairline,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(width: OSpace.m),
+          Expanded(
+            child: Padding(
+              padding: EdgeInsets.only(bottom: widget.isLast ? 0 : OSpace.xl),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _semantics(
+                    label: _screenReaderLabel(),
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(
+                        minHeight: OSpace.touch,
+                      ),
+                      child: Align(
+                        alignment: Alignment.topLeft,
+                        child: _header(context, c, item, statusColor),
+                      ),
+                    ),
+                  ),
+                  if (expanded) _detailPanel(context, c, item),
+                ],
               ),
             ),
-            const SizedBox(width: OSpace.m),
-            Expanded(
-              child: ExcludeSemantics(
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _node(
+    BuildContext context,
+    OColors c,
+    V2TimelineItem item,
+    Color statusColor,
+  ) {
+    final node = Container(
+      width: 26,
+      height: 26,
+      decoration: BoxDecoration(
+        color: c.bg,
+        shape: BoxShape.circle,
+        border: Border.all(color: c.hairline),
+      ),
+      child: Icon(
+        item.icon ?? _iconFor(item.status),
+        key: ValueKey<String>('v2-timeline-node-${item.id}'),
+        size: 14,
+        color: statusColor,
+      ),
+    );
+    // Only a running row animates. Once it finishes the pulse widget leaves
+    // the tree, so no ticker survives the run.
+    if (item.status != V2TimelineStatus.running) {
+      return ExcludeSemantics(child: node);
+    }
+    return ExcludeSemantics(child: OPulse(child: node));
+  }
+
+  /// The visible header is one screen-reader node. Its label is the whole
+  /// announcement, so the title, status and duration are never read twice.
+  Widget _semantics({required String label, required Widget child}) {
+    final item = widget.item;
+    final expanded = _isExpanded;
+    final hint = item.isExpandable
+        ? (expanded ? 'Hide details' : 'Show details')
+        : item.tapHint;
+    if (!_canTap) {
+      return Semantics(
+        container: true,
+        label: label,
+        sortKey: OrdinalSortKey(widget.index.toDouble()),
+        child: ExcludeSemantics(child: child),
+      );
+    }
+    return Semantics(
+      container: true,
+      button: true,
+      enabled: true,
+      expanded: item.isExpandable ? expanded : null,
+      label: label,
+      hint: hint,
+      sortKey: OrdinalSortKey(widget.index.toDouble()),
+      onTap: _handleTap,
+      child: ExcludeSemantics(
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          excludeFromSemantics: true,
+          onTap: _handleTap,
+          child: child,
+        ),
+      ),
+    );
+  }
+
+  Widget _header(
+    BuildContext context,
+    OColors c,
+    V2TimelineItem item,
+    Color statusColor,
+  ) {
+    final meta = <Widget>[
+      if (item.timeLabel != null && item.timeLabel!.trim().isNotEmpty)
+        _meta(c, item.timeLabel!.trim(), c.textFaint),
+      if (_statusText(item).isNotEmpty)
+        _meta(c, _statusText(item), statusColor, strong: true),
+      if (item.durationLabel != null && item.durationLabel!.trim().isNotEmpty)
+        _meta(c, item.durationLabel!.trim(), c.textFaint),
+    ];
+    final description = item.description?.trim() ?? '';
+    final error = item.errorMessage?.trim() ?? '';
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: OSpace.xs),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
                 child: Text(
                   item.title,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: OType.bodySm.copyWith(
                     color: c.text,
-                    fontWeight: FontWeight.w500,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
               ),
-            ),
-            if (item.durationLabel != null &&
-                item.durationLabel!.isNotEmpty) ...[
-              const SizedBox(width: OSpace.s),
-              ExcludeSemantics(
-                child: Text(
-                  item.durationLabel!,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.caption.copyWith(color: c.textFaint),
+              if (item.isExpandable) ...[
+                const SizedBox(width: OSpace.xs),
+                Padding(
+                  padding: const EdgeInsets.only(top: OSpace.xxs),
+                  child: AnimatedRotation(
+                    turns: _isExpanded ? 0.25 : 0,
+                    duration: OMove.duration(context, OMotion.fast),
+                    child: Icon(
+                      Icons.chevron_right_rounded,
+                      size: 18,
+                      color: c.textFaint,
+                    ),
+                  ),
                 ),
-              ),
+              ],
             ],
+          ),
+          if (description.isNotEmpty) ...[
+            const SizedBox(height: OSpace.xxs),
+            Text(
+              description,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: OType.caption.copyWith(color: c.textMuted),
+            ),
           ],
+          if (meta.isNotEmpty) ...[
+            const SizedBox(height: OSpace.xs),
+            Wrap(
+              spacing: OSpace.s,
+              runSpacing: OSpace.xxs,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: meta,
+            ),
+          ],
+          if (error.isNotEmpty) ...[
+            const SizedBox(height: OSpace.xs),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.error_outline_rounded, size: 14, color: c.danger),
+                const SizedBox(width: OSpace.xs),
+                Expanded(
+                  child: Text(
+                    error,
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                    style: OType.caption.copyWith(color: c.danger),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _meta(OColors c, String value, Color color, {bool strong = false}) {
+    return Text(
+      value,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: OType.caption.copyWith(
+        color: color,
+        fontWeight: strong ? FontWeight.w600 : FontWeight.w500,
+      ),
+    );
+  }
+
+  Widget _detailPanel(BuildContext context, OColors c, V2TimelineItem item) {
+    final details = item.expansionDetails;
+    return AnimatedSize(
+      duration: OMove.duration(context, OMotion.fast),
+      curve: OMotion.standard,
+      alignment: Alignment.topCenter,
+      child: Padding(
+        padding: const EdgeInsets.only(top: OSpace.s),
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(OSpace.m),
+          decoration: BoxDecoration(
+            color: c.surfaceAlt,
+            borderRadius: BorderRadius.circular(ORadius.m),
+            border: Border.all(color: c.hairline),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (var i = 0; i < details.length; i++) ...[
+                if (i > 0) const SizedBox(height: OSpace.m),
+                if (details[i].label != null &&
+                    details[i].label!.trim().isNotEmpty) ...[
+                  Text(
+                    details[i].label!.trim(),
+                    style: OType.caption.copyWith(
+                      color: c.textFaint,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: OSpace.xxs),
+                ],
+                _detailValue(context, c, details[i]),
+              ],
+            ],
+          ),
         ),
       ),
     );
+  }
 
-    if (onTap == null) {
-      return Semantics(
-        container: true,
-        label: item.semanticLabel,
-        child: content,
-      );
-    }
-    return OPressable(
-      onTap: onTap,
-      semanticLabel: item.semanticLabel,
-      child: content,
+  Widget _detailValue(
+    BuildContext context,
+    OColors c,
+    V2TimelineDetail detail,
+  ) {
+    final text = Text(
+      detail.value,
+      style: (detail.mono ? OType.mono : OType.bodySm).copyWith(
+        color: detail.onTap == null ? c.textMuted : c.text,
+        decoration: detail.onTap == null ? null : TextDecoration.underline,
+        decorationColor: c.hairlineStrong,
+      ),
     );
+    if (detail.onTap == null) return text;
+    return Semantics(
+      container: true,
+      button: true,
+      enabled: true,
+      label: detail.value,
+      child: ExcludeSemantics(
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: detail.onTap,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: OSpace.touch),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Expanded(child: text),
+                const SizedBox(width: OSpace.s),
+                Icon(Icons.open_in_new_rounded, size: 14, color: c.textFaint),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Completed steps carry their outcome in the glyph; only a state that
+  /// needs a word (running, failed, explicit host label) prints one.
+  String _statusText(V2TimelineItem item) {
+    if (item.status == V2TimelineStatus.success &&
+        (item.statusLabel?.trim().isEmpty ?? true)) {
+      return '';
+    }
+    return item.effectiveStatusLabel;
+  }
+
+  String _screenReaderLabel() {
+    final item = widget.item;
+    final error = item.errorMessage?.trim() ?? '';
+    final position =
+        widget.positionLabel?.trim() ??
+        'Step ${widget.index + 1} of ${widget.total}';
+    return <String>[
+      if (position.isNotEmpty) position,
+      item.semanticLabel,
+      if (error.isNotEmpty) error,
+    ].join(', ');
   }
 
   Color _statusColor(OColors c, V2TimelineStatus status) => switch (status) {

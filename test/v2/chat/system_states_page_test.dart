@@ -1,266 +1,396 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ovid_ai/ui/design/o_screen.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/states/state_tiles.dart';
 import 'package:ovid_ai/ui/v2/states/system_states_page.dart';
 
-void _noop() {}
+const _allTitles = <String>[
+  "You're offline",
+  'Account blocked',
+  'Allowance used',
+  'Rate limited',
+  'Update required',
+];
 
 Widget _app(Widget home, {bool dark = false}) =>
     MaterialApp(theme: dark ? OTheme.dark() : OTheme.light(), home: home);
 
 Future<void> _tall(WidgetTester tester) async {
-  await tester.binding.setSurfaceSize(const Size(420, 1800));
+  await tester.binding.setSurfaceSize(const Size(420, 2200));
   addTearDown(() => tester.binding.setSurfaceSize(null));
 }
 
+void _setSize(WidgetTester tester, Size size) {
+  tester.view.physicalSize = size;
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+}
+
+FilledButton _primaryButton(WidgetTester tester, String label) {
+  final finder = find.ancestor(
+    of: find.text(label),
+    matching: find.byType(FilledButton),
+  );
+  return tester.widget<FilledButton>(finder.first);
+}
+
+void _expectNoOverflow(WidgetTester tester) {
+  for (final flex in tester.allRenderObjects.whereType<RenderFlex>()) {
+    if (flex.direction != Axis.horizontal) continue;
+    var right = 0.0;
+    RenderBox? child = flex.firstChild;
+    while (child != null) {
+      final data = child.parentData! as FlexParentData;
+      final edge = data.offset.dx + child.size.width;
+      if (edge > right) right = edge;
+      child = flex.childAfter(child);
+    }
+    expect(
+      right,
+      lessThanOrEqualTo(flex.size.width + 0.5),
+      reason: 'a row paints past its box',
+    );
+  }
+}
+
+V2SystemStatesData _allConditions(DateTime now) => V2SystemStatesData(
+  offline: true,
+  blocked: true,
+  allowanceUsed: true,
+  allowanceResetsAt: now.add(const Duration(hours: 2)),
+  rateLimitedUntil: now.add(const Duration(seconds: 10)),
+  updateRequired: true,
+);
+
 void main() {
-  testWidgets('renders all four calm states in light', (tester) async {
+  testWidgets('the default screen is recovered, never an empty page', (
+    tester,
+  ) async {
     await _tall(tester);
     await tester.pumpWidget(_app(const V2SystemStatesPage()));
     await tester.pumpAndSettle();
 
     expect(find.text('System states'), findsOneWidget);
-    expect(find.text('Start with a hello'), findsOneWidget);
-    expect(find.text('You are offline'), findsOneWidget);
-    expect(find.text('Something went wrong'), findsOneWidget);
-    expect(find.text('Daily limit reached'), findsOneWidget);
-    expect(find.text('Resets soon'), findsOneWidget);
-    // No handler is supplied, so the action buttons stay hidden.
-    expect(find.text('See plans'), findsNothing);
-    expect(
-      find.text(
-        'Your chats and files stay safe in every state. Nothing is lost.',
-      ),
-      findsOneWidget,
-    );
+    expect(find.text('What is blocking chat'), findsOneWidget);
+    expect(find.text('All clear'), findsOneWidget);
+    expect(find.text('Ovid is ready when you are.'), findsOneWidget);
+    expect(find.byType(V2StateTile), findsNothing);
   });
 
-  testWidgets('renders all four states in dark', (tester) async {
+  testWidgets('one live condition renders exactly one tile and its exit', (
+    tester,
+  ) async {
     await _tall(tester);
-    await tester.pumpWidget(_app(const V2SystemStatesPage(), dark: true));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Start with a hello'), findsOneWidget);
-    expect(find.text('You are offline'), findsOneWidget);
-    expect(find.text('Something went wrong'), findsOneWidget);
-    expect(find.text('Daily limit reached'), findsOneWidget);
-  });
-
-  testWidgets('every state action fires', (tester) async {
-    await _tall(tester);
-    var examples = 0;
     var retries = 0;
-    var again = 0;
-    var details = 0;
-    var plans = 0;
     await tester.pumpWidget(
       _app(
         V2SystemStatesPage(
-          onTryExample: () => examples++,
+          data: const V2SystemStatesData(offline: true),
           onRetryConnection: () => retries++,
-          onTryAgain: () => again++,
-          onViewErrorDetails: () => details++,
-          onSeePlans: () => plans++,
         ),
       ),
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Try an example prompt'));
-    await tester.tap(find.text('Retry connection'));
-    await tester.tap(find.text('Try again'));
-    await tester.tap(find.text('View error details'));
-    await tester.tap(find.text('See plans'));
+    expect(find.byType(V2StateTile), findsOneWidget);
+    expect(find.text("You're offline"), findsOneWidget);
+    expect(find.text('Messages wait until you reconnect.'), findsOneWidget);
+    expect(find.text('All clear'), findsNothing);
 
-    expect(examples, 1);
+    await tester.tap(find.text('Retry'));
     expect(retries, 1);
-    expect(again, 1);
-    expect(details, 1);
-    expect(plans, 1);
   });
 
-  testWidgets('reset countdown comes from injected data', (tester) async {
+  testWidgets('every condition reaches its real action', (tester) async {
     await _tall(tester);
+    final start = DateTime(2026, 10, 22, 12);
+    var now = start;
+    var retries = 0;
+    var plans = 0;
+    var support = 0;
+    var rateRetries = 0;
+    var stores = 0;
+
     await tester.pumpWidget(
       _app(
-        const V2SystemStatesPage(
-          data: V2SystemStatesData(limitResetLabel: 'Resets in 2h 05m'),
+        V2SystemStatesPage(
+          data: _allConditions(start),
+          clock: () => now,
+          onRetryConnection: () => retries++,
+          onSeePlans: () => plans++,
+          onContactSupport: () => support++,
+          onRetryRateLimit: () => rateRetries++,
+          onOpenStore: () => stores++,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.text('Retry'));
+    await tester.tap(find.text('See plans'));
+    await tester.tap(find.text('Contact support'));
+    await tester.tap(find.text('Open store'));
+
+    // The rate-limit exit is closed until the countdown reaches zero.
+    expect(_primaryButton(tester, 'Try again').onPressed, isNull);
+    now = start.add(const Duration(seconds: 10));
+    await tester.pump(const Duration(seconds: 1));
+    expect(_primaryButton(tester, 'Try again').onPressed, isNotNull);
+    await tester.tap(find.text('Try again'));
+
+    expect(retries, 1);
+    expect(plans, 1);
+    expect(support, 1);
+    expect(rateRetries, 1);
+    expect(stores, 1);
+  });
+
+  testWidgets('multiple conditions render once each in precedence order', (
+    tester,
+  ) async {
+    await _tall(tester);
+    final start = DateTime(2026, 10, 22, 12);
+    await tester.pumpWidget(
+      _app(V2SystemStatesPage(data: _allConditions(start), clock: () => start)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(V2StateTile), findsNWidgets(_allTitles.length));
+    for (final title in _allTitles) {
+      expect(find.text(title), findsOneWidget);
+    }
+
+    final positions = <double>[
+      for (final title in _allTitles) tester.getTopLeft(find.text(title)).dy,
+    ];
+    for (var i = 1; i < positions.length; i++) {
+      expect(
+        positions[i],
+        greaterThan(positions[i - 1]),
+        reason: 'tile order must follow V2SystemStatesData.precedence',
+      );
+    }
+  });
+
+  testWidgets('rate-limit countdown ticks from a timestamp and stops at zero', (
+    tester,
+  ) async {
+    await _tall(tester);
+    final start = DateTime(2026, 10, 22, 12);
+    var now = start;
+    var retries = 0;
+
+    await tester.pumpWidget(
+      _app(
+        V2SystemStatesPage(
+          data: V2SystemStatesData(
+            rateLimitedUntil: start.add(const Duration(seconds: 10)),
+          ),
+          clock: () => now,
+          onRetryRateLimit: () => retries++,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Ready in 10s'), findsOneWidget);
+    expect(_primaryButton(tester, 'Try again').onPressed, isNull);
+
+    now = now.add(const Duration(seconds: 4));
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.text('Ready in 6s'), findsOneWidget);
+
+    now = start.add(const Duration(seconds: 10));
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.text('Ready now'), findsOneWidget);
+    expect(_primaryButton(tester, 'Try again').onPressed, isNotNull);
+
+    await tester.tap(find.text('Try again'));
+    expect(retries, 1);
+
+    // No negative countdown and no second firing after the window.
+    now = now.add(const Duration(minutes: 5));
+    await tester.pump(const Duration(seconds: 2));
+    expect(find.text('Ready now'), findsOneWidget);
+    expect(retries, 1);
+  });
+
+  testWidgets('allowance countdown comes from the reset instant', (
+    tester,
+  ) async {
+    await _tall(tester);
+    final start = DateTime(2026, 10, 22, 12);
+    var now = start;
+
+    await tester.pumpWidget(
+      _app(
+        V2SystemStatesPage(
+          data: V2SystemStatesData(
+            allowanceUsed: true,
+            allowanceResetsAt: start.add(const Duration(hours: 2)),
+          ),
+          clock: () => now,
+          onSeePlans: () {},
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Resets in 2h 0m'), findsOneWidget);
+    expect(_primaryButton(tester, 'See plans').onPressed, isNotNull);
+
+    now = now.add(const Duration(minutes: 1));
+    await tester.pump(const Duration(minutes: 1));
+    expect(find.text('Resets in 1h 59m'), findsOneWidget);
+  });
+
+  testWidgets('expired deadlines clear into the recovered state', (
+    tester,
+  ) async {
+    await _tall(tester);
+    final start = DateTime(2026, 10, 22, 12);
+    await tester.pumpWidget(
+      _app(
+        V2SystemStatesPage(
+          data: V2SystemStatesData(
+            allowanceUsed: true,
+            allowanceResetsAt: start.subtract(const Duration(seconds: 1)),
+            rateLimitedUntil: start.subtract(const Duration(seconds: 1)),
+          ),
+          clock: () => start,
         ),
       ),
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Resets in 2h 05m'), findsOneWidget);
-    expect(find.text('Resets soon'), findsNothing);
+    expect(find.byType(V2StateTile), findsNothing);
+    expect(find.text('All clear'), findsOneWidget);
   });
 
-  testWidgets('actions without callbacks are hidden, not left dead', (
+  testWidgets('the recovered state offers the way back', (tester) async {
+    await _tall(tester);
+    var back = 0;
+    await tester.pumpWidget(
+      _app(V2SystemStatesPage(onBackToChat: () => back++)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Back to chat'));
+    expect(back, 1);
+  });
+
+  testWidgets('title and body read as one node, then the action', (
     tester,
   ) async {
     final handle = tester.ensureSemantics();
     await _tall(tester);
-    await tester.pumpWidget(_app(const V2SystemStatesPage()));
-    await tester.pumpAndSettle();
-
-    // Every tile still renders its copy…
-    expect(find.text('Daily limit reached'), findsOneWidget);
-    // …but no action button exists for a callback the host did not supply.
-    expect(find.byType(FilledButton), findsNothing);
-    expect(find.text('See plans'), findsNothing);
-    expect(find.text('Try again'), findsNothing);
-    expect(find.text('Restore'), findsNothing);
-    handle.dispose();
-  });
-
-  for (final dark in [false, true]) {
-    testWidgets(
-      '320 dp at 200% text lays out cleanly (${dark ? 'dark' : 'light'})',
-      (tester) async {
-        tester.view.physicalSize = const Size(320, 640);
-        tester.view.devicePixelRatio = 1;
-        addTearDown(tester.view.resetPhysicalSize);
-        addTearDown(tester.view.resetDevicePixelRatio);
-
-        final errors = <FlutterErrorDetails>[];
-        final previous = FlutterError.onError;
-        FlutterError.onError = errors.add;
-        addTearDown(() => FlutterError.onError = previous);
-
-        await tester.pumpWidget(
-          MaterialApp(
-            theme: dark ? OTheme.dark() : OTheme.light(),
-            home: const MediaQuery(
-              data: MediaQueryData(
-                size: Size(320, 640),
-                textScaler: TextScaler.linear(2),
-              ),
-              child: V2SystemStatesPage(),
-            ),
-          ),
-        );
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 600));
-
-        for (final error in errors) {
-          debugPrint(error.toString());
-        }
-        expect(errors, isEmpty);
-
-        // The body scrolls, so every state and action stays reachable.
-        await tester.scrollUntilVisible(
-          find.text('Daily limit reached'),
-          200,
-          scrollable: find.byType(Scrollable).first,
-        );
-        expect(find.text('Daily limit reached'), findsOneWidget);
-      },
+    await tester.pumpWidget(
+      _app(
+        V2SystemStatesPage(
+          data: const V2SystemStatesData(offline: true, updateRequired: true),
+          onRetryConnection: () {},
+          onOpenStore: () {},
+        ),
+      ),
     );
-  }
-
-  testWidgets('offline copy promises messages will send later', (tester) async {
-    await _tall(tester);
-    await tester.pumpWidget(_app(const V2SystemStatesPage()));
     await tester.pumpAndSettle();
 
     expect(
-      find.text(
-        'No internet connection detected. Your messages will send when you reconnect.',
+      find.bySemanticsLabel(
+        "You're offline. Messages wait until you reconnect.",
       ),
       findsOneWidget,
     );
+    expect(find.bySemanticsLabel('Retry'), findsOneWidget);
+    expect(
+      find.bySemanticsLabel(
+        'Update required. Install the latest version to keep chatting.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.bySemanticsLabel('Open store'), findsOneWidget);
+
+    // Visual order is spoken order: offline copy, Retry, update copy, store.
+    final offline = tester.getTopLeft(find.text("You're offline")).dy;
+    final retry = tester.getTopLeft(find.text('Retry')).dy;
+    final update = tester.getTopLeft(find.text('Update required')).dy;
+    final store = tester.getTopLeft(find.text('Open store')).dy;
+    expect(offline, lessThan(retry));
+    expect(retry, lessThan(update));
+    expect(update, lessThan(store));
+    handle.dispose();
   });
 
-  testWidgets('renders the six state-tile variants plus the empty prompt', (
+  testWidgets('320 to 1280, 100% and 200% text, light and dark fit', (
     tester,
   ) async {
-    await _tall(tester);
-    var fired = 0;
-    await tester.pumpWidget(
-      _app(
-        V2SystemStatesPage(
-          onTryExample: () => fired++,
-          onRetryConnection: () => fired++,
-          onTryAgain: () => fired++,
-          onViewErrorDetails: () => fired++,
-          onSeePlans: () => fired++,
-          onManageStorage: () => fired++,
-          onGetHelp: () => fired++,
-          onRestoreAccount: () => fired++,
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
+    final start = DateTime(2026, 10, 22, 12);
+    for (final width in <double>[320, 360, 412, 600, 800, 1024, 1280]) {
+      for (final scale in <double>[1, 2]) {
+        for (final dark in <bool>[false, true]) {
+          _setSize(tester, Size(width, 900));
 
-    // One custom tile for the empty prompt and one for each of the six
-    // V2StateTile kinds.
-    expect(find.byType(V2StateTile), findsNWidgets(7));
-    expect(find.text('Try an example prompt'), findsOneWidget);
-    expect(find.text('Retry connection'), findsOneWidget);
-    expect(find.text('See plans'), findsOneWidget);
-    expect(find.text('Manage storage'), findsOneWidget);
-    expect(find.text('Get help'), findsOneWidget);
-    expect(find.text('Restore'), findsOneWidget);
-    expect(find.text('Try again'), findsOneWidget);
-  });
+          final errors = <FlutterErrorDetails>[];
+          final previous = FlutterError.onError;
+          FlutterError.onError = errors.add;
+          addTearDown(() => FlutterError.onError = previous);
 
-  testWidgets('storage, suspension and deletion actions fire', (tester) async {
-    await _tall(tester);
-    var storage = 0;
-    var help = 0;
-    var restore = 0;
-    await tester.pumpWidget(
-      _app(
-        V2SystemStatesPage(
-          onManageStorage: () => storage++,
-          onGetHelp: () => help++,
-          onRestoreAccount: () => restore++,
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: dark ? OTheme.dark() : OTheme.light(),
+              home: MediaQuery(
+                data: MediaQueryData(
+                  size: Size(width, 900),
+                  textScaler: TextScaler.linear(scale),
+                ),
+                child: V2SystemStatesPage(
+                  data: _allConditions(start),
+                  clock: () => start,
+                  onRetryConnection: () {},
+                  onSeePlans: () {},
+                  onContactSupport: () {},
+                  onRetryRateLimit: () {},
+                  onOpenStore: () {},
+                ),
+              ),
+            ),
+          );
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 600));
 
-    for (final label in ['Manage storage', 'Get help', 'Restore']) {
-      await tester.ensureVisible(find.text(label));
-      await tester.pump();
-      await tester.tap(find.text(label));
+          if (width <= 412) {
+            await tester.scrollUntilVisible(
+              find.text('Open store'),
+              240,
+              scrollable: find.byType(Scrollable).first,
+            );
+            await tester.pump();
+          }
+
+          for (final error in errors) {
+            debugPrint(error.toString());
+          }
+          expect(
+            errors,
+            isEmpty,
+            reason: '$width dp / ${scale}x / ${dark ? 'dark' : 'light'}',
+          );
+          _expectNoOverflow(tester);
+
+          if (width >= OBreakpoints.tablet) {
+            final cap = OBreakpoints.contentMaxWidth(width);
+            final tile = tester.getSize(find.byType(V2StateTile).first);
+            expect(
+              tile.width,
+              lessThanOrEqualTo(cap + 0.5),
+              reason: '$width dp must centre a capped column',
+            );
+          }
+        }
+      }
     }
-
-    expect(storage, 1);
-    expect(help, 1);
-    expect(restore, 1);
-  });
-
-  testWidgets('the newer state copy can be overridden', (tester) async {
-    await _tall(tester);
-    await tester.pumpWidget(
-      _app(
-        V2SystemStatesPage(
-          data: const V2SystemStatesData(
-            storageTitle: 'Workspace is full',
-            storageMessage: 'Delete a preview to free space.',
-            storageActionLabel: 'Clean up',
-            abuseTitle: 'Account on hold',
-            abuseMessage: 'Support is reviewing this account.',
-            abuseActionLabel: 'Contact support',
-            deletionTitle: 'Account closing',
-            deletionMessage: 'Sign in again within 24 hours to restore it.',
-            deletionActionLabel: 'Restore now',
-          ),
-          onManageStorage: _noop,
-          onGetHelp: _noop,
-          onRestoreAccount: _noop,
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('Workspace is full'), findsOneWidget);
-    expect(find.text('Delete a preview to free space.'), findsOneWidget);
-    expect(find.text('Clean up'), findsOneWidget);
-    expect(find.text('Account on hold'), findsOneWidget);
-    expect(find.text('Contact support'), findsOneWidget);
-    expect(find.text('Account closing'), findsOneWidget);
-    expect(find.text('Restore now'), findsOneWidget);
   });
 }

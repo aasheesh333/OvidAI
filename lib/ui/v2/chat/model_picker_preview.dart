@@ -117,6 +117,7 @@ class _V2ModelPickerPreviewState extends State<V2ModelPickerPreview> {
       speed: 'Slower',
       costHint: '4 credits',
       locked: !allowed,
+      advanced: true,
     ),
     V2ModelOption(
       id: 'custom-anthropic',

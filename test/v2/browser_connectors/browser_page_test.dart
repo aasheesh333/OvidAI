@@ -8,6 +8,14 @@ import 'package:ovid_ai/ui/v2/browser/control_bar.dart';
 import 'package:ovid_ai/ui/v2/browser/tab_strip.dart';
 import 'package:ovid_ai/ui/v2/browser/viewport.dart';
 
+/// A real 1 × 1 PNG. Enough to prove a real provider paints the frame.
+final MemoryImage _pixel = MemoryImage(
+  base64Decode(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0l'
+    'EQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  ),
+);
+
 Widget _app(Widget child, {ThemeData? theme, double textScale = 1}) {
   return MaterialApp(
     theme: theme ?? OTheme.light(),
@@ -63,11 +71,12 @@ Future<void> _pumpSize(
   Widget child,
   Size size, {
   ThemeData? theme,
+  double textScale = 1,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
-  await _pump(tester, child, theme: theme);
+  await _pump(tester, child, theme: theme, textScale: textScale);
 }
 
 void main() {
@@ -662,4 +671,205 @@ void main() {
       closeTo(600, 0.5),
     );
   });
+
+  testWidgets('the page offers no way to open a tab', (tester) async {
+    await _pump(
+      tester,
+      BrowserPage(data: _data(), onSelectTab: (_) {}, onMenu: () {}),
+    );
+
+    // Tabs come from the agent. There is no +, no "New tab" row and no
+    // tooltip that suggests one — on the page or in the tab strip.
+    expect(find.byIcon(Icons.add_rounded), findsNothing);
+    expect(find.byIcon(Icons.add), findsNothing);
+    expect(find.text('New tab'), findsNothing);
+    expect(find.byTooltip('New tab'), findsNothing);
+    expect(find.byKey(const ValueKey('v2-browser-tab-add')), findsNothing);
+    expect(find.byType(BrowserTabStrip), findsOneWidget);
+  });
+
+  testWidgets('the address is the header and every control is labelled', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    await _pump(
+      tester,
+      BrowserPage(
+        data: const V2BrowserData(
+          tabs: [
+            V2BrowserTab(id: 'docs', title: 'Docs', host: 'ovidsi.com'),
+            V2BrowserTab(id: 'github', title: 'GitHub', host: 'github.com'),
+          ],
+          activeTabId: 'docs',
+          address: 'https://ovidsi.com/docs',
+          controlling: true,
+        ),
+        onMenu: () {},
+        onToggleKeyboard: () {},
+        onReleaseControl: () {},
+      ),
+    );
+
+    // One screen header, and it is the URL.
+    final address = find.bySemanticsLabel('Address, https://ovidsi.com/docs');
+    expect(address, findsOneWidget);
+    expect(tester.getSemantics(address).flagsCollection.isHeader, isTrue);
+
+    // Every tab carries its name and host.
+    expect(find.bySemanticsLabel('Docs, ovidsi.com'), findsOneWidget);
+    expect(find.bySemanticsLabel('GitHub, github.com'), findsOneWidget);
+
+    // The dock, the menu and each dock button are announced.
+    expect(find.bySemanticsLabel('Browser controls'), findsOneWidget);
+    expect(find.bySemanticsLabel('Show keyboard'), findsOneWidget);
+    expect(find.bySemanticsLabel('Return control'), findsOneWidget);
+    expect(find.bySemanticsLabel('Browser menu'), findsOneWidget);
+    semantics.dispose();
+  });
+
+  testWidgets('320 → 1280 dp, both scales, both themes: nothing overflows', (
+    tester,
+  ) async {
+    addTearDown(tester.view.reset);
+    const widths = <double>[320, 360, 412, 600, 800, 1024, 1280];
+    for (final width in widths) {
+      for (final scale in <double>[1, 2]) {
+        for (final dark in <bool>[false, true]) {
+          tester.view.physicalSize = Size(width, 900);
+          tester.view.devicePixelRatio = 1;
+          await _pump(
+            tester,
+            BrowserPage(
+              data: V2BrowserData(
+                tabs: const [
+                  V2BrowserTab(id: 'docs', title: 'Docs', host: 'ovidsi.com'),
+                  V2BrowserTab(
+                    id: 'github',
+                    title: 'GitHub',
+                    host: 'github.com',
+                    headless: true,
+                  ),
+                ],
+                activeTabId: 'docs',
+                address: 'https://ovidsi.com/docs/quickstart',
+                frame: _pixel,
+                cursor: const V2ViewportCursor(x: 0.4, y: 0.6),
+                controlling: true,
+                keyboard: true,
+                canGoBack: true,
+                canGoForward: true,
+              ),
+              onMenu: () {},
+              onSelectTab: (_) {},
+              onReleaseControl: () {},
+              onToggleKeyboard: () {},
+              onBack: () {},
+              onForward: () {},
+              onPageTap: (_, _) {},
+              onRetry: () {},
+            ),
+            theme: dark ? OTheme.dark() : OTheme.light(),
+            textScale: scale,
+          );
+
+          final label =
+              '${width.toInt()} dp @ ${scale}x ${dark ? 'dark' : 'light'}';
+          expect(tester.takeException(), isNull, reason: label);
+
+          final viewport = find.byType(BrowserViewport);
+          expect(
+            tester.getSize(viewport).width,
+            lessThanOrEqualTo(width),
+            reason: label,
+          );
+          // One centred surface: never a phone layout stretched across a
+          // desktop, never a frame pushed off centre.
+          expect(
+            tester.getCenter(viewport).dx,
+            closeTo(width / 2, 0.5),
+            reason: label,
+          );
+          // The dock stays over the picture, inside its bounds.
+          final frame = tester.getRect(viewport);
+          final dock = tester.getRect(find.byType(BrowserControlBar));
+          expect(dock.left, greaterThanOrEqualTo(frame.left), reason: label);
+          expect(dock.right, lessThanOrEqualTo(frame.right), reason: label);
+          expect(dock.bottom, lessThanOrEqualTo(frame.bottom), reason: label);
+        }
+      }
+    }
+  });
+
+  for (final dark in <bool>[false, true]) {
+    final name = dark ? 'dark' : 'light';
+
+    testWidgets('landscape 640 × 360 at 200 % text does not clip ($name)', (
+      tester,
+    ) async {
+      final theme = dark ? OTheme.dark() : OTheme.light();
+
+      await _pumpSize(
+        tester,
+        BrowserPage(
+          data: V2BrowserData(
+            tabs: const [
+              V2BrowserTab(id: 'docs', title: 'Docs', host: 'ovidsi.com'),
+              V2BrowserTab(id: 'github', title: 'GitHub', host: 'github.com'),
+            ],
+            activeTabId: 'docs',
+            address: 'https://ovidsi.com/docs/quickstart',
+            frame: _pixel,
+          ),
+          onTakeControl: () {},
+          onMenu: () {},
+        ),
+        const Size(640, 360),
+        theme: theme,
+        textScale: 2,
+      );
+
+      expect(tester.takeException(), isNull);
+      final viewport = tester.getRect(find.byType(BrowserViewport));
+      expect(viewport.height, greaterThan(0));
+      // The one pill over the picture stays fully inside the frame.
+      final pill = tester.getRect(
+        find.byKey(BrowserControlBar.takeControlKey),
+      );
+      expect(pill.top, greaterThanOrEqualTo(viewport.top));
+      expect(pill.bottom, lessThanOrEqualTo(viewport.bottom));
+      expect(pill.left, greaterThanOrEqualTo(viewport.left));
+      expect(pill.right, lessThanOrEqualTo(viewport.right));
+
+      // The controlling dock is the same: inside the frame, not clipped.
+      await _pumpSize(
+        tester,
+        BrowserPage(
+          data: const V2BrowserData(
+            tabs: [
+              V2BrowserTab(id: 'docs', title: 'Docs', host: 'ovidsi.com'),
+              V2BrowserTab(id: 'github', title: 'GitHub', host: 'github.com'),
+            ],
+            activeTabId: 'docs',
+            address: 'https://ovidsi.com/docs/quickstart',
+            controlling: true,
+            keyboard: true,
+          ),
+          onMenu: () {},
+          onToggleKeyboard: () {},
+          onReleaseControl: () {},
+        ),
+        const Size(640, 360),
+        theme: theme,
+        textScale: 2,
+      );
+
+      expect(tester.takeException(), isNull);
+      final frame = tester.getRect(find.byType(BrowserViewport));
+      final dock = tester.getRect(find.byType(BrowserControlBar));
+      expect(dock.top, greaterThanOrEqualTo(frame.top));
+      expect(dock.bottom, lessThanOrEqualTo(frame.bottom));
+      expect(dock.left, greaterThanOrEqualTo(frame.left));
+      expect(dock.right, lessThanOrEqualTo(frame.right));
+    });
+  }
 }

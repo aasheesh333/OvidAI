@@ -485,6 +485,14 @@ class V2ArtifactTile extends StatelessWidget {
 
   bool get _hasMenu => onCopy != null || onDownload != null;
 
+  /// The Preview row already says "Preview"; repeating that as its subtitle
+  /// adds a line without adding information.
+  String get _previewSubtitle => previewLabel.trim();
+
+  bool get _showPreviewSubtitle =>
+      _previewSubtitle.isNotEmpty &&
+      _previewSubtitle.toLowerCase() != 'preview';
+
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
@@ -606,6 +614,9 @@ class V2ArtifactTile extends StatelessWidget {
         children: [
           OListRow(
             title: 'Preview',
+            // The host already knows what the preview shows; the menu row is
+            // where that context belongs, so it is not dead data.
+            subtitle: _showPreviewSubtitle ? _previewSubtitle : null,
             icon: Icons.visibility_outlined,
             showChevron: false,
             onTap: () => Navigator.of(sheetContext).pop('preview'),

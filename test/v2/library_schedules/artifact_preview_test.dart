@@ -437,7 +437,9 @@ void main() {
     expect(opened, Uri.parse('https://r2.test/report.pdf'));
   });
 
-  testWidgets('code previews are syntax coloured', (tester) async {
+  testWidgets('code previews give every token family its own style', (
+    tester,
+  ) async {
     _phone(tester);
     await tester.pumpWidget(
       _app(
@@ -456,15 +458,22 @@ void main() {
     final text = tester.widget<Text>(
       find.byKey(const ValueKey<String>('artifact-preview-code')),
     );
-    final colors = <Color>{};
+    final styles = <String>{};
     text.textSpan!.visitChildren((span) {
-      if (span is TextSpan && span.style?.color != null) {
-        colors.add(span.style!.color!);
+      if (span is TextSpan && span.style != null) {
+        final style = span.style!;
+        if (style.color != null ||
+            style.fontWeight != null ||
+            style.fontStyle != null) {
+          styles.add('${style.color}|${style.fontWeight}|${style.fontStyle}');
+        }
       }
       return true;
     });
-    // Keywords, numbers, strings and comments each get their own colour.
-    expect(colors.length, greaterThanOrEqualTo(4));
+    // The palette is monochrome on purpose (three-colour system): keywords,
+    // strings, numbers and comments are separated by ink step and weight
+    // instead of hue, so they must not collapse into one style.
+    expect(styles.length, greaterThanOrEqualTo(4));
   });
 
   testWidgets('document previews render the real text', (tester) async {

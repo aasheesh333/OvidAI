@@ -91,6 +91,27 @@ void main() {
     }
   });
 
+  testWidgets('the tree and branch chip announce their state', (tester) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(_app(const V2StudioWorkspacePage(data: _data)));
+    await tester.pumpAndSettle();
+
+    expect(find.bySemanticsLabel('Branch main'), findsOneWidget);
+    expect(
+      find.bySemanticsLabel(
+        'src/components/Hero.tsx, TypeScript file, modified',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      tester.getSemantics(
+        find.byKey(const ValueKey<String>('v2-file-tree-row-src')),
+      ),
+      isSemantics(hasExpandedState: true, isExpanded: true),
+    );
+    handle.dispose();
+  });
+
   testWidgets('a pushed workspace header shows back, branch and sync', (
     tester,
   ) async {
@@ -320,6 +341,75 @@ void main() {
     expect(find.byKey(const Key('studio-open-code-viewer')), findsNothing);
   });
 
+  testWidgets('the split view survives 600 dp at 200 % text in both themes', (
+    tester,
+  ) async {
+    const longData = V2StudioWorkspaceData(
+      repoName: 'acme/landing-page-with-a-very-long-repository-name',
+      branch: 'feature/hero-revamp-with-a-very-long-branch-name',
+      openFileName: 'VeryLongComponentNameThatKeepsGoing.tsx',
+      openFilePath: 'src/components/VeryLongComponentNameThatKeepsGoing.tsx',
+      saved: false,
+      fileTree: <V2FileNode>[
+        V2FileNode(
+          name: 'a-very-long-folder-name-that-keeps-going',
+          children: <V2FileNode>[
+            V2FileNode(
+              name: 'a-very-long-file-name-that-keeps-going.tsx',
+              path: 'src/components/VeryLongComponentNameThatKeepsGoing.tsx',
+            ),
+          ],
+        ),
+      ],
+      codeLines: _lines,
+    );
+
+    for (final width in <double>[600, 900, 1280]) {
+      _setSurface(tester, Size(width, 900));
+      for (final dark in <bool>[false, true]) {
+        await tester.pumpWidget(
+          _app(
+            const V2StudioWorkspacePage(data: longData),
+            dark: dark,
+            textScale: 2,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const Key('studio-tree-column')), findsOneWidget);
+        expect(
+          tester.takeException(),
+          isNull,
+          reason:
+              'split view overflowed at $width dp / 200% text '
+              '(${dark ? 'dark' : 'light'})',
+        );
+      }
+    }
+  });
+
+  testWidgets('an open file with no lines says so instead of going blank', (
+    tester,
+  ) async {
+    _setSurface(tester, const Size(900, 900));
+    await tester.pumpWidget(
+      _app(
+        const V2StudioWorkspacePage(
+          data: V2StudioWorkspaceData(
+            repoName: 'acme/landing-page',
+            branch: 'main',
+            openFileName: 'empty.dart',
+            openFilePath: 'lib/empty.dart',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Empty file'), findsOneWidget);
+    expect(find.byKey(const Key('studio-open-code-viewer')), findsNothing);
+  });
+
   testWidgets('below 600 dp the tree fills the screen and opens the viewer', (
     tester,
   ) async {
@@ -438,6 +528,22 @@ void main() {
         const ValueKey<String>('v2-file-tree-row-src/components/Hero.tsx'),
       ),
       findsOneWidget,
+    );
+  });
+
+  testWidgets('the explorer owns a lazy scroll, not a page-wide column', (
+    tester,
+  ) async {
+    _setSurface(tester, const Size(900, 900));
+    await tester.pumpWidget(_app(const V2StudioWorkspacePage(data: _data)));
+    await tester.pumpAndSettle();
+
+    // A real tree in a fixed pane: CustomScrollView + SliverList, so a large
+    // repository builds only the visible rows.
+    expect(find.byKey(const Key('v2-file-tree-scroll')), findsOneWidget);
+    expect(
+      tester.widget<V2FileTree>(find.byKey(const Key('studio-file-tree'))).scrollable,
+      isTrue,
     );
   });
 

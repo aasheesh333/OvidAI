@@ -30,6 +30,12 @@ void main() {
 
       expect(find.text('Ovid 2 Flash'), findsOneWidget);
       expect(find.text('Ovid 2 Pro'), findsOneWidget);
+      expect(
+        find.text('Free plan uses Auto only.'),
+        findsOneWidget,
+        reason: 'the header explains why every manual row is locked',
+      );
+      expect(find.byIcon(Icons.lock_outline_rounded), findsNWidgets(3));
 
       await tester.tap(find.text('Ovid 2 Pro'));
       await tester.pumpAndSettle();
@@ -72,6 +78,8 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Smart routing'), findsOneWidget);
+      expect(find.text('Free plan uses Auto only.'), findsNothing);
+      expect(find.byIcon(Icons.lock_outline_rounded), findsNothing);
       expect(
         find.text('All models are available on your plan.'),
         findsNothing,

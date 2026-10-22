@@ -109,6 +109,21 @@ Future<void> _pump(
   await tester.pump(const Duration(milliseconds: 500));
 }
 
+/// Pumps the page on top of a real route so `Navigator.canPop` is true and the
+/// back arrow has somewhere to go.
+Future<void> _pumpPushed(WidgetTester tester, Widget child) async {
+  await tester.pumpWidget(
+    MaterialApp(
+      theme: OTheme.light(),
+      home: const Scaffold(body: SizedBox.shrink()),
+    ),
+  );
+  final context = tester.element(find.byType(Scaffold));
+  Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => child));
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 500));
+}
+
 Future<void> _scrollTo(WidgetTester tester, Finder finder) async {
   await tester.scrollUntilVisible(
     finder,
@@ -540,7 +555,7 @@ void main() {
     tester,
   ) async {
     final handle = tester.ensureSemantics();
-    await _pump(
+    await _pumpPushed(
       tester,
       ConnectorPermissionsPage(
         data: _data(),

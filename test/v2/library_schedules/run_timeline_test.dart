@@ -271,6 +271,59 @@ void main() {
     expect(retries, 1);
   });
 
+  testWidgets('a failure prints its reason once', (tester) async {
+    _phone(tester);
+    await tester.pumpWidget(
+      _app(
+        const RunTimeline(
+          data: V2RunTimelineData(
+            runs: <V2TimelineRun>[
+              V2TimelineRun(
+                id: 'r1',
+                dayLabel: 'Today — May 18',
+                timeLabel: '9:00 AM',
+                durationLabel: '18s',
+                outcome: V2RunOutcome.failed,
+                summary: '',
+                failureDetail: 'The connector timed out.',
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Failed'), findsOneWidget);
+    expect(find.text('The connector timed out.'), findsOneWidget);
+    // The detail is the summary; the row does not add a second line.
+    expect(find.text('Failed without a summary.'), findsNothing);
+  });
+
+  testWidgets('a failure with no detail still says so', (tester) async {
+    _phone(tester);
+    await tester.pumpWidget(
+      _app(
+        const RunTimeline(
+          data: V2RunTimelineData(
+            runs: <V2TimelineRun>[
+              V2TimelineRun(
+                id: 'r1',
+                dayLabel: 'Today — May 18',
+                timeLabel: '9:00 AM',
+                outcome: V2RunOutcome.failed,
+                summary: '',
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Failed without a summary.'), findsOneWidget);
+  });
+
   testWidgets('reduced motion hides no content', (tester) async {
     _phone(tester);
     await tester.pumpWidget(

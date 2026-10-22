@@ -406,8 +406,10 @@ void main() {
 
       expect(find.textContaining('files'), findsNothing);
       expect(find.textContaining('GB'), findsNothing);
-      expect(find.bySemanticsLabel('Size summary: 4 files · 2.4 MB'),
-          findsNothing);
+      expect(
+        find.bySemanticsLabel('Size summary: 4 files · 2.4 MB'),
+        findsNothing,
+      );
     });
   });
 
@@ -555,6 +557,76 @@ void main() {
       expect(tester.takeException(), isNull);
       expect(find.text('Generated and uploaded'), findsOneWidget);
       expect(find.text('Added by you'), findsOneWidget);
+    });
+  });
+
+  group('host clear', () {
+    testWidgets('Clear clears state the bar does not own', (tester) async {
+      tester.view.physicalSize = const Size(430, 932);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      var cleared = 0;
+      var filters = const V2ArtifactFilters();
+      var searchActive = true;
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: OTheme.light(),
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setState) => ArtifactFilterBar(
+                filters: filters,
+                sessions: _sessions,
+                clearActive: searchActive,
+                onClear: () {
+                  cleared++;
+                  setState(() {
+                    filters = const V2ArtifactFilters();
+                    searchActive = false;
+                  });
+                },
+                onChanged: (next) => setState(() => filters = next),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // A search query alone is enough to offer Clear.
+      final clear = find.byKey(_clearKey);
+      expect(clear, findsOneWidget);
+      await tester.ensureVisible(clear);
+      await tester.pumpAndSettle();
+      await tester.tap(clear);
+      await tester.pumpAndSettle();
+
+      expect(cleared, 1);
+      expect(filters, const V2ArtifactFilters());
+      expect(find.byKey(_clearKey), findsNothing);
+    });
+
+    testWidgets('the chat picker is hidden when no artifact has a session', (
+      tester,
+    ) async {
+      await _pump(tester, sessions: const <V2ArtifactSession>[]);
+
+      expect(find.byKey(_sessionKey), findsNothing);
+      expect(find.text('All chats'), findsNothing);
+    });
+
+    testWidgets('a stale chat filter still shows so it can be cleared', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        sessions: const <V2ArtifactSession>[],
+        initial: const V2ArtifactFilters(sessionId: 'gone'),
+      );
+
+      expect(find.byKey(_sessionKey), findsOneWidget);
+      expect(find.text('Chat'), findsOneWidget);
     });
   });
 

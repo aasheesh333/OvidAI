@@ -151,7 +151,7 @@ void main() {
     expect(find.text('Connected'), findsOneWidget);
     expect(find.text('GitHub token'), findsOneWidget);
     expect(find.text('Provider key'), findsOneWidget);
-    expect(find.text('pat_live_••••••9x4q'), findsOneWidget);
+    expect(find.text('••••••9x4q'), findsOneWidget);
     expect(find.text('Cloud key'), findsOneWidget);
     expect(find.text('Active'), findsOneWidget);
     expect(find.text('example.com'), findsOneWidget);
@@ -335,7 +335,8 @@ void main() {
     await tester.tap(find.byTooltip('Delete example.com'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Delete login?'), findsOneWidget);
+    // The confirmation names the login being removed, not a generic "login".
+    expect(find.text('Delete example.com?'), findsOneWidget);
     expect(deleted, isNull);
 
     await tester.tap(find.text('Delete login'));
@@ -383,6 +384,14 @@ void main() {
 
     await tester.ensureVisible(find.byTooltip('Remove GitHub token'));
     await tester.tap(find.byTooltip('Remove GitHub token'));
+    await tester.pumpAndSettle();
+    expect(find.text('Remove GitHub token?'), findsOneWidget);
+    expect(removed, isFalse);
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('credential-confirm-remove')),
+    );
+    await tester.pumpAndSettle();
     expect(removed, isTrue);
   });
 

@@ -1,3 +1,5 @@
+import 'dart:ui' show Tristate;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
@@ -45,10 +47,6 @@ const _data = V2ModelChipMenuData(
     ),
   ],
 );
-
-const _upgradeHint =
-    'Upgrade to Plus or Pro to pick a model manually. '
-    'Auto is included on every plan.';
 
 /// Pumps the menu on its own, the way a gallery or a preview would.
 Future<void> _pumpMenu(
@@ -106,7 +104,6 @@ void main() {
     expect(find.text('Compare plans'), findsOneWidget);
     expect(find.text(r'From $18/mo'), findsOneWidget);
     expect(find.text('Free plan uses Auto only.'), findsNothing);
-    expect(find.text(_upgradeHint), findsNothing);
     expect(tester.takeException(), isNull);
 
     // Nothing in the header or the action row is clipped at the card edge.
@@ -197,7 +194,6 @@ void main() {
         onComparePlans: () => compared++,
       );
 
-      expect(find.text(_upgradeHint), findsNothing);
       expect(find.text('Plus plan'), findsNWidgets(3));
       expect(find.byIcon(Icons.lock_outline_rounded), findsWidgets);
 
@@ -232,7 +228,6 @@ void main() {
         onComparePlans: () => compared++,
       );
 
-      expect(find.text(_upgradeHint), findsNothing);
       expect(find.text('Plus plan'), findsNothing);
       expect(find.byIcon(Icons.check_circle_rounded), findsOneWidget);
 
@@ -258,7 +253,6 @@ void main() {
       onSelect: (id) => selected = id,
     );
 
-    expect(find.text(_upgradeHint), findsNothing);
     expect(find.text('Plus plan'), findsNWidgets(3));
 
     await tester.tap(find.text('Ovid Flash 2.5'));
@@ -331,7 +325,6 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('Auto'), findsOneWidget);
     expect(find.text('Compare plans'), findsOneWidget);
-    expect(find.text(_upgradeHint), findsNothing);
   });
 
   testWidgets('fits 320 dp at 200 % text in dark', (tester) async {
@@ -345,7 +338,6 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('Auto'), findsOneWidget);
     expect(find.text('Compare plans'), findsOneWidget);
-    expect(find.text(_upgradeHint), findsNothing);
   });
 
   testWidgets('paid menu fits 320 dp at 200 % text in light and dark', (
@@ -367,7 +359,6 @@ void main() {
       expect(tester.takeException(), isNull, reason: 'dark: $dark');
       expect(find.text('Ovid Flash 2.5'), findsOneWidget);
       expect(find.text('Compare plans'), findsOneWidget);
-      expect(find.text(_upgradeHint), findsNothing);
     }
   });
 
@@ -432,9 +423,11 @@ void main() {
     await _pumpMenu(tester);
 
     expect(
-      tester.getSemantics(find.bySemanticsLabel('Auto, Included free')),
+      tester.getSemantics(
+        find.bySemanticsLabel('Auto, Included free, available'),
+      ),
       matchesSemantics(
-        label: 'Auto, Included free',
+        label: 'Auto, Included free, available',
         isButton: true,
         isSelected: true,
         hasSelectedState: true,
@@ -444,6 +437,121 @@ void main() {
       ),
     );
     handle.dispose();
+  });
+
+  testWidgets('a manual row announces availability and selection', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    await _pumpMenu(
+      tester,
+      data: V2ModelChipMenuData(
+        lockedModels: _data.lockedModels,
+        tierLabel: 'Plus',
+        manualModelsAllowed: true,
+        selectedId: 'pro',
+      ),
+    );
+
+    expect(
+      tester.getSemantics(
+        find.bySemanticsLabel(
+          'Ovid Pro 1.5, Deep reasoning for complex code, available',
+        ),
+      ),
+      matchesSemantics(
+        label: 'Ovid Pro 1.5, Deep reasoning for complex code, available',
+        isButton: true,
+        hasSelectedState: true,
+        isSelected: true,
+        hasEnabledState: true,
+        isEnabled: true,
+        hasTapAction: true,
+      ),
+    );
+    handle.dispose();
+  });
+
+  testWidgets('a remembered locked pick falls back to Auto', (tester) async {
+    final handle = tester.ensureSemantics();
+    await _pumpMenu(
+      tester,
+      data: V2ModelChipMenuData(
+        lockedModels: _data.lockedModels,
+        selectedId: 'flash',
+      ),
+    );
+
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Auto, Included free, available'))
+          .flagsCollection
+          .isSelected,
+      Tristate.isTrue,
+    );
+    expect(find.byIcon(Icons.check_circle_rounded), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find
+            .ancestor(of: find.text('Auto'), matching: find.byType(Row))
+            .first,
+        matching: find.byIcon(Icons.check_circle_rounded),
+      ),
+      findsOneWidget,
+    );
+    handle.dispose();
+  });
+
+  testWidgets('Auto is available on every tier', (tester) async {
+    for (final tier in ['Free', 'Go', 'Plus', 'Pro', 'Starter']) {
+      final picks = <String>[];
+      await _pumpMenu(
+        tester,
+        data: V2ModelChipMenuData(
+          lockedModels: _data.lockedModels,
+          tierLabel: tier,
+          manualModelsAllowed: tier == 'Plus' || tier == 'Pro',
+        ),
+        onSelect: picks.add,
+      );
+
+      expect(find.text('Auto'), findsOneWidget, reason: tier);
+      await tester.tap(find.text('Auto'));
+      await tester.pump();
+      expect(picks, ['auto'], reason: tier);
+    }
+  });
+
+  testWidgets('stays inside the layout from 320 dp to 1280 dp', (tester) async {
+    addTearDown(tester.view.reset);
+
+    const widths = <double>[320, 360, 412, 600, 800, 1024, 1280];
+    for (final width in widths) {
+      for (final scale in [1.0, 2.0]) {
+        for (final dark in [false, true]) {
+          await _pumpMenu(
+            tester,
+            dark: dark,
+            size: Size(width, 800),
+            textScale: scale,
+            data: V2ModelChipMenuData(
+              lockedModels: _data.lockedModels,
+              tierLabel: 'Plus',
+              manualModelsAllowed: true,
+            ),
+          );
+
+          final reason = '${width.toInt()} dp @ ${scale}x dark: $dark';
+          expect(tester.takeException(), isNull, reason: reason);
+          expect(find.text('Auto'), findsOneWidget, reason: reason);
+          expect(find.text('Compare plans'), findsOneWidget, reason: reason);
+          expect(
+            tester.getSize(find.byType(V2ModelChipMenu)).width,
+            lessThanOrEqualTo(336),
+            reason: reason,
+          );
+        }
+      }
+    }
   });
 
   testWidgets('locked rows are announced as disabled', (tester) async {

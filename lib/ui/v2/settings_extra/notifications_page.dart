@@ -138,6 +138,8 @@ class V2NotificationsPageData {
   const V2NotificationsPageData({
     this.status = V2NotificationsStatus.ready,
     this.notificationsBlocked = false,
+    this.serviceAvailable = true,
+    this.saving = false,
     this.masterEnabled = true,
     this.showPermissionPrompt = false,
     this.activity = const <V2NotificationSetting>[
@@ -213,6 +215,16 @@ class V2NotificationsPageData {
   final V2NotificationsStatus status;
   final bool notificationsBlocked;
 
+  /// False when this device has no notification service at all (the native
+  /// channel is missing, or the platform cannot post notifications). The page
+  /// then says so and disables every control instead of storing a preference
+  /// that will never fire.
+  final bool serviceAvailable;
+
+  /// True while a change is being written. Controls stay disabled so a second
+  /// tap cannot race the first write; the page still shows the new values.
+  final bool saving;
+
   /// The account-wide push switch. On by default: a new account should hear
   /// about a finished run without hunting for this screen.
   final bool masterEnabled;
@@ -287,10 +299,22 @@ class _NotificationsPageState extends State<NotificationsPage> {
   late TimeOfDay _quietStart;
   late TimeOfDay _quietEnd;
   late List<V2NotificationSetting> _activity;
+  late List<V2NotificationSetting> _security;
   late List<V2ChannelSoundSetting> _sounds;
   late V2NotificationSound _soundChoice;
 
   V2NotificationsPageData get _data => widget.data;
+
+  /// The notification service exists and is not mid-write.
+  bool get _controlsEnabled => _data.serviceAvailable && !_data.saving;
+
+  /// The account switch is on only when the service exists and the OS allows
+  /// notifications. A local tap can never override either.
+  bool get _masterOn =>
+      _data.serviceAvailable && !_data.notificationsBlocked && _master;
+
+  /// Channels, quiet hours and sound are editable only under a live master.
+  bool get _masterEditable => _masterOn && _controlsEnabled;
 
   @override
   void initState() {
@@ -322,15 +346,48 @@ class _NotificationsPageState extends State<NotificationsPage> {
     if (prev == null || next.quietHoursEnd != prev.quietHoursEnd) {
       _quietEnd = next.quietHoursEnd;
     }
-    if (prev == null || !identical(next.activity, prev.activity)) {
+    if (prev == null || !_sameSettings(next.activity, prev.activity)) {
       _activity = List<V2NotificationSetting>.of(next.activity);
     }
-    if (prev == null || !identical(next.sounds, prev.sounds)) {
+    if (prev == null || !_sameSettings(next.security, prev.security)) {
+      _security = List<V2NotificationSetting>.of(next.security);
+    }
+    if (prev == null || !_sameSounds(next.sounds, prev.sounds)) {
       _sounds = List<V2ChannelSoundSetting>.of(next.sounds);
     }
-    if (prev == null || next.sound != prev.sound) {
+    if (prev == null ||
+        next.sound != prev.sound ||
+        !_sameSounds(next.sounds, prev.sounds)) {
       _soundChoice = _initialSound(next);
     }
+  }
+
+  /// Value equality, because callers build a fresh list on every rebuild.
+  /// Comparing identity would let an unchanged snapshot undo an optimistic tap.
+  bool _sameSettings(
+    List<V2NotificationSetting> a,
+    List<V2NotificationSetting> b,
+  ) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i].id != b[i].id ||
+          a[i].value != b[i].value ||
+          a[i].available != b[i].available) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool _sameSounds(
+    List<V2ChannelSoundSetting> a,
+    List<V2ChannelSoundSetting> b,
+  ) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i].id != b[i].id || a[i].value != b[i].value) return false;
+    }
+    return true;
   }
 
   /// One value for every channel: the common value when they agree, the
@@ -347,7 +404,13 @@ class _NotificationsPageState extends State<NotificationsPage> {
 
   @override
   Widget build(BuildContext context) {
-    return OScreen(title: 'Notifications', child: _body(context));
+    return OScreen(
+      title: 'Notifications',
+      // Settings read as a column, not a dashboard: 640 dp is the widest this
+      // page ever gets, on every band above the phone.
+      maxWidth: 640,
+      child: _body(context),
+    );
   }
 
   Widget _body(BuildContext context) {
@@ -372,9 +435,14 @@ class _NotificationsPageState extends State<NotificationsPage> {
 
   Widget _content(BuildContext context) {
     final sections = <Widget>[
-      if (_data.showPermissionPrompt && !_data.notificationsBlocked)
+      if (_data.saving) _savingStatus(context),
+      if (!_data.serviceAvailable) _serviceBanner(context),
+      if (_data.serviceAvailable &&
+          _data.showPermissionPrompt &&
+          !_data.notificationsBlocked)
         _permissionPrompt(context),
-      if (_data.notificationsBlocked) _blockedBanner(context),
+      if (_data.serviceAvailable && _data.notificationsBlocked)
+        _blockedBanner(context),
       _channelsCard(context),
       _quietHoursCard(context),
       _soundCard(context),
@@ -385,6 +453,76 @@ class _NotificationsPageState extends State<NotificationsPage> {
       itemBuilder: (context, index) => Padding(
         padding: const EdgeInsets.only(bottom: OSpace.l),
         child: sections[index],
+      ),
+    );
+  }
+
+  /// A static saving indicator. Deliberately not a spinner: the controls are
+  /// already disabled, and a looping animation would keep the frame scheduler
+  /// busy for a write that usually finishes in one frame.
+  Widget _savingStatus(BuildContext context) {
+    final c = OColors.of(context);
+    return Semantics(
+      key: const ValueKey<String>('notifications-saving'),
+      label: 'Saving changes',
+      liveRegion: true,
+      child: ExcludeSemantics(
+        child: Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: OSpace.m,
+            vertical: OSpace.s,
+          ),
+          decoration: BoxDecoration(
+            color: c.surfaceAlt,
+            borderRadius: BorderRadius.circular(ORadius.m),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.sync_rounded, size: 16, color: c.textMuted),
+              const SizedBox(width: OSpace.s),
+              Flexible(
+                child: Text(
+                  'Saving…',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// No service means no preference can ever fire. Say it once and leave every
+  /// control disabled rather than accepting a write that goes nowhere.
+  Widget _serviceBanner(BuildContext context) {
+    final c = OColors.of(context);
+    return OCard(
+      key: const ValueKey<String>('notifications-service-banner'),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Icons.notifications_off_outlined, size: 20, color: c.warn),
+              const SizedBox(width: OSpace.s),
+              Expanded(
+                child: Text(
+                  'Notifications unavailable',
+                  style: OType.bodyStrong.copyWith(color: c.text),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: OSpace.xs),
+          Text(
+            'This device cannot show notifications.',
+            style: OType.bodySm.copyWith(color: c.textMuted),
+          ),
+        ],
       ),
     );
   }
@@ -411,16 +549,18 @@ class _NotificationsPageState extends State<NotificationsPage> {
           ),
           const SizedBox(height: OSpace.xs),
           Text(
-            'Allow notifications in Android settings.',
+            'Allow notifications in system settings.',
             style: OType.bodySm.copyWith(color: c.textMuted),
           ),
-          const SizedBox(height: OSpace.m),
-          OButton(
-            label: 'Open settings',
-            icon: Icons.settings_outlined,
-            variant: OButtonVariant.secondary,
-            onPressed: _data.onOpenSystem,
-          ),
+          if (_data.onOpenSystem != null) ...[
+            const SizedBox(height: OSpace.m),
+            OButton(
+              label: 'Open settings',
+              icon: Icons.settings_outlined,
+              variant: OButtonVariant.secondary,
+              onPressed: _data.onOpenSystem,
+            ),
+          ],
         ],
       ),
     );
@@ -457,33 +597,42 @@ class _NotificationsPageState extends State<NotificationsPage> {
             'Ovid keeps working after you leave the app.',
             style: OType.bodySm.copyWith(color: c.textMuted),
           ),
-          const SizedBox(height: OSpace.m),
-          OButton(
-            key: const ValueKey<String>('notifications-permission-allow'),
-            label: 'Turn on',
-            onPressed: _data.onAllowNotifications,
-          ),
-          const SizedBox(height: OSpace.s),
-          OButton(
-            key: const ValueKey<String>('notifications-permission-later'),
-            label: 'Not now',
-            variant: OButtonVariant.secondary,
-            onPressed: _data.onDismissPermissionPrompt,
-          ),
+          if (_data.onAllowNotifications != null) ...[
+            const SizedBox(height: OSpace.m),
+            OButton(
+              key: const ValueKey<String>('notifications-permission-allow'),
+              label: 'Turn on',
+              onPressed: _data.onAllowNotifications,
+            ),
+          ],
+          if (_data.onDismissPermissionPrompt != null) ...[
+            const SizedBox(height: OSpace.s),
+            OButton(
+              key: const ValueKey<String>('notifications-permission-later'),
+              label: 'Not now',
+              variant: OButtonVariant.secondary,
+              onPressed: _data.onDismissPermissionPrompt,
+            ),
+          ],
         ],
       ),
     );
   }
 
   Widget _channelsCard(BuildContext context) {
+    final blocked = _data.notificationsBlocked;
+    final canMaster =
+        _controlsEnabled && !blocked && _data.onMasterChanged != null;
     final rows = <Widget>[
       _toggleRow(
         context,
         id: 'master',
         title: 'Push notifications',
-        value: _master,
-        onChanged: _data.onMasterChanged == null ? null : _setMaster,
+        subtitle: blocked ? _blockedLabel : null,
+        value: _masterOn,
+        onChanged: canMaster ? _setMaster : null,
         switchKey: const ValueKey<String>('notifications-master-switch'),
+        semanticValue: blocked ? _blockedLabel : null,
       ),
       // A channel the product cannot honour yet is removed, not shown as a
       // switch that would only pretend to store the change.
@@ -497,25 +646,48 @@ class _NotificationsPageState extends State<NotificationsPage> {
             onChanged: _data.onToggle == null
                 ? null
                 : (value) => _setSetting(setting.id, value),
-            enabled: _master,
+            enabled: _masterEditable,
+          ),
+      // Security channels live in their own injected list because the server
+      // treats them separately, but they are still notification channels: same
+      // switch, same persistence callback, same master gate.
+      for (final setting in _security)
+        if (setting.available)
+          _toggleRow(
+            context,
+            id: setting.id,
+            title: setting.title,
+            value: setting.value,
+            onChanged: _data.onToggle == null
+                ? null
+                : (value) => _setSetting(setting.id, value),
+            enabled: _masterEditable,
           ),
     ];
     return V2SettingsRowList(rows: rows);
   }
 
+  static const String _blockedLabel = 'Blocked in system settings';
+
   void _setMaster(bool value) {
     final handler = _data.onMasterChanged;
-    if (handler == null) return;
+    if (handler == null || !_controlsEnabled || _data.notificationsBlocked) {
+      return;
+    }
     setState(() => _master = value);
     handler(value);
   }
 
   void _setSetting(String id, bool value) {
     final handler = _data.onToggle;
-    if (handler == null) return;
+    if (handler == null || !_masterEditable) return;
     setState(() {
       _activity = [
         for (final row in _activity)
+          row.id == id ? row.copyWith(value: value) : row,
+      ];
+      _security = [
+        for (final row in _security)
           row.id == id ? row.copyWith(value: value) : row,
       ];
     });
@@ -525,53 +697,58 @@ class _NotificationsPageState extends State<NotificationsPage> {
   Widget _quietHoursCard(BuildContext context) {
     final c = OColors.of(context);
     final window = _window;
+    final allowed = _masterEditable;
     final canToggle =
-        _data.onQuietHoursEnabledChanged != null || _data.onQuietHours != null;
-    final canToggleSwitch = _data.onQuietHoursEnabledChanged != null;
+        allowed &&
+        (_data.onQuietHoursEnabledChanged != null ||
+            _data.onQuietHours != null);
+    final canToggleSwitch = allowed && _data.onQuietHoursEnabledChanged != null;
     final canEdit =
-        _data.onQuietHoursStartChanged != null ||
-        _data.onQuietHoursEndChanged != null;
+        allowed &&
+        (_data.onQuietHoursStartChanged != null ||
+            _data.onQuietHoursEndChanged != null);
     final range = _quietEnabled && !window.isEmpty
         ? window.label((time) => _formatTime(context, time))
         : 'Off';
 
-    return V2SettingsRowList(rows: [
-      V2SettingsRow(
-        key: const ValueKey<String>('notifications-quiet-hours-row'),
-        icon: Icons.dark_mode_outlined,
-        title: 'Quiet hours',
-        subtitle: range,
-        enabled: canToggle || canEdit,
-        showChevron: false,
-        onTap: canToggle || canEdit
-            ? () => _onQuietRowTap(context)
-            : null,
-        trailing: Semantics(
-          label: 'Quiet hours',
-          toggled: _quietEnabled,
-          button: true,
-          enabled: canToggleSwitch,
-          onTap: canToggleSwitch
-              ? () => _setQuietEnabled(!_quietEnabled)
-              : null,
-          child: ExcludeSemantics(
-            child: Switch(
-              key: const ValueKey<String>('quiet-hours-switch'),
-              value: _quietEnabled,
-              onChanged: canToggleSwitch ? _setQuietEnabled : null,
-              activeThumbColor: canToggleSwitch ? c.onAccent : c.textFaint,
-              activeTrackColor: canToggleSwitch
-                  ? c.accentFill
-                  : c.surfaceRaised,
-              inactiveThumbColor: c.textFaint,
-              inactiveTrackColor: c.surfaceRaised,
-              trackOutlineColor: WidgetStatePropertyAll(c.hairlineStrong),
-              materialTapTargetSize: MaterialTapTargetSize.padded,
+    return V2SettingsRowList(
+      rows: [
+        V2SettingsRow(
+          key: const ValueKey<String>('notifications-quiet-hours-row'),
+          icon: Icons.dark_mode_outlined,
+          title: 'Quiet hours',
+          subtitle: range,
+          enabled: canToggle || canEdit,
+          showChevron: false,
+          onTap: canToggle || canEdit ? () => _onQuietRowTap(context) : null,
+          trailing: Semantics(
+            label: 'Quiet hours',
+            value: range,
+            toggled: _quietEnabled,
+            button: true,
+            enabled: canToggleSwitch,
+            onTap: canToggleSwitch
+                ? () => _setQuietEnabled(!_quietEnabled)
+                : null,
+            child: ExcludeSemantics(
+              child: Switch(
+                key: const ValueKey<String>('quiet-hours-switch'),
+                value: _quietEnabled,
+                onChanged: canToggleSwitch ? _setQuietEnabled : null,
+                activeThumbColor: canToggleSwitch ? c.onAccent : c.textFaint,
+                activeTrackColor: canToggleSwitch
+                    ? c.accentFill
+                    : c.surfaceRaised,
+                inactiveThumbColor: c.textFaint,
+                inactiveTrackColor: c.surfaceRaised,
+                trackOutlineColor: WidgetStatePropertyAll(c.hairlineStrong),
+                materialTapTargetSize: MaterialTapTargetSize.padded,
+              ),
             ),
           ),
         ),
-      ),
-    ]);
+      ],
+    );
   }
 
   /// Row tap: turn quiet hours on when it is off, edit the range when the
@@ -599,6 +776,7 @@ class _NotificationsPageState extends State<NotificationsPage> {
   Future<void> _editQuietHours(BuildContext context) async {
     var start = _quietStart;
     var end = _quietEnd;
+    String? rangeError;
     await showOSheet<void>(
       context,
       title: 'Quiet hours',
@@ -606,59 +784,105 @@ class _NotificationsPageState extends State<NotificationsPage> {
         builder: (context, setSheetState) => Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            OListRow(
-              key: const ValueKey<String>('quiet-hours-start'),
-              icon: Icons.schedule_rounded,
-              title: 'Start',
-              subtitle: _formatTime(context, start),
-              showChevron: false,
-              onTap: () async {
-                final picked = await _pickTime(
-                  context,
-                  label: 'Start',
-                  initial: start,
-                );
-                if (picked == null) return;
-                setSheetState(() => start = picked);
-                _setQuietStart(picked);
-              },
-            ),
-            OListRow(
-              key: const ValueKey<String>('quiet-hours-end'),
-              icon: Icons.schedule_rounded,
-              title: 'End',
-              subtitle: _formatTime(context, end),
-              showChevron: false,
-              onTap: () async {
-                final picked = await _pickTime(
-                  context,
-                  label: 'End',
-                  initial: end,
-                );
-                if (picked == null) return;
-                setSheetState(() => end = picked);
-                _setQuietEnd(picked);
-              },
-            ),
+            if (_data.onQuietHoursStartChanged != null)
+              OListRow(
+                key: const ValueKey<String>('quiet-hours-start'),
+                icon: Icons.schedule_rounded,
+                title: 'Start',
+                subtitle: _formatTime(context, start),
+                showChevron: false,
+                onTap: () async {
+                  final picked = await _pickTime(
+                    context,
+                    label: 'Start',
+                    initial: start,
+                  );
+                  if (picked == null) return;
+                  if (picked == end) {
+                    setSheetState(() => rangeError = _rangeError);
+                    return;
+                  }
+                  setSheetState(() {
+                    start = picked;
+                    rangeError = null;
+                  });
+                  _setQuietStart(picked);
+                },
+              ),
+            if (_data.onQuietHoursEndChanged != null)
+              OListRow(
+                key: const ValueKey<String>('quiet-hours-end'),
+                icon: Icons.schedule_rounded,
+                title: 'End',
+                subtitle: _formatTime(context, end),
+                showChevron: false,
+                onTap: () async {
+                  final picked = await _pickTime(
+                    context,
+                    label: 'End',
+                    initial: end,
+                  );
+                  if (picked == null) return;
+                  if (picked == start) {
+                    setSheetState(() => rangeError = _rangeError);
+                    return;
+                  }
+                  setSheetState(() {
+                    end = picked;
+                    rangeError = null;
+                  });
+                  _setQuietEnd(picked);
+                },
+              ),
+            if (rangeError != null)
+              Semantics(
+                liveRegion: true,
+                child: Padding(
+                  padding: const EdgeInsets.only(top: OSpace.s),
+                  child: Row(
+                    key: const ValueKey<String>('quiet-hours-error'),
+                    children: [
+                      Icon(
+                        Icons.error_outline_rounded,
+                        size: 16,
+                        color: OColors.of(context).danger,
+                      ),
+                      const SizedBox(width: OSpace.xs),
+                      Flexible(
+                        child: Text(
+                          rangeError!,
+                          style: OType.caption.copyWith(
+                            color: OColors.of(context).danger,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
           ],
         ),
       ),
     );
   }
 
+  static const String _rangeError = 'Start and end must differ.';
+
   void _setQuietEnabled(bool value) {
     final handler = _data.onQuietHoursEnabledChanged;
-    if (handler == null) return;
+    if (handler == null || !_masterEditable) return;
     setState(() => _quietEnabled = value);
     handler(value);
   }
 
   void _setQuietStart(TimeOfDay value) {
+    if (!_masterEditable) return;
     setState(() => _quietStart = value);
     _data.onQuietHoursStartChanged?.call(value);
   }
 
   void _setQuietEnd(TimeOfDay value) {
+    if (!_masterEditable) return;
     setState(() => _quietEnd = value);
     _data.onQuietHoursEndChanged?.call(value);
   }
@@ -691,18 +915,24 @@ class _NotificationsPageState extends State<NotificationsPage> {
 
   Widget _soundCard(BuildContext context) {
     final canPick =
-        _master && _data.onSoundChanged != null && _sounds.isNotEmpty;
-    return V2SettingsRowList(rows: [
-      V2SettingsRow(
-        key: const ValueKey<String>('notifications-sound-row'),
-        icon: Icons.volume_up_outlined,
-        title: 'Sound',
-        subtitle: _soundChoice.label,
-        enabled: canPick,
-        onTap: canPick ? () => _pickSound(context) : null,
-      ),
-    ]);
+        _masterEditable && _data.onSoundChanged != null && _sounds.isNotEmpty;
+    return V2SettingsRowList(
+      rows: [
+        V2SettingsRow(
+          key: const ValueKey<String>('notifications-sound-row'),
+          icon: Icons.volume_up_outlined,
+          title: 'Sound',
+          subtitle: _soundChoice.label,
+          enabled: canPick,
+          onTap: canPick ? () => _pickSound(context) : null,
+        ),
+      ],
+    );
   }
+
+  /// Every sound the notification service can actually play. The list is the
+  /// enum the core maps onto `NotificationSound`, not free-form copy.
+  List<V2NotificationSound> get _soundOptions => V2NotificationSound.values;
 
   Future<void> _pickSound(BuildContext context) async {
     final choice = await showOSheet<V2NotificationSound>(
@@ -711,7 +941,7 @@ class _NotificationsPageState extends State<NotificationsPage> {
       builder: (sheetContext) => Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          for (final sound in V2NotificationSound.values)
+          for (final sound in _soundOptions)
             OListRow(
               key: ValueKey<String>('sound-choice-${sound.name}'),
               title: sound.label,
@@ -733,12 +963,10 @@ class _NotificationsPageState extends State<NotificationsPage> {
 
   void _setSound(V2NotificationSound sound) {
     final handler = _data.onSoundChanged;
-    if (handler == null) return;
+    if (handler == null || !_masterEditable) return;
     setState(() {
       _soundChoice = sound;
-      _sounds = [
-        for (final channel in _sounds) channel.copyWith(value: sound),
-      ];
+      _sounds = [for (final channel in _sounds) channel.copyWith(value: sound)];
     });
     for (final channel in _sounds) {
       handler(channel.id, sound);
@@ -749,34 +977,53 @@ class _NotificationsPageState extends State<NotificationsPage> {
     BuildContext context, {
     required String id,
     required String title,
+    String? subtitle,
     required bool value,
     ValueChanged<bool>? onChanged,
     bool enabled = true,
     Key? switchKey,
+    String? semanticValue,
   }) {
     final c = OColors.of(context);
     final canChange = enabled && onChanged != null;
     final handleChanged = canChange ? onChanged : null;
     return ConstrainedBox(
+      key: ValueKey<String>('notification-row-$id'),
       constraints: const BoxConstraints(minHeight: OSpace.listRow),
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: OSpace.m),
         child: Row(
           children: [
             Expanded(
-              child: Text(
-                title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: OType.body.copyWith(
-                  color: enabled ? c.text : c.textFaint,
-                  fontWeight: FontWeight.w500,
-                ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: OType.body.copyWith(
+                      color: enabled ? c.text : c.textFaint,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  if (subtitle != null) ...[
+                    const SizedBox(height: OSpace.xxs),
+                    Text(
+                      subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: OType.caption.copyWith(color: c.textMuted),
+                    ),
+                  ],
+                ],
               ),
             ),
             const SizedBox(width: OSpace.s),
             Semantics(
               label: title,
+              value: semanticValue,
               toggled: value,
               enabled: canChange,
               onTap: handleChanged == null ? null : () => handleChanged(!value),

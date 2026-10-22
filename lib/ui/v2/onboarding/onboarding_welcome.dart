@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../../design/o_tokens.dart';
 import 'step_progress.dart';
 
 // TODO(l10n): move welcome copy to the ARB files.
@@ -17,11 +16,6 @@ class OnboardingWelcomePage extends StatelessWidget {
     this.onClose,
     this.busy = false,
     this.error,
-    this.step = const V2OnboardingStepData(
-      step: V2OnboardingTour.welcome,
-      totalSteps: V2OnboardingTour.totalSteps,
-      trailingLabel: '',
-    ),
   });
 
   final VoidCallback? onGetStarted;
@@ -35,12 +29,13 @@ class OnboardingWelcomePage extends StatelessWidget {
   /// tapping the same action again.
   final String? error;
 
-  final V2OnboardingStepData step;
-
   @override
   Widget build(BuildContext context) {
     return OnboardingStepScaffold(
-      step: step,
+      // The welcome is always the first step of the real tour. It is not
+      // injectable: a caller must not be able to paint "Step 2 of 3" on the
+      // screen that starts a four-step flow.
+      step: V2OnboardingTour.welcomeStep,
       title: 'Welcome',
       onClose: onClose,
       primaryKey: const Key('welcome-get-started'),
@@ -48,10 +43,8 @@ class OnboardingWelcomePage extends StatelessWidget {
       onPrimary: busy ? null : onGetStarted,
       primaryLoading: busy,
       error: error,
-      child: const Padding(
-        padding: EdgeInsets.only(top: OSpace.xxl),
-        child: OnboardingIdentity(line: 'Ovid builds, ships and answers.'),
-      ),
+      centerBody: true,
+      child: const OnboardingIdentity(line: 'Ovid builds, ships and answers.'),
     );
   }
 }

@@ -113,6 +113,13 @@ class V2DailyTokensChart extends StatelessWidget {
     final total = points.fold<double>(0, (sum, point) => sum + point.value);
     final hasData =
         status == V2UsageChartStatus.ready && points.isNotEmpty && total > 0;
+    // Keep the range switch reachable on an empty window: the 7 day view can
+    // be empty while the 30 day ledger has activity, and hiding the only
+    // control would trap the reader in the empty state.
+    final showRange =
+        (status == V2UsageChartStatus.ready ||
+            status == V2UsageChartStatus.empty) &&
+        (hasData || onRangeChanged != null);
 
     final Widget body;
     switch (status) {
@@ -130,7 +137,7 @@ class V2DailyTokensChart extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (hasData) ...[
+        if (showRange) ...[
           // The 7/30 switch: right-aligned normally, full-width when the
           // text scale would overflow a trailing pill row.
           LayoutBuilder(
@@ -188,7 +195,7 @@ class V2DailyTokensChart extends StatelessWidget {
           height: 168,
           child: TweenAnimationBuilder<double>(
             tween: Tween<double>(begin: 0, end: 1),
-            duration: OMove.duration(context, OMotion.slow),
+            duration: OMove.duration(context, OMotion.base),
             curve: OMotion.emphasized,
             builder: (context, progress, _) => CustomPaint(
               painter: _TokenBarsPainter(
@@ -198,7 +205,6 @@ class V2DailyTokensChart extends StatelessWidget {
                   (max, point) => math.max(max, point.value),
                 ),
                 barColor: c.accentFill,
-                gridColor: c.hairline,
                 baselineColor: c.hairlineStrong,
                 progress: progress,
               ),
@@ -755,7 +761,7 @@ class _ChartSkeleton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      height: 160,
+      height: 168,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -779,7 +785,6 @@ class _TokenBarsPainter extends CustomPainter {
     required this.values,
     required this.maxValue,
     required this.barColor,
-    required this.gridColor,
     required this.baselineColor,
     required this.progress,
   });
@@ -787,7 +792,6 @@ class _TokenBarsPainter extends CustomPainter {
   final List<double> values;
   final double maxValue;
   final Color barColor;
-  final Color gridColor;
   final Color baselineColor;
   final double progress;
 
@@ -798,13 +802,8 @@ class _TokenBarsPainter extends CustomPainter {
     final usable = bottom - top;
     if (usable <= 0) return;
 
-    final gridPaint = Paint()
-      ..color = gridColor
-      ..strokeWidth = 1;
-    for (var i = 0; i < 3; i++) {
-      final y = top + usable * i / 2;
-      canvas.drawLine(Offset(0, y), Offset(size.width, y), gridPaint);
-    }
+    // No grid, no ticks, no axis labels: the bars are the chart and the
+    // semantics summary carries the numbers.
     canvas.drawLine(
       Offset(0, bottom),
       Offset(size.width, bottom),
@@ -839,7 +838,6 @@ class _TokenBarsPainter extends CustomPainter {
       oldDelegate.values != values ||
       oldDelegate.maxValue != maxValue ||
       oldDelegate.barColor != barColor ||
-      oldDelegate.gridColor != gridColor ||
       oldDelegate.baselineColor != baselineColor ||
       oldDelegate.progress != progress;
 }
@@ -1030,7 +1028,12 @@ String _percentLabel(double percent) {
 }
 
 String _pointValue(V2TokenChartPoint point) {
-  if (point.valueLabel.isNotEmpty) return point.valueLabel;
+  if (point.valueLabel.isNotEmpty) {
+    // Callers may hand us `8.2M`; the summary should always say the unit.
+    return point.valueLabel.toLowerCase().contains('token')
+        ? point.valueLabel
+        : '${point.valueLabel} tokens';
+  }
   return '${_compactNumber(point.value)} tokens';
 }
 

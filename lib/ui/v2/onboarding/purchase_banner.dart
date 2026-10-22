@@ -21,6 +21,10 @@ enum V2PurchaseBannerStatus {
 
   /// A previous purchase was found and the plan is active again.
   restored,
+
+  /// Restore reached the store and it reported no active subscription for
+  /// this account. This is a real answer, not a failure.
+  nothingToRestore,
 }
 
 /// Immutable data for [V2PurchaseBanner].
@@ -200,6 +204,12 @@ class V2PurchaseBanner extends StatelessWidget {
             : 'Your $plan subscription is active again.',
         icon: Icons.check_circle_outline_rounded,
         tone: c.success,
+      ),
+      V2PurchaseBannerStatus.nothingToRestore => _BannerCopy(
+        title: 'No purchase found',
+        message: 'No active subscription is linked to this account.',
+        icon: Icons.search_off_rounded,
+        tone: c.warn,
       ),
       V2PurchaseBannerStatus.hidden => _BannerCopy(
         title: '',

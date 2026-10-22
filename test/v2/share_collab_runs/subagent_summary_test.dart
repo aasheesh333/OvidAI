@@ -12,6 +12,13 @@ const _summary = V2SubagentSummaryData(
   keyFindings: ['Breakpoints hold at 320 dp.', 'All tests pass.'],
 );
 
+const _longFinding =
+    'The retry path keeps the original failure, retries exactly once and then '
+    'surfaces the server message unchanged, which means the caller can still '
+    'distinguish a network drop from a rejected token without parsing prose. '
+    'The old code swallowed the second error and reported a generic failure, '
+    'so this is the part worth reading twice before the branch merges.';
+
 void main() {
   testWidgets('renders the strict five fields', (tester) async {
     for (final dark in [false, true]) {
@@ -22,7 +29,7 @@ void main() {
       );
 
       expect(find.text('Summary'), findsOneWidget);
-      expect(find.text('Completed'), findsNWidgets(2));
+      expect(find.text('Completed'), findsOneWidget);
       expect(find.text('STATUS'), findsOneWidget);
       expect(find.text('FILES MODIFIED'), findsOneWidget);
       expect(find.text('ARTIFACTS CREATED'), findsOneWidget);
@@ -40,15 +47,31 @@ void main() {
     }
   });
 
-  testWidgets('missing contract keys read Not reported', (tester) async {
+  testWidgets('missing contract keys read as a dash, not invented text', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
     await pumpAt(
       tester,
-      const SubagentSummaryCard(
-        summary: V2SubagentSummaryData(reported: {}),
-      ),
+      const SubagentSummaryCard(summary: V2SubagentSummaryData(reported: {})),
     );
-    expect(find.text('Not reported'), findsNWidgets(5));
+    expect(find.text(v2SubagentMissingValue), findsNWidgets(5));
     expect(find.text('None'), findsNothing);
+    expect(find.text('Not reported'), findsNothing);
+
+    // The dash is spoken as a value, so a label + value is still read.
+    expect(find.bySemanticsLabel('Status: Not reported'), findsOneWidget);
+    expect(
+      find.bySemanticsLabel('Files modified: Not reported'),
+      findsOneWidget,
+    );
+    expect(
+      find.bySemanticsLabel('Artifacts created: Not reported'),
+      findsOneWidget,
+    );
+    expect(find.bySemanticsLabel('Key findings: Not reported'), findsOneWidget);
+    expect(find.bySemanticsLabel('Error if any: Not reported'), findsOneWidget);
+    handle.dispose();
   });
 
   testWidgets('reported but empty fields read None', (tester) async {
@@ -59,7 +82,20 @@ void main() {
       ),
     );
     expect(find.text('None'), findsNWidgets(4));
-    expect(find.text('Not reported'), findsNothing);
+    expect(find.text(v2SubagentMissingValue), findsNothing);
+  });
+
+  testWidgets('a status outside the contract is shown verbatim', (
+    tester,
+  ) async {
+    await pumpAt(
+      tester,
+      const SubagentSummaryCard(
+        summary: V2SubagentSummaryData(status: 'partial'),
+      ),
+    );
+    expect(find.text('partial'), findsOneWidget);
+    expect(find.text('Completed'), findsNothing);
   });
 
   testWidgets('empty and error states retry', (tester) async {
@@ -135,8 +171,36 @@ void main() {
         ),
       ),
     );
-    expect(find.text('Failed'), findsNWidgets(2));
+    expect(find.text('Failed'), findsOneWidget);
     expect(find.text('The build failed.'), findsOneWidget);
+  });
+
+  testWidgets('a long finding is capped until it is expanded', (tester) async {
+    await pumpAt(
+      tester,
+      const SingleChildScrollView(
+        padding: EdgeInsets.all(16),
+        child: SubagentSummaryCard(
+          summary: V2SubagentSummaryData(
+            status: 'completed',
+            keyFindings: [_longFinding],
+          ),
+        ),
+      ),
+    );
+
+    expect(tester.takeException(), isNull);
+    final preview = tester.widget<Text>(find.text(_longFinding));
+    expect(preview.maxLines, 3);
+    expect(find.text('Show more'), findsOneWidget);
+
+    await tester.ensureVisible(find.text('Show more'));
+    await tester.pump();
+    await tester.tap(find.text('Show more'));
+    await tester.pump();
+
+    expect(find.text('Show less'), findsOneWidget);
+    expect(tester.widget<Text>(find.text(_longFinding)).maxLines, isNull);
   });
 
   testWidgets('fits 320 dp at 200 % text in both themes', (tester) async {
@@ -145,12 +209,20 @@ void main() {
         tester,
         const SingleChildScrollView(
           padding: EdgeInsets.all(16),
-          child: SubagentSummaryCard(summary: _summary),
+          child: SubagentSummaryCard(
+            summary: V2SubagentSummaryData(
+              status: 'completed',
+              filesModified: ['a/very/long/path/that/keeps/going/Hero.tsx'],
+              artifactsCreated: ['preview-screenshot-with-a-long-name.png'],
+              keyFindings: [_longFinding],
+            ),
+          ),
         ),
         dark: dark,
       );
       expect(tester.takeException(), isNull);
       expect(find.text('Summary'), findsOneWidget);
+      expect(find.text('Show more'), findsOneWidget);
     }
   });
 }

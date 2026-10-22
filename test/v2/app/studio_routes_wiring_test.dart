@@ -405,11 +405,19 @@ void main() {
       page.onPreview!();
       await tester.pumpAndSettle();
 
-      expect(find.text('No preview running'), findsOneWidget);
+      // No preview client exists yet, so the screen says so and draws no
+      // control that could not act. It must never paint a blank frame that
+      // looks loaded.
+      expect(find.text('No preview'), findsOneWidget);
+      expect(
+        find.text('Live preview is not connected yet.'),
+        findsOneWidget,
+      );
       expect(find.text('Start preview'), findsNothing);
       expect(find.text('Share'), findsNothing);
       expect(find.text('Stop'), findsNothing);
       expect(find.byTooltip('Refresh'), findsNothing);
+      expect(find.text('Reconnect'), findsNothing);
     });
 
     testWidgets('the changes route stays honestly empty', (tester) async {

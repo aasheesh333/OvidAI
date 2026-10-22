@@ -441,7 +441,7 @@ List<V2ScreenEntry> v2Screens = <V2ScreenEntry>[
     id: 'account_health',
     title: 'Account health',
     group: 'Settings',
-    summary: 'Security score, devices, sign-ins and services',
+    summary: 'Plan, usage, storage and deletion',
     builder: (_) => const AccountHealthPage(data: V2AccountHealthPageData()),
   ),
 

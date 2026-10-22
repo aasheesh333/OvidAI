@@ -109,10 +109,7 @@ void main() {
     await tester.pumpWidget(
       _app(
         V2ChatPage(
-          data: const V2ChatPageData(
-            queuedCount: 1,
-            queuedPreview: 'Use a warmer accent',
-          ),
+          data: const V2ChatPageData(queuedCount: 1),
           onStop: () => stops++,
           onDismissQueued: () => dismissed++,
         ),
@@ -121,7 +118,6 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.byType(V2QueueDock), findsOneWidget);
-    expect(find.text('Use a warmer accent'), findsNothing);
     expect(
       tester.getTopLeft(find.byType(V2QueueDock)).dy,
       lessThan(tester.getTopLeft(find.byType(TextField)).dy),
@@ -145,7 +141,7 @@ void main() {
     await tester.pumpWidget(
       _app(
         V2ChatPage(
-          data: const V2ChatPageData(queuedCount: 1, queuedPreview: 'Go ahead'),
+          data: const V2ChatPageData(queuedCount: 1),
           onStop: () => stops++,
           onSendQueuedNow: () => sentNow++,
         ),
@@ -239,17 +235,9 @@ void main() {
     addTearDown(tester.view.reset);
 
     const chatStates = <String, V2ChatPageData>{
-      'empty': V2ChatPageData(queuedCount: 3, queuedPreview: 'First draft'),
-      'running': V2ChatPageData(
-        state: V2ChatState.running,
-        queuedCount: 3,
-        queuedPreview: 'First draft',
-      ),
-      'offline': V2ChatPageData(
-        state: V2ChatState.offline,
-        queuedCount: 3,
-        queuedPreview: 'First draft',
-      ),
+      'empty': V2ChatPageData(queuedCount: 3),
+      'running': V2ChatPageData(state: V2ChatState.running, queuedCount: 3),
+      'offline': V2ChatPageData(state: V2ChatState.offline, queuedCount: 3),
     };
     const liveStates = <String, V2LiveChatData>{
       'content': V2LiveChatData(

@@ -495,19 +495,13 @@ class _V2AppShellState extends State<V2AppShell> {
         : V2ChatState.empty;
     final agent = CloudAgentFacade.I;
     final sessionId = app.activeSessionId;
-    final queued = sessionId == null
-        ? const <String>[]
-        : agent.queuedMessagesFor(sessionId);
     return V2ChatPageData(
       title: 'Ovid Si',
       modelLabel: _modelLabel(app.activeSession),
-      tokensLabel: _tokensLabel(),
-      fastAgentLabel: 'Fast agent',
       sessionId: app.activeSessionId,
       draft: _draftFor(app.activeSessionId),
       state: state,
       queuedCount: sessionId == null ? 0 : agent.queuedCountFor(sessionId),
-      queuedPreview: queued.firstOrNull,
       limitResetLabel: _resetLabel(),
       permissionLabel: agent.mode.label,
       composerHint: 'Ask Ovid anything',
@@ -1650,18 +1644,6 @@ class _V2AppShellState extends State<V2AppShell> {
     return '$first$second'.toUpperCase();
   }
 
-  String _tokensLabel() {
-    final usage = _usage.usage;
-    if (usage == null || usage.today == null) {
-      return 'Auto · Checking allowance…';
-    }
-    if (AppState.I.ovidCloudTier != 'free') return 'Auto · Paid plan';
-    final today = usage.today!;
-    final used = today.inputTokens + today.outputTokens;
-    final left = (50000000 - used).clamp(0, 50000000);
-    return 'Auto · ${_compact(left)} tokens left today';
-  }
-
   bool get _planLimited {
     final usage = _usage.usage;
     return usage != null && usage.hasRemainingPct && usage.remainingPct <= 0;
@@ -1686,15 +1668,6 @@ class _V2AppShellState extends State<V2AppShell> {
       return '${(value / (1024 * 1024)).toStringAsFixed(1)} MB';
     }
     return '${(value / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
-  }
-
-  String _compact(int value) {
-    if (value >= 1000000) {
-      final m = value / 1000000;
-      return '${m.toStringAsFixed(m >= 10 ? 0 : 1)}M';
-    }
-    if (value >= 1000) return '${(value / 1000).toStringAsFixed(0)}K';
-    return '$value';
   }
 
   IconData _toolIcon(String? name) {

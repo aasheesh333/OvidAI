@@ -324,6 +324,25 @@ void main() {
     expect(find.text('74.2M'), findsNothing);
   });
 
+  testWidgets('an empty window keeps the range switch reachable', (
+    tester,
+  ) async {
+    _phone(tester);
+    V2UsageChartRange? changed;
+    await tester.pumpWidget(
+      _app(V2DailyTokensChart(onRangeChanged: (value) => changed = value)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('No token activity yet'), findsOneWidget);
+    expect(find.text('7 days'), findsOneWidget);
+
+    await tester.tap(find.text('30 days'));
+    await tester.pump();
+
+    expect(changed, V2UsageChartRange.thirtyDays);
+  });
+
   testWidgets('range tabs are 48 dp buttons and announce disabled state', (
     tester,
   ) async {
@@ -435,9 +454,7 @@ void main() {
     tester,
   ) async {
     var retried = 0;
-    await tester.pumpWidget(
-      _app(V2DailyTokensChart(onRetry: () => retried++)),
-    );
+    await tester.pumpWidget(_app(V2DailyTokensChart(onRetry: () => retried++)));
     await tester.pumpAndSettle();
 
     // No chat callback: the button must say what it does.
@@ -446,9 +463,7 @@ void main() {
     await tester.pump();
     expect(retried, 1);
 
-    await tester.pumpWidget(
-      _app(V2DailyTokensChart(onStartChat: () {})),
-    );
+    await tester.pumpWidget(_app(V2DailyTokensChart(onStartChat: () {})));
     await tester.pumpAndSettle();
     expect(find.text('Try again'), findsNothing);
     expect(find.text('Start a chat'), findsOneWidget);

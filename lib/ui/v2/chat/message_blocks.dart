@@ -53,6 +53,26 @@ final class V2BulletListBlock extends V2MessageBlock {
   final bool ordered;
 }
 
+/// Column alignment from the markdown separator row (`:---`, `:---:`, `---:`).
+enum V2TableAlign { start, center, end }
+
+/// A pipe table (`| a | b |` + a `|---|---|` separator). The header row is
+/// always drawn; rows keep the header's column count so a short or overlong
+/// row cannot shift cells under the wrong heading.
+final class V2TableBlock extends V2MessageBlock {
+  const V2TableBlock({
+    required this.headers,
+    required this.rows,
+    this.align = const <V2TableAlign>[],
+  });
+
+  final List<String> headers;
+  final List<List<String>> rows;
+
+  /// Per-column alignment. Shorter than [headers] means the rest start-align.
+  final List<V2TableAlign> align;
+}
+
 final class V2CodeBlock extends V2MessageBlock {
   const V2CodeBlock({required this.code, this.language});
 
@@ -162,12 +182,14 @@ final _linkPattern = RegExp(
   r'^\[([^\]]+)\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)$',
 );
 final _bareUrlPattern = RegExp(r'^<?(https?://[^\s<>]+)>?$');
+final _tableSeparatorCell = RegExp(r'^:?-{3,}:?$');
 
 /// Parses the small markdown subset used in assistant messages.
 ///
 /// Supported blocks:
 /// * ATX headings (`#`, `##`, `###`; deeper levels collapse to 3)
 /// * bullet and ordered lists (two-space nesting)
+/// * pipe tables with an alignment separator row
 /// * fenced code (```` ```lang ````), with `mermaid` becoming a diagram card
 /// * standalone images (`![alt](url)`)
 /// * standalone file links (`[report.pdf](url)`), rendered as artifact cards
@@ -242,6 +264,35 @@ List<V2MessageBlock> parseV2MessageBlocks(String markdown) {
       }
       i++;
       continue;
+    }
+
+    // A table is only a table when the next line is a separator with the same
+    // column count. A stray `|` line stays a paragraph, never a broken grid.
+    final tableHeader = _tableCells(raw);
+    if (tableHeader != null && i + 1 < lines.length) {
+      final separator = _tableCells(lines[i + 1]);
+      if (separator != null &&
+          separator.length == tableHeader.length &&
+          _isTableSeparator(separator)) {
+        flushParagraph();
+        final rows = <List<String>>[];
+        var j = i + 2;
+        while (j < lines.length) {
+          final cells = _tableCells(lines[j]);
+          if (cells == null) break;
+          rows.add(_normalizeTableRow(cells, tableHeader.length));
+          j++;
+        }
+        blocks.add(
+          V2TableBlock(
+            headers: List.unmodifiable(tableHeader),
+            rows: List.unmodifiable(rows),
+            align: List.unmodifiable(separator.map(_tableAlignOf)),
+          ),
+        );
+        i = j;
+        continue;
+      }
     }
 
     final image = _imagePattern.firstMatch(line);
@@ -369,6 +420,53 @@ bool _isFenceClose(String line, String char, int length) {
   }
   return true;
 }
+
+/// Splits a `| a | b |` row into trimmed cells. `\|` is a literal pipe.
+/// Returns null when the line is not a pipe row.
+List<String>? _tableCells(String raw) {
+  final text = raw.trim();
+  if (text.length < 3 || !text.startsWith('|') || !text.endsWith('|')) {
+    return null;
+  }
+  final inner = text.substring(1, text.length - 1);
+  final cells = <String>[];
+  final buffer = StringBuffer();
+  for (var i = 0; i < inner.length; i++) {
+    final char = inner[i];
+    if (char == r'\' && i + 1 < inner.length && inner[i + 1] == '|') {
+      buffer.write('|');
+      i++;
+      continue;
+    }
+    if (char == '|') {
+      cells.add(buffer.toString().trim());
+      buffer.clear();
+      continue;
+    }
+    buffer.write(char);
+  }
+  cells.add(buffer.toString().trim());
+  return cells;
+}
+
+bool _isTableSeparator(List<String> cells) =>
+    cells.isNotEmpty &&
+    cells.every((cell) => _tableSeparatorCell.hasMatch(cell));
+
+V2TableAlign _tableAlignOf(String cell) {
+  final text = cell.trim();
+  final left = text.startsWith(':');
+  final right = text.endsWith(':');
+  if (left && right) return V2TableAlign.center;
+  if (right) return V2TableAlign.end;
+  return V2TableAlign.start;
+}
+
+/// Pads or trims a row to the header's column count, so every row lands under
+/// the right heading even when the markdown is ragged.
+List<String> _normalizeTableRow(List<String> cells, int columns) => [
+  for (var i = 0; i < columns; i++) i < cells.length ? cells[i] : '',
+];
 
 int _indentDepth(String indent) {
   var width = 0;
@@ -559,6 +657,7 @@ class V2MessageBlocks extends StatelessWidget {
       V2HeadingBlock heading => _HeadingView(block: heading, onOpenLink: open),
       V2ParagraphBlock paragraph => _paragraph(context, paragraph.text, open),
       V2BulletListBlock list => _BulletListView(block: list, onOpenLink: open),
+      V2TableBlock table => _TableView(block: table, onOpenLink: open),
       V2CodeBlock code => _CodeBlockCard(block: code, onCopy: onCopyCode),
       V2DiagramBlock diagram => _DiagramCard(block: diagram),
       V2ImageBlock image => _ImageCard(
@@ -602,11 +701,13 @@ class _InlineText extends StatefulWidget {
     required this.text,
     required this.style,
     required this.onOpenLink,
+    this.textAlign = TextAlign.start,
   });
 
   final String text;
   final TextStyle style;
   final ValueChanged<String> onOpenLink;
+  final TextAlign textAlign;
 
   @override
   State<_InlineText> createState() => _InlineTextState();
@@ -689,7 +790,10 @@ class _InlineTextState extends State<_InlineText> {
     if (index < widget.text.length) {
       spans.add(TextSpan(text: widget.text.substring(index)));
     }
-    return Text.rich(TextSpan(style: style, children: spans));
+    return Text.rich(
+      TextSpan(style: style, children: spans),
+      textAlign: widget.textAlign,
+    );
   }
 }
 
@@ -764,6 +868,80 @@ class _BulletListView extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+/// A markdown table: header row, one hairline between rows, and real cell
+/// text (inline bold/code/links still work). A wide table scrolls sideways
+/// inside its card instead of clipping or shrinking the text, which is the
+/// only way columns stay readable at 320 dp / 200 %.
+class _TableView extends StatelessWidget {
+  const _TableView({required this.block, required this.onOpenLink});
+
+  final V2TableBlock block;
+  final ValueChanged<String> onOpenLink;
+
+  TextAlign _alignFor(int column) => switch (column < block.align.length
+      ? block.align[column]
+      : V2TableAlign.start) {
+    V2TableAlign.start => TextAlign.start,
+    V2TableAlign.center => TextAlign.center,
+    V2TableAlign.end => TextAlign.end,
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    if (block.headers.isEmpty) return const SizedBox.shrink();
+
+    TableRow row(List<String> cells, {required bool header}) {
+      return TableRow(
+        decoration: header ? BoxDecoration(color: c.surfaceAlt) : null,
+        children: [
+          for (var i = 0; i < block.headers.length; i++)
+            Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: OSpace.m,
+                vertical: OSpace.s,
+              ),
+              child: _InlineText(
+                text: i < cells.length ? cells[i] : '',
+                style: (header ? OType.bodySmStrong : OType.bodySm).copyWith(
+                  color: c.text,
+                ),
+                onOpenLink: onOpenLink,
+                textAlign: _alignFor(i),
+              ),
+            ),
+        ],
+      );
+    }
+
+    return Semantics(
+      container: true,
+      label: 'Table',
+      child: Container(
+        clipBehavior: Clip.antiAlias,
+        decoration: BoxDecoration(
+          color: c.surface,
+          borderRadius: BorderRadius.circular(ORadius.m),
+          border: Border.all(color: c.hairline),
+        ),
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Table(
+            defaultColumnWidth: const IntrinsicColumnWidth(),
+            border: TableBorder(
+              horizontalInside: BorderSide(color: c.hairline),
+            ),
+            children: [
+              row(block.headers, header: true),
+              for (final cells in block.rows) row(cells, header: false),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

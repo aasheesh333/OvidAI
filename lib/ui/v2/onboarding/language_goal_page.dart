@@ -114,20 +114,30 @@ class LanguageGoalPage extends StatefulWidget {
 }
 
 class _LanguageGoalPageState extends State<LanguageGoalPage> {
-  late String? _languageId = widget.data.selectedLanguageId;
+  late String? _languageId = _visibleLanguageId(widget.data);
   late Set<String> _goalIds = _visibleGoalIds(widget.data);
 
   @override
   void didUpdateWidget(covariant LanguageGoalPage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.data.selectedLanguageId != oldWidget.data.selectedLanguageId) {
-      _languageId = widget.data.selectedLanguageId;
+
+    // Re-read the host's choice when it changes, but keep a choice made here
+    // when the host only rebuilt for an unrelated reason. A stored id that no
+    // longer exists in the grid can never stay selected invisibly.
+    final nextLanguage = _visibleLanguageId(widget.data);
+    if (nextLanguage != _visibleLanguageId(oldWidget.data) ||
+        (_languageId != null && !_hasLanguage(widget.data, _languageId!))) {
+      _languageId = nextLanguage;
     }
-    if (!_sameGoals(
-      widget.data.selectedGoalIds,
-      oldWidget.data.selectedGoalIds,
-    )) {
-      _goalIds = _visibleGoalIds(widget.data);
+
+    // Goals can be added or removed by the host (a refreshed catalog, a
+    // restored snapshot). Drop ids that are no longer on screen.
+    final nextGoals = _visibleGoalIds(widget.data);
+    if (!_sameGoals(nextGoals, _visibleGoalIds(oldWidget.data))) {
+      _goalIds = nextGoals;
+    } else {
+      final available = widget.data.goals.map((goal) => goal.id).toSet();
+      _goalIds = _goalIds.where(available.contains).toSet();
     }
   }
 
@@ -164,29 +174,42 @@ class _LanguageGoalPageState extends State<LanguageGoalPage> {
       _languageId != null &&
       (widget.data.goals.isEmpty || _goalIds.isNotEmpty);
 
+  /// Why the primary action is blocked. Null when it can continue, or when the
+  /// host supplied no action at all (a preview, not a user-facing state).
+  String? get _blockedReason {
+    if (widget.onContinue == null) return null;
+    if (_languageId == null) return 'Choose a voice language.';
+    if (widget.data.goals.isNotEmpty && _goalIds.isEmpty) {
+      return 'Pick a goal.';
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
     final data = widget.data;
-    final hasChoices =
-        !data.loading && data.error == null && data.languages.isNotEmpty;
+    final hasChoices = !data.loading && data.languages.isNotEmpty;
     final Widget body;
     if (data.loading) {
       body = const OSkeletonList(rows: 7);
-    } else if (data.error != null) {
-      body = OErrorState(
-        title: 'Choices did not load',
-        message: data.error!,
-        onRetry: widget.onRetry,
-      );
     } else if (data.languages.isEmpty) {
-      body = OEmptyState(
-        icon: Icons.language_rounded,
-        title: 'No voice languages yet',
-        message: 'Check your connection and try again.',
-        action: widget.onRetry == null
-            ? null
-            : OButton(label: 'Try again', onPressed: widget.onRetry),
-      );
+      // Nothing loaded: this is the only state where the error replaces the
+      // grid. A failed save keeps the choices visible and puts the error
+      // beside the action, so a retry does not lose the work.
+      body = data.error == null
+          ? OEmptyState(
+              icon: Icons.language_rounded,
+              title: 'No voice languages yet',
+              message: 'Check your connection and try again.',
+              action: widget.onRetry == null
+                  ? null
+                  : OButton(label: 'Try again', onPressed: widget.onRetry),
+            )
+          : OErrorState(
+              title: 'Choices did not load',
+              message: data.error!,
+              onRetry: widget.onRetry,
+            );
     } else {
       body = _content(context, data);
     }
@@ -199,6 +222,7 @@ class _LanguageGoalPageState extends State<LanguageGoalPage> {
         trailingLabel: '',
       ),
       title: 'Voice & goal',
+      subtitle: 'For voice and replies',
       onBack: widget.onBack,
       backKey: const Key('language-goal-back'),
       onClose: widget.onClose,
@@ -208,11 +232,8 @@ class _LanguageGoalPageState extends State<LanguageGoalPage> {
       primaryEnabled: valid,
       primaryVisible: hasChoices,
       scrollable: !data.loading,
-      footerNote: valid || !hasChoices
-          ? null
-          : _languageId == null
-          ? 'Choose a language to continue.'
-          : 'Pick at least one goal to continue.',
+      footerNote: _blockedReason,
+      error: hasChoices ? data.error : null,
       child: body,
     );
   }
@@ -221,11 +242,10 @@ class _LanguageGoalPageState extends State<LanguageGoalPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const OSectionTitle(
-          title: 'Language',
-          padding: EdgeInsets.only(bottom: OSpace.s),
-        ),
-        _ChipGrid(
+        // The choice only drives voice input and replies; the app UI ships in
+        // English. "Voice language" keeps that promise honest.
+        _ChoiceSection(
+          title: 'Voice language',
           children: [
             for (final language in data.languages)
               OChip(
@@ -235,12 +255,10 @@ class _LanguageGoalPageState extends State<LanguageGoalPage> {
               ),
           ],
         ),
-        if (data.goals.isNotEmpty) ...[
-          const OSectionTitle(
+        if (data.goals.isNotEmpty)
+          _ChoiceSection(
             title: 'Goal',
-            padding: EdgeInsets.only(top: OSpace.xl, bottom: OSpace.s),
-          ),
-          _ChipGrid(
+            topPadding: OSpace.xl,
             children: [
               for (final goal in data.goals)
                 OChip(
@@ -251,15 +269,56 @@ class _LanguageGoalPageState extends State<LanguageGoalPage> {
                 ),
             ],
           ),
-        ],
       ],
+    );
+  }
+}
+
+/// One labelled group of chips. [Semantics] makes the section a header that
+/// owns its options, so a screen reader announces "Voice language" before the
+/// radio state of each chip instead of reading a flat list of labels.
+class _ChoiceSection extends StatelessWidget {
+  const _ChoiceSection({
+    required this.title,
+    required this.children,
+    this.topPadding = 0,
+  });
+
+  final String title;
+  final List<Widget> children;
+  final double topPadding;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      container: true,
+      explicitChildNodes: true,
+      header: true,
+      label: title,
+      child: Padding(
+        padding: EdgeInsets.only(top: topPadding),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            ExcludeSemantics(
+              child: OSectionTitle(
+                title: title,
+                padding: const EdgeInsets.only(bottom: OSpace.s),
+              ),
+            ),
+            _ChipGrid(children: children),
+          ],
+        ),
+      ),
     );
   }
 }
 
 /// A grid of chips: one column under 360 dp, two from 360 dp, three from
 /// 600 dp. Cells share the column width and the chip centres inside its cell,
-/// so large text wraps to the next row instead of clipping a card.
+/// so large text wraps to the next row instead of clipping a card. Above
+/// 100 % text the grid drops to one column (two on a wide window) so an
+/// option is never ellipsized before the person can read it.
 class _ChipGrid extends StatelessWidget {
   const _ChipGrid({required this.children});
 
@@ -270,12 +329,20 @@ class _ChipGrid extends StatelessWidget {
     // The band comes from the window, not the (already capped) content width:
     // at exactly 600 dp the page is a tablet even though its column is
     // narrower. Below 360 dp a single column keeps 200 % text readable.
-    final width = OResponsive.of(context).width;
-    final columns = width < OBreakpoints.compact
-        ? 1
-        : width < OBreakpoints.tablet
-        ? 2
-        : 3;
+    final responsive = OResponsive.of(context);
+    final width = responsive.width;
+    // Large text gets fewer columns instead of an ellipsized choice: the
+    // person must be able to read the whole option before picking it.
+    final int columns;
+    if (width < OBreakpoints.compact) {
+      columns = 1;
+    } else if (responsive.textScale > 1.05) {
+      columns = width < OBreakpoints.wide ? 1 : 2;
+    } else if (width < OBreakpoints.tablet) {
+      columns = 2;
+    } else {
+      columns = 3;
+    }
     final rows = <Widget>[];
     for (var i = 0; i < children.length; i += columns) {
       final end = i + columns < children.length ? i + columns : children.length;
@@ -301,6 +368,16 @@ class _ChipGrid extends StatelessWidget {
     );
   }
 }
+
+/// The stored language only counts when its chip is actually on screen.
+String? _visibleLanguageId(V2LanguageGoalData data) {
+  final id = data.selectedLanguageId;
+  if (id == null || !_hasLanguage(data, id)) return null;
+  return id;
+}
+
+bool _hasLanguage(V2LanguageGoalData data, String id) =>
+    data.languages.any((language) => language.id == id);
 
 /// Keeps only the selections that are actually on screen, so a stale id can
 /// never travel out through `onContinue`.

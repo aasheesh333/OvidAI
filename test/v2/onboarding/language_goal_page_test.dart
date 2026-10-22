@@ -1,9 +1,13 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/onboarding/language_goal_page.dart';
+import 'package:ovid_ai/ui/v2/onboarding/onboarding_prefs.dart';
 import 'package:ovid_ai/ui/v2/onboarding/step_progress.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 Future<void> _pump(
   WidgetTester tester, {
@@ -63,7 +67,7 @@ void main() {
   ) async {
     await _pump(tester);
 
-    expect(find.text('LANGUAGE'), findsOneWidget);
+    expect(find.text('VOICE LANGUAGE'), findsOneWidget);
     expect(find.text('English'), findsOneWidget);
     expect(find.text('हिन्दी'), findsOneWidget);
     expect(find.text('Hinglish'), findsOneWidget);
@@ -84,13 +88,13 @@ void main() {
     await _pumpSmall(tester);
 
     expect(tester.takeException(), isNull);
-    expect(find.text('LANGUAGE'), findsOneWidget);
+    expect(find.text('VOICE LANGUAGE'), findsOneWidget);
   });
 
   testWidgets('language and goal renders correctly in dark', (tester) async {
     await _pump(tester, dark: true);
 
-    expect(find.text('LANGUAGE'), findsOneWidget);
+    expect(find.text('VOICE LANGUAGE'), findsOneWidget);
     expect(find.text('हिन्दी'), findsOneWidget);
     expect(find.byKey(const Key('language-goal-continue')), findsOneWidget);
   });
@@ -158,7 +162,7 @@ void main() {
       find.byKey(const Key('language-goal-continue')),
     );
     expect(blocked.onPressed, isNull);
-    expect(find.text('Pick at least one goal to continue.'), findsOneWidget);
+    expect(find.text('Pick a goal.'), findsOneWidget);
 
     // Tapping the disabled action must not continue.
     await tester.tap(
@@ -167,6 +171,136 @@ void main() {
     );
     await tester.pump();
     expect(continues, 0);
+  });
+
+  testWidgets('Continue persists both choices and they are read on reopen', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    final store = V2OnboardingStore();
+
+    await _pump(
+      tester,
+      onContinue: (languageId, goalIds) async {
+        await store.saveChoices(languageId: languageId, goalIds: goalIds);
+      },
+    );
+
+    await tester.ensureVisible(find.text('தமிழ்'));
+    await tester.tap(find.text('தமிழ்'));
+    await tester.ensureVisible(find.text('Research'));
+    await tester.tap(find.text('Research'));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('language-goal-continue')));
+    await tester.pumpAndSettle();
+
+    final snapshot = await store.load(
+      welcomeVersion: kV2OnboardingWelcomeVersion,
+    );
+    expect(snapshot.languageId, 'ta');
+    expect(snapshot.goalIds, contains('research'));
+
+    // A fresh mount reads the stored snapshot back into the same chips.
+    await tester.pumpWidget(const SizedBox.shrink());
+    final handle = tester.ensureSemantics();
+    await _pump(
+      tester,
+      data: V2LanguageGoalData(
+        selectedLanguageId: snapshot.languageId,
+        selectedGoalIds: snapshot.goalIds,
+      ),
+      onContinue: (_, _) {},
+    );
+
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('தமிழ்')),
+      isSemantics(
+        label: 'தமிழ்',
+        isButton: true,
+        hasSelectedState: true,
+        isSelected: true,
+      ),
+    );
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('English')),
+      isSemantics(
+        label: 'English',
+        isButton: true,
+        hasSelectedState: true,
+        isSelected: false,
+      ),
+    );
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Research')),
+      isSemantics(
+        label: 'Research',
+        isButton: true,
+        hasSelectedState: true,
+        isSelected: true,
+      ),
+    );
+    handle.dispose();
+  });
+
+  testWidgets('a stale saved language is not selected and cannot continue', (
+    tester,
+  ) async {
+    var continues = 0;
+    await _pump(
+      tester,
+      data: const V2LanguageGoalData(selectedLanguageId: 'removed-language'),
+      onContinue: (_, _) => continues++,
+    );
+
+    final button = tester.widget<OButton>(
+      find.byKey(const Key('language-goal-continue')),
+    );
+    expect(button.onPressed, isNull);
+    expect(find.text('Choose a voice language.'), findsOneWidget);
+    expect(find.text('removed-language'), findsNothing);
+
+    await tester.tap(
+      find.byKey(const Key('language-goal-continue')),
+      warnIfMissed: false,
+    );
+    await tester.pump();
+    expect(continues, 0);
+  });
+
+  testWidgets('only one language chip is selected at a time', (tester) async {
+    final handle = tester.ensureSemantics();
+    await _pump(tester, onContinue: (_, _) {});
+
+    await tester.ensureVisible(find.text('हिन्दी'));
+    await tester.tap(find.text('हिन्दी'));
+    await tester.pump();
+
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('हिन्दी')).flagsCollection
+          .isSelected,
+      ui.Tristate.isTrue,
+    );
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('English')).flagsCollection
+          .isSelected,
+      ui.Tristate.isFalse,
+    );
+    handle.dispose();
+  });
+
+  testWidgets('each section is a labelled header that groups its chips', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    await _pump(tester, onContinue: (_, _) {});
+
+    expect(find.bySemanticsLabel('Voice language'), findsOneWidget);
+    expect(find.bySemanticsLabel('Goal'), findsOneWidget);
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Voice language')),
+      isSemantics(label: 'Voice language', isHeader: true),
+    );
+    handle.dispose();
   });
 
   testWidgets('back is only shown when wired and fires once', (tester) async {
@@ -206,11 +340,12 @@ void main() {
     expect(find.byKey(const Key('language-goal-continue')), findsNothing);
   });
 
-  testWidgets('error state retries', (tester) async {
+  testWidgets('a failed load shows the error and retries', (tester) async {
     var retries = 0;
     await _pump(
       tester,
       data: const V2LanguageGoalData(
+        languages: [],
         error: 'We could not load your languages.',
       ),
       onRetry: () => retries++,
@@ -222,6 +357,31 @@ void main() {
     await tester.pump();
 
     expect(retries, 1);
+  });
+
+  testWidgets('a failed save keeps the choices visible and retries', (
+    tester,
+  ) async {
+    var continues = 0;
+    await _pump(
+      tester,
+      data: const V2LanguageGoalData(
+        error: 'We could not save your choices. Try again.',
+      ),
+      onContinue: (_, _) => continues++,
+    );
+
+    // The grid is still there: a save failure must not throw away the work.
+    expect(find.text('हिन्दी'), findsOneWidget);
+    expect(find.text('Build something'), findsOneWidget);
+    expect(
+      find.text('We could not save your choices. Try again.'),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byKey(const Key('language-goal-continue')));
+    await tester.pump();
+    expect(continues, 1);
   });
 
   testWidgets('empty language state offers a retry', (tester) async {
@@ -407,7 +567,7 @@ void main() {
 
     // No helper paragraph stands in for the missing section.
     expect(find.text('GOAL'), findsNothing);
-    expect(find.text('LANGUAGE'), findsOneWidget);
+    expect(find.text('VOICE LANGUAGE'), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('language-goal-continue')));
     await tester.pump();

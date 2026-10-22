@@ -10,7 +10,8 @@ import '../../design/o_tokens.dart';
 /// The chat controller embeds this instead of the normal composer until the
 /// user has bound a repository **and** a branch. It renders the reason and a
 /// single action that opens the repo picker; it owns no state and never sends
-/// a message.
+/// a message. When no picker is wired the action is absent: the gate still
+/// explains the block, but it never shows a button that cannot open anything.
 class V2StudioGate extends StatelessWidget {
   const V2StudioGate({
     super.key,
@@ -21,8 +22,7 @@ class V2StudioGate extends StatelessWidget {
     this.actionLabel = 'Pick a folder',
   });
 
-  /// Opens the repository picker. When null the button is disabled and
-  /// announced as such.
+  /// Opens the repository picker. When null the action is removed.
   final VoidCallback? onPickFolder;
 
   /// Alias for [onPickFolder] matching the workspace page's `onPickRepo` name.
@@ -82,14 +82,14 @@ class V2StudioGate extends StatelessWidget {
               ],
             ),
             const SizedBox(height: OSpace.m),
-            OButton(
-              key: const Key('studio-gate-pick-folder'),
-              label: actionLabel,
-              icon: Icons.folder_open_rounded,
-              expand: true,
-              onPressed: _onPick,
-            ),
-            if (_onPick == null) ...[const SizedBox(height: OSpace.xs)],
+            if (_onPick != null)
+              OButton(
+                key: const Key('studio-gate-pick-folder'),
+                label: actionLabel,
+                icon: Icons.folder_open_rounded,
+                expand: true,
+                onPressed: _onPick,
+              ),
           ],
         ),
       ),

@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ovid_ai/core/cloud/schedule_client.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
+import 'package:ovid_ai/ui/design/o_screen.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/schedules/run_timeline.dart';
 import 'package:ovid_ai/ui/v2/schedules/schedule_runs_page.dart';
@@ -339,5 +341,110 @@ void main() {
         expect(tester.takeException(), isNull);
       },
     );
+  }
+
+  testWidgets('a failed run states its reason once', (tester) async {
+    _phone(tester);
+    final data = V2ScheduleRunsData.fromRuns(
+      [
+        ScheduleRunDto.fromJson(<String, dynamic>{
+          'id': 'r1',
+          'scheduleId': 's1',
+          'scheduledFor': '2026-10-21T09:00:00.000Z',
+          'status': 'failed',
+          'attempt': 1,
+          'ranLate': false,
+          'error': 'The connector timed out.',
+          'startedAt': '2026-10-21T09:00:00.000Z',
+          'finishedAt': '2026-10-21T09:00:30.000Z',
+        }),
+      ],
+      scheduleTitle: 'Morning briefing',
+      now: DateTime.parse('2026-10-21T12:00:00.000Z'),
+    );
+
+    await tester.pumpWidget(_app(ScheduleRunsPage(data: data)));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Failed'), findsOneWidget);
+    // The reason appears in the failure line, not again as the summary.
+    expect(find.text('The connector timed out.'), findsOneWidget);
+    expect(find.text('Failed without a summary.'), findsNothing);
+  });
+
+  testWidgets('a run row announces its status and duration', (tester) async {
+    _phone(tester);
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(_app(const ScheduleRunsPage(data: _data)));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.bySemanticsLabel(
+        RegExp(r'^Completed run at 9:00 AM, took 1m 12s\.'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.bySemanticsLabel(RegExp(r'^Failed run at 3:00 AM, took 18s\.')),
+      findsOneWidget,
+    );
+    handle.dispose();
+  });
+
+  testWidgets('each day heading is one header node', (tester) async {
+    _phone(tester);
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(_app(const ScheduleRunsPage(data: _data)));
+    await tester.pumpAndSettle();
+
+    expect(find.bySemanticsLabel('Today — May 18, 2 runs'), findsOneWidget);
+    expect(find.bySemanticsLabel('Yesterday — May 17, 1 run'), findsOneWidget);
+    handle.dispose();
+  });
+
+  for (final dark in [false, true]) {
+    testWidgets('centres and caps the history from 600 to 1280 '
+        '(${dark ? 'dark' : 'light'})', (tester) async {
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      tester.view.devicePixelRatio = 1;
+
+      for (final width in const [600.0, 800.0, 1024.0, 1280.0]) {
+        for (final scale in const [1.0, 2.0]) {
+          tester.view.physicalSize = Size(width, 900);
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: dark ? OTheme.dark() : OTheme.light(),
+              home: MediaQuery(
+                data: MediaQueryData(
+                  size: Size(width, 900),
+                  textScaler: TextScaler.linear(scale),
+                ),
+                child: const ScheduleRunsPage(data: _data),
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final reason = '$width dp at ${scale}x';
+          expect(tester.takeException(), isNull, reason: reason);
+
+          final list = find.byType(ListView).first;
+          final size = tester.getSize(list);
+          final left = tester.getTopLeft(list).dx;
+          final cap = OBreakpoints.contentMaxWidth(width);
+          expect(
+            size.width,
+            lessThanOrEqualTo(cap + 0.5),
+            reason: '$reason: the history is wider than its band cap',
+          );
+          expect(
+            left,
+            closeTo((width - size.width) / 2, 1),
+            reason: '$reason: the history is not centred',
+          );
+        }
+      }
+    });
   }
 }

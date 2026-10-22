@@ -225,11 +225,13 @@ class _V2StudioWorkspacePageState extends State<V2StudioWorkspacePage> {
           icon: Icons.folder_off_outlined,
           title: 'No repository open',
           message: '',
-          action: OButton(
-            label: 'Pick a repository',
-            icon: Icons.folder_open_rounded,
-            onPressed: widget.onPickRepo,
-          ),
+          action: widget.onPickRepo == null
+              ? null
+              : OButton(
+                  label: 'Pick a repository',
+                  icon: Icons.folder_open_rounded,
+                  onPressed: widget.onPickRepo,
+                ),
         ),
         V2WorkspaceStatus.content => _buildWorkspace(context),
       },
@@ -253,23 +255,21 @@ class _V2StudioWorkspacePageState extends State<V2StudioWorkspacePage> {
             width >= OBreakpoints.contentMaxWidth(OBreakpoints.wide)
             ? 320.0
             : 280.0;
-        final tree = SingleChildScrollView(
-          padding: const EdgeInsets.only(bottom: OSpace.l),
-          child: V2FileTree(
-            key: const Key('studio-file-tree'),
-            data: V2FileTreeData(
-              status: data.fileTree.isEmpty
-                  ? V2FileTreeStatus.empty
-                  : V2FileTreeStatus.content,
-              nodes: [for (final node in data.fileTree) _treeEntry(node)],
-              selectedPath: data.openFilePath.trim().isEmpty
-                  ? null
-                  : data.openFilePath,
-            ),
-            onSelectFile: _selectFile,
-            onRetry: widget.onRetry,
-            onRefresh: widget.onRetry ?? widget.onSync,
+        final tree = V2FileTree(
+          key: const Key('studio-file-tree'),
+          scrollable: true,
+          data: V2FileTreeData(
+            status: data.fileTree.isEmpty
+                ? V2FileTreeStatus.empty
+                : V2FileTreeStatus.content,
+            nodes: [for (final node in data.fileTree) _treeEntry(node)],
+            selectedPath: data.openFilePath.trim().isEmpty
+                ? null
+                : data.openFilePath,
           ),
+          onSelectFile: _selectFile,
+          onRetry: widget.onRetry,
+          onRefresh: widget.onRetry ?? widget.onSync,
         );
 
         final body = wide
@@ -345,14 +345,16 @@ class _HeaderActions extends StatelessWidget {
             key: const Key('studio-branch-chip'),
             onTap: onBranchTap,
             semanticLabel: 'Branch $branch',
-            child: SizedBox(
-              height: OSpace.touch,
-              child: Center(
-                widthFactor: 1,
-                child: OChip(
-                  label: branch,
-                  icon: Icons.account_tree_outlined,
-                  selected: true,
+            child: ExcludeSemantics(
+              child: SizedBox(
+                height: OSpace.touch,
+                child: Center(
+                  widthFactor: 1,
+                  child: OChip(
+                    label: branch,
+                    icon: Icons.account_tree_outlined,
+                    selected: true,
+                  ),
                 ),
               ),
             ),
@@ -390,6 +392,7 @@ class _EditorPane extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     final name = data.openFileName.trim();
+    final path = data.openFilePath.trim();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -402,6 +405,9 @@ class _EditorPane extends StatelessWidget {
                   name.isEmpty ? 'No file open' : name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
+                  semanticsLabel: name.isEmpty
+                      ? 'No file open'
+                      : 'Open file ${path.isEmpty ? name : path}',
                   style: OType.bodySm.copyWith(
                     color: c.text,
                     fontWeight: FontWeight.w600,
@@ -410,20 +416,30 @@ class _EditorPane extends StatelessWidget {
               ),
               if (!data.saved)
                 const OPill(label: 'Unsaved', tone: OPillTone.warn, dot: true),
-              OIconButton(
-                key: const Key('studio-open-code-viewer'),
-                icon: Icons.open_in_full_rounded,
-                semanticLabel: 'Open file in code viewer',
-                tooltip: 'Open in viewer',
-                onPressed: onOpenViewer,
-              ),
+              // No viewer callback means no viewer: the control is absent, not
+              // a disabled icon that does nothing.
+              if (onOpenViewer != null)
+                OIconButton(
+                  key: const Key('studio-open-code-viewer'),
+                  icon: Icons.open_in_full_rounded,
+                  semanticLabel: 'Open file in code viewer',
+                  tooltip: 'Open in viewer',
+                  onPressed: onOpenViewer,
+                ),
             ],
           ),
         ),
         Divider(height: 1, color: c.hairline),
         Expanded(
           child: data.codeLines.isEmpty
-              ? const SizedBox.shrink()
+              ? (path.isEmpty
+                    ? const SizedBox.shrink()
+                    : Center(
+                        child: Text(
+                          'Empty file',
+                          style: OType.caption.copyWith(color: c.textMuted),
+                        ),
+                      ))
               : Padding(
                   padding: const EdgeInsets.only(
                     top: OSpace.s,

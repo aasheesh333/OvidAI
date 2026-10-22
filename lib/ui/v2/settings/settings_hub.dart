@@ -74,6 +74,7 @@ class V2SettingsHubData {
   const V2SettingsHubData({
     this.status = V2SettingsHubStatus.ready,
     this.profile,
+    this.storageLabel,
     this.account = const V2SettingsSection(title: 'Account'),
     this.chat = const V2SettingsSection(title: 'Chat'),
     this.models = const V2SettingsSection(title: 'Models'),
@@ -90,6 +91,11 @@ class V2SettingsHubData {
 
   final V2SettingsHubStatus status;
   final V2SettingsProfile? profile;
+
+  /// The account's real storage figure ("1.2 of 3 GB"), supplied by the route
+  /// that reads the quota. Null means the row shows no value; the hub never
+  /// invents a number.
+  final String? storageLabel;
   final V2SettingsSection account;
   final V2SettingsSection chat;
   final V2SettingsSection models;
@@ -109,7 +115,8 @@ class V2SettingsHubData {
 
 /// Settings home: one header, one search action, at most five sections of
 /// one-line rows. Rows only call the callbacks carried by [data]; the hub never
-/// pushes another settings page.
+/// pushes another settings page. A row without a handler is removed rather
+/// than rendered as a control that cannot act.
 ///
 /// It owns two pieces of view state: which row search should reveal, and the
 /// transient highlight that shows the person where that row landed.
@@ -137,22 +144,31 @@ class _SettingsHubPageState extends State<SettingsHubPage> {
     super.dispose();
   }
 
-  GlobalKey _keyFor(String id) => _rowKeys.putIfAbsent(
-    id,
-    () => GlobalKey(debugLabel: 'settings-row-$id'),
-  );
+  GlobalKey _keyFor(String id) =>
+      _rowKeys.putIfAbsent(id, () => GlobalKey(debugLabel: 'settings-row-$id'));
 
-  /// The handler a row really runs. A row without one is rendered disabled
-  /// instead of looking tappable and doing nothing.
-  VoidCallback? _rowTapFor(V2SettingsItem item) {
-    if (!item.enabled) return null;
+  /// The handler a row really runs, ignoring whether the row is currently
+  /// enabled. Null means the row has no destination at all.
+  VoidCallback? _handlerFor(V2SettingsItem item) {
     if (item.id == 'show_reasoning') {
       final changed = data.onReasoningChanged;
       if (changed == null) return null;
       return () => changed(!data.showReasoning);
     }
+    if (item.id == 'connectors') {
+      // The connectors page is opened through the host's work routes; the
+      // settings route table has no case for it. Prefer that handler so the
+      // row cannot be a dead end.
+      return data.onAddConnector ?? item.onTap;
+    }
     return item.onTap;
   }
+
+  /// The handler a row runs right now. A row the host has explicitly disabled
+  /// stays visible but does nothing; a row with no handler at all is removed
+  /// by [_visibleItems].
+  VoidCallback? _rowTapFor(V2SettingsItem item) =>
+      item.enabled ? _handlerFor(item) : null;
 
   /// Scrolls the row into view and flashes it, so a search result that lives
   /// on the hub (rather than on its own page) never "scrolls nowhere".
@@ -286,6 +302,10 @@ class _SettingsHubPageState extends State<SettingsHubPage> {
     );
   }
 
+  /// At most five sections, in one order, with no row that cannot act.
+  ///
+  /// A row whose handler is missing is dropped: a settings row that cannot
+  /// reach real state is a dead control, not a disabled one.
   List<V2SettingsSection> _visibleSections() {
     final sections = <V2SettingsSection>[
       _ordered('account', data.account),
@@ -294,13 +314,58 @@ class _SettingsHubPageState extends State<SettingsHubPage> {
       _ordered('data_control', data.dataControl),
       _ordered('advanced', data.advanced),
     ];
-    return <V2SettingsSection>[
-      for (final section in sections)
-        V2SettingsSection(
-          title: section.title,
-          items: _mergeMemoryRows(section.items),
-        ),
-    ];
+    final visible = <V2SettingsSection>[];
+    for (final section in sections.take(_maxSections)) {
+      final items = _visibleItems(section.items);
+      final keepsProfile =
+          data.profile != null && section.title == data.account.title;
+      if (items.isEmpty && !keepsProfile) continue;
+      visible.add(V2SettingsSection(title: section.title, items: items));
+    }
+    return visible;
+  }
+
+  static const int _maxSections = 5;
+
+  List<V2SettingsItem> _visibleItems(List<V2SettingsItem> items) {
+    final seen = <String>{};
+    final visible = <V2SettingsItem>[];
+    for (final item in _mergeMemoryRows(items)) {
+      // No handler means no destination: remove the row entirely.
+      if (_handlerFor(item) == null) continue;
+      // One row per id: two copies would also collide on the reveal key.
+      if (!seen.add(item.id)) continue;
+      visible.add(_withValue(item));
+    }
+    return visible;
+  }
+
+  /// Fills a row's trailing value from real data the hub already owns.
+  ///
+  /// An explicit [V2SettingsItem.value] always wins. The plan name comes from
+  /// the profile; the storage figure comes from [V2SettingsHubData.storageLabel].
+  /// Nothing is substituted when a source is absent.
+  V2SettingsItem _withValue(V2SettingsItem item) {
+    final value =
+        item.value ??
+        switch (item.id) {
+          'plan_billing' => data.profile?.planLabel,
+          'storage' => data.storageLabel,
+          _ => null,
+        };
+    if (value == null || value.trim().isEmpty || value == item.value) {
+      return item;
+    }
+    return V2SettingsItem(
+      id: item.id,
+      label: item.label,
+      icon: item.icon,
+      value: value,
+      subtitle: item.subtitle,
+      onTap: item.onTap,
+      danger: item.danger,
+      enabled: item.enabled,
+    );
   }
 
   /// Collapses memory, shared memory and memory files into one "Memory" row.
@@ -327,6 +392,7 @@ class _SettingsHubPageState extends State<SettingsHubPage> {
       id: keep.id,
       label: keep.id == 'memory' ? 'Memory' : keep.label,
       icon: Icons.psychology_outlined,
+      value: keep.value,
       onTap: tap,
       enabled: keep.enabled,
     );
@@ -453,8 +519,7 @@ class _SectionGroup extends StatelessWidget {
         ? section.items
         : section.items.where((item) => item.id != 'account').toList();
     final rows = <Widget>[
-      if (profile != null)
-        _ProfileRow(profile: profile!, onTap: onProfileTap),
+      if (profile != null) _ProfileRow(profile: profile!, onTap: onProfileTap),
       for (final item in items)
         _SettingsRow(
           key: keyFor(item.id),
@@ -501,57 +566,62 @@ class _ProfileRow extends StatelessWidget {
       profile.name,
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
-      style: OType.body.copyWith(
-        color: c.text,
-        fontWeight: FontWeight.w600,
-      ),
+      style: OType.body.copyWith(color: c.text, fontWeight: FontWeight.w600),
     );
-    return OPressable(
-      onTap: onTap,
-      semanticLabel: '${profile.name}, ${profile.planLabel}',
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: OSpace.listRow),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: OSpace.m),
-          child: Row(
-            children: [
-              OAvatar(
-                initials: profile.initials ?? profile.name,
-                image: profile.image,
-                size: 40,
-                semanticLabel: '${profile.name} profile photo',
-              ),
-              const SizedBox(width: OSpace.m),
-              Expanded(
-                child: stacked
-                    ? Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          name,
-                          const SizedBox(height: OSpace.xs),
-                          Align(alignment: Alignment.centerLeft, child: pill),
-                        ],
-                      )
-                    : name,
-              ),
-              if (!stacked) ...[
-                const SizedBox(width: OSpace.s),
-                pill,
+    // The row's own label already carries the name and the plan, so the
+    // visible copies are decoration for a screen reader.
+    final identity = ExcludeSemantics(
+      child: stacked
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                name,
+                const SizedBox(height: OSpace.xs),
+                Align(alignment: Alignment.centerLeft, child: pill),
               ],
-              if (onTap != null) ...[
-                const SizedBox(width: OSpace.s),
-                Icon(
-                  Icons.chevron_right_rounded,
-                  size: 20,
-                  color: c.textFaint,
-                ),
-              ],
+            )
+          : name,
+    );
+    final content = ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: OSpace.listRow),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: OSpace.m),
+        child: Row(
+          children: [
+            OAvatar(
+              initials: profile.initials ?? profile.name,
+              image: profile.image,
+              size: v2SettingsTileSize,
+              semanticLabel: '${profile.name} profile photo',
+            ),
+            const SizedBox(width: OSpace.m),
+            Expanded(child: identity),
+            if (!stacked) ...[
+              const SizedBox(width: OSpace.s),
+              ExcludeSemantics(child: pill),
             ],
-          ),
+            if (onTap != null) ...[
+              const SizedBox(width: OSpace.s),
+              Icon(Icons.chevron_right_rounded, size: 20, color: c.textFaint),
+            ],
+          ],
         ),
       ),
     );
+    final label = '${profile.name}, ${profile.planLabel}';
+    if (onTap == null) {
+      // Identity, not a control: never announce a disabled button for a
+      // profile the host has not wired a destination for. One node carries
+      // the name and plan; the avatar is decoration next to it.
+      return Semantics(
+        container: true,
+        label: label,
+        excludeSemantics: true,
+        child: content,
+      );
+    }
+    return OPressable(onTap: onTap, semanticLabel: label, child: content);
   }
 }
 
@@ -600,13 +670,18 @@ class _SettingsRow extends StatelessWidget {
                     V2SettingsTile(icon: item.icon, danger: item.danger),
                     const SizedBox(width: OSpace.m),
                     Expanded(
-                      child: Text(
-                        item.label,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.body.copyWith(
-                          color: fg,
-                          fontWeight: FontWeight.w500,
+                      // The row's semantic label already carries the title
+                      // and its value; leaving the Texts in the tree makes
+                      // TalkBack read the row twice.
+                      child: ExcludeSemantics(
+                        child: Text(
+                          item.label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: OType.body.copyWith(
+                            color: fg,
+                            fontWeight: FontWeight.w500,
+                          ),
                         ),
                       ),
                     ),
@@ -614,12 +689,14 @@ class _SettingsRow extends StatelessWidget {
                       const SizedBox(width: OSpace.s),
                       ConstrainedBox(
                         constraints: BoxConstraints(maxWidth: valueMax),
-                        child: Text(
-                          value,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          textAlign: TextAlign.right,
-                          style: OType.caption.copyWith(color: c.textMuted),
+                        child: ExcludeSemantics(
+                          child: Text(
+                            value,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.right,
+                            style: OType.caption.copyWith(color: c.textMuted),
+                          ),
                         ),
                       ),
                     ],

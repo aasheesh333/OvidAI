@@ -238,7 +238,7 @@ void main() {
     );
 
     await _openFilter(tester);
-    await tester.tap(find.text('Connected'));
+    await tester.tap(find.byKey(const ValueKey('connector-filter-connected')));
     await tester.pumpAndSettle();
 
     expect(find.text('GitHub'), findsOneWidget);
@@ -560,7 +560,7 @@ void main() {
     expect(data.flagsCollection.isToggled.toBoolOrNull(), isTrue);
     expect(data.flagsCollection.isEnabled.toBoolOrNull(), isTrue);
 
-    final row = find.bySemanticsLabel('GitHub, On');
+    final row = find.bySemanticsLabel('GitHub, Connected');
     expect(row, findsOneWidget);
     expect(
       tester.getSemantics(row).getSemanticsData().flagsCollection.isButton,

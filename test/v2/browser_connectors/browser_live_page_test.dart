@@ -26,6 +26,23 @@ final Uint8List _frameBytes = base64Decode(
 
 WsMultiplexer _ws() => WsMultiplexer(mintTicket: () async => 'ticket');
 
+/// A multiplexer whose link state a test can flip, so the page can be driven
+/// through a dropped socket without opening one.
+class _FakeLinkWs extends WsMultiplexer {
+  _FakeLinkWs() : super(mintTicket: () async => 'ticket');
+
+  WsLinkState _link = WsLinkState.disconnected;
+
+  @override
+  WsLinkState get linkState => _link;
+
+  void setLink(WsLinkState value) {
+    if (_link == value) return;
+    _link = value;
+    notifyListeners();
+  }
+}
+
 Map<String, dynamic> _state({
   bool takeover = false,
   bool live = true,
@@ -80,15 +97,22 @@ void main() {
     Size size = const Size(420, 900),
     double textScale = 1,
     ThemeData? theme,
+    WsMultiplexer? ws,
+    bool failTakeover = false,
   }) async {
     // Built inside the test body on purpose: the client chains frame decodes
     // on a future created in its constructor zone, and a client built in
     // setUp would schedule them outside the widget tester's fake clock.
     client = BrowserStreamClient(
-      ws: _ws(),
+      ws: ws ?? _ws(),
       rawFramesOverride: raw.stream,
       binaryFramesOverride: binary.stream,
-      sendOverride: (frame) async => sent.add(frame),
+      sendOverride: (frame) async {
+        sent.add(frame);
+        if (failTakeover && frame['op'] == 'browser_takeover') {
+          throw StateError('link is down');
+        }
+      },
       decodeFrame: (bytes) async =>
           BrowserFrame(webpBytes: bytes, width: 2, height: 2),
     );
@@ -348,6 +372,34 @@ void main() {
     expect(opsOf('browser_attach').length, greaterThan(attachesBefore));
   });
 
+  testWidgets('a browser-channel error is a real error state with a retry', (
+    tester,
+  ) async {
+    await pumpPage(tester);
+    await emitState(tester);
+
+    raw.add(<String, dynamic>{
+      'op': 'error',
+      'sessionId': 's1',
+      'code': 'unavailable',
+      'message': 'worker down',
+    });
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Live view paused'), findsOneWidget);
+    expect(
+      find.text('The cloud browser is not available right now.'),
+      findsOneWidget,
+    );
+
+    final attachesBefore = opsOf('browser_attach').length;
+    await tester.tap(find.text('Try again'));
+    await tester.pump();
+    await tester.pump();
+    expect(opsOf('browser_attach').length, greaterThan(attachesBefore));
+  });
+
   testWidgets('a picture that stops arriving says the stream is lost', (
     tester,
   ) async {
@@ -414,4 +466,118 @@ void main() {
       expect(find.byTooltip('Return control'), findsOneWidget);
     });
   }
+
+  testWidgets('control is not offered while the picture is still waiting', (
+    tester,
+  ) async {
+    await pumpPage(tester);
+    await emitState(tester);
+
+    // Attached, no picture: there is nothing to aim at yet.
+    expect(find.text('Connecting…'), findsOneWidget);
+    expect(find.byKey(BrowserControlBar.takeControlKey), findsNothing);
+
+    await tester.pump(const Duration(seconds: 6));
+    expect(find.text('Waiting for the page…'), findsOneWidget);
+    expect(find.byKey(BrowserControlBar.takeControlKey), findsNothing);
+
+    // The first frame is what unlocks control.
+    await emitFrame(tester);
+    expect(find.byKey(BrowserControlBar.takeControlKey), findsOneWidget);
+  });
+
+  testWidgets('switching tabs drops the old picture instead of mislabelling it', (
+    tester,
+  ) async {
+    await pumpPage(tester);
+    await emitState(tester);
+    await emitFrame(tester);
+    expect(find.byType(Image), findsWidgets);
+
+    await tester.tap(find.byKey(const ValueKey('v2-browser-tab-1')));
+    await tester.pump();
+
+    // The old tab's last frame must not sit under the new tab's address.
+    expect(find.byType(Image), findsNothing);
+    expect(find.text('Connecting…'), findsOneWidget);
+
+    // The new tab's first frame brings the picture back.
+    await emitState(tester, _state(title: 'Docs'));
+    await emitFrame(tester);
+    expect(find.byType(Image), findsWidgets);
+  });
+
+  testWidgets('a dropped socket stops painting the last frame as live', (
+    tester,
+  ) async {
+    final ws = _FakeLinkWs()..setLink(WsLinkState.online);
+    await pumpPage(tester, ws: ws);
+    await emitState(tester);
+    await emitFrame(tester);
+    expect(find.text('Stream lost'), findsNothing);
+
+    ws.setLink(WsLinkState.disconnected);
+    await tester.pump();
+    await tester.pump();
+
+    // The frame is still there (a stale still is better than black), but it
+    // is no longer presented as a live stream, and reconnect is offered.
+    expect(find.text('Stream lost'), findsOneWidget);
+    expect(find.byKey(BrowserViewport.retryKey), findsOneWidget);
+  });
+
+  testWidgets('a hand-back the server ignores keeps control and says so', (
+    tester,
+  ) async {
+    await pumpPage(tester);
+    await emitState(tester, _state(takeover: true));
+    await emitFrame(tester);
+
+    await tester.tap(find.byKey(BrowserControlBar.takeControlKey));
+    await tester.pump();
+    expect(opsOf('browser_takeover').last['enabled'], isFalse);
+
+    // Never optimistic: the dock stays until the server confirms.
+    expect(find.byTooltip('Return control'), findsOneWidget);
+
+    // No acknowledgement arrives; the person is told and can try again.
+    await tester.pump(const Duration(seconds: 6));
+    expect(find.text('Still controlling. Try again.'), findsOneWidget);
+    expect(find.byTooltip('Return control'), findsOneWidget);
+  });
+
+  testWidgets('a takeover request that cannot be sent says so', (tester) async {
+    await pumpPage(tester, failTakeover: true);
+    await emitState(tester);
+    await emitFrame(tester);
+
+    await tester.tap(find.byKey(BrowserControlBar.takeControlKey));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.text('Start controlling'));
+    await tester.pump();
+    await tester.pump();
+
+    // The request never left; the person is told and the sheet keeps its
+    // retry instead of pretending control changed hands.
+    expect(find.text('Could not pause the page. Try again.'), findsOneWidget);
+    expect(find.byTooltip('Return control'), findsNothing);
+
+    await tester.pump(const Duration(seconds: 6));
+    expect(find.text('Could not pause'), findsOneWidget);
+    expect(find.text('Try again'), findsOneWidget);
+  });
+
+  testWidgets('the page never offers download or upload', (tester) async {
+    await pumpPage(tester);
+    await emitState(tester, _state(takeover: true));
+    await emitFrame(tester);
+
+    expect(find.byIcon(Icons.download_rounded), findsNothing);
+    expect(find.byIcon(Icons.upload_rounded), findsNothing);
+    expect(find.byTooltip('Download'), findsNothing);
+    expect(find.byTooltip('Upload'), findsNothing);
+    expect(find.text('Download'), findsNothing);
+    expect(find.text('Upload'), findsNothing);
+  });
 }

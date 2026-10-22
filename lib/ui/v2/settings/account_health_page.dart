@@ -8,55 +8,80 @@ import 'settings_rows.dart';
 // TODO(l10n): move user-facing copy to the ARB files in the localization pass.
 
 /// Where the account stands with the service.
+///
+/// Only two states are reported by a real service: the account is in good
+/// standing, or a deletion request is pending. There is no suspension endpoint,
+/// so a suspended state is not modelled (and cannot be invented by the UI).
 enum V2AccountStatus {
   /// In good standing.
   active,
 
   /// A deletion request is scheduled but can still be cancelled.
   deletionPending,
-
-  /// Blocked for abuse; data is kept and support can review it.
-  suspendedForAbuse,
 }
 
 /// Injected state for the Account health screen.
 ///
-/// The page only carries what a service can actually report: the account's
-/// standing, the deletion state and the sign-in method. Device management and
-/// two-step sign-in have no endpoint behind them, so they are not modelled and
-/// not rendered.
+/// The page carries only facts the app can read: the plan, the account's
+/// standing, today's usage, storage and the deletion state. Every label is
+/// supplied by the caller; an empty label renders the honest [unknown] mark
+/// instead of a zero that looks like real usage. Device management and
+/// two-step sign-in have no endpoint behind them, so they are neither modelled
+/// nor rendered.
 @immutable
 class V2AccountHealthPageData {
   const V2AccountHealthPageData({
-    this.emailVerified = true,
-    this.emailLabel = '',
+    this.planLabel = '',
     this.accountStatus,
+    this.todayUsageLabel = '',
+    this.todayUsageFraction,
+    this.storageUsedLabel = '',
+    this.storageFraction,
     this.deletionScheduledLabel = '',
-    this.hasData = true,
     this.loading = false,
     this.errorMessage,
-    this.onContactSupport,
+    this.onOpenPlans,
+    this.onOpenStorage,
     this.onCancelDeletion,
     this.onRetry,
   });
 
-  final bool emailVerified;
+  /// The mark for a fact the app has not read. It is deliberately not `0`: a
+  /// zero looks like real usage and hides a failed read.
+  static const unknown = '—';
 
-  /// The address the person signs in with. Empty when the account has none.
-  final String emailLabel;
+  /// The current plan's display name (`Free`, `Go`, …), or empty when unknown.
+  final String planLabel;
 
   /// Where the account stands right now, or null when no status has been
-  /// reported. A missing status is never rendered as the green "Active" pill.
+  /// reported. A missing status is never rendered as "Healthy".
   final V2AccountStatus? accountStatus;
+
+  /// Today's usage, already formatted (`8.2K tokens`). Empty when unknown.
+  final String todayUsageLabel;
+
+  /// Share (0..1) of today's allowance already used, or null when unknown.
+  /// Drives the attention line; it is never shown as a number.
+  final double? todayUsageFraction;
+
+  /// Used storage, already formatted (`1.2 GB of 3 GB`). Empty when unknown.
+  final String storageUsedLabel;
+
+  /// Share (0..1) of the storage quota already used, or null when unknown.
+  final double? storageFraction;
 
   /// The date the data goes, e.g. `20 Nov 2026`.
   final String deletionScheduledLabel;
 
-  final bool hasData;
   final bool loading;
   final String? errorMessage;
 
-  final VoidCallback? onContactSupport;
+  /// Opens the plan list. Null when the host has no route: the row is static.
+  final VoidCallback? onOpenPlans;
+
+  /// Opens the storage screen. Null when the host has no route: the row is
+  /// static.
+  final VoidCallback? onOpenStorage;
 
   /// Cancels a scheduled deletion. The page confirms first.
   final VoidCallback? onCancelDeletion;
@@ -64,29 +89,47 @@ class V2AccountHealthPageData {
 
   bool get deletionPending => accountStatus == V2AccountStatus.deletionPending;
 
-  String get accountStatusLabel => switch (accountStatus) {
-    V2AccountStatus.active => 'Active',
-    V2AccountStatus.deletionPending => 'Deletion pending',
-    V2AccountStatus.suspendedForAbuse => 'Suspended',
-    null => 'Not checked',
-  };
+  bool get canCancelDeletion => deletionPending && onCancelDeletion != null;
 
-  String get accountStatusDetail => switch (accountStatus) {
-    V2AccountStatus.active => 'Your account is in good standing.',
-    V2AccountStatus.deletionPending =>
-      'Your account is scheduled for deletion.',
-    V2AccountStatus.suspendedForAbuse =>
-      'Suspended for abuse. Contact support to appeal.',
-    null => 'No account status has been reported yet.',
-  };
+  /// The one status line, derived from the facts above. It is never hardcoded:
+  /// a missing status or a fact that needs attention changes it.
+  String get statusLabel {
+    if (deletionPending) return 'Attention needed · Deletion scheduled';
+    if (accountStatus == null) return 'Attention needed · Status unknown';
+    if ((storageFraction ?? 0) >= 0.9) {
+      return 'Attention needed · Storage almost full';
+    }
+    if ((todayUsageFraction ?? 0) >= 1) {
+      return 'Attention needed · Daily limit reached';
+    }
+    return 'Healthy';
+  }
 
-  /// `Deletes on 20 Nov 2026`, or an empty string when no date is known.
-  String get deletionSummary => deletionScheduledLabel.isEmpty
-      ? ''
-      : 'Deletes on $deletionScheduledLabel';
+  bool get isHealthy => statusLabel == 'Healthy';
+
+  /// The same line, punctuated for a screen reader instead of a middle dot.
+  String get statusAnnouncement =>
+      isHealthy ? 'Healthy' : statusLabel.replaceFirst(' · ', '. ');
+
+  String get planText => planLabel.trim().isEmpty ? unknown : planLabel.trim();
+
+  String get todayText =>
+      todayUsageLabel.trim().isEmpty ? unknown : todayUsageLabel.trim();
+
+  String get storageText =>
+      storageUsedLabel.trim().isEmpty ? unknown : storageUsedLabel.trim();
+
+  String get deletionText {
+    if (deletionPending) {
+      final date = deletionScheduledLabel.trim();
+      return date.isEmpty ? 'Scheduled' : 'Scheduled · $date';
+    }
+    if (accountStatus == V2AccountStatus.active) return 'None';
+    return unknown;
+  }
 }
 
-/// Account health: standing, deletion state and the sign-in method.
+/// Account health: one derived status line and four facts the app can read.
 class AccountHealthPage extends StatelessWidget {
   const AccountHealthPage({super.key, required this.data});
 
@@ -94,6 +137,8 @@ class AccountHealthPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // The shell's band cap (640 dp on a tablet, 720 dp on a wide window) is the
+    // single source of truth; a wider window adds margin, not line length.
     return OScreen(title: 'Account health', child: _body(context));
   }
 
@@ -101,13 +146,6 @@ class AccountHealthPage extends StatelessWidget {
     if (data.loading) return const OSkeletonList(rows: 4);
     if (data.errorMessage != null) {
       return OErrorState(message: data.errorMessage!, onRetry: data.onRetry);
-    }
-    if (!data.hasData) {
-      return const OEmptyState(
-        icon: Icons.health_and_safety_outlined,
-        title: 'No account data',
-        message: 'Sign in to see your account status.',
-      );
     }
 
     return SingleChildScrollView(
@@ -120,116 +158,81 @@ class AccountHealthPage extends StatelessWidget {
           V2SettingsRowList(
             rows: [
               _HealthRow(
-                key: const ValueKey<String>('health-account-status'),
-                icon: Icons.verified_user_outlined,
-                title: 'Account status',
-                showChevron: false,
-                trailing: OPill(
-                  label: data.accountStatusLabel,
-                  tone: switch (data.accountStatus) {
-                    V2AccountStatus.active => OPillTone.success,
-                    V2AccountStatus.deletionPending => OPillTone.warn,
-                    V2AccountStatus.suspendedForAbuse => OPillTone.danger,
-                    null => OPillTone.neutral,
-                  },
-                  dot: true,
-                ),
+                key: const ValueKey<String>('health-plan'),
+                icon: Icons.workspace_premium_outlined,
+                title: 'Plan',
+                value: data.planText,
+                onTap: data.onOpenPlans,
               ),
               _HealthRow(
-                icon: Icons.alternate_email_rounded,
-                title: 'Email',
-                subtitle: data.emailLabel.isEmpty ? null : data.emailLabel,
-                showChevron: false,
-                trailing: data.emailVerified
-                    ? const OPill(
-                        label: 'Verified',
-                        tone: OPillTone.success,
-                        dot: true,
-                      )
-                    : const OPill(
-                        label: 'Not verified',
-                        tone: OPillTone.warn,
-                        dot: true,
-                      ),
+                key: const ValueKey<String>('health-usage'),
+                icon: Icons.insights_outlined,
+                title: 'Today',
+                value: data.todayText,
               ),
-              if (data.deletionPending && data.deletionSummary.isNotEmpty)
-                _HealthRow(
-                  key: const ValueKey<String>('health-deletion'),
-                  icon: Icons.event_busy_outlined,
-                  title: 'Deletion',
-                  subtitle: data.deletionSummary,
-                  showChevron: false,
-                ),
-              if (data.onContactSupport != null)
-                _HealthRow(
-                  icon: Icons.support_agent_rounded,
-                  title: 'Contact support',
-                  onTap: data.onContactSupport,
-                ),
+              _HealthRow(
+                key: const ValueKey<String>('health-storage'),
+                icon: Icons.cloud_outlined,
+                title: 'Storage',
+                value: data.storageText,
+                onTap: data.onOpenStorage,
+              ),
+              _HealthRow(
+                key: const ValueKey<String>('health-deletion'),
+                icon: Icons.event_busy_outlined,
+                title: 'Deletion',
+                value: data.deletionText,
+                onTap: data.canCancelDeletion
+                    ? () => _confirmCancelDeletion(context)
+                    : null,
+              ),
             ],
           ),
-          if (_bottomAction() != null) ...[
-            const SizedBox(height: OSpace.l),
-            _bottomAction()!,
-          ],
         ],
       ),
     );
   }
 
-  /// One status line: the pill plus what that standing means.
+  /// One status line. The icon and the words carry the state; the whole line
+  /// is a single semantics node so TalkBack announces it once.
   Widget _statusLine(BuildContext context) {
     final c = OColors.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        OPill(
-          label: data.accountStatusLabel,
-          tone: switch (data.accountStatus) {
-            V2AccountStatus.active => OPillTone.success,
-            V2AccountStatus.deletionPending => OPillTone.warn,
-            V2AccountStatus.suspendedForAbuse => OPillTone.danger,
-            null => OPillTone.neutral,
-          },
-          dot: true,
+    final healthy = data.isHealthy;
+    return Semantics(
+      container: true,
+      label: 'Status: ${data.statusAnnouncement}',
+      child: ExcludeSemantics(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: OSpace.xxs),
+              child: Icon(
+                healthy
+                    ? Icons.check_circle_outline_rounded
+                    : Icons.error_outline_rounded,
+                size: 18,
+                color: healthy ? c.success : c.warn,
+              ),
+            ),
+            const SizedBox(width: OSpace.s),
+            Expanded(
+              child: Text(
+                data.statusLabel,
+                style: OType.bodySm.copyWith(
+                  color: c.text,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ],
         ),
-        const SizedBox(height: OSpace.xs),
-        Text(
-          data.accountStatusDetail,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-          style: OType.bodySm.copyWith(color: c.textMuted),
-        ),
-      ],
+      ),
     );
   }
 
-  Widget? _bottomAction() {
-    if (data.deletionPending && data.onCancelDeletion != null) {
-      return _CancelDeletionButton(onPressed: data.onCancelDeletion!);
-    }
-    return null;
-  }
-}
-
-/// Confirms with the real deletion service before anything is cancelled.
-class _CancelDeletionButton extends StatelessWidget {
-  const _CancelDeletionButton({required this.onPressed});
-
-  final VoidCallback onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    return OButton(
-      key: const ValueKey<String>('account-health-cancel-deletion'),
-      label: 'Cancel deletion',
-      variant: OButtonVariant.danger,
-      expand: true,
-      onPressed: () => _confirm(context),
-    );
-  }
-
-  Future<void> _confirm(BuildContext context) async {
+  /// Confirms with the real deletion service before anything is cancelled.
+  Future<void> _confirmCancelDeletion(BuildContext context) async {
     final confirmed = await showOSheet<bool>(
       context,
       title: 'Cancel account deletion?',
@@ -266,120 +269,99 @@ class _CancelDeletionButton extends StatelessWidget {
         );
       },
     );
-    if (confirmed == true) onPressed();
+    if (confirmed == true) data.onCancelDeletion?.call();
   }
 }
 
-/// Settings row that keeps its trailing pill inside the card.
+/// One fact: a 40 dp tile, a short label and its value on the same line.
 ///
-/// `OListRow` hands its trailing child an unbounded width, so a status pill
-/// paints past the card edge once the caption is scaled up. At normal text this
-/// is exactly `OListRow`; above 140 % the trailing control moves under the
-/// title instead of squeezing it into a sliver.
+/// The value is ellipsized rather than wrapped so a long size or date cannot
+/// turn the row into a paragraph. An actionable row is a real button
+/// (chevron, tap target, `button: true`); a row without a handler is static
+/// and never announces an enabled state.
 class _HealthRow extends StatelessWidget {
   const _HealthRow({
     super.key,
+    required this.icon,
     required this.title,
-    this.subtitle,
-    this.icon,
-    this.trailing,
+    required this.value,
     this.onTap,
-    this.showChevron = true,
   });
 
+  final IconData icon;
   final String title;
-  final String? subtitle;
-  final IconData? icon;
-  final Widget? trailing;
+  final String value;
   final VoidCallback? onTap;
-  final bool showChevron;
-
-  /// Above this scale the trailing control drops below the title.
-  static const _stackAbove = 1.4;
 
   @override
   Widget build(BuildContext context) {
-    final trailingWidget = trailing;
-    final stacked =
-        trailingWidget != null &&
-        MediaQuery.textScalerOf(context).scale(1) > _stackAbove;
-    if (!stacked) {
-      return OListRow(
-        title: title,
-        subtitle: subtitle,
-        leading: icon == null ? null : V2SettingsTile(icon: icon!),
-        showChevron: showChevron,
-        onTap: onTap,
-        padding: const EdgeInsets.symmetric(vertical: OSpace.m),
-        trailing: trailingWidget == null
-            ? null
-            : ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 168),
-                child: trailingWidget,
-              ),
-      );
-    }
-
     final c = OColors.of(context);
-    final leadingWidget =
-        icon == null ? null : V2SettingsTile(icon: icon!);
-    final label = subtitle == null ? title : '$title, $subtitle';
-    final content = Padding(
-      padding: const EdgeInsets.symmetric(vertical: OSpace.m),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (leadingWidget != null) ...[
-            leadingWidget,
+    final actionable = onTap != null;
+    final content = ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: OSpace.listRow),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: OSpace.m),
+        child: Row(
+          children: [
+            V2SettingsTile(icon: icon),
             const SizedBox(width: OSpace.m),
-          ],
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // The row label already carries the title and subtitle; the
-                // visible copies are decoration and would be read twice.
-                ExcludeSemantics(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: OType.body.copyWith(
-                          color: c.text,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                      if (subtitle != null) ...[
-                        const SizedBox(height: 2),
-                        Text(
-                          subtitle!,
-                          style: OType.caption.copyWith(color: c.textMuted),
-                        ),
-                      ],
-                    ],
+            Expanded(
+              flex: 2,
+              child: ExcludeSemantics(
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.body.copyWith(
+                    color: c.text,
+                    fontWeight: FontWeight.w500,
                   ),
                 ),
-                const SizedBox(height: OSpace.s),
-                trailingWidget,
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-    return ConstrainedBox(
-      constraints: const BoxConstraints(minHeight: OSpace.listRow),
-      child: onTap == null
-          ? Semantics(label: label, child: content)
-          : Material(
-              type: MaterialType.transparency,
-              child: InkWell(
-                onTap: onTap,
-                borderRadius: BorderRadius.circular(ORadius.m),
-                child: Semantics(label: label, button: true, child: content),
               ),
             ),
+            const SizedBox(width: OSpace.s),
+            Flexible(
+              flex: 3,
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: ExcludeSemantics(
+                  child: Text(
+                    value,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.end,
+                    style: OType.caption.copyWith(color: c.textMuted),
+                  ),
+                ),
+              ),
+            ),
+            if (actionable) ...[
+              const SizedBox(width: OSpace.xs),
+              Icon(Icons.chevron_right_rounded, size: 20, color: c.textFaint),
+            ],
+          ],
+        ),
+      ),
+    );
+
+    // A dash is visual shorthand; spoken, the row says the value is unknown.
+    final spokenValue = value == V2AccountHealthPageData.unknown
+        ? 'unknown'
+        : value;
+    final label = '$title, $spokenValue';
+    if (!actionable) return Semantics(label: label, child: content);
+    return Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(ORadius.m),
+        child: Semantics(
+          label: label,
+          button: true,
+          enabled: true,
+          child: content,
+        ),
+      ),
     );
   }
 }

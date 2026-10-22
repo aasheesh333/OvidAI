@@ -49,12 +49,6 @@ void main() {
             sizeLabel: '30 MB',
           ),
         ],
-        importValidation: const V2ImportValidation(
-          fileName: 'ovid-backup-2026-10-21.zip',
-          message: 'Ready to import: 12 MB · 42 chats · 860 messages.',
-          valid: true,
-          planQuotaLabel: 'Needs 12 MB · 1.8 GB free on your plan.',
-        ),
         onDeleteData: _noop,
         onResetMemory: _noop,
         onExportSessionToggled: _toggle,
@@ -122,9 +116,10 @@ void main() {
     ),
     'health': const AccountHealthPage(
       data: V2AccountHealthPageData(
-        emailVerified: false,
-        emailLabel: 'aarav@gmail.com',
+        planLabel: 'Plus',
         accountStatus: V2AccountStatus.deletionPending,
+        todayUsageLabel: '8.2K tokens',
+        storageUsedLabel: '1.2 GB of 15 GB',
         deletionScheduledLabel: '20 Nov 2026',
       ),
     ),

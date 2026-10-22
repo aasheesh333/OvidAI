@@ -145,7 +145,7 @@ class _FooterItem extends StatelessWidget {
           style: OType.caption.copyWith(color: c.textMuted),
         ),
         if (subtitle != null) ...[
-          const SizedBox(height: 2),
+          const SizedBox(height: OSpace.xxs),
           Text(
             subtitle,
             maxLines: 1,

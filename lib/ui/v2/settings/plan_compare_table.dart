@@ -19,6 +19,7 @@ class V2PlanComparePlan {
     required this.name,
     required this.priceLabel,
     this.pricePeriodLabel = '/ month',
+    this.priceAvailable = true,
     required this.storageGb,
     required this.filesPerWindow,
     required this.fileWindowHours,
@@ -35,6 +36,11 @@ class V2PlanComparePlan {
   final String name;
   final String priceLabel;
   final String pricePeriodLabel;
+
+  /// False when this plan is not sold for the billing period the table is
+  /// showing (no price, no store product). The price cell then says so instead
+  /// of printing a `—` next to a period suffix.
+  final bool priceAvailable;
   final int storageGb;
 
   /// Files accepted inside [fileWindowHours] (50 / day on Free, 80 / 3 h on
@@ -412,8 +418,9 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
                             label: 'Price',
                             semanticLabel: 'Price',
                             value: (plan) => _priceCell(context, plan),
-                            semanticValue: (plan) =>
-                                '${plan.priceLabel} ${plan.pricePeriodLabel}',
+                            semanticValue: (plan) => plan.priceAvailable
+                                ? '${plan.priceLabel} ${plan.pricePeriodLabel}'
+                                : 'not sold for this billing period',
                           ),
                         ],
                       ),
@@ -517,8 +524,8 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
                 const SizedBox(height: OSpace.xs),
                 Wrap(
                   crossAxisAlignment: WrapCrossAlignment.center,
-                  spacing: 6,
-                  runSpacing: 2,
+                  spacing: OSpace.iconGap,
+                  runSpacing: OSpace.xxs,
                   children: [
                     Container(
                       width: 6,
@@ -685,7 +692,7 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
           ),
         ),
         if (plan.fileWindowHours != 24) ...[
-          const SizedBox(height: 2),
+          const SizedBox(height: OSpace.xxs),
           Text(
             plan.filesWindowLabel,
             style: OType.caption.copyWith(color: c.textMuted),
@@ -707,7 +714,7 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
           size: 14,
           color: plan.manualModels ? c.success : c.textFaint,
         ),
-        const SizedBox(width: 6),
+        const SizedBox(width: OSpace.iconGap),
         Expanded(
           child: Text(
             plan.modelAccessLabel,
@@ -734,7 +741,7 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
             fontWeight: FontWeight.w600,
           ),
         ),
-        const SizedBox(height: 2),
+        const SizedBox(height: OSpace.xxs),
         Text(
           '${plan.monthlyTokenCapLabel} / 30 d',
           style: OType.caption.copyWith(color: c.textMuted),
@@ -745,7 +752,13 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
 
   Widget _priceCell(BuildContext context, V2PlanComparePlan plan) {
     final c = OColors.of(context);
-    final current = plan.id == widget.data.currentPlanId;
+    final current = _matches(plan, widget.data.currentPlanId);
+    if (!plan.priceAvailable) {
+      return Text(
+        'Not sold',
+        style: OType.caption.copyWith(color: c.textMuted),
+      );
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -754,7 +767,7 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
           plan.priceLabel,
           style: OType.h3.copyWith(color: current ? c.accent : c.text),
         ),
-        const SizedBox(height: 2),
+        const SizedBox(height: OSpace.xxs),
         Text(
           plan.pricePeriodLabel,
           style: OType.caption.copyWith(color: c.textMuted),
@@ -763,10 +776,19 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
     );
   }
 
+  /// The current plan can be named by its id (`plus`) or its display name
+  /// (`Ovid Plus`); both resolve to the same column.
+  static bool _matches(V2PlanComparePlan plan, String? currentId) {
+    if (currentId == null) return false;
+    final id = currentId.trim().toLowerCase();
+    return plan.id.trim().toLowerCase() == id ||
+        plan.name.trim().toLowerCase() == id;
+  }
+
   static int? _currentIndex(List<V2PlanComparePlan> plans, String? currentId) {
     if (currentId == null) return null;
     for (var index = 0; index < plans.length; index++) {
-      if (plans[index].id == currentId) return index;
+      if (_matches(plans[index], currentId)) return index;
     }
     return null;
   }

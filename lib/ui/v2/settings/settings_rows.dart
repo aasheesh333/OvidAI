@@ -15,8 +15,7 @@ const double v2SettingsTileSize = 40;
 
 /// Divider inset that skips the icon tile and its gap, so the hairline runs
 /// from the row's text edge to the content edge.
-const double v2SettingsRowDividerIndent =
-    v2SettingsTileSize + OSpace.m;
+const double v2SettingsRowDividerIndent = v2SettingsTileSize + OSpace.m;
 
 /// The 40 dp leading tile: `surfaceAlt`, radius m, one 20 dp glyph.
 class V2SettingsTile extends StatelessWidget {
@@ -43,7 +42,11 @@ class V2SettingsTile extends StatelessWidget {
 /// A trailing value plus the chevron, for rows that navigate and carry a
 /// real value ("Voice language · English").
 class V2SettingsRowValue extends StatelessWidget {
-  const V2SettingsRowValue({super.key, required this.value, this.chevron = true});
+  const V2SettingsRowValue({
+    super.key,
+    required this.value,
+    this.chevron = true,
+  });
 
   final String value;
   final bool chevron;
@@ -118,34 +121,49 @@ class V2SettingsRow extends StatelessWidget {
     final leadingWidget =
         leading ??
         (icon == null ? null : V2SettingsTile(icon: icon!, danger: danger));
-    final trailingWidget =
-        trailing ??
-        (value == null
-            ? null
-            : V2SettingsRowValue(
-                value: value!,
-                // The chevron belongs to navigation; an immediate action
-                // (clear cache) shows its value alone.
-                chevron: showChevron && onTap != null,
-              ));
-    if (trailingWidget != null &&
-        stacksTrailing &&
-        MediaQuery.textScalerOf(context).scale(1) > _stackAbove) {
-      return _stacked(context, leadingWidget, trailingWidget);
-    }
-    // The key stays on this wrapper: forwarding it to the row would put the
-    // same ValueKey on two widgets.
-    return OListRow(
-      title: title,
-      subtitle: subtitle,
-      leading: leadingWidget,
-      trailing: trailingWidget,
-      onTap: onTap,
-      danger: danger,
-      enabled: enabled,
-      // A value row already ends in its value; the chevron rides with it.
-      showChevron: trailingWidget == null && showChevron,
-      padding: const EdgeInsets.symmetric(vertical: OSpace.m),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final trailingWidget = trailing ?? _valueTrailing(constraints.maxWidth);
+        if (trailingWidget != null &&
+            stacksTrailing &&
+            MediaQuery.textScalerOf(context).scale(1) > _stackAbove) {
+          return _stacked(context, leadingWidget, trailingWidget);
+        }
+        // The key stays on this wrapper: forwarding it to the row would put the
+        // same ValueKey on two widgets.
+        return OListRow(
+          title: title,
+          subtitle: subtitle,
+          leading: leadingWidget,
+          trailing: trailingWidget,
+          onTap: onTap,
+          danger: danger,
+          enabled: enabled,
+          // A value row already ends in its value; the chevron rides with it.
+          showChevron: trailingWidget == null && showChevron,
+          padding: const EdgeInsets.symmetric(vertical: OSpace.m),
+        );
+      },
+    );
+  }
+
+  /// A trailing value capped to its share of the row.
+  ///
+  /// [OListRow] lays its non-flex children out with an unbounded width, so a
+  /// value without its own cap makes the row overflow instead of ellipsizing.
+  Widget? _valueTrailing(double rowWidth) {
+    if (value == null) return null;
+    final maxWidth = rowWidth.isFinite
+        ? (rowWidth * 0.38).clamp(72.0, 160.0).toDouble()
+        : 160.0;
+    return ConstrainedBox(
+      constraints: BoxConstraints(maxWidth: maxWidth),
+      child: V2SettingsRowValue(
+        value: value!,
+        // The chevron belongs to navigation; an immediate action
+        // (clear cache) shows its value alone.
+        chevron: showChevron && onTap != null,
+      ),
     );
   }
 
@@ -162,10 +180,7 @@ class V2SettingsRow extends StatelessWidget {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (leading != null) ...[
-              leading,
-              const SizedBox(width: OSpace.m),
-            ],
+            if (leading != null) ...[leading, const SizedBox(width: OSpace.m)],
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,

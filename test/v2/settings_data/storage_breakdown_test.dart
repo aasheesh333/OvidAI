@@ -355,7 +355,7 @@ void main() {
     expect(retries, 1);
   });
 
-  testWidgets('a zero-fraction category still gets a legend row', (
+  testWidgets('a category with no data is omitted from the bar and legend', (
     tester,
   ) async {
     await _pump(
@@ -385,8 +385,12 @@ void main() {
 
     expect(find.text('34%'), findsOneWidget);
     expect(find.text('33%'), findsNWidgets(2));
-    expect(find.text('0%'), findsOneWidget);
-    expect(find.text('0 B'), findsOneWidget);
+    // A zero-byte category is not drawn at 0 % and does not get a legend row.
+    expect(find.text('Previews'), findsNothing);
+    expect(find.text('0%'), findsNothing);
+    expect(find.text('0 B'), findsNothing);
+    // Unknown capacity is a dash, not "0 GB".
+    expect(find.text('of —'), findsOneWidget);
   });
 
   testWidgets('renders the five specified categories with sizes and shares', (
@@ -589,8 +593,12 @@ void main() {
       final result = reconcileStorageBreakdown(_entries, sum - 1);
 
       expect(result.usedBytes, sum);
-      expect(result.entries.any((entry) => entry.category == V2StorageCategory.other),
-          isFalse);
+      expect(
+        result.entries.any(
+          (entry) => entry.category == V2StorageCategory.other,
+        ),
+        isFalse,
+      );
       expect(result.addsUp, isTrue);
     });
   });
@@ -624,5 +632,66 @@ void main() {
     ]);
     expect(shares.fold<int>(0, (sum, share) => sum + share), 100);
     expect(shares.length, entries.length);
+  });
+
+  testWidgets('a long GB string never overflows at 320 dp', (tester) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    final data = _data(
+      usedBytes: 1234567 * 1024 * 1024,
+      totalBytes: 9999999 * 1024 * 1024,
+      amountLabel: '123456.7 GB',
+      totalLabel: '999999.9 GB',
+      entries: const [
+        V2StorageCategoryBytes(
+          category: V2StorageCategory.chats,
+          bytes: 1234567 * 1024 * 1024,
+          sizeLabel: '123456.7 GB',
+        ),
+      ],
+    );
+
+    for (final scale in [1.0, 2.0]) {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: OTheme.light(),
+          home: MediaQuery(
+            data: MediaQueryData(
+              size: const Size(320, 640),
+              textScaler: TextScaler.linear(scale),
+            ),
+            child: Scaffold(
+              body: SingleChildScrollView(
+                padding: const EdgeInsets.all(OSpace.l),
+                child: StorageBreakdown(data: data),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+
+      expect(tester.takeException(), isNull, reason: 'scale $scale');
+    }
+  });
+
+  testWidgets('an unknown capacity is announced without a fake total', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    await _pump(
+      tester,
+      StorageBreakdown(data: _data(totalBytes: 0, totalLabel: '—')),
+    );
+
+    final chart = tester.getSemantics(
+      find.byKey(const ValueKey('storage-breakdown-chart')),
+    );
+    expect(chart.label, startsWith('Storage: 3 GB used.'));
+    expect(chart.label, isNot(contains('of —')));
+    handle.dispose();
   });
 }

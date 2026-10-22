@@ -66,9 +66,6 @@ class V2OnboardingSnapshot {
   /// The paywall currency picked in a previous run (`usd` or `inr`), or null
   /// when the person has not changed the default.
   final String? currencyId;
-
-  /// A returning user who already picked a language skips the language step.
-  bool get hasChoices => languageId != null;
 }
 
 /// Durable store for the first-run choices.
@@ -98,6 +95,7 @@ class V2OnboardingStore {
 
     final goals = (prefs.getString(kV2FirstGoalPref) ?? '')
         .split(',')
+        .map((id) => id.trim())
         .where((id) => id.isNotEmpty)
         .toSet();
 
@@ -117,6 +115,10 @@ class V2OnboardingStore {
   }
 
   /// Persists both first-run choices together. Throws on failure.
+  ///
+  /// Goals are written first: the language key is the marker that tells the
+  /// gate this step is complete. If the second write fails, a restart repeats
+  /// the step instead of skipping it with half a choice.
   Future<void> saveChoices({
     required String languageId,
     required Set<String> goalIds,
@@ -126,11 +128,11 @@ class V2OnboardingStore {
     }
     final prefs = await SharedPreferences.getInstance();
     final sorted = goalIds.toList()..sort();
+    final goalsOk = await prefs.setString(kV2FirstGoalPref, sorted.join(','));
     final languageOk = await prefs.setString(
       kV2OnboardingLanguagePref,
       languageId,
     );
-    final goalsOk = await prefs.setString(kV2FirstGoalPref, sorted.join(','));
     if (!languageOk || !goalsOk) {
       throw StateError('could not persist the onboarding choices');
     }

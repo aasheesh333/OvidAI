@@ -41,7 +41,7 @@ void main() {
   ) async {
     for (final dark in <bool>[false, true]) {
       await tester.pumpWidget(
-        _app(const V2CommitSheet(data: _data), dark: dark),
+        _app(V2CommitSheet(data: _data, onCommit: (_) {}), dark: dark),
       );
       await tester.pumpAndSettle();
 
@@ -245,7 +245,9 @@ void main() {
     tester,
   ) async {
     final handle = tester.ensureSemantics();
-    await tester.pumpWidget(_app(const V2CommitSheet(data: _data)));
+    await tester.pumpWidget(
+      _app(V2CommitSheet(data: _data, onCommit: (_) {})),
+    );
     await tester.pumpAndSettle();
 
     expect(
@@ -260,8 +262,9 @@ void main() {
     handle.dispose();
   });
 
-  testWidgets('an unwired commit action stays disabled', (tester) async {
-    final handle = tester.ensureSemantics();
+  testWidgets('an unwired commit shows neither a field nor a submit', (
+    tester,
+  ) async {
     await tester.pumpWidget(
       _app(
         const V2CommitSheet(
@@ -274,9 +277,11 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(_submit(tester).onPressed, isNull);
-    expect(_submit(tester).semanticLabel, 'Commit & push, unavailable');
-    handle.dispose();
+    // A read-only review: no message input, no submit control.
+    expect(find.byKey(_submitKey), findsNothing);
+    expect(find.byKey(_messageKey), findsNothing);
+    expect(find.text('Commit & push'), findsNothing);
+    expect(find.textContaining('unavailable'), findsNothing);
   });
 
   testWidgets('an unwired sync shows no dead button and no excuse', (
@@ -306,8 +311,8 @@ void main() {
 
     await tester.pumpWidget(
       _app(
-        const V2CommitSheet(
-          data: V2CommitSheetData(
+        V2CommitSheet(
+          data: const V2CommitSheetData(
             files: _files,
             branchLabel: 'feature/hero-revamp',
             behindCount: 1,
@@ -315,6 +320,7 @@ void main() {
                 'feat: update hero typography & branding across the landing '
                 'page',
           ),
+          onCommit: (_) {},
         ),
         textScale: 2,
       ),

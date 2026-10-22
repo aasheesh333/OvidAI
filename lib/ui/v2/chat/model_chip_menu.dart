@@ -13,11 +13,6 @@ const double _menuMaxWidth = 336;
 /// spoken label can never drift apart.
 const String _lockedPlanLabel = 'Plus plan';
 
-/// Default explanation shown while the plan is Auto-only.
-const String _defaultUpgradeHint =
-    'Upgrade to Plus or Pro to pick a model manually. '
-    'Auto is included on every plan.';
-
 /// A locked model row in the compact chip menu.
 @immutable
 class V2ChipModel {
@@ -47,12 +42,12 @@ class V2ModelChipMenuData {
     this.manageLabel = 'Manage models',
     this.compareLabel = 'Compare plans',
     this.comparePriceLabel = 'From \$18/mo',
-    this.note = 'Free plan uses Auto only.',
     this.manualModelsAllowed = false,
-    this.upgradeHint = _defaultUpgradeHint,
     this.lockedPlanLabel = _lockedPlanLabel,
   });
 
+  /// Every manual model the menu can show. On an Auto-only plan each row is
+  /// drawn locked; on Plus/Pro the same rows are selectable.
   final List<V2ChipModel> lockedModels;
   final String tierLabel;
   final String autoName;
@@ -62,21 +57,22 @@ class V2ModelChipMenuData {
   final String manageLabel;
   final String compareLabel;
   final String comparePriceLabel;
-  final String note;
 
   /// Whether the current plan may pick a manual model. Free and Go are
   /// Auto-only; Plus and Pro allow every model. Defaults to false because
   /// [lockedModels] only carries rows the caller expects to gate.
   final bool manualModelsAllowed;
 
-  /// Short explanation shown under the header while the plan is Auto-only.
-  final String upgradeHint;
-
   /// Plan a manual model requires, used by the locked-row tag and its spoken
   /// label. Free and Go both need Plus.
   final String lockedPlanLabel;
 
-  bool get autoSelected => selectedId == 'auto';
+  /// True when Auto is the model that will actually run. A remembered manual
+  /// pick that the current plan cannot reach falls back to Auto.
+  bool get autoSelected {
+    if (selectedId == 'auto' || autoOnly) return true;
+    return !lockedModels.any((model) => model.id == selectedId);
+  }
 
   /// True when the plan can only use Auto. The explicit
   /// [manualModelsAllowed] gate wins, and an Auto-only tier label is also
@@ -176,8 +172,8 @@ class V2ModelChipMenu extends StatelessWidget {
   }
 }
 
-/// Small status tag. Mirrors the shared `OPill` look but grows with the text
-/// scale instead of clipping its label inside a fixed 24 dp box.
+/// The always-available Auto row. It is drawn with the accent tile and a
+/// check so the recommendation reads without a second paragraph.
 class _AutoRow extends StatelessWidget {
   const _AutoRow({required this.data, required this.onTap});
 
@@ -188,7 +184,7 @@ class _AutoRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     return Semantics(
-      label: '${data.autoName}, ${data.autoTag}',
+      label: '${data.autoName}, ${data.autoTag}, available',
       button: true,
       enabled: true,
       selected: data.autoSelected,
@@ -202,8 +198,8 @@ class _AutoRow extends StatelessWidget {
           child: Row(
             children: [
               Container(
-                width: 40,
-                height: 40,
+                width: OSpace.iconTile,
+                height: OSpace.iconTile,
                 decoration: BoxDecoration(
                   color: c.accentSoft,
                   borderRadius: BorderRadius.circular(ORadius.m),
@@ -222,7 +218,7 @@ class _AutoRow extends StatelessWidget {
                   children: [
                     Wrap(
                       spacing: OSpace.xs,
-                      runSpacing: 2,
+                      runSpacing: OSpace.xxs,
                       crossAxisAlignment: WrapCrossAlignment.center,
                       children: [
                         Text(
@@ -232,7 +228,7 @@ class _AutoRow extends StatelessWidget {
                         OPill(label: data.autoTag, tone: OPillTone.success),
                       ],
                     ),
-                    const SizedBox(height: 2),
+                    const SizedBox(height: OSpace.xxs),
                     Text(
                       data.autoSubtitle,
                       maxLines: 1,
@@ -273,7 +269,7 @@ class _ManualRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     return Semantics(
-      label: '${model.name}, ${model.subtitle}',
+      label: '${model.name}, ${model.subtitle}, available',
       button: true,
       enabled: true,
       selected: selected,
@@ -287,8 +283,8 @@ class _ManualRow extends StatelessWidget {
           child: Row(
             children: [
               Container(
-                width: 40,
-                height: 40,
+                width: OSpace.iconTile,
+                height: OSpace.iconTile,
                 decoration: BoxDecoration(
                   color: c.surfaceAlt,
                   borderRadius: BorderRadius.circular(ORadius.m),
@@ -310,7 +306,7 @@ class _ManualRow extends StatelessWidget {
                         fontWeight: FontWeight.w500,
                       ),
                     ),
-                    const SizedBox(height: 2),
+                    const SizedBox(height: OSpace.xxs),
                     Text(
                       model.subtitle,
                       maxLines: 1,
@@ -356,8 +352,8 @@ class _LockedRow extends StatelessWidget {
           builder: (context, constraints) => Row(
             children: [
               Container(
-                width: 40,
-                height: 40,
+                width: OSpace.iconTile,
+                height: OSpace.iconTile,
                 decoration: BoxDecoration(
                   color: c.surfaceAlt,
                   borderRadius: BorderRadius.circular(ORadius.m),
@@ -379,7 +375,7 @@ class _LockedRow extends StatelessWidget {
                         fontWeight: FontWeight.w500,
                       ),
                     ),
-                    const SizedBox(height: 2),
+                    const SizedBox(height: OSpace.xxs),
                     Text(
                       model.subtitle,
                       maxLines: 1,
@@ -449,7 +445,7 @@ class _ActionRow extends StatelessWidget {
                     alignment: WrapAlignment.spaceBetween,
                     crossAxisAlignment: WrapCrossAlignment.center,
                     spacing: OSpace.s,
-                    runSpacing: 2,
+                    runSpacing: OSpace.xxs,
                     children: [
                       Text(
                         label,

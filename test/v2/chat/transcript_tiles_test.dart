@@ -1,4 +1,3 @@
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -322,6 +321,27 @@ void main() {
       await tester.tap(find.bySemanticsLabel('Actions for diagram.png'));
       await tester.pumpAndSettle();
       expect(find.text('Copy link'), findsOneWidget);
+    });
+
+    testWidgets('the artifact menu names the real preview', (tester) async {
+      await tester.pumpWidget(
+        _app(
+          V2ArtifactTile(
+            fileName: 'portfolio.html',
+            meta: '14 KB',
+            statusLabel: 'Ready',
+            previewLabel: 'Interactive HTML5 canvas',
+            onOpen: () {},
+            onCopy: () {},
+          ),
+        ),
+      );
+
+      await tester.tap(find.bySemanticsLabel('Actions for portfolio.html'));
+      await tester.pumpAndSettle();
+      // The host's preview description is shown where it belongs instead of
+      // being carried unused.
+      expect(find.text('Interactive HTML5 canvas'), findsOneWidget);
     });
 
     testWidgets('a real thumbnail replaces the glyph, a missing one keeps it', (

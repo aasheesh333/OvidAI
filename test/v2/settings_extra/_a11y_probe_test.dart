@@ -62,7 +62,7 @@ final _screens = <String, Widget>{
   'presets': const AgentPresetsPage(
     data: V2AgentPresetsPageData(presets: _presets, selectedId: 'general'),
   ),
-  'wait': const ResponseWaitPage(data: V2ResponseWaitPageData()),
+  'wait': const ResponseWaitPage(data: V2ResponseWaitPageData(seconds: 120)),
   'permissions': const PermissionsPage(
     data: V2PermissionsPageData(permissions: _permissions),
   ),

@@ -116,6 +116,11 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
   /// when the platform has no preferences (previews).
   Map<String, V2ConnectorConnection> _connections = const {};
 
+  /// Switch values for rows the wiring layer supplied without a saved record.
+  /// They keep the row honest in memory instead of snapping back when there is
+  /// nothing to persist; a store-backed row clears its entry once saved.
+  final Map<String, bool> _enabledOverrides = <String, bool>{};
+
   /// The plan the add flow enforces. Resolved once, from the injected value or
   /// the cached tier.
   V2ConnectorPlan? _plan;
@@ -135,7 +140,10 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
       final saved = await _store.load();
       if (!mounted) return;
       setState(() {
-        _connections = {for (final connection in saved) connection.id: connection};
+        _connections = {
+          for (final connection in saved) connection.id: connection,
+        };
+        _enabledOverrides.clear();
       });
     } catch (_) {
       // No readable store: the built-in catalog is still shown, all
@@ -165,21 +173,23 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
     final rows = <V2Connector>[];
     for (final row in base) {
       final saved = _connections[row.id];
-      rows.add(
-        saved == null
-            ? row
-            : row.copyWith(
-                connected: true,
-                enabled: saved.enabled,
-                endpoint: saved.endpoint,
-                description: row.description,
-              ),
-      );
+      final merged = saved == null
+          ? row
+          : row.copyWith(
+              connected: true,
+              enabled: saved.enabled,
+              endpoint: saved.endpoint,
+              description: row.description,
+            );
+      final override = _enabledOverrides[row.id];
+      rows.add(override == null ? merged : merged.copyWith(enabled: override));
     }
     final baseIds = {for (final row in base) row.id};
     for (final saved in _connections.values) {
       if (!saved.custom || baseIds.contains(saved.id)) continue;
-      rows.insert(0, saved.toRow());
+      final row = saved.toRow();
+      final override = _enabledOverrides[saved.id];
+      rows.insert(0, override == null ? row : row.copyWith(enabled: override));
     }
     return rows;
   }
@@ -233,18 +243,27 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
       return;
     }
     final current = _connections[id];
-    if (current == null) return;
     setState(() {
-      _connections = {
-        ..._connections,
-        id: current.copyWith(enabled: enabled),
-      };
+      _enabledOverrides[id] = enabled;
+      if (current != null) {
+        _connections = {
+          ..._connections,
+          id: current.copyWith(enabled: enabled),
+        };
+      }
     });
+    // A row the wiring layer supplied without a saved record has nothing to
+    // persist yet. The switch keeps the value it was given instead of
+    // snapping back; the next reload replaces it with the store's truth.
+    if (current == null) return;
     try {
       await _store.setEnabled(id, enabled);
+      if (!mounted) return;
+      setState(() => _enabledOverrides.remove(id));
     } catch (_) {
       if (!mounted) return;
       setState(() {
+        _enabledOverrides.remove(id);
         _connections = {..._connections, id: current};
       });
       showOSnack(context, 'Could not save that change.');
@@ -343,6 +362,7 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
     if (_query.isEmpty) return true;
     if (connector.name.toLowerCase().contains(_query)) return true;
     if (connector.description.toLowerCase().contains(_query)) return true;
+    if (connector.category.toLowerCase().contains(_query)) return true;
     return connector.tools.any((tool) => tool.toLowerCase().contains(_query));
   }
 
@@ -390,10 +410,7 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               if (_customCapReached) ...[
-                _CapLine(
-                  plan: _plan!,
-                  onUpgrade: _openUpgrade,
-                ),
+                _CapLine(plan: _plan!, onUpgrade: _openUpgrade),
                 const SizedBox(height: OSpace.m),
               ],
               Row(
@@ -417,36 +434,27 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
           ),
         ),
         if (catalog.isEmpty)
-          SliverFillRemaining(
-            hasScrollBody: false,
-            child: _catalogEmpty(),
-          )
+          SliverFillRemaining(hasScrollBody: false, child: _catalogEmpty())
         else if (rows.isEmpty)
           SliverFillRemaining(hasScrollBody: false, child: _searchEmpty())
         else
           SliverList(
-            delegate: SliverChildBuilderDelegate(
-              (context, index) {
-                final connector = rows[index];
-                return Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (index > 0)
-                      Divider(
-                        height: 1,
-                        color: OColors.of(context).hairline,
-                      ),
-                    _ConnectorRow(
-                      connector: connector,
-                      onTap: () => _openConnector(connector.id),
-                      onToggle: (value) => _toggle(connector.id, value),
-                      onConnect: () => _connect(connector.id),
-                    ),
-                  ],
-                );
-              },
-              childCount: rows.length,
-            ),
+            delegate: SliverChildBuilderDelegate((context, index) {
+              final connector = rows[index];
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (index > 0)
+                    Divider(height: 1, color: OColors.of(context).hairline),
+                  _ConnectorRow(
+                    connector: connector,
+                    onTap: () => _openConnector(connector.id),
+                    onToggle: (value) => _toggle(connector.id, value),
+                    onConnect: () => _connect(connector.id),
+                  ),
+                ],
+              );
+            }, childCount: rows.length),
           ),
       ],
     );
@@ -458,24 +466,42 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
       icon: Icons.hub_outlined,
       title: 'No connectors',
       message: 'New connectors appear here.',
-      action: OButton(
-        label: 'Add connector',
-        icon: Icons.add_rounded,
-        onPressed: _customCapReached ? null : _openAddCustom,
-      ),
+      // At the cap there is nothing to add, so the one action is the real way
+      // out. A disabled "Add connector" here would be a dead control.
+      action: _customCapReached
+          ? OButton(
+              label: 'Upgrade',
+              icon: Icons.arrow_upward_rounded,
+              onPressed: _openUpgrade,
+            )
+          : OButton(
+              label: 'Add connector',
+              icon: Icons.add_rounded,
+              onPressed: _openAddCustom,
+            ),
     );
   }
 
   Widget _searchEmpty() {
+    // Two different empty states: a search that found nothing and a filter
+    // with no rows. Telling someone to "try a different search" when they
+    // never searched is wrong, and the action differs too.
+    final searching = _query.isNotEmpty;
     return OEmptyState(
       compact: true,
-      icon: Icons.search_off_rounded,
-      title: 'No matches',
-      message: 'Try a different search.',
+      icon: searching
+          ? Icons.search_off_rounded
+          : Icons.filter_list_off_rounded,
+      title: searching ? 'No matches' : 'Empty filter',
+      message: searching
+          ? 'Try a different search.'
+          : 'No connector in this filter.',
       action: OButton(
-        label: 'Clear search',
+        label: searching ? 'Clear search' : 'Show all',
         variant: OButtonVariant.secondary,
-        onPressed: _clearSearch,
+        onPressed: searching
+            ? _clearSearch
+            : () => setState(() => _filter = _Filter.all),
       ),
     );
   }
@@ -500,6 +526,7 @@ class _FilterButton extends StatelessWidget {
       itemBuilder: (context) => [
         for (final option in _Filter.values)
           CheckedPopupMenuItem<_Filter>(
+            key: ValueKey('connector-filter-${option.name}'),
             value: option,
             checked: option == value,
             child: Text(option.label),
@@ -512,28 +539,28 @@ class _FilterButton extends StatelessWidget {
         button: true,
         enabled: true,
         child: SizedBox(
-        width: OSpace.touch,
-        height: OSpace.touch,
-        child: Stack(
-          alignment: Alignment.center,
-          children: [
-            Icon(Icons.filter_list_rounded, size: 22, color: c.textMuted),
-            if (value != _Filter.all)
-              Positioned(
-                top: OSpace.m,
-                right: OSpace.m,
-                child: Container(
-                  width: 6,
-                  height: 6,
-                  decoration: BoxDecoration(
-                    color: c.accent,
-                    shape: BoxShape.circle,
+          width: OSpace.touch,
+          height: OSpace.touch,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              Icon(Icons.filter_list_rounded, size: 22, color: c.textMuted),
+              if (value != _Filter.all)
+                Positioned(
+                  top: OSpace.m,
+                  right: OSpace.m,
+                  child: Container(
+                    width: 6,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      color: c.accent,
+                      shape: BoxShape.circle,
+                    ),
                   ),
                 ),
-              ),
-          ],
+            ],
+          ),
         ),
-      ),
       ),
     );
   }
@@ -556,10 +583,13 @@ class _ConnectorRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    // One status line, in the words the person would use: a saved connector is
+    // connected, a connected one that is switched off is paused, and a row
+    // with no saved record is not connected. "On" alone told them nothing.
     final status = !connector.connected
         ? 'Not connected'
         : connector.enabled
-        ? 'On'
+        ? 'Connected'
         : 'Paused';
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: OSpace.s),
@@ -580,11 +610,7 @@ class _ConnectorRow extends StatelessWidget {
                         borderRadius: BorderRadius.circular(ORadius.m),
                         border: Border.all(color: c.hairline),
                       ),
-                      child: Icon(
-                        connector.icon,
-                        size: 18,
-                        color: c.textMuted,
-                      ),
+                      child: Icon(connector.icon, size: 18, color: c.textMuted),
                     ),
                     const SizedBox(width: OSpace.m),
                     Expanded(
@@ -620,12 +646,12 @@ class _ConnectorRow extends StatelessWidget {
             child: Semantics(
               label: '${connector.name} connector',
               child: SizedBox(
-              height: OSpace.touch,
-              child: Switch(
-                key: ValueKey('connector-switch-${connector.id}'),
-                value: connector.connected && connector.enabled,
-                // A row without a saved connection opens the setup form; the
-                // switch never shows a state the store does not hold.
+                height: OSpace.touch,
+                child: Switch(
+                  key: ValueKey('connector-switch-${connector.id}'),
+                  value: connector.connected && connector.enabled,
+                  // A row without a saved connection opens the setup form; the
+                  // switch never shows a state the store does not hold.
                   onChanged: connector.connected
                       ? onToggle
                       : (value) {
@@ -670,10 +696,7 @@ class _CapLine extends StatelessWidget {
           Icon(Icons.lock_outline_rounded, size: 18, color: c.warn),
           const SizedBox(width: OSpace.s),
           Expanded(
-            child: Text(
-              message,
-              style: OType.caption.copyWith(color: c.text),
-            ),
+            child: Text(message, style: OType.caption.copyWith(color: c.text)),
           ),
           OTextAction(label: 'Upgrade', onPressed: onUpgrade),
         ],

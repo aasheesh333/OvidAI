@@ -4,6 +4,7 @@ import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/onboarding/phone_auth_sheet.dart';
 import 'package:ovid_ai/ui/v2/onboarding/sign_in_page.dart';
+import 'package:ovid_ai/ui/widgets/external_link.dart';
 
 Future<void> _pump(
   WidgetTester tester, {
@@ -125,6 +126,124 @@ void main() {
     expect(googleTaps, 1);
   });
 
+  testWidgets('only the provider that was tapped shows in-flight', (
+    tester,
+  ) async {
+    var loading = false;
+    var googleCalls = 0;
+    late StateSetter host;
+
+    await tester.binding.setSurfaceSize(const Size(400, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: OTheme.light(),
+        home: StatefulBuilder(
+          builder: (context, setState) {
+            host = setState;
+            return SignInPage(
+              data: V2SignInData(loading: loading),
+              onGoogle: () {
+                googleCalls++;
+                setState(() => loading = true);
+              },
+              onPhone: () {},
+            );
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Continue with Google'));
+    await tester.pump();
+
+    final google = tester.widget<OButton>(
+      find.byKey(const Key('sign-in-submit')),
+    );
+    final phone = tester.widget<OButton>(
+      find.byKey(const Key('sign-in-phone')),
+    );
+    expect(googleCalls, 1);
+    expect(google.loading, isTrue);
+    expect(phone.loading, isFalse);
+    expect(phone.onPressed, isNull);
+
+    // A second tap cannot start the request again while it is in flight.
+    await tester.tap(find.text('Continue with Google'), warnIfMissed: false);
+    await tester.pump();
+    expect(googleCalls, 1);
+
+    // The host completed the request: both controls return to idle.
+    host(() => loading = false);
+    await tester.pump();
+    expect(
+      tester.widget<OButton>(find.byKey(const Key('sign-in-submit'))).onPressed,
+      isNotNull,
+    );
+    expect(
+      tester.widget<OButton>(find.byKey(const Key('sign-in-phone'))).onPressed,
+      isNotNull,
+    );
+  });
+
+  testWidgets('the phone action owns its own in-flight state', (tester) async {
+    var loading = false;
+    await tester.binding.setSurfaceSize(const Size(400, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: OTheme.light(),
+        home: StatefulBuilder(
+          builder: (context, setState) => SignInPage(
+            data: V2SignInData(loading: loading),
+            onGoogle: () {},
+            onPhone: () => setState(() => loading = true),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('sign-in-phone')));
+    await tester.pump();
+
+    expect(
+      tester.widget<OButton>(find.byKey(const Key('sign-in-phone'))).loading,
+      isTrue,
+    );
+    expect(
+      tester.widget<OButton>(find.byKey(const Key('sign-in-submit'))).loading,
+      isFalse,
+    );
+    expect(
+      tester.widget<OButton>(find.byKey(const Key('sign-in-submit'))).onPressed,
+      isNull,
+    );
+  });
+
+  testWidgets('cancellation returns to idle instead of showing an error', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      data: const V2SignInData(error: 'cancelled'),
+      onGoogle: () {},
+      onPhone: () {},
+    );
+
+    expect(find.byKey(const Key('sign-in-error')), findsNothing);
+    expect(find.text('Try again'), findsNothing);
+    expect(
+      tester.widget<OButton>(find.byKey(const Key('sign-in-submit'))).onPressed,
+      isNotNull,
+    );
+    expect(
+      tester.widget<OButton>(find.byKey(const Key('sign-in-phone'))).onPressed,
+      isNotNull,
+    );
+  });
+
   testWidgets('loading disables both actions and shows a spinner', (
     tester,
   ) async {
@@ -180,16 +299,80 @@ void main() {
     expect(find.text('Try again'), findsNothing);
   });
 
-  testWidgets('legal links live in settings, not on this step', (
+  testWidgets('legal links open the real documents before choosing', (
     tester,
   ) async {
+    final opened = <Uri>[];
+    externalLinkLauncherForTest = (uri) async {
+      opened.add(uri);
+      return true;
+    };
+    addTearDown(() => externalLinkLauncherForTest = null);
+
     await _pump(tester, onGoogle: () {}, onPhone: () {});
 
-    // The step is wordmark, one line and two providers; the documents are
-    // reachable from Settings → About instead of a fifth body element here.
+    expect(find.text('By continuing, you agree to'), findsOneWidget);
+    expect(find.text('Terms'), findsOneWidget);
+    expect(find.text('Privacy Policy'), findsOneWidget);
+
+    await tester.ensureVisible(find.text('Terms'));
+    await tester.tap(find.text('Terms'));
+    await tester.pump();
+    await tester.tap(find.text('Privacy Policy'));
+    await tester.pump();
+
+    expect(opened, hasLength(2));
+    expect(opened[0].path, '/terms');
+    expect(opened[1].path, '/privacy');
+  });
+
+  testWidgets('legal links disappear when no URL is configured', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: OTheme.light(),
+        home: const Scaffold(
+          body: V2LegalNote(termsUrl: '', privacyUrl: ''),
+        ),
+      ),
+    );
+    await tester.pump();
+
     expect(find.text('Terms'), findsNothing);
     expect(find.text('Privacy Policy'), findsNothing);
-    expect(find.textContaining('By signing in'), findsNothing);
+    expect(find.text('By continuing, you agree to'), findsNothing);
+  });
+
+  testWidgets('wide window keeps the onboarding column capped', (tester) async {
+    await _pump(tester, width: 1280, onGoogle: () {}, onPhone: () {});
+
+    expect(tester.takeException(), isNull);
+    expect(
+      tester.getRect(find.byKey(const Key('sign-in-phone'))).width,
+      lessThanOrEqualTo(592.5),
+    );
+    expect(find.byKey(const Key('sign-in-submit')), findsOneWidget);
+  });
+
+  testWidgets('wide dark window at 200% keeps the column capped', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      dark: true,
+      width: 1280,
+      textScale: 2,
+      onGoogle: () {},
+      onPhone: () {},
+    );
+
+    expect(tester.takeException(), isNull);
+    expect(
+      tester.getRect(find.byKey(const Key('sign-in-phone'))).width,
+      lessThanOrEqualTo(592.5),
+    );
+    expect(find.byKey(const Key('sign-in-submit')), findsOneWidget);
   });
 
   testWidgets('narrow phone at 200% text does not overflow in light', (
@@ -279,7 +462,7 @@ void main() {
       await openSheet(tester);
 
       expect(find.byType(V2PhoneAuthSheet), findsOneWidget);
-      expect(find.text('Sign in with your phone'), findsOneWidget);
+      expect(find.text('Phone sign-in'), findsOneWidget);
       expect(find.byKey(const Key('phone-auth-phone')), findsOneWidget);
       // Opening the sheet is the action; the legacy callback is not fired.
       expect(phoneTaps, 0);
@@ -346,7 +529,8 @@ void main() {
       );
       await tester.pump();
       await tester.tap(find.byKey(const Key('phone-auth-send')));
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
 
       expect(sent, '98765 43210');
       expect(find.text('Enter your code'), findsOneWidget);
@@ -357,6 +541,11 @@ void main() {
         '123456',
       );
       await tester.pump();
+      await tester.pump();
+
+      // The sixth digit auto-submits; the explicit button is still allowed
+      // and stays wired for assistive tech.
+      expect(verified, '123456');
       await tester.tap(find.byKey(const Key('phone-auth-verify')));
       await tester.pump();
 
@@ -406,7 +595,7 @@ void main() {
       await tester.tap(find.byKey(const Key('phone-auth-back')));
       await tester.pumpAndSettle();
 
-      expect(find.text('Sign in with your phone'), findsOneWidget);
+      expect(find.text('Phone sign-in'), findsOneWidget);
       expect(find.byKey(const Key('phone-auth-code-field')), findsNothing);
     });
 

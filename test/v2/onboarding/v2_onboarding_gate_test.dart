@@ -270,7 +270,7 @@ void main() {
     expect(find.text('Ovid builds, ships and answers.'), findsOneWidget);
 
     await _tap(tester, find.byKey(const Key('welcome-get-started')));
-    expect(find.text('LANGUAGE'), findsOneWidget);
+    expect(find.text('VOICE LANGUAGE'), findsOneWidget);
 
     await _tap(tester, find.text('हिन्दी'));
     await _tap(tester, find.byKey(const Key('language-goal-continue')));
@@ -449,7 +449,7 @@ void main() {
 
     final prefs = await SharedPreferences.getInstance();
     expect(prefs.getString('ovid_welcome_version_v2'), '1');
-    expect(find.text('LANGUAGE'), findsOneWidget);
+    expect(find.text('VOICE LANGUAGE'), findsOneWidget);
   });
 
   testWidgets('startup failure shows an error and retry recovers', (
@@ -514,12 +514,12 @@ void main() {
 
     // A returning user is not asked for the language again.
     expect(find.text('Welcome back'), findsOneWidget);
-    expect(find.text('LANGUAGE'), findsNothing);
+    expect(find.text('VOICE LANGUAGE'), findsNothing);
 
     // The goal survives too: Back shows it still selected.
     final handle = tester.ensureSemantics();
     await _tap(tester, find.byKey(const Key('sign-in-back')));
-    expect(find.text('LANGUAGE'), findsOneWidget);
+    expect(find.text('VOICE LANGUAGE'), findsOneWidget);
     expect(find.text('हिन्दी'), findsOneWidget);
     final research = tester.getSemantics(find.bySemanticsLabel('Research'));
     expect(research.flagsCollection.isSelected, ui.Tristate.isTrue);
@@ -557,7 +557,7 @@ void main() {
     await _pumpGate(tester, auth: auth);
 
     await _tap(tester, find.byKey(const Key('sign-in-back')));
-    expect(find.text('LANGUAGE'), findsOneWidget);
+    expect(find.text('VOICE LANGUAGE'), findsOneWidget);
 
     await _tap(tester, find.byKey(const Key('language-goal-back')));
     expect(find.text('Welcome back'), findsOneWidget);
@@ -632,7 +632,7 @@ void main() {
 
       await _tap(tester, find.byKey(const Key('welcome-get-started')));
       expect(tester.takeException(), isNull);
-      expect(find.text('LANGUAGE'), findsOneWidget);
+      expect(find.text('VOICE LANGUAGE'), findsOneWidget);
 
       await _tap(tester, find.byKey(const Key('language-goal-continue')));
       expect(tester.takeException(), isNull);

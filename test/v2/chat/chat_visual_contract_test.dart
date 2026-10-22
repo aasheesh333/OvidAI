@@ -196,7 +196,9 @@ void main() {
     await tester.pumpWidget(tile(running: true));
     await tester.pump();
     // A subtle sweep plays across the label while the thought is live.
-    expect(find.byType(ShaderMask), findsOneWidget);
+    // Flat system: the running thought breathes opacity, no gradient shader.
+    expect(find.byType(Opacity), findsWidgets);
+    expect(find.byType(ShaderMask), findsNothing);
     expect(tester.binding.transientCallbackCount, greaterThan(0));
 
     await tester.pumpWidget(tile(running: false));
@@ -250,11 +252,15 @@ void main() {
     await tester.pumpWidget(_app(const V2ChatPage(data: V2ChatPageData())));
     await tester.pump(const Duration(milliseconds: 400));
 
-    // The wordmark, one short line, three suggestion chips. No paragraph,
-    // no icon circle.
-    expect(find.text('Ovid Si'), findsNWidgets(2));
+    // One greeting and three starting points. The wordmark lives in the top
+    // bar only — repeating it in the body was the duplicate the minimal pass
+    // removed. No paragraph, no icon circle.
+    expect(find.text('Ovid Si'), findsOneWidget);
     expect(find.text('What should we build?'), findsOneWidget);
-    expect(find.byType(OChip), findsNWidgets(3));
+    expect(find.byType(OChip), findsNothing);
     expect(find.byType(CircleAvatar), findsNothing);
+    // Three rows, each with an arrow: the starting points are full-width
+    // rows now, not floating chips that wrap on a narrow phone.
+    expect(find.byIcon(Icons.arrow_forward_rounded), findsNWidgets(3));
   });
 }

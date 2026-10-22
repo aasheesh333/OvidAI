@@ -23,8 +23,7 @@ enum V2AddConnectorStatus { loading, content, error, blocked }
 abstract final class V2ConnectorSafety {
   static const workspaceRoot = '/workspace';
 
-  static const _shellMessage =
-      'Remove shell characters like ; & | \$ ` > <.';
+  static const _shellMessage = 'Remove shell characters like ; & | \$ ` > <.';
   static const _pathMessage = 'Use a path inside your workspace.';
 
   static String? validateEndpoint({
@@ -50,7 +49,9 @@ abstract final class V2ConnectorSafety {
       // Globs, subshells and history expansion are shell syntax too.
       if (RegExp(r'[(){}*?\[\]!]').hasMatch(text)) return _shellMessage;
 
-      for (final match in RegExp(r'''(^|\s)("[^"]*"|'[^']*'|[^\s]+)''').allMatches(text)) {
+      for (final match in RegExp(
+        r'''(^|\s)("[^"]*"|'[^']*'|[^\s]+)''',
+      ).allMatches(text)) {
         final word = match.group(2)!;
         if (!word.startsWith('/')) continue;
         final path = word.replaceAll(RegExp(r'^["\x27]|["\x27]$'), '');
@@ -113,15 +114,16 @@ class V2CustomConnectorDraft {
   final String description;
   final String kind;
 
-  String get endpoint =>
-      target == V2ConnectorTarget.command ? command : url;
+  String get endpoint => target == V2ConnectorTarget.command ? command : url;
 
   bool get isCustom => catalogId == null;
 
   /// The record this draft becomes once it is saved.
   V2ConnectorConnection toConnection({DateTime? connectedAt}) {
     return V2ConnectorConnection(
-      id: catalogId ?? 'custom-${(connectedAt ?? DateTime.now()).microsecondsSinceEpoch}',
+      id:
+          catalogId ??
+          'custom-${(connectedAt ?? DateTime.now()).microsecondsSinceEpoch}',
       name: name,
       description: description.isNotEmpty
           ? description
@@ -223,8 +225,8 @@ class V2AddConnectorData {
     return switch (plan) {
       V2ConnectorPlan.free => 'No custom connectors on Free.',
       V2ConnectorPlan.go => 'All 5 custom slots used on Go.',
-      V2ConnectorPlan.plus || V2ConnectorPlan.pro =>
-        'All 20 custom slots used on Plus and Pro.',
+      V2ConnectorPlan.plus => 'All 20 custom slots used on Plus.',
+      V2ConnectorPlan.pro => 'All 20 custom slots used on Pro.',
     };
   }
 }
@@ -276,7 +278,6 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
   late bool _write = widget.data.write;
   late bool _execute = widget.data.execute;
   late V2ConnectorTarget _target = widget.data.target;
-  bool _showKey = false;
   bool _submitted = false;
 
   /// Result of the last real connection test run from this screen.
@@ -296,10 +297,8 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
     if (widget.data.presetId != null) _target = V2ConnectorTarget.url;
   }
 
-  String? get _endpointError => V2ConnectorSafety.validateEndpoint(
-    value: _endpoint,
-    target: _target,
-  );
+  String? get _endpointError =>
+      V2ConnectorSafety.validateEndpoint(value: _endpoint, target: _target);
 
   bool get _showEndpointError =>
       (_submitted || _endpoint.isNotEmpty) && _endpointError != null;
@@ -318,8 +317,9 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
   /// already in flight. Missing fields are explained inline by [_save].
   bool get _saveEnabled => !widget.data.planLimitReached && !_saving;
 
-  bool get _canTest =>
-      !widget.data.planLimitReached && _endpointError == null && !_testing;
+  /// The connection test is not an install: it stays available at the plan cap
+  /// so the person can prove the server answers before upgrading.
+  bool get _canTest => _endpointError == null && !_testing;
 
   V2ConnectorStore get _store => widget.store ?? v2ConnectorStore;
   V2ConnectorSecrets get _secrets => widget.secrets ?? v2ConnectorSecrets;
@@ -410,6 +410,8 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
       return;
     }
     if (!mounted) return;
+    // The secret now lives in the keystore; do not keep a copy in the field.
+    _key.clear();
     setState(() => _saving = false);
     showOSnack(context, '${connection.name} saved.');
     Navigator.of(context).maybePop();
@@ -475,9 +477,7 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
           onPressed: _saveEnabled ? _save : null,
         ),
       ],
-      child: ODismissKeyboard(
-        child: OFadeSlide(child: _body(context)),
-      ),
+      child: ODismissKeyboard(child: OFadeSlide(child: _body(context))),
     );
   }
 
@@ -493,16 +493,29 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
     };
   }
 
+  /// The way back to the list. Null when there is nowhere to go, so the
+  /// blocked state never renders a disabled button.
+  VoidCallback? get _close {
+    final external = widget.onBack;
+    if (external != null) return external;
+    return Navigator.of(context).canPop()
+        ? () => Navigator.of(context).maybePop()
+        : null;
+  }
+
   Widget _blockedState() {
+    final close = _close;
     return OEmptyState(
       icon: Icons.shield_outlined,
       title: 'Add connectors here',
       message: widget.data.chatBlockMessage,
-      action: OButton(
-        label: 'Back to connectors',
-        icon: Icons.arrow_back_rounded,
-        onPressed: widget.onBack,
-      ),
+      action: close == null
+          ? null
+          : OButton(
+              label: 'Back to connectors',
+              icon: Icons.arrow_back_rounded,
+              onPressed: close,
+            ),
     );
   }
 
@@ -531,9 +544,7 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
         ),
         const SizedBox(height: OSpace.m),
         TextField(
-          key: Key(
-            isCommand ? 'add-connector-command' : 'add-connector-url',
-          ),
+          key: Key(isCommand ? 'add-connector-command' : 'add-connector-url'),
           controller: isCommand ? _command : _url,
           keyboardType: isCommand ? TextInputType.text : TextInputType.url,
           textInputAction: TextInputAction.next,
@@ -555,31 +566,21 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
         ],
         if (_auth == V2ConnectorAuth.apiKey) ...[
           const SizedBox(height: OSpace.m),
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  key: const Key('add-connector-key'),
-                  controller: _key,
-                  obscureText: !_showKey,
-                  onChanged: (_) => _fieldChanged(),
-                  style: OType.bodySm.copyWith(color: c.text),
-                  decoration: InputDecoration(
-                    labelText: 'API key',
-                    hintText: 'Paste key',
-                    errorText: _submitted ? _keyError : null,
-                  ),
-                ),
-              ),
-              const SizedBox(width: OSpace.s),
-              OIconButton(
-                icon: _showKey
-                    ? Icons.visibility_off_outlined
-                    : Icons.visibility_outlined,
-                semanticLabel: _showKey ? 'Hide key' : 'Show key',
-                onPressed: () => setState(() => _showKey = !_showKey),
-              ),
-            ],
+          TextField(
+            key: const Key('add-connector-key'),
+            controller: _key,
+            // The key is only ever shown masked: there is no reveal control.
+            // It lives in the platform keystore, never in preferences or a log.
+            obscureText: true,
+            enableSuggestions: false,
+            autocorrect: false,
+            onChanged: (_) => _fieldChanged(),
+            style: OType.bodySm.copyWith(color: c.text),
+            decoration: InputDecoration(
+              labelText: 'API key',
+              hintText: 'Paste key',
+              errorText: _submitted ? _keyError : null,
+            ),
           ),
           const SizedBox(height: OSpace.xs),
           Text(
@@ -622,7 +623,7 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
           variant: OButtonVariant.secondary,
           expand: true,
           loading: widget.data.testing || _testing,
-          onPressed: blocked || !_canTest ? null : _test,
+          onPressed: _canTest ? _test : null,
         ),
         if (_report != null) ...[
           const SizedBox(height: OSpace.m),
@@ -676,10 +677,7 @@ class _CapLine extends StatelessWidget {
           Icon(Icons.lock_outline_rounded, size: 18, color: c.warn),
           const SizedBox(width: OSpace.s),
           Expanded(
-            child: Text(
-              message,
-              style: OType.caption.copyWith(color: c.text),
-            ),
+            child: Text(message, style: OType.caption.copyWith(color: c.text)),
           ),
           OTextAction(
             key: const Key('connector-cap-upgrade'),
@@ -740,7 +738,10 @@ class _PermissionSwitchRow extends StatelessWidget {
         child: Row(
           children: [
             Expanded(
-              child: Text(title, style: OType.bodyStrong.copyWith(color: c.text)),
+              child: Text(
+                title,
+                style: OType.bodyStrong.copyWith(color: c.text),
+              ),
             ),
             const SizedBox(width: OSpace.m),
             SizedBox(
@@ -774,7 +775,9 @@ class _TestResult extends StatelessWidget {
     final color = neutral ? c.textMuted : (ok ? c.success : c.danger);
     final icon = neutral
         ? Icons.info_outline_rounded
-        : (ok ? Icons.check_circle_outline_rounded : Icons.error_outline_rounded);
+        : (ok
+              ? Icons.check_circle_outline_rounded
+              : Icons.error_outline_rounded);
     final text = message.isNotEmpty
         ? message
         : ok
@@ -788,10 +791,7 @@ class _TestResult extends StatelessWidget {
           Icon(icon, size: 18, color: color),
           const SizedBox(width: OSpace.s),
           Expanded(
-            child: Text(
-              text,
-              style: OType.caption.copyWith(color: color),
-            ),
+            child: Text(text, style: OType.caption.copyWith(color: color)),
           ),
         ],
       ),

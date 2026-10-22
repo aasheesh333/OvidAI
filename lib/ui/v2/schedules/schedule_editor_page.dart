@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
@@ -158,6 +159,31 @@ class _ScheduleEditorPageState extends State<ScheduleEditorPage> {
     _frequency = widget.data.frequency;
     _cadence = _initialCadence(widget.data);
     _promptTouched = widget.data.prompt.trim().isNotEmpty;
+  }
+
+  @override
+  void didUpdateWidget(covariant ScheduleEditorPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final previous = oldWidget.data;
+    final next = widget.data;
+    // A retry can replace the whole schedule while the editor stays mounted.
+    // Only a changed source value is adopted, so an in-progress draft is never
+    // overwritten by an unrelated rebuild.
+    if (next.prompt != previous.prompt && _prompt.text != next.prompt) {
+      _prompt.value = TextEditingValue(
+        text: next.prompt,
+        selection: TextSelection.collapsed(offset: next.prompt.length),
+      );
+      _promptTouched = next.prompt.trim().isNotEmpty;
+    }
+    if (next.frequency != previous.frequency ||
+        next.timeLabel != previous.timeLabel ||
+        next.customRule != previous.customRule ||
+        next.timezoneId != previous.timezoneId ||
+        !setEquals(next.days, previous.days)) {
+      _frequency = next.frequency;
+      _cadence = _initialCadence(next);
+    }
   }
 
   @override
@@ -391,6 +417,9 @@ class _ScheduleEditorPageState extends State<ScheduleEditorPage> {
         controller: _prompt,
         minLines: 3,
         maxLines: 5,
+        // The draft is immutable while the save is in flight, matching the
+        // cadence controls below it.
+        readOnly: widget.data.saving,
         textCapitalization: TextCapitalization.sentences,
         onChanged: (value) {
           setState(() => _promptTouched = true);

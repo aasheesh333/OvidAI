@@ -4,6 +4,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/cloud/cloud_rest.dart';
 import 'package:ovid_ai/core/cloud/schedule_client.dart';
@@ -56,6 +57,7 @@ class _FakeGateway implements ScheduleGateway {
   final List<ScheduleTrigger> createdTriggers = <ScheduleTrigger>[];
   int runNowCalls = 0;
   int listCalls = 0;
+  Object? failCreateWith;
   Object? failUpdateWith;
   Object? failDeleteWith;
 
@@ -77,6 +79,8 @@ class _FakeGateway implements ScheduleGateway {
     String? sessionId,
     int maxRetries = 0,
   }) async {
+    final failure = failCreateWith;
+    if (failure != null) throw failure;
     createdTriggers.add(trigger);
     final row = _scheduleJson(
       id: 'new-${rows.length + 1}',
@@ -155,6 +159,25 @@ void _phone(WidgetTester tester) {
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
+}
+
+/// The editor asks the platform for the device zone before it opens. In a test
+/// there is no platform, so the reply must be stubbed or the future never
+/// completes.
+void _mockNativeChannel() {
+  final messenger =
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+  messenger.setMockMethodCallHandler(const MethodChannel('ovid/native'), (
+    call,
+  ) async {
+    return call.method == 'timeZoneId' ? 'UTC' : null;
+  });
+  addTearDown(() {
+    messenger.setMockMethodCallHandler(
+      const MethodChannel('ovid/native'),
+      null,
+    );
+  });
 }
 
 Future<SchedulesController> _loaded(_FakeGateway gateway) async {
@@ -253,6 +276,60 @@ void main() {
       expect(gateway.deletes, ['s1']);
       expect(find.text('Summarise the news.'), findsNothing);
       expect(find.text('No schedules yet'), findsOneWidget);
+    });
+
+    testWidgets('the switch persists, then rolls back when rejected', (
+      tester,
+    ) async {
+      _phone(tester);
+      final gateway = _FakeGateway([_scheduleJson(title: 'Nightly backup')]);
+      final controller = await _loaded(gateway);
+      await tester.pumpWidget(_app(SchedulesScreen(controller: controller)));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(Switch));
+      await tester.pumpAndSettle();
+      expect(gateway.updates.single, {'id': 's1', 'status': 'paused'});
+      expect(controller.items.single.enabled, isFalse);
+
+      // A rejected resume snaps back and explains why.
+      gateway.failUpdateWith = CloudApiException(
+        status: 500,
+        code: 'internal',
+        message: 'The scheduler is offline.',
+      );
+      await tester.tap(find.byType(Switch));
+      await tester.pumpAndSettle();
+
+      expect(controller.items.single.enabled, isFalse);
+      expect(
+        tester.widget<Switch>(find.byType(Switch)).value,
+        isFalse,
+        reason: 'the switch must show the saved state, not the attempt',
+      );
+      expect(find.textContaining('Could not resume'), findsOneWidget);
+    });
+
+    testWidgets('run now reaches the service', (tester) async {
+      _phone(tester);
+      final gateway = _FakeGateway([_scheduleJson(title: 'Nightly backup')]);
+      final controller = await _loaded(gateway);
+      await tester.pumpWidget(_app(SchedulesScreen(controller: controller)));
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is OIconButton &&
+              widget.semanticLabel == 'More options for Nightly backup',
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Run now'));
+      await tester.pumpAndSettle();
+
+      expect(gateway.runNowCalls, 1);
+      expect(find.textContaining('Started “Nightly backup”'), findsOneWidget);
     });
 
     testWidgets('a failed delete restores the row', (tester) async {
@@ -704,6 +781,128 @@ void main() {
       expect(find.text('Schedule runs'), findsNothing);
       expect(find.text('Completed'), findsOneWidget);
       expect(find.text('1m 12s'), findsOneWidget);
+    });
+  });
+
+  group('editor wiring', () {
+    testWidgets('saving a new schedule persists it and returns to the list', (
+      tester,
+    ) async {
+      _phone(tester);
+      _mockNativeChannel();
+      final gateway = _FakeGateway([]);
+      final controller = await _loaded(gateway);
+      await tester.pumpWidget(_app(SchedulesScreen(controller: controller)));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('New schedule').last);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Prompt'), findsOneWidget);
+      await tester.enterText(
+        find.byType(TextField).first,
+        'Summarise the news.',
+      );
+      await tester.pump();
+
+      await tester.scrollUntilVisible(
+        find.text('Save'),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+
+      expect(gateway.createdTriggers, hasLength(1));
+      expect(gateway.createdTriggers.single.kind, 'cron');
+      // The default cadence is weekdays at 9:00 in the device zone.
+      expect(gateway.createdTriggers.single.expr, '0 9 * * 1,2,3,4,5');
+      expect(gateway.createdTriggers.single.tz, 'UTC');
+      expect(gateway.rows, hasLength(1));
+      expect(gateway.rows.single['description'], 'Summarise the news.');
+      // Back on the list with the saved row.
+      expect(find.text('Summarise the news.'), findsOneWidget);
+    });
+
+    testWidgets('a rejected delete from the editor stays open and explains', (
+      tester,
+    ) async {
+      _phone(tester);
+      _mockNativeChannel();
+      final gateway = _FakeGateway([_scheduleJson(title: 'Nightly backup')])
+        ..failDeleteWith = CloudApiException(
+          status: 503,
+          code: 'unavailable',
+          message: 'Try again later.',
+        );
+      final controller = await _loaded(gateway);
+      await tester.pumpWidget(_app(SchedulesScreen(controller: controller)));
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is OIconButton &&
+              widget.semanticLabel == 'More options for Nightly backup',
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Edit'));
+      await tester.pumpAndSettle();
+      expect(find.text('Prompt'), findsOneWidget);
+
+      await tester.tap(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is OIconButton && widget.semanticLabel == 'More options',
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete schedule'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(TextButton, 'Delete'));
+      await tester.pumpAndSettle();
+
+      expect(gateway.deletes, isEmpty);
+      // Still editing, with the reason on screen.
+      expect(find.text('Prompt'), findsOneWidget);
+      expect(find.textContaining('Could not delete'), findsOneWidget);
+    });
+
+    testWidgets('a rejected save stays in the editor with an inline error', (
+      tester,
+    ) async {
+      _phone(tester);
+      _mockNativeChannel();
+      final gateway = _FakeGateway([])
+        ..failCreateWith = CloudApiException(
+          status: 500,
+          code: 'internal',
+          message: 'The scheduler is offline.',
+        );
+      final controller = await _loaded(gateway);
+      await tester.pumpWidget(_app(SchedulesScreen(controller: controller)));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('New schedule').last);
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byType(TextField).first,
+        'Summarise the news.',
+      );
+      await tester.pump();
+
+      await tester.scrollUntilVisible(
+        find.text('Save'),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+
+      expect(gateway.rows, isEmpty);
+      expect(find.text('Schedule'), findsOneWidget);
+      expect(find.text('The scheduler is offline.'), findsOneWidget);
     });
   });
 

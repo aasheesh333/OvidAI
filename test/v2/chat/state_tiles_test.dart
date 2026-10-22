@@ -10,21 +10,27 @@ import 'package:ovid_ai/ui/v2/states/state_tiles.dart';
 
 const _titles = <V2StateTileKind, String>{
   V2StateTileKind.offline: "You're offline",
-  V2StateTileKind.planLimited: 'Plan limit reached',
+  V2StateTileKind.planLimited: 'Allowance used',
   V2StateTileKind.storageFull: 'Storage full',
-  V2StateTileKind.abuseBlocked: 'Account suspended',
-  V2StateTileKind.deletionPending: 'Account deletion pending',
-  V2StateTileKind.serverError: 'Something went wrong',
+  V2StateTileKind.abuseBlocked: 'Account blocked',
+  V2StateTileKind.deletionPending: 'Deletion pending',
+  V2StateTileKind.serverError: 'Request failed',
+  V2StateTileKind.rateLimited: 'Rate limited',
+  V2StateTileKind.updateRequired: 'Update required',
 };
 
 const _actions = <V2StateTileKind, String>{
   V2StateTileKind.offline: 'Retry',
   V2StateTileKind.planLimited: 'See plans',
   V2StateTileKind.storageFull: 'Manage storage',
-  V2StateTileKind.abuseBlocked: 'Get help',
+  V2StateTileKind.abuseBlocked: 'Contact support',
   V2StateTileKind.deletionPending: 'Restore',
   V2StateTileKind.serverError: 'Try again',
+  V2StateTileKind.rateLimited: 'Try again',
+  V2StateTileKind.updateRequired: 'Open store',
 };
+
+void _noop() {}
 
 Widget _app(Widget child, {bool dark = false}) {
   return MaterialApp(
@@ -57,63 +63,28 @@ Widget _narrowApp(Widget child, {required bool dark}) {
   );
 }
 
-Widget _allTiles({
-  void Function(V2StateTileKind kind)? onAction,
-  bool named = false,
-}) {
-  final tiles = <Widget>[
-    if (named) ...[
-      // The named constructors are the ergonomic call site for each state.
-      V2StateTile.offline(
-        onAction: onAction == null
-            ? null
-            : () => onAction(V2StateTileKind.offline),
-      ),
-      V2StateTile.planLimited(
-        onAction: onAction == null
-            ? null
-            : () => onAction(V2StateTileKind.planLimited),
-      ),
-      V2StateTile.storageFull(
-        onAction: onAction == null
-            ? null
-            : () => onAction(V2StateTileKind.storageFull),
-      ),
-      V2StateTile.abuseBlocked(
-        onAction: onAction == null
-            ? null
-            : () => onAction(V2StateTileKind.abuseBlocked),
-      ),
-      V2StateTile.deletionPending(
-        onAction: onAction == null
-            ? null
-            : () => onAction(V2StateTileKind.deletionPending),
-      ),
-      V2StateTile.serverError(
-        onAction: onAction == null
-            ? null
-            : () => onAction(V2StateTileKind.serverError),
-      ),
-    ] else
-      for (final kind in V2StateTileKind.values)
-        V2StateTile(
-          kind: kind,
-          onAction: onAction == null ? null : () => onAction(kind),
-        ),
-  ];
+Widget _allTiles({void Function(V2StateTileKind kind)? onAction}) {
   return Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
-      for (var i = 0; i < tiles.length; i++) ...[
-        if (i > 0) const SizedBox(height: OSpace.m),
-        tiles[i],
+      for (final kind in V2StateTileKind.values) ...[
+        if (kind != V2StateTileKind.values.first)
+          const SizedBox(height: OSpace.m),
+        V2StateTile(
+          key: ValueKey(kind),
+          kind: kind,
+          onAction: onAction == null ? null : () => onAction(kind),
+        ),
       ],
     ],
   );
 }
 
+Finder _actionIn(V2StateTileKind kind, String label) =>
+    find.descendant(of: find.byKey(ValueKey(kind)), matching: find.text(label));
+
 Future<void> _tall(WidgetTester tester) async {
-  await tester.binding.setSurfaceSize(const Size(420, 2600));
+  await tester.binding.setSurfaceSize(const Size(420, 3000));
   addTearDown(() => tester.binding.setSurfaceSize(null));
 }
 
@@ -151,15 +122,22 @@ Color _toneColor(OColors c, V2StateTileTone tone) => switch (tone) {
   V2StateTileTone.danger => c.danger,
 };
 
+FilledButton _primaryButton(WidgetTester tester, String label) {
+  final finder = find.ancestor(
+    of: find.text(label),
+    matching: find.byType(FilledButton),
+  );
+  return tester.widget<FilledButton>(finder.first);
+}
+
 void main() {
-  test('every state has distinct defaults and a next action', () {
+  test('every state has distinct defaults and one exit', () {
     final icons = <IconData>{};
     for (final kind in V2StateTileKind.values) {
       final copy = V2StateTileCopy.of(kind);
       expect(copy.title, isNotEmpty);
       expect(copy.message, isNotEmpty);
       expect(copy.actionLabel, isNotEmpty);
-      expect(copy.icon, isNotNull);
       expect(icons.add(copy.icon), isTrue, reason: '$kind reuses an icon');
     }
   });
@@ -169,37 +147,41 @@ void main() {
     for (final kind in V2StateTileKind.values) {
       final copy = V2StateTileCopy.of(kind);
       expect(words(copy.title), lessThanOrEqualTo(4), reason: '$kind title');
-      expect(words(copy.message), lessThanOrEqualTo(18), reason: '$kind body');
+      expect(words(copy.message), lessThanOrEqualTo(12), reason: '$kind body');
       expect(
         words(copy.actionLabel),
         lessThanOrEqualTo(3),
         reason: '$kind action',
       );
+      final secondary = copy.secondaryActionLabel;
+      if (secondary != null) {
+        expect(words(secondary), lessThanOrEqualTo(3));
+      }
     }
   });
 
-  testWidgets('renders all six states in light mode', (tester) async {
+  testWidgets('renders all eight states in light mode', (tester) async {
     await _tall(tester);
-    await tester.pumpWidget(_app(_allTiles(named: true)));
+    await tester.pumpWidget(_app(_allTiles()));
     await tester.pumpAndSettle();
 
     for (final kind in V2StateTileKind.values) {
       final copy = V2StateTileCopy.of(kind);
-      expect(find.text(_titles[kind]!), findsOneWidget);
-      expect(find.text(_actions[kind]!), findsOneWidget);
-      expect(find.text(copy.message), findsOneWidget);
+      expect(_actionIn(kind, _titles[kind]!), findsOneWidget);
+      expect(_actionIn(kind, _actions[kind]!), findsOneWidget);
+      expect(_actionIn(kind, copy.message), findsOneWidget);
       expect(find.byIcon(copy.icon), findsOneWidget);
     }
   });
 
-  testWidgets('renders all six states in dark mode', (tester) async {
+  testWidgets('renders all eight states in dark mode', (tester) async {
     await _tall(tester);
-    await tester.pumpWidget(_app(_allTiles(named: true), dark: true));
+    await tester.pumpWidget(_app(_allTiles(), dark: true));
     await tester.pumpAndSettle();
 
     for (final kind in V2StateTileKind.values) {
-      expect(find.text(_titles[kind]!), findsOneWidget);
-      expect(find.text(_actions[kind]!), findsOneWidget);
+      expect(_actionIn(kind, _titles[kind]!), findsOneWidget);
+      expect(_actionIn(kind, _actions[kind]!), findsOneWidget);
     }
   });
 
@@ -233,30 +215,100 @@ void main() {
     await tester.pumpAndSettle();
 
     for (final kind in V2StateTileKind.values) {
-      await tester.tap(find.text(_actions[kind]!));
+      final finder = _actionIn(kind, _actions[kind]!);
+      await tester.ensureVisible(finder);
+      await tester.pump();
+      await tester.tap(finder);
       await tester.pump();
     }
 
     expect(fired, V2StateTileKind.values.toSet());
   });
 
-  testWidgets('a detail line carries measured data and keeps copy separate', (
+  testWidgets(
+    'a rate-limit countdown ticks from the deadline and stops at zero',
+    (tester) async {
+      await _tall(tester);
+      final start = DateTime(2026, 10, 22, 12);
+      var now = start;
+      var taps = 0;
+
+      await tester.pumpWidget(
+        _app(
+          V2StateTile.rateLimited(
+            deadline: start.add(const Duration(seconds: 10)),
+            clock: () => now,
+            onAction: () => taps++,
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(find.text('Ready in 10s'), findsOneWidget);
+      expect(_primaryButton(tester, 'Try again').onPressed, isNull);
+
+      now = now.add(const Duration(seconds: 4));
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('Ready in 6s'), findsOneWidget);
+      expect(_primaryButton(tester, 'Try again').onPressed, isNull);
+
+      now = start.add(const Duration(seconds: 10));
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('Ready now'), findsOneWidget);
+      expect(_primaryButton(tester, 'Try again').onPressed, isNotNull);
+
+      // The timer must not keep waking the device or move past zero.
+      now = now.add(const Duration(minutes: 5));
+      await tester.pump(const Duration(seconds: 2));
+      expect(find.text('Ready now'), findsOneWidget);
+      expect(taps, 0);
+
+      await tester.tap(find.text('Try again'));
+      expect(taps, 1);
+    },
+  );
+
+  testWidgets('an allowance countdown is derived from the reset timestamp', (
     tester,
   ) async {
     await _tall(tester);
+    final start = DateTime(2026, 10, 22, 12);
+    var now = start;
+
     await tester.pumpWidget(
       _app(
-        V2StateTile.planLimited(detail: 'Resets in 6h 12m', onAction: () {}),
+        V2StateTile.planLimited(
+          deadline: start.add(const Duration(hours: 2)),
+          clock: () => now,
+          onAction: _noop,
+        ),
       ),
     );
-    await tester.pumpAndSettle();
+    await tester.pump();
+    expect(find.text('Resets in 2h 0m'), findsOneWidget);
+    expect(_primaryButton(tester, 'See plans').onPressed, isNotNull);
 
-    expect(find.text('Plan limit reached'), findsOneWidget);
-    expect(find.text('Resets in 6h 12m'), findsOneWidget);
-    expect(
-      find.text('Your allowance is spent. Upgrade now or wait for the reset.'),
-      findsOneWidget,
+    now = now.add(const Duration(minutes: 1));
+    await tester.pump(const Duration(minutes: 1));
+    expect(find.text('Resets in 1h 59m'), findsOneWidget);
+  });
+
+  testWidgets('a deadline in the past is already clear and never ticks', (
+    tester,
+  ) async {
+    final start = DateTime(2026, 10, 22, 12);
+    await tester.pumpWidget(
+      _app(
+        V2StateTile.rateLimited(
+          deadline: start.subtract(const Duration(seconds: 1)),
+          clock: () => start,
+          onAction: _noop,
+        ),
+      ),
     );
+    await tester.pump();
+
+    expect(find.text('Ready now'), findsOneWidget);
+    expect(_primaryButton(tester, 'Try again').onPressed, isNotNull);
   });
 
   testWidgets('copy overrides keep the state but change its words', (
@@ -270,11 +322,10 @@ void main() {
           kind: V2StateTileKind.serverError,
           copy: V2StateTileCopy.serverError.copyWith(
             title: 'Run stopped',
-            message: 'The run stopped when it reached the 8-hour limit.',
+            message: 'The run stopped at the eight-hour limit.',
             actionLabel: 'View run',
             tone: V2StateTileTone.warn,
           ),
-          detail: 'Stopped at 8h',
           onAction: () => fired++,
         ),
       ),
@@ -282,12 +333,11 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Run stopped'), findsOneWidget);
-    expect(find.text('Something went wrong'), findsNothing);
+    expect(find.text('Request failed'), findsNothing);
     expect(
-      find.text('The run stopped when it reached the 8-hour limit.'),
+      find.text('The run stopped at the eight-hour limit.'),
       findsOneWidget,
     );
-    expect(find.text('Stopped at 8h'), findsOneWidget);
 
     await tester.tap(find.text('View run'));
     expect(fired, 1);
@@ -305,7 +355,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Something went wrong'), findsOneWidget);
+    expect(find.text('Request failed'), findsOneWidget);
     expect(find.byType(OButton), findsNothing);
   });
 
@@ -336,47 +386,59 @@ void main() {
     expect(retries, 1);
   });
 
-  testWidgets('missing callbacks disable and announce their actions', (
+  testWidgets('missing callbacks keep the exit visible but disabled', (
     tester,
   ) async {
     final handle = tester.ensureSemantics();
     await _tall(tester);
-    await tester.pumpWidget(_app(V2StateTile.planLimited()));
+    await tester.pumpWidget(_app(V2StateTile.offline()));
     await tester.pumpAndSettle();
 
-    final button = tester.widget<FilledButton>(find.byType(FilledButton));
+    expect(find.text('Retry'), findsOneWidget);
+    final button = tester.widget<OutlinedButton>(find.byType(OutlinedButton));
     expect(button.onPressed, isNull);
-    final disabled = tester.getSemantics(
-      find.bySemanticsLabel('See plans').first,
-    );
+    final disabled = tester.getSemantics(find.bySemanticsLabel('Retry').first);
     expect(disabled.flagsCollection.isEnabled, Tristate.isFalse);
 
-    await tester.pumpWidget(_app(V2StateTile.planLimited(onAction: () {})));
+    await tester.pumpWidget(_app(V2StateTile.offline(onAction: _noop)));
     await tester.pumpAndSettle();
 
-    final enabled = tester.getSemantics(
-      find.bySemanticsLabel('See plans').first,
-    );
+    final enabled = tester.getSemantics(find.bySemanticsLabel('Retry').first);
     expect(enabled.flagsCollection.isEnabled, Tristate.isTrue);
     handle.dispose();
   });
 
-  testWidgets('copy and message are exposed to screen readers', (tester) async {
+  testWidgets('title and body are one screen-reader node, action separate', (
+    tester,
+  ) async {
     final handle = tester.ensureSemantics();
     await _tall(tester);
-    await tester.pumpWidget(_app(V2StateTile.offline(onAction: () {})));
+    await tester.pumpWidget(_app(V2StateTile.offline(onAction: _noop)));
     await tester.pumpAndSettle();
 
-    expect(find.bySemanticsLabel(RegExp("You're offline")), findsOneWidget);
     expect(
-      find.bySemanticsLabel(RegExp('Messages will send when you reconnect')),
+      find.bySemanticsLabel(
+        "You're offline. Messages wait until you reconnect.",
+      ),
       findsOneWidget,
     );
+    expect(find.bySemanticsLabel('Retry'), findsOneWidget);
     expect(
-      find.bySemanticsLabel('Retry'),
-      findsOneWidget,
-      reason: 'the action is a separate button node',
+      find.bySemanticsLabel(RegExp(r'^Messages wait until you reconnect\.$')),
+      findsNothing,
+      reason: 'the body must not become a second node',
     );
+    handle.dispose();
+  });
+
+  testWidgets('a state change is announced as a live region', (tester) async {
+    final handle = tester.ensureSemantics();
+    await _tall(tester);
+    await tester.pumpWidget(_app(V2StateTile.offline(onAction: _noop)));
+    await tester.pumpAndSettle();
+
+    final node = tester.getSemantics(find.byType(V2StateTile));
+    expect(node.flagsCollection.isLiveRegion, isTrue);
     handle.dispose();
   });
 
@@ -408,7 +470,7 @@ void main() {
         final buttons = find.byWidgetPredicate(
           (widget) => widget is FilledButton || widget is OutlinedButton,
         );
-        expect(buttons, findsNWidgets(6));
+        expect(buttons, findsNWidgets(V2StateTileKind.values.length));
         for (final element in buttons.evaluate()) {
           expect(
             tester.getSize(find.byWidget(element.widget)).height,
@@ -417,12 +479,16 @@ void main() {
         }
 
         // The last state is reachable and usable after scrolling.
+        final lastAction = _actionIn(
+          V2StateTileKind.updateRequired,
+          _actions[V2StateTileKind.updateRequired]!,
+        );
         await tester.scrollUntilVisible(
-          find.text('Try again'),
+          lastAction,
           240,
           scrollable: find.byType(Scrollable).first,
         );
-        await tester.tap(find.text('Try again'));
+        await tester.tap(lastAction);
         expect(taps, 1);
       },
     );
@@ -446,14 +512,12 @@ void main() {
             title: 'Your monthly plan allowance is completely used',
             message:
                 'Your chats are safe. Upgrade to a larger plan to keep '
-                'working now, or wait for your allowance to reset at the start '
-                'of the next month.',
+                'working now, or wait for your allowance to reset.',
             actionLabel: 'Compare all plans',
             secondaryActionLabel: 'View usage details',
           ),
-          detail: 'Resets in 6h 12m · 50,000,000 tokens used',
-          onAction: () {},
-          onSecondaryAction: () {},
+          onAction: _noop,
+          onSecondaryAction: _noop,
         ),
         dark: true,
       ),
@@ -466,17 +530,6 @@ void main() {
     }
     expect(errors, isEmpty);
     _expectNoOverflow(tester);
-  });
-
-  testWidgets('a state change is announced as a live region', (tester) async {
-    final handle = tester.ensureSemantics();
-    await _tall(tester);
-    await tester.pumpWidget(_app(V2StateTile.offline(onAction: () {})));
-    await tester.pumpAndSettle();
-
-    final node = tester.getSemantics(find.byType(V2StateTile));
-    expect(node.flagsCollection.isLiveRegion, isTrue);
-    handle.dispose();
   });
 
   testWidgets('unbroken tokens wrap at 320 dp and 200 % text', (tester) async {
@@ -497,8 +550,7 @@ void main() {
             message: 'See https://example.com/$token before you upgrade.',
             actionLabel: 'See plans',
           ),
-          detail: token,
-          onAction: () {},
+          onAction: _noop,
         ),
         dark: true,
       ),

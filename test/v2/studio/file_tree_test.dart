@@ -180,7 +180,10 @@ void main() {
 
     expect(
       tester.getSemantics(_row('lib/main.dart')),
-      isSemantics(label: 'main.dart, Dart file, modified', isButton: false),
+      isSemantics(
+        label: 'lib/main.dart, Dart file, modified',
+        isButton: false,
+      ),
     );
     expect(
       tester.getSemantics(_row('lib')),
@@ -346,7 +349,7 @@ void main() {
     expect(
       tester.getSemantics(_row('lib/widgets/button.dart')),
       isSemantics(
-        label: 'button.dart, Dart file',
+        label: 'lib/widgets/button.dart, Dart file',
         isButton: true,
         hasSelectedState: true,
         isSelected: true,
@@ -570,6 +573,49 @@ void main() {
     expect(find.byIcon(Icons.image_outlined), findsOneWidget);
     expect(find.byIcon(Icons.terminal_rounded), findsOneWidget);
     expect(find.byIcon(Icons.article_outlined), findsOneWidget);
+  });
+
+  testWidgets('scrollable mode owns its scroll and builds rows lazily', (
+    tester,
+  ) async {
+    const nodeCount = 400;
+    final nodes = <V2FileTreeEntry>[
+      for (var i = 0; i < nodeCount; i++)
+        V2FileTreeEntry(name: 'file_$i.dart', path: 'lib/file_$i.dart'),
+    ];
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: OTheme.light(),
+        home: Scaffold(
+          body: SizedBox(
+            height: 400,
+            child: V2FileTree(
+              data: V2FileTreeData(nodes: nodes),
+              scrollable: true,
+              onSelectFile: (_) {},
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('v2-file-tree-scroll')), findsOneWidget);
+    expect(find.text('file_0.dart'), findsOneWidget);
+    // Only the visible window is built; the tail of the list is not.
+    expect(find.text('file_${nodeCount - 1}.dart'), findsNothing);
+    expect(
+      tester.widgetList(find.byType(InkWell)).length,
+      lessThan(nodeCount),
+      reason: 'a lazy tree must not build every row up front',
+    );
+
+    await tester.drag(
+      find.byKey(const Key('v2-file-tree-scroll')),
+      const Offset(0, -20000),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('file_${nodeCount - 1}.dart'), findsOneWidget);
   });
 
   testWidgets('320 dp at 200 % text and reduced motion do not overflow', (

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter_test/flutter_test.dart';
@@ -81,7 +83,7 @@ void main() {
     expect(find.text('Storage'), findsOneWidget);
     expect(find.text('Free plan'), findsOneWidget);
     expect(find.text('1.2 GB'), findsOneWidget);
-    expect(find.text('of 3.0 GB'), findsOneWidget);
+    expect(find.text('of 3 GB'), findsOneWidget);
 
     // The legend is the breakdown.
     expect(find.text('Artifacts'), findsOneWidget);
@@ -93,7 +95,10 @@ void main() {
 
     // One clean-up row, no card chrome.
     expect(find.text('Clear cache'), findsOneWidget);
-    expect(find.byKey(const ValueKey('storage-clear-cache-row')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('storage-clear-cache-row')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('deleted dashboard sections are gone', (tester) async {
@@ -128,7 +133,7 @@ void main() {
       find.byType(StorageBreakdown),
     );
     expect(breakdown.data.amountLabel, isEmpty);
-    expect(breakdown.data.totalLabel, '3.0 GB');
+    expect(breakdown.data.totalLabel, '3 GB');
     expect(breakdown.data.entries.map((entry) => entry.category), [
       V2StorageCategory.artifacts,
       V2StorageCategory.chats,
@@ -208,6 +213,23 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    expect(find.text('Storage is empty'), findsNothing);
+    expect(find.text('Nothing stored yet'), findsOneWidget);
+    expect(find.text('Clear cache'), findsOneWidget);
+  });
+
+  testWidgets('a known plan alone is not the page-level empty state', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        StoragePage(data: const V2StoragePageData(planName: 'Plus plan')),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The plan table supplies 15 GB even when the caller omits the total.
     expect(find.text('Storage is empty'), findsNothing);
     expect(find.text('Nothing stored yet'), findsOneWidget);
     expect(find.text('Clear cache'), findsOneWidget);
@@ -394,6 +416,7 @@ void main() {
     expect(v2PlanStorageQuotaGb('3x'), 5);
     expect(v2PlanStorageQuotaGb('7x'), 15);
     expect(v2PlanStorageQuotaGb('15x'), 75);
+    expect(v2PlanStorageQuotaGb('Ovid Plus'), 15);
     expect(v2PlanStorageQuotaGb('Enterprise'), isNull);
   });
 
@@ -401,10 +424,10 @@ void main() {
     tester,
   ) async {
     const expected = <String, String>{
-      'Free plan': '3.0',
-      'Go plan': '5.0',
-      'Plus plan': '15.0',
-      'Pro plan': '75.0',
+      'Free plan': '3',
+      'Go plan': '5',
+      'Plus plan': '15',
+      'Pro plan': '75',
     };
     for (final entry in expected.entries) {
       await tester.pumpWidget(
@@ -512,7 +535,229 @@ void main() {
     // The detail sums to 1.2 GB, so the heading uses 1.2 GB too instead of
     // contradicting the legend with the stale 1.0 GB total.
     expect(find.text('1.2 GB'), findsOneWidget);
-    expect(find.text('of 3.0 GB'), findsOneWidget);
+    expect(find.text('of 3 GB'), findsOneWidget);
     expect(find.text('Other'), findsNothing);
   });
+
+  testWidgets('missing data renders a dash, never a zero', (tester) async {
+    await tester.pumpWidget(
+      _app(
+        StoragePage(
+          data: const V2StoragePageData(
+            usedGb: 0.5,
+            slices: [
+              V2StorageSlice(label: 'Chats', sizeLabel: '512 MB', valueGb: 0.5),
+            ],
+          ),
+        ),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // No plan and no total: capacity is unknown, not "0 GB".
+    expect(find.text('of —'), findsOneWidget);
+    // No cache figure: the row says so instead of claiming "0 MB".
+    final row = find.byKey(const ValueKey('storage-clear-cache-row'));
+    expect(find.descendant(of: row, matching: find.text('—')), findsOneWidget);
+  });
+
+  testWidgets('a category with no data is omitted from the bar and legend', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        StoragePage(
+          data: const V2StoragePageData(
+            planName: 'Free plan',
+            usedGb: 1,
+            totalGb: 3,
+            slices: [
+              V2StorageSlice(label: 'Chats', sizeLabel: '1 GB', valueGb: 1),
+              V2StorageSlice(label: 'Artifacts', sizeLabel: '0 MB', valueGb: 0),
+            ],
+          ),
+        ),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Chats'), findsOneWidget);
+    expect(find.text('Artifacts'), findsNothing);
+    expect(find.text('0%'), findsNothing);
+  });
+
+  testWidgets('clear cache updates the real size in the row and the legend', (
+    tester,
+  ) async {
+    const freed = 142 * 1024 * 1024;
+    await tester.pumpWidget(
+      _app(
+        StoragePage(data: _data(onClearCacheAndReport: () async => freed)),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final row = find.byKey(const ValueKey('storage-clear-cache-row'));
+    expect(
+      find.descendant(of: row, matching: find.text('170 MB')),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Clear cache'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Freed 142 MB of cache.'), findsOneWidget);
+    // 0.17 GiB − 142 MB = 32 MB, shown in the row and in the legend.
+    expect(
+      find.descendant(of: row, matching: find.text('32 MB')),
+      findsOneWidget,
+    );
+    expect(find.text('32 MB'), findsWidgets);
+    expect(find.text('170 MB'), findsNothing);
+  });
+
+  testWidgets('clearing shows progress and blocks a second tap', (
+    tester,
+  ) async {
+    final completer = Completer<int>();
+    var calls = 0;
+    await tester.pumpWidget(
+      _app(
+        StoragePage(
+          data: _data(
+            onClearCacheAndReport: () {
+              calls++;
+              return completer.future;
+            },
+          ),
+        ),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final row = find.byKey(const ValueKey('storage-clear-cache-row'));
+    await tester.tap(find.text('Clear cache'));
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey('storage-clear-cache-progress')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: row, matching: find.text('170 MB')),
+      findsNothing,
+    );
+
+    await tester.tap(row, warnIfMissed: false);
+    await tester.pump();
+    expect(calls, 1);
+
+    completer.complete(142 * 1024 * 1024);
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey('storage-clear-cache-progress')),
+      findsNothing,
+    );
+    expect(find.text('Freed 142 MB of cache.'), findsOneWidget);
+  });
+
+  testWidgets('the clear row announces what it will free', (tester) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(
+      _app(
+        StoragePage(data: _data(onClearCache: () {})),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.bySemanticsLabel('Clear cache, 170 MB will be freed'),
+      findsOneWidget,
+    );
+    handle.dispose();
+  });
+
+  testWidgets('fits 320 to 1280 at 1x and 2x, light and dark', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    for (final width in [320.0, 360.0, 412.0, 600.0, 800.0, 1024.0, 1280.0]) {
+      for (final scale in [1.0, 2.0]) {
+        for (final dark in [false, true]) {
+          tester.view.physicalSize = Size(width, 900);
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: dark ? OTheme.dark() : OTheme.light(),
+              home: MediaQuery(
+                data: MediaQueryData(
+                  size: Size(width, 900),
+                  textScaler: TextScaler.linear(scale),
+                ),
+                child: StoragePage(data: _data(onClearCache: () {})),
+              ),
+            ),
+          );
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 600));
+
+          expect(
+            tester.takeException(),
+            isNull,
+            reason: '$width @ ${scale}x ${dark ? 'dark' : 'light'}',
+          );
+          if (width >= 600) {
+            expect(
+              tester
+                  .getSize(find.byKey(const ValueKey('storage-breakdown')))
+                  .width,
+              lessThanOrEqualTo(640),
+              reason: '$width content cap',
+            );
+          }
+        }
+      }
+    }
+  });
+
+  testWidgets('a long GB string does not overflow at 320 dp', (tester) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(
+      _app(
+        StoragePage(
+          data: const V2StoragePageData(
+            totalGb: 999999.9,
+            usedGb: 123456.7,
+            slices: [
+              V2StorageSlice(
+                label: 'Artifacts',
+                sizeLabel: '123456.7 GB',
+                valueGb: 123456.7,
+              ),
+            ],
+            cacheGb: 12345.6,
+            cacheSizeLabel: '12345.6 GB',
+            onClearCache: _noop,
+          ),
+        ),
+        theme: OTheme.dark(),
+        textScaler: const TextScaler.linear(2),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
+
+    expect(tester.takeException(), isNull);
+  });
 }
+
+void _noop() {}

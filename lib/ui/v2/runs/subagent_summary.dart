@@ -11,6 +11,84 @@ import '../../design/o_tokens.dart';
 /// Load state for [SubagentSummaryCard].
 enum V2SubagentSummaryStatus { loading, empty, error, ready }
 
+/// The visible mark for a contract value the run never supplied.
+///
+/// Missing is missing: the card shows this dash, never a guess and never a
+/// sentence that pretends the subagent reported an empty list.
+const String v2SubagentMissingValue = '—';
+
+/// How a missing contract value is read aloud. The dash itself is not spoken.
+const String v2SubagentNotReported = 'Not reported';
+
+/// A run's real state.
+///
+/// [unknown] is a state, not a placeholder: a run that has not reported a
+/// terminal status is never treated as [completed].
+enum V2SubagentRunStatus {
+  unknown,
+  running,
+  completed,
+  failed,
+  cancelled,
+  timedOut,
+}
+
+/// Maps the runtime's status wording onto [V2SubagentRunStatus].
+///
+/// Only wording the runtime can actually emit is mapped; anything else stays
+/// [V2SubagentRunStatus.unknown] so it can be shown verbatim.
+V2SubagentRunStatus v2SubagentRunStatusOf(String? raw) {
+  return switch ((raw ?? '').trim().toLowerCase()) {
+    'completed' || 'success' || 'succeeded' => V2SubagentRunStatus.completed,
+    'failed' || 'failure' || 'error' => V2SubagentRunStatus.failed,
+    'cancelled' || 'canceled' || 'stopped' => V2SubagentRunStatus.cancelled,
+    'timeout' || 'timed_out' || 'timed out' => V2SubagentRunStatus.timedOut,
+    'running' ||
+    'working' ||
+    'in progress' ||
+    'in_progress' => V2SubagentRunStatus.running,
+    _ => V2SubagentRunStatus.unknown,
+  };
+}
+
+/// The one visible label for a run status.
+String v2SubagentRunStatusLabel(V2SubagentRunStatus status) {
+  return switch (status) {
+    V2SubagentRunStatus.unknown => v2SubagentMissingValue,
+    V2SubagentRunStatus.running => 'Running',
+    V2SubagentRunStatus.completed => 'Completed',
+    V2SubagentRunStatus.failed => 'Failed',
+    V2SubagentRunStatus.cancelled => 'Cancelled',
+    V2SubagentRunStatus.timedOut => 'Timed out',
+  };
+}
+
+/// Label for a status string as the runtime reported it.
+///
+/// Contract wording is normalised; unusual wording is shown verbatim rather
+/// than replaced, because it is real data. An absent status reads as a dash.
+String v2SubagentReportedStatusLabel(String? raw) {
+  final text = (raw ?? '').trim();
+  if (text.isEmpty) return v2SubagentMissingValue;
+  final status = v2SubagentRunStatusOf(text);
+  return status == V2SubagentRunStatus.unknown
+      ? text
+      : v2SubagentRunStatusLabel(status);
+}
+
+/// Colour tone for a run status: success green, failure red, timeout amber,
+/// cancellation neutral, matching the run timeline.
+OPillTone v2SubagentRunStatusTone(V2SubagentRunStatus status) {
+  return switch (status) {
+    V2SubagentRunStatus.completed => OPillTone.success,
+    V2SubagentRunStatus.failed => OPillTone.danger,
+    V2SubagentRunStatus.timedOut => OPillTone.warn,
+    V2SubagentRunStatus.running => OPillTone.accent,
+    V2SubagentRunStatus.cancelled ||
+    V2SubagentRunStatus.unknown => OPillTone.neutral,
+  };
+}
+
 /// Every key in the subagent's strict five-key contract.
 const Set<String> v2SubagentSummaryKeys = {
   'status',
@@ -27,8 +105,9 @@ const Set<String> v2SubagentSummaryKeys = {
 /// Nothing is added or renamed, so [json] is what the main agent received.
 ///
 /// [reported] lists the keys the run actually supplied. A key that was absent
-/// is rendered as "Not reported" rather than as an empty value, so the screen
-/// never claims a subagent reported "no files" when it said nothing at all.
+/// renders as [v2SubagentMissingValue] rather than as an empty value, so the
+/// screen never claims a subagent reported "no files" when it said nothing at
+/// all.
 @immutable
 class V2SubagentSummaryData {
   const V2SubagentSummaryData({
@@ -73,25 +152,32 @@ class V2SubagentSummaryData {
   });
 }
 
-/// Renders one subagent's strict five-field summary as five compact rows.
+/// Renders one subagent's strict five-field summary.
 ///
 /// Presentational: the parent injects the already-decoded [summary] plus the
-/// callbacks. A null [summary] with [V2SubagentSummaryStatus.ready] is treated
-/// as empty.
+/// callbacks. A null [summary] in [V2SubagentSummaryStatus.ready] is treated as
+/// empty, never as five blank fields.
 class SubagentSummaryCard extends StatelessWidget {
   const SubagentSummaryCard({
     super.key,
     this.summary,
     this.status = V2SubagentSummaryStatus.ready,
+    this.showStatus = true,
     this.onFileTap,
     this.onArtifactTap,
     this.onRetry,
     this.errorMessage = 'We could not load the summary.',
-    this.initiallyRaw = false,
   });
 
   final V2SubagentSummaryData? summary;
   final V2SubagentSummaryStatus status;
+
+  /// Whether the card renders the contract's Status field.
+  ///
+  /// The subagent screen shows the live run status itself (it also has a real
+  /// status before any summary exists), so it turns this copy off and the
+  /// status is never read twice.
+  final bool showStatus;
 
   /// Opens a modified file. Chips are only announced as buttons when this is
   /// non-null.
@@ -107,10 +193,6 @@ class SubagentSummaryCard extends StatelessWidget {
 
   final String errorMessage;
 
-  /// Retained for callers that used to reveal raw JSON. The minimal card shows
-  /// the five fields only.
-  final bool initiallyRaw;
-
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
@@ -119,24 +201,12 @@ class SubagentSummaryCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  'Summary',
-                  style: OType.bodySm.copyWith(
-                    color: c.text,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-              if (status == V2SubagentSummaryStatus.ready &&
-                  data?.hasStatus == true)
-                OPill(
-                  label: _statusLabel(data!.status),
-                  tone: _statusTone(data.status),
-                ),
-            ],
+          Text(
+            'Summary',
+            style: OType.bodySm.copyWith(
+              color: c.text,
+              fontWeight: FontWeight.w600,
+            ),
           ),
           const SizedBox(height: OSpace.m),
           switch (status) {
@@ -150,10 +220,10 @@ class SubagentSummaryCard extends StatelessWidget {
               message: 'No summary yet',
               onRetry: onRetry,
             ),
-            V2SubagentSummaryStatus.ready => _fields(
-              context,
-              data ?? const V2SubagentSummaryData(),
-            ),
+            V2SubagentSummaryStatus.ready =>
+              data == null
+                  ? _Notice(message: 'No summary yet', onRetry: onRetry)
+                  : _fields(context, data),
           },
         ],
       ),
@@ -161,24 +231,41 @@ class SubagentSummaryCard extends StatelessWidget {
   }
 
   Widget _fields(BuildContext context, V2SubagentSummaryData data) {
+    final c = OColors.of(context);
+    final statusLabel = v2SubagentReportedStatusLabel(data.status);
+    final findings = data.hasField('key_findings')
+        ? data.keyFindings
+        : const <String>[];
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _Field(
-          label: 'Status',
-          child: Text(
-            data.hasStatus ? _statusLabel(data.status) : _notReported,
-            style: OType.bodySm.copyWith(
-              color: OColors.of(context).text,
-            ),
+        if (showStatus)
+          _Field(
+            label: 'Status',
+            valueLabel: data.hasStatus ? statusLabel : v2SubagentNotReported,
+            child: data.hasStatus
+                ? Align(
+                    alignment: Alignment.centerLeft,
+                    child: OPill(
+                      label: statusLabel,
+                      tone: v2SubagentRunStatusTone(
+                        v2SubagentRunStatusOf(data.status),
+                      ),
+                    ),
+                  )
+                : const _ValueText(v2SubagentMissingValue),
           ),
-        ),
         _Field(
           label: 'Files modified',
-          child: !data.hasField('files_modified')
-              ? const _None(label: _notReported)
+          valueLabel: !data.hasField('files_modified')
+              ? v2SubagentNotReported
               : data.filesModified.isEmpty
-              ? const _None(label: 'None')
+              ? 'None'
+              : null,
+          child: !data.hasField('files_modified')
+              ? const _ValueText(v2SubagentMissingValue)
+              : data.filesModified.isEmpty
+              ? const _ValueText('None')
               : Wrap(
                   spacing: OSpace.s,
                   runSpacing: OSpace.s,
@@ -199,10 +286,15 @@ class SubagentSummaryCard extends StatelessWidget {
         ),
         _Field(
           label: 'Artifacts created',
-          child: !data.hasField('artifacts_created')
-              ? const _None(label: _notReported)
+          valueLabel: !data.hasField('artifacts_created')
+              ? v2SubagentNotReported
               : data.artifactsCreated.isEmpty
-              ? const _None(label: 'None')
+              ? 'None'
+              : null,
+          child: !data.hasField('artifacts_created')
+              ? const _ValueText(v2SubagentMissingValue)
+              : data.artifactsCreated.isEmpty
+              ? const _ValueText('None')
               : Wrap(
                   spacing: OSpace.s,
                   runSpacing: OSpace.s,
@@ -223,76 +315,107 @@ class SubagentSummaryCard extends StatelessWidget {
         ),
         _Field(
           label: 'Key findings',
+          valueLabel: !data.hasField('key_findings')
+              ? v2SubagentNotReported
+              : findings.isEmpty
+              ? 'None'
+              : null,
           child: !data.hasField('key_findings')
-              ? const _None(label: _notReported)
-              : data.keyFindings.isEmpty
-              ? const _None(label: 'None')
-              : _Findings(findings: data.keyFindings),
+              ? const _ValueText(v2SubagentMissingValue)
+              : findings.isEmpty
+              ? const _ValueText('None')
+              : _Findings(findings: findings),
         ),
         _Field(
           label: 'Error if any',
           last: true,
+          valueLabel: !data.hasField('error_if_any')
+              ? v2SubagentNotReported
+              : data.hasError
+              ? data.errorIfAny!.trim()
+              : 'None',
           child: !data.hasField('error_if_any')
-              ? const _None(label: _notReported)
+              ? const _ValueText(v2SubagentMissingValue)
               : data.hasError
               ? Text(
                   data.errorIfAny!.trim(),
-                  style: OType.bodySm.copyWith(
-                    color: OColors.of(context).danger,
-                  ),
+                  style: OType.bodySm.copyWith(color: c.danger),
                 )
-              : const _None(label: 'None'),
+              : const _ValueText('None'),
         ),
       ],
     );
   }
 }
 
-const String _notReported = 'Not reported';
-
 /// One contract field: a quiet label over its value.
+///
+/// When [valueLabel] is set the field is a single accessibility node reading
+/// "label: value". Fields whose value is a control (a file chip) leave it null
+/// so the chip keeps its own tap target.
 class _Field extends StatelessWidget {
   const _Field({
     required this.label,
     required this.child,
+    this.valueLabel,
     this.last = false,
   });
 
   final String label;
   final Widget child;
+  final String? valueLabel;
   final bool last;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(vertical: OSpace.s),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                label.toUpperCase(),
-                style: OType.overline.copyWith(color: c.textFaint),
-              ),
-              const SizedBox(height: OSpace.xs),
-              child,
-            ],
+    final body = Padding(
+      padding: const EdgeInsets.symmetric(vertical: OSpace.s),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label.toUpperCase(),
+            style: OType.overline.copyWith(color: c.textFaint),
           ),
-        ),
+          const SizedBox(height: OSpace.xs),
+          child,
+        ],
+      ),
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (valueLabel == null)
+          body
+        else
+          Semantics(
+            container: true,
+            label: '$label: $valueLabel',
+            excludeSemantics: true,
+            child: body,
+          ),
         if (!last) Divider(height: 1, color: c.hairline),
       ],
     );
   }
 }
 
-
-class _Findings extends StatelessWidget {
+/// Long findings are previewed at three lines; the full text is one tap away.
+class _Findings extends StatefulWidget {
   const _Findings({required this.findings});
 
   final List<String> findings;
+
+  @override
+  State<_Findings> createState() => _FindingsState();
+}
+
+class _FindingsState extends State<_Findings> {
+  /// Above this length a finding is previewed instead of printed whole.
+  static const int _previewChars = 160;
+
+  final Set<int> _expanded = <int>{};
 
   @override
   Widget build(BuildContext context) {
@@ -300,34 +423,67 @@ class _Findings extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        for (var i = 0; i < findings.length; i++) ...[
-          Row(
+        for (var i = 0; i < widget.findings.length; i++) ...[
+          _finding(context, c, i, widget.findings[i]),
+          if (i < widget.findings.length - 1) const SizedBox(height: OSpace.s),
+        ],
+      ],
+    );
+  }
+
+  Widget _finding(BuildContext context, OColors c, int index, String finding) {
+    final expanded = _expanded.contains(index);
+    final capped =
+        finding.length > _previewChars || '\n'.allMatches(finding).length >= 3;
+    final collapsed = capped && !expanded;
+    final text = Text(
+      finding,
+      maxLines: collapsed ? 3 : null,
+      overflow: collapsed ? TextOverflow.ellipsis : TextOverflow.clip,
+      style: OType.bodySm.copyWith(color: c.text),
+    );
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ExcludeSemantics(
+          child: Text('•', style: OType.bodySm.copyWith(color: c.accent)),
+        ),
+        const SizedBox(width: OSpace.s),
+        Expanded(
+          child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              ExcludeSemantics(
-                child: Text(
-                  '•',
-                  style: OType.bodySm.copyWith(color: c.accent),
+              if (collapsed)
+                Semantics(
+                  // The preview is visual only: a screen reader gets the whole
+                  // finding, not the three-line cut.
+                  label: finding,
+                  excludeSemantics: true,
+                  child: text,
+                )
+              else
+                text,
+              if (capped)
+                OTextAction(
+                  label: expanded ? 'Show less' : 'Show more',
+                  onPressed: () => setState(() {
+                    if (expanded) {
+                      _expanded.remove(index);
+                    } else {
+                      _expanded.add(index);
+                    }
+                  }),
                 ),
-              ),
-              const SizedBox(width: OSpace.s),
-              Expanded(
-                child: Text(
-                  findings[i],
-                  style: OType.bodySm.copyWith(color: c.text),
-                ),
-              ),
             ],
           ),
-          if (i < findings.length - 1) const SizedBox(height: OSpace.xs),
-        ],
+        ),
       ],
     );
   }
 }
 
-class _None extends StatelessWidget {
-  const _None({required this.label});
+class _ValueText extends StatelessWidget {
+  const _ValueText(this.label);
 
   final String label;
 
@@ -341,11 +497,7 @@ class _None extends StatelessWidget {
 }
 
 class _Notice extends StatelessWidget {
-  const _Notice({
-    required this.message,
-    this.onRetry,
-    this.danger = false,
-  });
+  const _Notice({required this.message, this.onRetry, this.danger = false});
 
   final String message;
   final VoidCallback? onRetry;
@@ -364,8 +516,7 @@ class _Notice extends StatelessWidget {
             ),
           ),
         ),
-        if (onRetry != null)
-          OTextAction(label: 'Retry', onPressed: onRetry),
+        if (onRetry != null) OTextAction(label: 'Retry', onPressed: onRetry),
       ],
     );
   }
@@ -393,35 +544,4 @@ class _SummarySkeleton extends StatelessWidget {
       ],
     );
   }
-}
-
-/// Plain-language label for the runtime's terminal status.
-String _statusLabel(String status) {
-  final raw = status.trim();
-  return switch (raw.toLowerCase()) {
-    'completed' => 'Completed',
-    'failed' => 'Failed',
-    'cancelled' || 'canceled' => 'Cancelled',
-    'timeout' || 'timed_out' || 'timed out' => 'Timed out',
-    'running' => 'Running',
-    '' => 'No status',
-    _ => raw,
-  };
-}
-
-/// Colour tone for the status pill. Successful runs are green, failures red,
-/// timeouts amber and cancellations neutral, matching the run timeline.
-OPillTone _statusTone(String status) {
-  final raw = status.trim().toLowerCase();
-  if (raw == 'completed' || raw == 'success' || raw == 'succeeded') {
-    return OPillTone.success;
-  }
-  if (raw == 'failed' || raw == 'failure' || raw == 'error') {
-    return OPillTone.danger;
-  }
-  if (raw == 'timeout' || raw == 'timed_out' || raw == 'timed out') {
-    return OPillTone.warn;
-  }
-  if (raw == 'running' || raw == 'working') return OPillTone.accent;
-  return OPillTone.neutral;
 }

@@ -1,6 +1,6 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
@@ -12,6 +12,23 @@ final Uint8List _frameBytes = base64Decode(
   'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR4nGOoifn/'
   'H4QZYAwAYdILWapN/cEAAAAASUVORK5CYII=',
 );
+
+/// A provider that always fails to decode: the "corrupt frame" case.
+class _BrokenFrame extends ImageProvider<_BrokenFrame> {
+  const _BrokenFrame();
+
+  @override
+  Future<_BrokenFrame> obtainKey(ImageConfiguration configuration) =>
+      SynchronousFuture<_BrokenFrame>(this);
+
+  @override
+  ImageStreamCompleter loadImage(
+    _BrokenFrame key,
+    ImageDecoderCallback decode,
+  ) => OneFrameImageStreamCompleter(
+    Future<ImageInfo>.error(Exception('corrupt frame')),
+  );
+}
 
 Widget _app(
   Widget child, {
@@ -135,6 +152,17 @@ void main() {
     expect(find.text('Connecting…'), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
     expect(find.byType(Image), findsNothing);
+  });
+
+  testWidgets('a corrupt frame says so instead of leaving a blank box', (
+    tester,
+  ) async {
+    await _pump(tester, const BrowserViewport(frame: _BrokenFrame()));
+    await tester.pump();
+
+    // The surface stays labelled: no black rectangle that looks loaded.
+    expect(find.text('Frame unavailable'), findsOneWidget);
+    expect(find.text('Live'), findsNothing);
   });
 
   testWidgets('stream lost keeps the last frame and offers a reconnect', (

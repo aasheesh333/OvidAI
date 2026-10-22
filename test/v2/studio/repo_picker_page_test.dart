@@ -21,7 +21,6 @@ Widget _app(Widget child, {bool dark = false, double textScale = 1}) =>
     );
 
 void _noopConfirm(V2Repo repo, String branch) {}
-void _noopSelect(V2Repo repo) {}
 
 const _repos = <V2Repo>[
   V2Repo(
@@ -119,20 +118,26 @@ void main() {
     expect(tokens, 1);
   });
 
-  testWidgets('tapping a repository reports the selection', (tester) async {
-    V2Repo? selected;
+  testWidgets('a repository tap opens the branch step and never confirms early', (
+    tester,
+  ) async {
+    var confirms = 0;
     await tester.pumpWidget(
       _app(
         V2RepoPickerPage(
           data: const V2RepoPickerData(repos: _repos),
-          onSelectRepo: (repo) => selected = repo,
+          onConfirm: (_, _) => confirms++,
         ),
       ),
     );
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('acme/api-server'));
-    expect(selected?.id, '2');
+    await tester.pumpAndSettle();
+
+    // The gate only opens on a repo **and** a branch.
+    expect(confirms, 0);
+    expect(find.byKey(const Key('repo-picker-branch-release')), findsOneWidget);
   });
 
   testWidgets('requires a repository and branch before the primary enables', (
@@ -382,26 +387,19 @@ void main() {
     expect(find.text('main'), findsOneWidget);
   });
 
-  testWidgets('without a confirm handler the picker cannot pretend to start', (
+  testWidgets('without a confirm handler there is no primary action', (
     tester,
   ) async {
     await tester.pumpWidget(
-      _app(
-        const V2RepoPickerPage(
-          data: V2RepoPickerData(repos: _repos),
-          onSelectRepo: _noopSelect,
-        ),
-      ),
+      _app(const V2RepoPickerPage(data: V2RepoPickerData(repos: _repos))),
     );
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('acme/landing-page'));
     await tester.pumpAndSettle();
 
-    final primary = tester.widget<OButton>(
-      find.byKey(const Key('repo-picker-primary')),
-    );
-    expect(primary.onPressed, isNull);
+    // Nothing can bind the folder, so no Start control is drawn at all.
+    expect(find.byKey(const Key('repo-picker-primary')), findsNothing);
     expect(find.textContaining('not connected'), findsNothing);
   });
 

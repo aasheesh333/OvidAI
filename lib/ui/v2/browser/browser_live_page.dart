@@ -86,6 +86,14 @@ class _BrowserLivePageState extends State<BrowserLivePage>
   String? _attachId;
   bool _sheetOpen = false;
 
+  /// The attach generation the picture on screen belongs to. A new generation
+  /// (retry, tab replace, socket reconnect) invalidates it.
+  int _generation = 0;
+
+  /// A hand-back timeout is reported once per failed request, not on every
+  /// repaint.
+  bool _releaseFailureShown = false;
+
   @override
   void initState() {
     super.initState();
@@ -132,7 +140,12 @@ class _BrowserLivePageState extends State<BrowserLivePage>
     final id = widget.attachId ?? _attachId ?? await _resolveAttachId();
     if (!mounted || _backgrounded) return;
     _attachId = id;
-    await _client.attach(id);
+    try {
+      await _client.attach(id);
+    } catch (_) {
+      // The link layer owns reconnects; the page stays on its honest waiting
+      // surface instead of dying on an unhandled future error.
+    }
     _startStallTimer();
   }
 
@@ -186,6 +199,31 @@ class _BrowserLivePageState extends State<BrowserLivePage>
     if (!mounted) return;
     if (_client.error != null) _firstStateTimer?.cancel();
     if (!_client.takeoverActive && _keyboard.value) _keyboard.value = false;
+
+    // A new attach generation (first attach, retry, reconnect) means the
+    // picture on screen belongs to a session the server is no longer
+    // streaming. Drop it instead of painting a stale page as live, and give
+    // the new session the same honest waiting window as a cold open.
+    final generation = _client.generation;
+    if (generation != _generation) {
+      final firstAttach = _generation == 0;
+      _generation = generation;
+      _clearFrame();
+      if (!firstAttach) _startFirstStateTimer();
+    }
+
+    // Handing control back is server-acknowledged too. If the ack never
+    // comes, stay controlled (never fake the release) but say so once and
+    // leave the return button in place to try again.
+    if (_client.takeoverFailed && _client.takeoverActive) {
+      if (!_releaseFailureShown) {
+        _releaseFailureShown = true;
+        _snack('Still controlling. Try again.');
+      }
+    } else {
+      _releaseFailureShown = false;
+    }
+
     setState(() {});
     final notice = _client.notice;
     if (notice != null) {
@@ -196,7 +234,10 @@ class _BrowserLivePageState extends State<BrowserLivePage>
             : 'Reconnecting to the browser…',
       );
       if (notice.code == 'not_attached' && _attachId != null) {
-        unawaited(_client.attach(_attachId!));
+        // The server dropped this viewer's attach. `attach()` alone is a
+        // no-op while the client still believes it is attached, so drop the
+        // stale picture and re-attach from scratch.
+        unawaited(_retry());
       }
     }
   }
@@ -239,6 +280,30 @@ class _BrowserLivePageState extends State<BrowserLivePage>
     _client.detach();
     _startFirstStateTimer();
     await _attach();
+  }
+
+  /// Selects an agent tab. The old tab's picture is dropped immediately: the
+  /// address is about to change, so leaving its last frame on screen would be
+  /// a lie until the new tab's first frame arrives.
+  Future<void> _switchTab(int index) async {
+    _clearFrame();
+    _startFirstStateTimer();
+    try {
+      await _client.switchTab(index);
+    } catch (_) {
+      // The switch did not leave this device. Stay on the waiting surface;
+      // the retry action re-attaches.
+    }
+  }
+
+  /// Hands the page back to Ovid. The dock only changes once the server
+  /// acknowledges, so a failed request keeps control here.
+  Future<void> _releaseControl() async {
+    try {
+      await _client.releaseTakeover();
+    } catch (_) {
+      if (mounted) _snack('Could not hand back control.');
+    }
   }
 
   void _snack(String message) {
@@ -357,7 +422,14 @@ class _BrowserLivePageState extends State<BrowserLivePage>
   }
 
   Future<void> _requestTakeover() async {
-    await _client.requestTakeover();
+    try {
+      await _client.requestTakeover();
+    } catch (_) {
+      if (!mounted) return;
+      // The sheet is already open; a failure to send is the same outcome as
+      // an unacknowledged request, so say it plainly.
+      _snack('Could not pause the page. Try again.');
+    }
   }
 
   void _toggleKeyboard() {
@@ -402,6 +474,10 @@ class _BrowserLivePageState extends State<BrowserLivePage>
 
   V2ViewportStatus get _viewportStatus {
     final state = _client.state;
+    // The socket is down: the last frame is a still picture of a page this
+    // device can no longer drive. Say the stream is lost instead of painting
+    // it as live while the link is gone.
+    if (_client.reconnecting) return V2ViewportStatus.streamLost;
     if (state == null) return V2ViewportStatus.loading;
     if (_frame == null) {
       if (!state.live) return V2ViewportStatus.waiting;
@@ -460,6 +536,13 @@ class _BrowserLivePageState extends State<BrowserLivePage>
     );
   }
 
+  /// Control is only offered when there is a picture to control: taking over a
+  /// page this device cannot see would hand over taps nobody can aim.
+  bool get _canTakeControl =>
+      _client.canTakeOver &&
+      !_client.controlledElsewhere &&
+      _viewportStatus == V2ViewportStatus.live;
+
   @override
   Widget build(BuildContext context) {
     final data = _data();
@@ -470,14 +553,10 @@ class _BrowserLivePageState extends State<BrowserLivePage>
           onMenu: _openMenu,
           onSelectTab: (id) {
             final index = int.tryParse(id);
-            if (index != null) unawaited(_client.switchTab(index));
+            if (index != null) unawaited(_switchTab(index));
           },
-          onTakeControl: _client.canTakeOver && !_client.controlledElsewhere
-              ? _takeControl
-              : null,
-          onReleaseControl: _client.takeoverActive
-              ? () => unawaited(_client.releaseTakeover())
-              : null,
+          onTakeControl: _canTakeControl ? _takeControl : null,
+          onReleaseControl: _client.takeoverActive ? _releaseControl : null,
           onToggleKeyboard: _client.takeoverActive ? _toggleKeyboard : null,
           onRetry: _retry,
           onPageTap: _onPageTap,

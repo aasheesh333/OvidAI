@@ -113,7 +113,6 @@ class SchedulesPage extends StatelessWidget {
     this.onScheduleTap,
     this.onScheduleMenu,
     this.onToggle,
-    this.onRetryRun,
     this.onEdit,
     this.onRunNow,
     this.onDelete,
@@ -127,7 +126,6 @@ class SchedulesPage extends StatelessWidget {
   /// Escape hatch: replaces the built-in Edit / Pause / Run now / Delete menu.
   final ValueChanged<V2ScheduleItem>? onScheduleMenu;
   final void Function(V2ScheduleItem schedule, bool enabled)? onToggle;
-  final ValueChanged<V2ScheduleItem>? onRetryRun;
   final ValueChanged<V2ScheduleItem>? onEdit;
   final ValueChanged<V2ScheduleItem>? onRunNow;
   final ValueChanged<V2ScheduleItem>? onDelete;
@@ -221,72 +219,91 @@ class SchedulesPage extends StatelessWidget {
       if (schedule.ruleLabel.isNotEmpty) schedule.ruleLabel,
       ?nextRun,
     ].join(' · ');
+    // The row announces what it shows: the prompt, the cadence, the next run
+    // and, when it is off, that it is paused. The switch keeps its own node so
+    // its state can still be changed.
+    final label = _cardLabel(prompt, schedule, nextRun);
+
+    final card = OCard(
+      onTap: onTap == null ? null : () => onTap(schedule),
+      semanticLabel: onTap == null ? null : label,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Text(
+                  prompt,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.bodyStrong.copyWith(color: c.text),
+                ),
+              ),
+              const SizedBox(width: OSpace.s),
+              MergeSemantics(
+                child: Semantics(
+                  label: 'Turn ${schedule.title} on or off',
+                  toggled: schedule.enabled,
+                  enabled: onToggleSchedule != null,
+                  child: Switch(
+                    value: schedule.enabled,
+                    onChanged: onToggleSchedule == null
+                        ? null
+                        : (value) => onToggleSchedule(schedule, value),
+                    thumbColor: WidgetStateProperty.resolveWith(
+                      (states) => states.contains(WidgetState.disabled)
+                          ? c.textFaint
+                          : (schedule.enabled ? c.onAccent : c.textFaint),
+                    ),
+                    trackColor: WidgetStateProperty.resolveWith(
+                      (states) =>
+                          states.contains(WidgetState.disabled) ||
+                              !schedule.enabled
+                          ? c.surfaceRaised
+                          : c.accentFill,
+                    ),
+                    trackOutlineColor: WidgetStatePropertyAll(c.hairlineStrong),
+                  ),
+                ),
+              ),
+              if (menuEnabled)
+                OIconButton(
+                  icon: Icons.more_vert_rounded,
+                  semanticLabel: 'More options for ${schedule.title}',
+                  size: 18,
+                  onPressed: () => _openMenu(context, schedule),
+                ),
+            ],
+          ),
+          if (meta.isNotEmpty) ...[
+            const SizedBox(height: OSpace.s),
+            _metaRow(c, Icons.schedule_rounded, meta),
+          ],
+        ],
+      ),
+    );
 
     return Padding(
       padding: const EdgeInsets.only(bottom: OSpace.m),
-      child: OCard(
-        onTap: onTap == null ? null : () => onTap(schedule),
-        semanticLabel: '${schedule.title}. ${schedule.rule}',
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  child: Text(
-                    prompt,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.bodyStrong.copyWith(color: c.text),
-                  ),
-                ),
-                const SizedBox(width: OSpace.s),
-                MergeSemantics(
-                  child: Semantics(
-                    label: 'Turn ${schedule.title} on or off',
-                    toggled: schedule.enabled,
-                    enabled: onToggleSchedule != null,
-                    child: Switch(
-                      value: schedule.enabled,
-                      onChanged: onToggleSchedule == null
-                          ? null
-                          : (value) => onToggleSchedule(schedule, value),
-                      thumbColor: WidgetStateProperty.resolveWith(
-                        (states) => states.contains(WidgetState.disabled)
-                            ? c.textFaint
-                            : (schedule.enabled ? c.onAccent : c.textFaint),
-                      ),
-                      trackColor: WidgetStateProperty.resolveWith(
-                        (states) =>
-                            states.contains(WidgetState.disabled) ||
-                                !schedule.enabled
-                            ? c.surfaceRaised
-                            : c.accentFill,
-                      ),
-                      trackOutlineColor: WidgetStatePropertyAll(
-                        c.hairlineStrong,
-                      ),
-                    ),
-                  ),
-                ),
-                if (menuEnabled)
-                  OIconButton(
-                    icon: Icons.more_vert_rounded,
-                    semanticLabel: 'More options for ${schedule.title}',
-                    size: 18,
-                    onPressed: () => _openMenu(context, schedule),
-                  ),
-              ],
-            ),
-            if (meta.isNotEmpty) ...[
-              const SizedBox(height: OSpace.s),
-              _metaRow(c, Icons.schedule_rounded, meta),
-            ],
-          ],
-        ),
-      ),
+      // A non-tappable card is not a control: its own text stays readable
+      // rather than being wrapped in a second, duplicated label.
+      child: card,
     );
+  }
+
+  /// One spoken sentence for a card, mirroring the visible content.
+  String _cardLabel(String prompt, V2ScheduleItem schedule, String? nextRun) {
+    final parts = <String>[
+      prompt,
+      if (schedule.ruleLabel.isNotEmpty) schedule.ruleLabel,
+      if (nextRun != null) 'Next run, $nextRun',
+      if (!schedule.enabled) 'Paused',
+    ];
+    return parts
+        .map((part) => part.trim().replaceFirst(RegExp(r'\.$'), ''))
+        .join('. ');
   }
 
   Widget _metaRow(OColors c, IconData icon, String text) {
@@ -367,26 +384,33 @@ class SchedulesPage extends StatelessWidget {
     BuildContext context,
     V2ScheduleItem schedule,
   ) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: Text('Delete “${schedule.title}”?'),
-        content: const Text(
-          'Future runs stop immediately. This cannot be undone.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Keep'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
-    );
-    if (!context.mounted || confirmed != true) return;
+    final confirmed = await confirmDeleteSchedule(context, schedule.title);
+    if (!context.mounted || !confirmed) return;
     onDelete?.call(schedule);
   }
+}
+
+/// The one confirmation before a schedule is deleted. Shared by the list and
+/// the editor so a destructive action never has two different shapes.
+Future<bool> confirmDeleteSchedule(BuildContext context, String title) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: Text('Delete “$title”?'),
+      content: const Text(
+        'Future runs stop immediately. This cannot be undone.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext, false),
+          child: const Text('Keep'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext, true),
+          child: const Text('Delete'),
+        ),
+      ],
+    ),
+  );
+  return confirmed == true;
 }

@@ -158,6 +158,7 @@ class BrowserViewport extends StatelessWidget {
                       actionKey: retryKey,
                       actionLabel: 'Reconnect',
                       onRetry: onRetry,
+                      announce: true,
                     ),
                   ],
                   if (effective == V2ViewportStatus.live && cursor != null)
@@ -233,6 +234,7 @@ class _NoticeBody extends StatelessWidget {
     required this.actionKey,
     required this.actionLabel,
     this.onRetry,
+    this.announce = false,
   });
 
   final String title;
@@ -240,33 +242,41 @@ class _NoticeBody extends StatelessWidget {
   final String actionLabel;
   final VoidCallback? onRetry;
 
+  /// True for a state that changes while the person is watching (the stream
+  /// dropping), so a screen reader announces it instead of staying silent.
+  final bool announce;
+
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    return Center(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(OSpace.m),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              title,
-              textAlign: TextAlign.center,
-              style: OType.bodySm.copyWith(
-                color: c.text,
-                fontWeight: FontWeight.w600,
+    return Semantics(
+      container: true,
+      liveRegion: announce,
+      child: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(OSpace.m),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                title,
+                textAlign: TextAlign.center,
+                style: OType.bodySm.copyWith(
+                  color: c.text,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
-            ),
-            if (onRetry != null) ...[
-              const SizedBox(height: OSpace.m),
-              OButton(
-                key: actionKey,
-                label: actionLabel,
-                variant: OButtonVariant.secondary,
-                onPressed: onRetry,
-              ),
+              if (onRetry != null) ...[
+                const SizedBox(height: OSpace.m),
+                OButton(
+                  key: actionKey,
+                  label: actionLabel,
+                  variant: OButtonVariant.secondary,
+                  onPressed: onRetry,
+                ),
+              ],
             ],
-          ],
+          ),
         ),
       ),
     );

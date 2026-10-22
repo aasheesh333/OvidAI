@@ -24,6 +24,7 @@ class V2ShareLinkCardData {
     this.copied = false,
     this.viewer = false,
     this.revoked = false,
+    this.busy = false,
   }) : assert(capacity > 0, 'A shared link always has a capacity');
 
   /// The link people open, for example `ovidsi.com/c/79f9b4c0e`.
@@ -53,6 +54,10 @@ class V2ShareLinkCardData {
   /// True when the creator has revoked the link. Nothing is actionable then.
   final bool revoked;
 
+  /// True while the host is revoking the link. Copy and fork are disabled so
+  /// the surface cannot claim the link is still usable while it is going away.
+  final bool busy;
+
   bool get isCollab => mode == V2ShareMode.collab;
 
   /// True when the room has reached its member cap.
@@ -62,7 +67,7 @@ class V2ShareLinkCardData {
   String get memberLabel => '$memberCount of $capacity members';
 
   /// Only a read-only viewer can fork; Collab rooms are joined, not cloned.
-  bool get canFork => viewer && !isCollab && !revoked;
+  bool get canFork => viewer && !isCollab && !revoked && !busy;
 
   /// Whether [now] is at or past [expiresAt].
   bool isExpiredAt(DateTime now) =>
@@ -107,7 +112,7 @@ class V2ShareLinkCard extends StatelessWidget {
 
   final V2ShareLinkCardData data;
 
-  /// Copy the URL. Disabled when the link is expired or revoked.
+  /// Copy the URL. Disabled when the link is empty, expired, revoked or busy.
   final VoidCallback? onCopy;
 
   /// Revoke the link for its creator. Hidden for viewers.
@@ -125,8 +130,9 @@ class V2ShareLinkCard extends StatelessWidget {
     final c = OColors.of(context);
     final expired = data.isExpiredAt(now ?? DateTime.now());
     final hasLink = data.url.trim().isNotEmpty;
-    final copied = data.copied && hasLink;
-    final canCopy = hasLink && !expired && !data.revoked && onCopy != null;
+    final copied = data.copied && hasLink && !data.revoked && !expired;
+    final canCopy =
+        hasLink && !expired && !data.revoked && !data.busy && onCopy != null;
 
     final fork = data.canFork && onFork != null && !expired
         ? OButton(
@@ -137,12 +143,25 @@ class V2ShareLinkCard extends StatelessWidget {
             onPressed: onFork,
           )
         : null;
-    final revoke = !data.viewer && onRevoke != null
+    final revoke =
+        !data.viewer &&
+            onRevoke != null &&
+            !data.revoked &&
+            !expired &&
+            !data.busy
         ? OTextAction(
             label: 'Revoke',
             icon: Icons.link_off_rounded,
             onPressed: onRevoke,
           )
+        : null;
+
+    final status = data.revoked
+        ? 'Link revoked.'
+        : expired
+        ? 'Link expired.'
+        : data.busy
+        ? 'Revoking link…'
         : null;
 
     return Align(
@@ -166,7 +185,10 @@ class V2ShareLinkCard extends StatelessWidget {
                   const SizedBox(width: OSpace.s),
                   Expanded(
                     child: Semantics(
-                      label: hasLink ? 'Share link, ${data.url}' : 'No link yet',
+                      container: true,
+                      label: hasLink
+                          ? 'Share link, ${data.url}'
+                          : 'No link yet',
                       child: ExcludeSemantics(
                         child: Text(
                           hasLink ? data.url : 'No link yet',
@@ -180,34 +202,36 @@ class V2ShareLinkCard extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(width: OSpace.xs),
-                  OIconButton(
-                    icon: copied
-                        ? Icons.check_rounded
-                        : Icons.copy_rounded,
-                    semanticLabel: copied ? 'Copied' : 'Copy link',
-                    tooltip: copied ? 'Copied' : 'Copy link',
-                    active: copied,
-                    onPressed: canCopy ? onCopy : null,
+                  // The label carries the full URL after copying so the
+                  // announcement says exactly what landed on the clipboard.
+                  Semantics(
+                    container: true,
+                    button: true,
+                    enabled: canCopy,
+                    liveRegion: copied,
+                    label: copied ? 'Link copied, ${data.url}' : 'Copy link',
+                    onTap: canCopy ? onCopy : null,
+                    excludeSemantics: true,
+                    child: OIconButton(
+                      icon: copied ? Icons.check_rounded : Icons.copy_rounded,
+                      semanticLabel: copied ? 'Copied' : 'Copy link',
+                      tooltip: copied ? 'Copied' : 'Copy link',
+                      active: copied,
+                      onPressed: canCopy ? onCopy : null,
+                    ),
                   ),
                 ],
               ),
-              if (data.revoked) ...[
+              if (status != null) ...[
                 const SizedBox(height: OSpace.xs),
                 Text(
-                  'Link revoked.',
-                  style: OType.caption.copyWith(color: c.danger),
-                ),
-              ] else if (expired) ...[
-                const SizedBox(height: OSpace.xs),
-                Text(
-                  'Link expired.',
-                  style: OType.caption.copyWith(color: c.textMuted),
+                  status,
+                  style: OType.caption.copyWith(
+                    color: data.revoked ? c.danger : c.textMuted,
+                  ),
                 ),
               ],
-              if (fork != null) ...[
-                const SizedBox(height: OSpace.s),
-                fork,
-              ],
+              if (fork != null) ...[const SizedBox(height: OSpace.s), fork],
               if (revoke != null)
                 Align(alignment: Alignment.centerLeft, child: revoke),
             ],

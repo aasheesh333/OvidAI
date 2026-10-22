@@ -100,20 +100,31 @@ class V2ChangesPage extends StatefulWidget {
     super.key,
     required this.data,
     this.onCommit,
+    this.onCommitAsync,
     this.onSync,
     this.onBack,
     this.onRetry,
     this.onCopyDiff,
-    this.onMenu,
   });
 
   final V2ChangesData data;
+
+  /// Fire-and-forget commit. Kept for hosts that cannot report a result.
   final ValueChanged<String>? onCommit;
+
+  /// Preferred over [onCommit]: commits [message] and returns null on success
+  /// or the real failure copy. The screen shows exactly what this returns, so
+  /// a commit can never be reported as successful when it was not.
+  final Future<String?> Function(String message)? onCommitAsync;
+
   final VoidCallback? onSync;
   final VoidCallback? onBack;
   final VoidCallback? onRetry;
   final ValueChanged<String>? onCopyDiff;
-  final VoidCallback? onMenu;
+
+  /// True when some commit path is wired. Without one the screen is a review
+  /// surface only and draws no commit control.
+  bool get canCommit => onCommit != null || onCommitAsync != null;
 
   @override
   State<V2ChangesPage> createState() => _V2ChangesPageState();
@@ -144,7 +155,7 @@ class _V2ChangesPageState extends State<V2ChangesPage> {
   /// diff review; the sheet owns the message and the final commit action.
   Future<void> _openCommitSheet() async {
     final data = widget.data;
-    if (data.files.isEmpty) return;
+    if (data.files.isEmpty || !widget.canCommit) return;
     final message = await showOSheet<String>(
       context,
       builder: (sheetContext) => V2CommitSheet(
@@ -165,15 +176,28 @@ class _V2ChangesPageState extends State<V2ChangesPage> {
         onSync: widget.onSync,
         onRetry: widget.onRetry,
         onClose: () => Navigator.of(sheetContext).pop(),
-        // The sheet disables its commit action when no real commit path is
-        // wired. The page only supplies the pop-and-report handler when its
-        // own [onCommit] exists, so an unwired page cannot fake a commit.
-        onCommit: widget.onCommit == null
-            ? null
-            : (value) => Navigator.of(sheetContext).pop(value),
+        // The sheet only closes with a message; the page then runs the real
+        // commit and reports its outcome.
+        onCommit: (value) => Navigator.of(sheetContext).pop(value),
       ),
     );
-    if (message != null) widget.onCommit?.call(message);
+    if (message == null || !mounted) return;
+
+    final asyncCommit = widget.onCommitAsync;
+    if (asyncCommit != null) {
+      String? failure;
+      try {
+        failure = await asyncCommit(message);
+      } catch (_) {
+        // The wiring layer owns error copy; a handler that throws instead of
+        // returning a message still gets an honest line, never a fake success.
+        failure = 'The commit did not finish.';
+      }
+      if (!mounted) return;
+      showOSnack(context, failure ?? 'Committed.');
+      return;
+    }
+    widget.onCommit?.call(message);
   }
 
   /// The commit sheet lists files by full path, while [V2ChangedFile] keeps the
@@ -191,6 +215,9 @@ class _V2ChangesPageState extends State<V2ChangesPage> {
     final data = widget.data;
     final hasContent =
         data.status == V2ChangesStatus.content && data.files.isNotEmpty;
+    // No diff source means no commit control. A permanently disabled check
+    // mark would imply a commit path that does not exist.
+    final commitable = hasContent && widget.canCommit;
     return OScreen(
       title: 'Changes',
       padding: false,
@@ -202,13 +229,14 @@ class _V2ChangesPageState extends State<V2ChangesPage> {
               onPressed: widget.onBack,
             ),
       actions: [
-        OIconButton(
-          key: const Key('studio-open-commit-sheet'),
-          icon: Icons.check_rounded,
-          semanticLabel: 'Commit & push',
-          tooltip: 'Commit',
-          onPressed: hasContent ? _openCommitSheet : null,
-        ),
+        if (commitable)
+          OIconButton(
+            key: const Key('studio-open-commit-sheet'),
+            icon: Icons.check_rounded,
+            semanticLabel: 'Commit & push',
+            tooltip: 'Commit',
+            onPressed: _openCommitSheet,
+          ),
       ],
       child: switch (data.status) {
         V2ChangesStatus.loading => const OSkeletonList(rows: 6),
@@ -351,15 +379,21 @@ class _DiffFileRow extends StatelessWidget {
             child: InkWell(
               onTap: onToggle,
               child: Semantics(
+                container: true,
+                excludeSemantics: true,
                 label: '$path, +${file.additions} −${file.deletions}',
                 button: true,
+                enabled: true,
                 expanded: expanded,
+                onTap: onToggle,
                 child: row,
               ),
             ),
           )
         else
           Semantics(
+            container: true,
+            excludeSemantics: true,
             label: '$path, +${file.additions} −${file.deletions}',
             child: row,
           ),
@@ -392,11 +426,16 @@ class _DiffBody extends StatelessWidget {
               child: Row(
                 children: [
                   Expanded(
-                    child: Text(
-                      hunk.header,
-                      style: OType.mono.copyWith(color: c.textMuted),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                    child: Semantics(
+                      header: true,
+                      label: 'Hunk ${hunk.header}',
+                      excludeSemantics: true,
+                      child: Text(
+                        hunk.header,
+                        style: OType.mono.copyWith(color: c.textMuted),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
                   ),
                   if (onCopyDiff != null)
@@ -450,36 +489,54 @@ class _DiffLineRow extends StatelessWidget {
       V2DiffKind.context => ' ',
     };
     final style = OType.mono.copyWith(color: foreground);
-    return ColoredBox(
-      color: background,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: OSpace.m, vertical: 1),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SizedBox(
-              width: 28,
-              child: Text(
-                line.oldNumber?.toString() ?? '',
-                textAlign: TextAlign.right,
-                style: style.copyWith(color: c.textFaint),
+    final number = switch (line.kind) {
+      V2DiffKind.added => line.newNumber ?? line.oldNumber,
+      V2DiffKind.removed => line.oldNumber ?? line.newNumber,
+      V2DiffKind.context => line.newNumber ?? line.oldNumber,
+    };
+    final spoken = switch (line.kind) {
+      V2DiffKind.added => 'Added line ${number ?? ''}: ${line.text}',
+      V2DiffKind.removed => 'Removed line ${number ?? ''}: ${line.text}',
+      V2DiffKind.context => 'Line ${number ?? ''}: ${line.text}',
+    };
+    return Semantics(
+      container: true,
+      excludeSemantics: true,
+      label: spoken,
+      child: ColoredBox(
+        color: background,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: OSpace.m,
+            vertical: 1,
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: 28,
+                child: Text(
+                  line.oldNumber?.toString() ?? '',
+                  textAlign: TextAlign.right,
+                  style: style.copyWith(color: c.textFaint),
+                ),
               ),
-            ),
-            const SizedBox(width: OSpace.s),
-            SizedBox(
-              width: 28,
-              child: Text(
-                line.newNumber?.toString() ?? '',
-                textAlign: TextAlign.right,
-                style: style.copyWith(color: c.textFaint),
+              const SizedBox(width: OSpace.s),
+              SizedBox(
+                width: 28,
+                child: Text(
+                  line.newNumber?.toString() ?? '',
+                  textAlign: TextAlign.right,
+                  style: style.copyWith(color: c.textFaint),
+                ),
               ),
-            ),
-            SizedBox(
-              width: 20,
-              child: Text(marker, textAlign: TextAlign.center, style: style),
-            ),
-            Text(line.text, softWrap: false, style: style),
-          ],
+              SizedBox(
+                width: 20,
+                child: Text(marker, textAlign: TextAlign.center, style: style),
+              ),
+              Text(line.text, softWrap: false, style: style),
+            ],
+          ),
         ),
       ),
     );

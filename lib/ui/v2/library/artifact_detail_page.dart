@@ -464,6 +464,11 @@ class _ArtifactDetailPageState extends State<ArtifactDetailPage> {
         typeLabel: data.typeLabel,
         sizeLabel: data.sizeLabel,
         image: data.thumbnail,
+        // With no inline thumbnail, an image still previews from the signed
+        // link the page already holds instead of a placeholder.
+        imageUrl: data.previewKind == V2ArtifactPreviewKind.image
+            ? data.resolvedOpenUrl
+            : '',
         code: data.previewCode,
         codeFile: data.previewCodeFile == data.name ? '' : data.previewCodeFile,
         codeTotalLines: data.previewTotalLines,

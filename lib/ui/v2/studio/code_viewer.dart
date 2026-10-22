@@ -206,13 +206,14 @@ class V2CodeViewerPage extends StatelessWidget {
               onPressed: onBack,
             ),
       actions: [
-        OIconButton(
-          key: const Key('v2-code-viewer-copy'),
-          icon: Icons.copy_rounded,
-          semanticLabel: data.diff ? 'Copy diff' : 'Copy file contents',
-          tooltip: 'Copy',
-          onPressed: data.hasContent ? onCopy : null,
-        ),
+        if (onCopy != null)
+          OIconButton(
+            key: const Key('v2-code-viewer-copy'),
+            icon: Icons.copy_rounded,
+            semanticLabel: data.diff ? 'Copy diff' : 'Copy file contents',
+            tooltip: 'Copy',
+            onPressed: data.hasContent ? onCopy : null,
+          ),
       ],
       child: switch (data.status) {
         V2CodeViewerStatus.loading => const OSkeletonList(rows: 6),
@@ -453,15 +454,17 @@ class _TruncationBar extends StatelessWidget {
               ),
             ),
           ),
-          const SizedBox(height: OSpace.s),
-          OButton(
-            key: const Key('v2-code-viewer-open-externally'),
-            label: 'Open externally',
-            icon: Icons.open_in_new_rounded,
-            variant: OButtonVariant.secondary,
-            expand: true,
-            onPressed: onOpenExternally,
-          ),
+          if (onOpenExternally != null) ...[
+            const SizedBox(height: OSpace.s),
+            OButton(
+              key: const Key('v2-code-viewer-open-externally'),
+              label: 'Open externally',
+              icon: Icons.open_in_new_rounded,
+              variant: OButtonVariant.secondary,
+              expand: true,
+              onPressed: onOpenExternally,
+            ),
+          ],
         ],
       ),
     );

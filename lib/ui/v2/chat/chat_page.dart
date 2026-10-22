@@ -21,19 +21,23 @@ import 'queue_dock.dart';
 // TODO(l10n): move user-facing copy to ARB keys in the localization pass.
 
 /// A tappable starting point on the empty chat screen.
+///
+/// One title (four words maximum) and a glyph: the row is the whole message, so
+/// there is no subtitle to read and nothing to truncate.
 @immutable
 class V2ChatSuggestion {
-  const V2ChatSuggestion({
-    required this.title,
-    required this.subtitle,
-    required this.icon,
-  });
+  const V2ChatSuggestion({required this.title, required this.icon});
 
   final String title;
-  final String subtitle;
   final IconData icon;
 }
 
+/// The home screen's states.
+///
+/// `empty` is the content state for a new chat (greeting and three starting
+/// points) and `running` is the content state while a turn is live; `loading`,
+/// `error`, `offline` and `planLimited` are the interruptions the composer and
+/// the body must survive without drawing an action they cannot honour.
 enum V2ChatState { empty, loading, running, planLimited, offline, error }
 
 /// Immutable view data for the home chat screen. The wiring owns the live
@@ -44,39 +48,25 @@ class V2ChatPageData {
     this.title = 'Ovid Si',
     this.sessionId,
     this.modelLabel = 'Auto',
-    this.tokensLabel = '50M tokens left today',
-    this.fastAgentLabel = 'Fast agent',
     this.headline = 'What should we build?',
-    this.subtitle = 'Ask anything. Ovid works in the background.',
     this.draft = '',
     this.sendError,
     this.onSendErrorAction,
     this.onDismissSendError,
     this.state = V2ChatState.empty,
     this.suggestions = const [
-      V2ChatSuggestion(
-        title: 'Build a landing page',
-        subtitle: 'React & Tailwind components',
-        icon: Icons.web_rounded,
-      ),
+      V2ChatSuggestion(title: 'Build a landing page', icon: Icons.web_rounded),
       V2ChatSuggestion(
         title: 'Research a topic',
-        subtitle: 'Deep web synthesis & citations',
         icon: Icons.auto_awesome_rounded,
       ),
-      V2ChatSuggestion(
-        title: 'Fix a repo bug',
-        subtitle: 'Git branch integration',
-        icon: Icons.bug_report_rounded,
-      ),
+      V2ChatSuggestion(title: 'Fix a repo bug', icon: Icons.bug_report_rounded),
     ],
     this.queuedCount = 0,
-    this.queuedPreview,
     this.autoOnly = false,
     this.subagentCount = 0,
     this.limitResetLabel = 'Resets in 6h 12m',
-    this.errorMessage =
-        'Ovid could not load this chat. Check your connection and try again.',
+    this.errorMessage = "Couldn't load this chat.",
     this.permissionLabel = 'General',
     this.composerHint = 'Ask Ovid anything',
     this.offlineTitle = "You're offline",
@@ -86,21 +76,11 @@ class V2ChatPageData {
   final String title;
   final String? sessionId;
   final String modelLabel;
-  final String tokensLabel;
-  final String fastAgentLabel;
   final String headline;
-
-  /// Kept for hosts that compose their own empty state. The page renders one
-  /// short line under the wordmark ([headline]) and no paragraph.
-  final String subtitle;
   final String draft;
   final V2ChatState state;
   final List<V2ChatSuggestion> suggestions;
   final int queuedCount;
-
-  /// Text of the next queued message. When null or empty the dock still shows
-  /// the count but omits the preview line.
-  final String? queuedPreview;
 
   /// Free and Go are Auto-only. The model chip shows a lock and speaks
   /// "Auto only"; it stays tappable so the upgrade menu can open.
@@ -128,15 +108,11 @@ class V2ChatPageData {
     title: title,
     sessionId: sessionId,
     modelLabel: modelLabel,
-    tokensLabel: tokensLabel,
-    fastAgentLabel: fastAgentLabel,
     headline: headline,
-    subtitle: subtitle,
     draft: draft,
     state: state,
     suggestions: suggestions,
     queuedCount: queuedCount,
-    queuedPreview: queuedPreview,
     autoOnly: autoOnly,
     subagentCount: subagentCount,
     limitResetLabel: limitResetLabel,
@@ -245,6 +221,7 @@ class V2ChatPage extends StatefulWidget {
 
 class _V2ChatPageState extends State<V2ChatPage> {
   late final TextEditingController _controller;
+  late final FocusNode _focusNode;
   late final V2VoiceDictation _voice;
 
   final List<V2ComposerAttachment> _attachments = [];
@@ -268,6 +245,9 @@ class _V2ChatPageState extends State<V2ChatPage> {
     _controller = TextEditingController(text: widget.data.draft);
     _lastDraft = _controller.text;
     _controller.addListener(_handleControllerChanged);
+    // Owned here, not by TextField: a rebuild (a new state, a queued message,
+    // a new draft from the host) must not drop the caret or close the keyboard.
+    _focusNode = FocusNode(debugLabel: 'chat-composer');
     _voice = V2VoiceDictation(
       service: widget.voiceService,
       localeId: V2VoiceLocales.localeFor(
@@ -305,6 +285,7 @@ class _V2ChatPageState extends State<V2ChatPage> {
       ..removeListener(_handleVoiceChanged)
       ..dispose();
     _controller.dispose();
+    _focusNode.dispose();
     super.dispose();
   }
 
@@ -476,6 +457,7 @@ class _V2ChatPageState extends State<V2ChatPage> {
   }
 
   void _send() {
+    if (_locked || _running) return;
     final text = _controller.text.trim();
     if (widget.onSubmit == null && widget.onSend == null) return;
     if (text.isEmpty && _attachments.isEmpty) return;
@@ -584,13 +566,13 @@ class _V2ChatPageState extends State<V2ChatPage> {
                     if (data.queuedCount > 0)
                       V2QueueDock(
                         count: data.queuedCount,
-                        preview: data.queuedPreview ?? '',
                         onSendNow: widget.onSendQueuedNow ?? widget.onStop,
                         onDismiss: widget.onDismissQueued,
                       ),
                     _Composer(
                       data: data,
                       controller: _controller,
+                      focusNode: _focusNode,
                       canSend: _canSend,
                       running: _running,
                       locked: _locked,
@@ -631,14 +613,18 @@ class _V2ChatPageState extends State<V2ChatPage> {
           title: 'Daily limit reached',
           message:
               "You've used all 50M free tokens for today. ${data.limitResetLabel}.",
-          action: OButton(
-            label: 'See plans',
-            icon: Icons.bolt_rounded,
-            onPressed: widget.onSeePlans,
-          ),
+          // No handler means no upgrade route from this host: the state then
+          // explains itself and offers no button that would do nothing.
+          action: widget.onSeePlans == null
+              ? null
+              : OButton(
+                  label: 'See plans',
+                  icon: Icons.bolt_rounded,
+                  onPressed: widget.onSeePlans,
+                ),
         );
       case V2ChatState.running:
-        return _RunningState(onStop: widget.onStop);
+        return const _RunningState();
       case V2ChatState.empty:
       case V2ChatState.offline:
         return _HomeContent(
@@ -646,6 +632,9 @@ class _V2ChatPageState extends State<V2ChatPage> {
           offline: data.state == V2ChatState.offline,
           onSuggestionTap: (suggestion) {
             _setDraft(suggestion.title);
+            // The row is a shortcut into the composer, so put the caret there
+            // instead of leaving a filled field that nothing is focused on.
+            _focusNode.requestFocus();
             widget.onSuggestionTap?.call(suggestion);
           },
           onRetry: widget.onRetry,
@@ -722,15 +711,19 @@ class _ChatTopBar extends StatelessWidget implements PreferredSizeWidget {
           child: Row(
             children: [
               // The chip keeps its intrinsic width; the title expands into the
-              // free space and ellipsizes instead of squeezing the chip.
-              V2ModelChip(
-                label: modelLabel,
-                autoOnly: autoOnly,
-                subagentCount: subagentCount,
-                enabled: onModelChipTap != null,
-                onTap: onModelChipTap,
-              ),
-              const SizedBox(width: OSpace.s),
+              // free space and ellipsizes instead of squeezing the chip. With
+              // no model handler there is no menu to open, so the chip is not
+              // drawn: a disabled button that says "unavailable" is still a
+              // control that cannot act.
+              if (onModelChipTap != null) ...[
+                V2ModelChip(
+                  label: modelLabel,
+                  autoOnly: autoOnly,
+                  subagentCount: subagentCount,
+                  onTap: onModelChipTap,
+                ),
+                const SizedBox(width: OSpace.s),
+              ],
               Expanded(
                 child: Semantics(
                   container: true,
@@ -747,18 +740,21 @@ class _ChatTopBar extends StatelessWidget implements PreferredSizeWidget {
           ),
         ),
         actions: [
-          if (wideHeader) ...[
+          // Studio and Browser are header shortcuts, not the only way to
+          // reach those surfaces. A host that did not wire them gets no glyph
+          // rather than a grey one.
+          if (wideHeader && onStudio != null)
             OIconButton(
               icon: Icons.terminal_rounded,
               semanticLabel: 'Open Studio',
               onPressed: onStudio,
             ),
+          if (wideHeader && onBrowser != null)
             OIconButton(
               icon: Icons.public_rounded,
               semanticLabel: 'Open Browser',
               onPressed: onBrowser,
             ),
-          ],
           if (onMore != null)
             OIconButton(
               icon: Icons.more_vert_rounded,
@@ -788,6 +784,10 @@ class _HomeContent extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    // Three starting points at most, and the greeting is the screen's one
+    // heading below the bar. Taking the slice once keeps the separators honest
+    // even when a host repeats the same suggestion object twice.
+    final rows = data.suggestions.take(3).toList(growable: false);
     // Same capped column as the transcript, so the home state centres on a
     // tablet instead of stretching the wordmark and chips. The cap comes from
     // the breakpoint (640 at 600 dp, 720 at 900 dp), never a fixed number.
@@ -808,23 +808,26 @@ class _HomeContent extends StatelessWidget {
               // No repeated wordmark (the top bar already carries the title),
               // no icon circle, no paragraph.
               const SizedBox(height: OSpace.xxl),
-              Text(
-                data.headline,
-                textAlign: TextAlign.center,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: OType.h2.copyWith(color: c.text),
+              Semantics(
+                container: true,
+                header: true,
+                child: Text(
+                  data.headline,
+                  textAlign: TextAlign.center,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.h2.copyWith(color: c.text),
+                ),
               ),
               const SizedBox(height: OSpace.xl),
               // Starting points stack full-width so a chip label never wraps
               // into a ragged two-line pill on a narrow phone.
-              for (final suggestion in data.suggestions.take(3)) ...[
+              for (var i = 0; i < rows.length; i++) ...[
                 _SuggestionRow(
-                  suggestion: suggestion,
-                  onTap: () => onSuggestionTap(suggestion),
+                  suggestion: rows[i],
+                  onTap: () => onSuggestionTap(rows[i]),
                 ),
-                if (suggestion != data.suggestions.take(3).last)
-                  const SizedBox(height: OSpace.s),
+                if (i < rows.length - 1) const SizedBox(height: OSpace.s),
               ],
             ],
           ),
@@ -846,6 +849,7 @@ class _SuggestionRow extends StatelessWidget {
     final c = OColors.of(context);
     return Semantics(
       button: true,
+      enabled: true,
       label: suggestion.title,
       excludeSemantics: true,
       onTap: onTap,
@@ -930,21 +934,27 @@ class _OfflineBanner extends StatelessWidget {
             ),
           ),
           const SizedBox(width: OSpace.s),
-          OButton(
-            label: 'Retry',
-            variant: OButtonVariant.ghost,
-            onPressed: onRetry,
-          ),
+          // A retry needs a retry owner. Without one the banner still says what
+          // is happening, but draws no button that cannot act.
+          if (onRetry != null)
+            OButton(
+              label: 'Retry',
+              variant: OButtonVariant.ghost,
+              onPressed: onRetry,
+            ),
         ],
       ),
     );
   }
 }
 
+/// The "a turn is running" body.
+///
+/// It is a status, not a second control surface: Stop already lives in the
+/// composer's send slot, so drawing another Stop here would give the same
+/// action two buttons. The pulse stops under reduced motion.
 class _RunningState extends StatelessWidget {
-  const _RunningState({required this.onStop});
-
-  final VoidCallback? onStop;
+  const _RunningState();
 
   @override
   Widget build(BuildContext context) {
@@ -973,12 +983,6 @@ class _RunningState extends StatelessWidget {
                 textAlign: TextAlign.center,
                 style: OType.h2.copyWith(color: c.text),
               ),
-              const SizedBox(height: OSpace.l),
-              OButton(
-                label: 'Stop',
-                variant: OButtonVariant.danger,
-                onPressed: onStop,
-              ),
             ],
           ),
         ),
@@ -991,6 +995,7 @@ class _Composer extends StatelessWidget {
   const _Composer({
     required this.data,
     required this.controller,
+    required this.focusNode,
     required this.canSend,
     required this.running,
     required this.locked,
@@ -1010,6 +1015,7 @@ class _Composer extends StatelessWidget {
 
   final V2ChatPageData data;
   final TextEditingController controller;
+  final FocusNode focusNode;
   final bool canSend;
   final bool running;
   final bool locked;
@@ -1074,39 +1080,52 @@ class _Composer extends StatelessWidget {
                 field: Padding(
                   padding: const EdgeInsets.symmetric(horizontal: OSpace.xs),
                   child: CallbackShortcuts(
-                    bindings: {
-                      const SingleActivator(LogicalKeyboardKey.enter): () {
-                        if (canSend) onSend();
-                      },
-                      const SingleActivator(LogicalKeyboardKey.numpadEnter): () {
-                        if (canSend) onSend();
-                      },
-                    },
-                    child: TextField(
-                      controller: controller,
-                      enabled: enabled,
-                      minLines: 1,
-                      maxLines: 3,
-                      keyboardType: TextInputType.multiline,
-                      textInputAction: TextInputAction.newline,
-                      style: OType.body.copyWith(color: c.text),
-                      decoration: InputDecoration(
-                        hintText: running
-                            ? 'Ovid is working…'
-                            : locked
-                            ? 'Upgrade to keep building'
-                            : data.composerHint,
-                        hintStyle: OType.body.copyWith(color: c.textFaint),
-                        // A placeholder that wraps reads as a broken field.
-                        hintMaxLines: 1,
-                        filled: false,
-                        isDense: true,
-                        border: InputBorder.none,
-                        enabledBorder: InputBorder.none,
-                        focusedBorder: InputBorder.none,
-                        disabledBorder: InputBorder.none,
-                        contentPadding: const EdgeInsets.symmetric(
-                          vertical: 12,
+                    // Enter sends only when a send would actually do something;
+                    // with an empty draft (or no owner) the key falls through
+                    // to the field so it can insert a newline instead of being
+                    // swallowed. Shift+Enter never matches these activators.
+                    bindings: canSend
+                        ? <ShortcutActivator, VoidCallback>{
+                            const SingleActivator(LogicalKeyboardKey.enter):
+                                onSend,
+                            const SingleActivator(
+                              LogicalKeyboardKey.numpadEnter,
+                            ): onSend,
+                          }
+                        : const <ShortcutActivator, VoidCallback>{},
+                    child: TickerMode(
+                      // The input decorator animates its hint and border, and
+                      // the caret blinks. Neither is an entrance, so the
+                      // field's tickers are muted when the platform asks for
+                      // less motion.
+                      enabled: !OMove.reduced(context),
+                      child: TextField(
+                        controller: controller,
+                        focusNode: focusNode,
+                        enabled: enabled,
+                        minLines: 1,
+                        maxLines: 3,
+                        keyboardType: TextInputType.multiline,
+                        textInputAction: TextInputAction.newline,
+                        style: OType.body.copyWith(color: c.text),
+                        decoration: InputDecoration(
+                          hintText: running
+                              ? 'Ovid is working…'
+                              : locked
+                              ? 'Upgrade to keep building'
+                              : data.composerHint,
+                          hintStyle: OType.body.copyWith(color: c.textFaint),
+                          // A placeholder that wraps reads as a broken field.
+                          hintMaxLines: 1,
+                          filled: false,
+                          isDense: true,
+                          border: InputBorder.none,
+                          enabledBorder: InputBorder.none,
+                          focusedBorder: InputBorder.none,
+                          disabledBorder: InputBorder.none,
+                          contentPadding: const EdgeInsets.symmetric(
+                            vertical: 12,
+                          ),
                         ),
                       ),
                     ),
@@ -1174,6 +1193,12 @@ class _RoundAction extends StatelessWidget {
         height: OSpace.touch,
         child: Material(
           color: background,
+          // Material cross-fades its colour over 200 ms. A send button that
+          // turns from accent to danger is a state change, not an entrance:
+          // keep it instant for reduced motion and short otherwise.
+          animationDuration: OMove.reduced(context)
+              ? Duration.zero
+              : OMotion.instant,
           shape: const CircleBorder(),
           child: InkWell(
             customBorder: const CircleBorder(),

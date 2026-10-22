@@ -72,6 +72,10 @@ class V2SettingsSearchData {
         if (!item.enabled) return false;
         // The hub owns the reasoning switch; it has no row `onTap`.
         if (item.id == 'show_reasoning') return hub.onReasoningChanged != null;
+        // Connectors open through the host's work route, not the row.
+        if (item.id == 'connectors') {
+          return hub.onAddConnector != null || item.onTap != null;
+        }
         return item.onTap != null;
       },
     );
@@ -101,7 +105,8 @@ class V2SettingsSearchData {
   /// True when the injected index has no rows at all, independent of a query.
   bool get isEmpty => !sections.any((section) => section.items.isNotEmpty);
 
-  /// All rows that match [query] across section and row titles.
+  /// All rows that match [query] across section titles, row titles and real
+  /// values.
   ///
   /// * Matching is case-insensitive and ignores surrounding whitespace.
   /// * Matching a section title returns every row in that section.
@@ -114,7 +119,9 @@ class V2SettingsSearchData {
       if (section.items.isEmpty) continue;
       final sectionMatches = section.title.toLowerCase().contains(needle);
       for (final item in section.items) {
-        final rowMatches = item.label.toLowerCase().contains(needle);
+        final rowMatches =
+            item.label.toLowerCase().contains(needle) ||
+            (item.value?.toLowerCase().contains(needle) ?? false);
         if (sectionMatches || rowMatches) {
           results.add(
             V2SettingsSearchResult(sectionTitle: section.title, item: item),
@@ -246,6 +253,7 @@ class _SettingsSearchPageState extends State<SettingsSearchPage> {
     switch (widget.data.status) {
       case V2SettingsSearchStatus.loading:
         return Semantics(
+          container: true,
           label: 'Loading settings search',
           child: const OSkeletonList(rows: 6),
         );
@@ -359,14 +367,29 @@ class _ResultRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final item = result.item;
-    return V2SettingsRow(
+    final value = item.value;
+    final label = value == null || value.trim().isEmpty
+        ? item.label
+        : '${item.label}, $value';
+    // One node per result: the label, the enabled state and the tap all
+    // belong to the same control, so a disabled result is announced as a
+    // disabled button instead of reading as two nodes.
+    return Semantics(
       key: ValueKey<String>('search-result-${item.id}'),
-      icon: item.icon,
-      title: item.label,
-      danger: item.danger,
+      container: true,
+      label: label,
+      button: true,
       enabled: actionable,
-      showChevron: actionable,
-      onTap: actionable ? onTap : null,
+      excludeSemantics: true,
+      child: V2SettingsRow(
+        icon: item.icon,
+        title: item.label,
+        value: value,
+        danger: item.danger,
+        enabled: actionable,
+        showChevron: actionable,
+        onTap: actionable ? onTap : null,
+      ),
     );
   }
 }

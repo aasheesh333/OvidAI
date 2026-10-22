@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/studio/studio_gate.dart';
 
@@ -36,16 +35,16 @@ void main() {
     }
   });
 
-  testWidgets('a missing callback leaves the gate action disabled', (
+  testWidgets('a missing callback removes the gate action entirely', (
     tester,
   ) async {
     await tester.pumpWidget(_app(const V2StudioGate()));
     await tester.pumpAndSettle();
 
-    final button = tester.widget<OButton>(
-      find.byKey(const Key('studio-gate-pick-folder')),
-    );
-    expect(button.onPressed, isNull);
+    // The block is still explained, but there is no button that cannot open
+    // anything.
+    expect(find.text('Pick a folder to start coding'), findsOneWidget);
+    expect(find.byKey(const Key('studio-gate-pick-folder')), findsNothing);
     expect(find.text('Repository setup is not available yet.'), findsNothing);
   });
 

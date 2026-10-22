@@ -1,10 +1,10 @@
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/design/o_tokens.dart';
+import 'package:ovid_ai/ui/v2/a11y/live_region.dart';
 import 'package:ovid_ai/ui/v2/chat/composer_attachments.dart';
 import 'package:ovid_ai/ui/v2/chat/composer_row.dart';
 import 'package:ovid_ai/ui/v2/chat/live_chat_page.dart';
@@ -168,7 +168,7 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 400));
 
-    expect(find.text('Ask Ovid anything'), findsOneWidget);
+    expect(find.text('Ask Ovid anything'), findsWidgets);
     await tester.tap(find.text('Start a chat'));
     expect(started, 1);
   });
@@ -616,10 +616,7 @@ void main() {
     );
     await tester.pump();
     // The row's actions live in one labelled menu, not an icon per action.
-    expect(
-      find.bySemanticsLabel(RegExp('Actions for')),
-      findsOneWidget,
-    );
+    expect(find.bySemanticsLabel(RegExp('Actions for')), findsOneWidget);
   });
 
   testWidgets('composer is exactly one row in the contract order', (
@@ -768,19 +765,17 @@ void main() {
     expect(taps, 1);
   });
 
-  testWidgets('model chip is disabled when the host cannot change models', (
+  testWidgets('model chip is absent when the host cannot change models', (
     tester,
   ) async {
     await tester.pumpWidget(_app(const V2LiveChatPage(data: _data)));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
 
-    final chip = tester.widget<V2ModelChip>(find.byType(V2ModelChip));
-    expect(chip.enabled, isFalse);
-    expect(
-      find.bySemanticsLabel('Model: Auto. Model selection unavailable'),
-      findsOneWidget,
-    );
+    // No handler means no menu to open. The chip is removed rather than
+    // drawn disabled: a control that cannot act is not a control (§8).
+    expect(find.byType(V2ModelChip), findsNothing);
+    expect(find.bySemanticsLabel(RegExp('Model:')), findsNothing);
   });
 
   testWidgets('plus callback replaces the file picker', (tester) async {
@@ -1110,5 +1105,246 @@ void main() {
     await tester.tap(download);
     await tester.pump();
     expect(find.text('This file cannot be downloaded.'), findsOneWidget);
+  });
+
+  testWidgets('running swaps send for stop and keeps the transcript', (
+    tester,
+  ) async {
+    var stops = 0;
+    await tester.pumpWidget(
+      _app(
+        V2LiveChatPage(
+          data: const V2LiveChatData(items: _items, running: true),
+          onStop: () => stops++,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    // One action, and it is Stop: no second send control appears.
+    expect(find.byIcon(Icons.stop_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.arrow_upward_rounded), findsNothing);
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Stop')),
+      isSemantics(
+        label: 'Stop',
+        hint: 'Press stop to pause',
+        isButton: true,
+        isEnabled: true,
+      ),
+    );
+    // The run status is the field's hint, not a second row.
+    expect(find.text('Ovid is generating code...'), findsOneWidget);
+    // A run owns the composer, so the draft is disabled rather than sending a
+    // second turn behind the live one.
+    expect(tester.widget<TextField>(find.byType(TextField)).enabled, isFalse);
+    // The transcript is still on screen while the turn runs.
+    expect(find.text('Thinking process (3.2s)'), findsOneWidget);
+
+    await tester.tap(find.byIcon(Icons.stop_rounded));
+    expect(stops, 1);
+  });
+
+  testWidgets('a new assistant row is announced in the live region', (
+    tester,
+  ) async {
+    const first = V2LiveChatData(
+      items: [V2LiveUserMessage(id: 'u1', text: 'Hi')],
+    );
+    const appended = V2LiveChatData(
+      items: [
+        V2LiveUserMessage(id: 'u1', text: 'Hi'),
+        V2LiveAssistantMessage(id: 'a1', markdown: 'Hello there'),
+      ],
+    );
+
+    await tester.pumpWidget(_app(const V2LiveChatPage(data: first)));
+    await tester.pump();
+    await tester.pumpWidget(_app(const V2LiveChatPage(data: appended)));
+    await tester.pump();
+
+    expect(
+      tester.widget<OLiveRegion>(find.byType(OLiveRegion)).message,
+      'Ovid replied',
+    );
+    // The cue is a live region, not visible chrome.
+    expect(find.text('Ovid replied'), findsNothing);
+  });
+
+  testWidgets('the queued preview is what the live region speaks', (
+    tester,
+  ) async {
+    const idle = V2LiveChatData(items: _items, running: true);
+    const queued = V2LiveChatData(
+      items: _items,
+      running: true,
+      queuedCount: 1,
+      queuedPreview: 'Then add testimonials',
+    );
+
+    await tester.pumpWidget(_app(const V2LiveChatPage(data: idle)));
+    await tester.pump();
+    await tester.pumpWidget(_app(const V2LiveChatPage(data: queued)));
+    await tester.pump();
+
+    expect(
+      tester.widget<OLiveRegion>(find.byType(OLiveRegion)).message,
+      'Queued: Then add testimonials',
+    );
+    await tester.pump(const Duration(seconds: 3));
+  });
+
+  testWidgets('unwired header actions are removed, not greyed', (tester) async {
+    await tester.pumpWidget(_app(const V2LiveChatPage(data: _data)));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    // No handler means no control (§8): the gallery renders the page without
+    // callbacks, so the bar must not advertise actions it cannot run.
+    expect(find.bySemanticsLabel('Open menu'), findsNothing);
+    expect(find.bySemanticsLabel('Open Studio'), findsNothing);
+    expect(find.bySemanticsLabel('Open Browser'), findsNothing);
+    expect(find.bySemanticsLabel('More options'), findsNothing);
+    expect(find.byIcon(Icons.menu_rounded), findsNothing);
+  });
+
+  testWidgets('the fully wired header fits 320 dp at 200 % text', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(_app(_wired(), textScale: 2));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    // Below 360 dp the action budget is one: menu, chip, title and the
+    // overflow share the bar, and the chip ellipsizes before anything paints
+    // outside it.
+    expect(tester.takeException(), isNull);
+    expect(find.byType(V2ModelChip), findsOneWidget);
+    expect(find.bySemanticsLabel('Open menu'), findsOneWidget);
+    expect(find.bySemanticsLabel('More options'), findsOneWidget);
+    expect(find.bySemanticsLabel('Open Studio'), findsNothing);
+    expect(find.bySemanticsLabel('Open Browser'), findsNothing);
+
+    // From 360 dp both shortcuts are back, still without overflow.
+    tester.view.physicalSize = const Size(400, 700);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(tester.takeException(), isNull);
+    expect(find.bySemanticsLabel('Open Studio'), findsOneWidget);
+    expect(find.bySemanticsLabel('Open Browser'), findsOneWidget);
+  });
+
+  testWidgets('the host timestamp is spoken, never drawn', (tester) async {
+    await tester.pumpWidget(_app(const V2LiveChatPage(data: _data)));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    // The transcript stays timestamp-free visually, but the time the host
+    // already holds is part of the message's accessible name.
+    expect(find.text('10:24 AM'), findsNothing);
+    expect(find.bySemanticsLabel(RegExp(r'^You, 10:24 AM\. ')), findsOneWidget);
+  });
+
+  testWidgets('a scrolled-up reader keeps the offset when a row appends', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(420, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    List<V2LiveChatItem> items(int count) => [
+      for (var i = 0; i < count; i++)
+        V2LiveUserMessage(id: 'u$i', text: 'Message number $i'),
+    ];
+
+    await tester.pumpWidget(
+      _app(V2LiveChatPage(data: V2LiveChatData(items: items(40)))),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    final list = find.byKey(const ValueKey<String>('v2-live-transcript'));
+    final scrollable = find.descendant(
+      of: list,
+      matching: find.byType(Scrollable),
+    );
+    ScrollPosition position() =>
+        tester.state<ScrollableState>(scrollable).position;
+
+    // Scroll to the bottom, then back up to read an earlier row.
+    await tester.drag(list, const Offset(0, -5000));
+    await tester.pump();
+    await tester.drag(list, const Offset(0, 600));
+    await tester.pump();
+    final before = position().pixels;
+    expect(before, greaterThan(0));
+    expect(before, lessThan(position().maxScrollExtent - 100));
+
+    await tester.pumpWidget(
+      _app(V2LiveChatPage(data: V2LiveChatData(items: items(41)))),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      position().pixels,
+      closeTo(before, 1),
+      reason: 'an appended row must not move a reader who scrolled up',
+    );
+  });
+
+  testWidgets('a reader at the tail follows an appended row', (tester) async {
+    tester.view.physicalSize = const Size(420, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    List<V2LiveChatItem> items(int count) => [
+      for (var i = 0; i < count; i++)
+        V2LiveUserMessage(id: 'u$i', text: 'Message number $i'),
+    ];
+
+    await tester.pumpWidget(
+      _app(V2LiveChatPage(data: V2LiveChatData(items: items(40)))),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    final list = find.byKey(const ValueKey<String>('v2-live-transcript'));
+    final scrollable = find.descendant(
+      of: list,
+      matching: find.byType(Scrollable),
+    );
+    ScrollPosition position() =>
+        tester.state<ScrollableState>(scrollable).position;
+
+    await tester.drag(list, const Offset(0, -5000));
+    await tester.pump();
+    // A lazy list grows its extent estimate while it scrolls, so one drag may
+    // stop short. Walk to the real bottom before testing the follow.
+    for (var i = 0; i < 8; i++) {
+      if (position().pixels >= position().maxScrollExtent - 1) break;
+      await tester.drag(list, const Offset(0, -3000));
+      await tester.pump();
+    }
+    final oldMax = position().maxScrollExtent;
+    expect(position().pixels, closeTo(oldMax, 1));
+
+    await tester.pumpWidget(
+      _app(V2LiveChatPage(data: V2LiveChatData(items: items(41)))),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    expect(position().maxScrollExtent, greaterThan(oldMax));
+    expect(
+      position().pixels,
+      closeTo(position().maxScrollExtent, 1),
+      reason: 'a reader at the tail follows the newest row',
+    );
   });
 }

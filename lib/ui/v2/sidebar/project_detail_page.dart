@@ -433,7 +433,7 @@ class _DetailHeader extends StatelessWidget {
                     ),
                   ],
                 ),
-                const SizedBox(height: 2),
+                const SizedBox(height: OSpace.xxs),
                 Text(
                   '${data.chatLabel} · ${data.memoryLabel}',
                   style: OType.caption.copyWith(color: c.textMuted),
@@ -538,7 +538,7 @@ class _ChatRow extends StatelessWidget {
                       ),
                     ),
                     if (chat.meta.isNotEmpty) ...[
-                      const SizedBox(height: 2),
+                      const SizedBox(height: OSpace.xxs),
                       Text(
                         chat.meta,
                         maxLines: 1,
@@ -601,7 +601,7 @@ class _MemoryRow extends StatelessWidget {
                             ),
                           ),
                           if (file.meta.isNotEmpty) ...[
-                            const SizedBox(height: 2),
+                            const SizedBox(height: OSpace.xxs),
                             Text(
                               file.meta,
                               maxLines: 1,
@@ -658,7 +658,7 @@ class _MemoryHint extends StatelessWidget {
                   'No memory files yet',
                   style: OType.bodySm.copyWith(color: c.text),
                 ),
-                const SizedBox(height: 2),
+                const SizedBox(height: OSpace.xxs),
                 Text(
                   'Memory is what this project remembers between chats.',
                   style: OType.caption.copyWith(color: c.textMuted),

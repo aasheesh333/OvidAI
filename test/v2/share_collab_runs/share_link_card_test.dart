@@ -12,6 +12,7 @@ V2ShareLinkCardData _data({
   bool copied = false,
   bool viewer = false,
   bool revoked = false,
+  bool busy = false,
   DateTime? expiresAt,
 }) {
   return V2ShareLinkCardData(
@@ -20,6 +21,7 @@ V2ShareLinkCardData _data({
     copied: copied,
     viewer: viewer,
     revoked: revoked,
+    busy: busy,
     expiresAt: expiresAt,
   );
 }
@@ -29,6 +31,7 @@ void main() {
     await pumpAt(tester, V2ShareLinkCard(data: _data(), onCopy: () {}));
 
     expect(find.text(_url), findsOneWidget);
+    expect(find.bySemanticsLabel('Share link, $_url'), findsOneWidget);
     expect(find.bySemanticsLabel('Copy link'), findsOneWidget);
     // Mode, member count and dates belong to the sheet, not the row.
     expect(find.text('Collab'), findsNothing);
@@ -37,7 +40,7 @@ void main() {
     expect(find.textContaining('Created'), findsNothing);
   });
 
-  testWidgets('copy fires and the copied state replaces the label', (
+  testWidgets('copy announces the full link and the copied state', (
     tester,
   ) async {
     var copies = 0;
@@ -46,9 +49,9 @@ void main() {
       V2ShareLinkCard(data: _data(copied: true), onCopy: () => copies++),
     );
 
-    expect(find.bySemanticsLabel('Copied'), findsOneWidget);
+    expect(find.bySemanticsLabel('Link copied, $_url'), findsOneWidget);
     expect(find.bySemanticsLabel('Copy link'), findsNothing);
-    await tester.tap(find.bySemanticsLabel('Copied'));
+    await tester.tap(find.bySemanticsLabel('Link copied, $_url'));
     await tester.pump();
     expect(copies, 1);
   });
@@ -56,30 +59,35 @@ void main() {
   testWidgets('an empty link is not copyable', (tester) async {
     await pumpAt(
       tester,
-      const V2ShareLinkCard(
-        data: V2ShareLinkCardData(url: ''),
-      ),
+      const V2ShareLinkCard(data: V2ShareLinkCardData(url: '')),
     );
     expect(find.text('No link yet'), findsOneWidget);
+    expect(find.bySemanticsLabel('No link yet'), findsOneWidget);
     await tester.tap(find.bySemanticsLabel('Copy link'), warnIfMissed: false);
     await tester.pump();
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('a revoked link says so and disables copy', (tester) async {
+  testWidgets('a revoked link says so and disables copy and revoke', (
+    tester,
+  ) async {
     var copies = 0;
+    var revokes = 0;
     await pumpAt(
       tester,
       V2ShareLinkCard(
         data: _data(revoked: true),
         onCopy: () => copies++,
+        onRevoke: () => revokes++,
       ),
     );
 
     expect(find.text('Link revoked.'), findsOneWidget);
+    expect(find.text('Revoke'), findsNothing);
     await tester.tap(find.bySemanticsLabel('Copy link'), warnIfMissed: false);
     await tester.pump();
     expect(copies, 0);
+    expect(revokes, 0);
   });
 
   testWidgets('an expired link says so and disables copy', (tester) async {
@@ -97,6 +105,28 @@ void main() {
     await tester.tap(find.bySemanticsLabel('Copy link'), warnIfMissed: false);
     await tester.pump();
     expect(copies, 0);
+  });
+
+  testWidgets('a busy link disables copy, fork and revoke', (tester) async {
+    var copies = 0;
+    var revokes = 0;
+    await pumpAt(
+      tester,
+      V2ShareLinkCard(
+        data: _data(busy: true, viewer: true),
+        onCopy: () => copies++,
+        onFork: () {},
+        onRevoke: () => revokes++,
+      ),
+    );
+
+    expect(find.text('Revoking link…'), findsOneWidget);
+    expect(find.text('Fork'), findsNothing);
+    expect(find.text('Revoke'), findsNothing);
+    await tester.tap(find.bySemanticsLabel('Copy link'), warnIfMissed: false);
+    await tester.pump();
+    expect(copies, 0);
+    expect(revokes, 0);
   });
 
   testWidgets('a read-only viewer forks and never sees revoke', (tester) async {

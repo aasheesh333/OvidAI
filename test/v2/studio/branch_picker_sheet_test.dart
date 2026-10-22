@@ -127,6 +127,20 @@ void main() {
     expect(retried, 1);
   });
 
+  testWidgets('searching for the current branch still shows it', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_app(const V2BranchPickerSheet(data: _data)));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'main');
+    await tester.pumpAndSettle();
+
+    expect(find.text('No branches found'), findsNothing);
+    expect(find.text('CURRENT'), findsOneWidget);
+    expect(find.text('develop'), findsNothing);
+  });
+
   testWidgets('no-match search offers a clear action', (tester) async {
     await tester.pumpWidget(_app(const V2BranchPickerSheet(data: _data)));
     await tester.pumpAndSettle();
@@ -148,7 +162,41 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.bySemanticsLabel('develop, 12m ago by Priya'), findsOneWidget);
+    expect(
+      find.bySemanticsLabel('Current branch, main, Default · Synced with remote'),
+      findsOneWidget,
+    );
     handle.dispose();
+  });
+
+  testWidgets('a long branch list builds lazily', (tester) async {
+    const count = 300;
+    final branches = <V2Branch>[
+      for (var i = 0; i < count; i++) V2Branch(name: 'branch_$i'),
+    ];
+    await tester.pumpWidget(
+      _app(
+        V2BranchPickerSheet(
+          data: V2BranchPickerData(current: _current, branches: branches),
+          onSelectBranch: (_) {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('branch_${count - 1}'), findsNothing);
+    expect(
+      tester.widgetList(find.byType(InkWell)).length,
+      lessThan(count),
+      reason: 'a lazy branch list must not build every row up front',
+    );
+
+    for (var i = 0; i < 40; i++) {
+      await tester.drag(find.byType(ListView), const Offset(0, -600));
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+    expect(find.text('branch_${count - 1}'), findsOneWidget);
   });
 
   testWidgets('fits a 320 dp screen at 200% text without overflow', (
