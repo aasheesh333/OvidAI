@@ -2,9 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show kIsWeb, visibleForTesting;
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:permission_handler/permission_handler.dart' hide ServiceStatus;
+import 'package:permission_handler/permission_handler.dart';
 
 import '../../../core/app_info.dart';
 import '../../../core/background_notifications.dart';
@@ -12,8 +13,10 @@ import '../../../core/cloud/account_settings_client.dart';
 import '../../../core/cloud/artifact_vault.dart';
 import '../../../core/cloud/cloud_rest.dart';
 import '../../../core/cloud/cloud_session_store.dart';
+import '../../../core/cloud/credentials.dart';
 import '../../../core/cloud/projects.dart';
 import '../../../core/cloud/usage_history.dart';
+import '../../../core/commands.dart';
 import '../../../core/firebase_service.dart';
 import '../../../core/format.dart';
 import '../../../core/github_service.dart';
@@ -91,7 +94,7 @@ class V2SettingsRoutes {
       case 'shared_memory':
         return _SharedMemoryLoader(actions: actions);
       case 'memory_files':
-        return _MemoryFilesLoader(actions: actions);
+        return const MemoryFilesPage.live();
       case 'appearance':
         return _AppearanceLoader(actions: actions);
       case 'data_control':
@@ -115,7 +118,7 @@ class V2SettingsRoutes {
       case 'app_lock':
         return const AppLockSettingsPage();
       case 'about':
-        return _AboutLoader(actions: actions);
+        return AboutPage(data: _about(context, actions));
       default:
         return null;
     }
@@ -174,6 +177,7 @@ class V2SettingsRoutes {
       onSignOut: () => actions.signOut(context),
       onDeleteAccount: () => actions.deleteAccount(context),
       onLinkAccount: () => open(context, 'credentials', actions),
+      onDataControl: () => unawaited(open(context, 'data_control', actions)),
       requestDeletion: FirebaseService.I.requestAccountDeletion,
       restoreDeletion: actions.restoreAccount,
       deletionPending: receipt?.isPending == true,
@@ -471,7 +475,9 @@ class V2SettingsRoutes {
     List<V2MemoryFile> files = const [],
     bool loading = false,
     String? errorMessage,
-    void Function(V2MemoryScope scope, String id)? onForgetMemory,
+    V2MemoryForget? onForgetMemory,
+    V2MemoryEdit? onEditMemory,
+    V2MemoryAdd? onAddMemory,
     VoidCallback? onRetry,
   }) {
     final app = AppState.I;
@@ -503,6 +509,8 @@ class V2SettingsRoutes {
       // One Forget per row: the source deletes the fact line, the chat file or
       // the project's memory files for real.
       onForgetMemory: onForgetMemory,
+      onEditMemory: onEditMemory,
+      onAddMemory: onAddMemory,
       onResetAll: () => actions.resetMemory(context),
       onRetry: onRetry,
     );
@@ -702,8 +710,13 @@ class V2SettingsRoutes {
 
   static V2CredentialsPageData _credentials(
     BuildContext context,
-    V2SettingsActions actions,
-  ) {
+    V2SettingsActions actions, {
+    List<V2BrowserCredential> browserCredentials = const [],
+    ValueChanged<V2BrowserCredential>? onAddBrowserCredential,
+    ValueChanged<V2BrowserCredential>? onEditBrowserCredential,
+    ValueChanged<V2BrowserCredential>? onDeleteBrowserCredential,
+    VoidCallback? onRevokeAll,
+  }) {
     final firebase = FirebaseService.I;
     final github = GitHubService.I;
     return V2CredentialsPageData(
@@ -730,6 +743,7 @@ class V2SettingsRoutes {
         subtitle: 'Personal token for custom providers',
         connected: false,
       ),
+      browserCredentials: browserCredentials,
       githubOAuthConnected: github.isLoggedIn,
       cloudKeyStatusLabel: 'Managed by Ovid',
       cloudKeyStatusDetail:
@@ -739,7 +753,12 @@ class V2SettingsRoutes {
       // store itself when no host saver is injected.
       onConnectGithubOAuth: () => showGithubLoginSheet(context),
       onDisconnectGithubOAuth: () => unawaited(github.signOut()),
-      onRevokeAll: () => actions.signOut(context),
+      onAddBrowserCredential: onAddBrowserCredential,
+      onEditBrowserCredential: onEditBrowserCredential,
+      onDeleteBrowserCredential: onDeleteBrowserCredential,
+      // Revoke removes the saved credentials; it must never sign the account
+      // out. The page already removed its own secrets and browser logins.
+      onRevokeAll: onRevokeAll,
     );
   }
 
@@ -822,9 +841,16 @@ class V2SettingsRoutes {
     V2SettingsActions actions, {
     required bool notificationsBlocked,
     required VoidCallback onOpenSystem,
+    V2NotificationsStatus status = V2NotificationsStatus.ready,
+    bool serviceAvailable = true,
+    bool saving = false,
+    bool masterEnabled = false,
+    ValueChanged<bool>? onMasterChanged,
+    void Function(String id, bool value)? onToggle,
+    VoidCallback? onRetry,
   }) {
     final settings = BackgroundNotifier.I.settings;
-    final master = AppState.I.notificationsEnabled;
+    final master = masterEnabled;
     final start = settings.quietHoursStartMinutes;
     final end = settings.quietHoursEndMinutes;
     String hhmm(int minutes) {
@@ -834,6 +860,9 @@ class V2SettingsRoutes {
     }
 
     return V2NotificationsPageData(
+      status: status,
+      serviceAvailable: serviceAvailable,
+      saving: saving,
       notificationsBlocked: notificationsBlocked,
       masterEnabled: master,
       activity: [
@@ -907,9 +936,11 @@ class V2SettingsRoutes {
               },
             ),
       ],
-      onToggle: (id, value) => actions.setNotificationChannel(id, value),
-      onMasterChanged: (value) =>
-          unawaited(actions.setNotificationsMaster(context, value)),
+      onToggle:
+          onToggle ?? (id, value) => actions.setNotificationChannel(id, value),
+      onMasterChanged:
+          onMasterChanged ??
+          (value) => unawaited(actions.setNotificationsMaster(context, value)),
       onQuietHours: () =>
           actions.setQuietHours(enabled: !settings.quietHoursEnabled),
       onQuietHoursEnabledChanged: (value) =>
@@ -924,14 +955,11 @@ class V2SettingsRoutes {
       ),
       onSoundChanged: (id, value) => actions.setChannelSound(id, value),
       onOpenSystem: onOpenSystem,
+      onRetry: onRetry,
     );
   }
 
-  static V2AgentPresetsPageData _presets(
-    BuildContext context,
-    V2SettingsActions actions, {
-    VoidCallback? onCreate,
-  }) {
+  static V2AgentPresetsPageData _presets() {
     return V2AgentPresetsPageData(
       presets: [
         for (final preset in PresetRegistry.all)
@@ -940,76 +968,139 @@ class V2SettingsRoutes {
             name: preset.label,
             description: preset.description,
             modelLabel: preset.model ?? 'Auto',
+            modelId: preset.model,
             builtIn: PresetRegistry.isBuiltInId(preset.id),
             icon: PresetRegistry.isBuiltInId(preset.id)
                 ? Icons.auto_awesome_rounded
                 : Icons.tune_rounded,
+            responseWaitSeconds: preset.responseWaitSeconds,
+            permissionModeId: preset.permissionMode,
           ),
       ],
       selectedId: AppState.I.activeSession?.presetId,
-      onCreate: onCreate,
-      onSelect: actions.selectPreset,
-      onDelete: (id) => actions.deletePreset(id),
+      models: _presetModels(),
+      defaultResponseWaitSeconds: AppState.I.responseTimeoutSec,
+      onApply: (id) async {
+        final result = await CommandService.I.execute('/preset $id');
+        final feedback = result?.feedback ?? '';
+        if (feedback.startsWith('Unknown preset') ||
+            feedback.startsWith('No active session')) {
+          throw StateError(feedback);
+        }
+      },
+      onCreatePreset: (draft) async {
+        final preset = AgentPreset(
+          id: PresetRegistry.newCustomId(),
+          label: draft.name.trim(),
+          description: draft.description.trim(),
+          model: draft.modelId.trim().isEmpty ? null : draft.modelId.trim(),
+          responseWaitSeconds: draft.responseWaitSeconds,
+          permissionMode: draft.permissionModeId,
+        );
+        await AppState.I.saveCustomPreset(preset);
+      },
+      onUpdatePreset: (id, draft) async {
+        final existing = PresetRegistry.all
+            .where((preset) => preset.id == id)
+            .firstOrNull;
+        if (existing == null) {
+          throw StateError('That preset no longer exists.');
+        }
+        if (PresetRegistry.isBuiltInId(id)) {
+          throw StateError('Built-in presets cannot be edited.');
+        }
+        await AppState.I.saveCustomPreset(
+          existing.copyWith(
+            label: draft.name.trim(),
+            description: draft.description.trim(),
+            model: draft.modelId.trim().isEmpty ? null : draft.modelId.trim(),
+            responseWaitSeconds: draft.responseWaitSeconds,
+            permissionMode: draft.permissionModeId,
+          ),
+        );
+      },
+      onDeletePreset: (id) => AppState.I.deleteCustomPreset(id),
     );
+  }
+
+  /// Test seam: the production wiring of the preset screen's hooks.
+  @visibleForTesting
+  static V2AgentPresetsPageData presetsPageForTest() => _presets();
+
+  /// The models a preset can pin: Auto first, then every model a configured
+  /// provider lists. The editor's picker is only as real as this list.
+  static List<V2PresetModelOption> _presetModels() {
+    final options = <String, V2PresetModelOption>{
+      'auto': const V2PresetModelOption(id: 'auto', label: 'Auto'),
+    };
+    for (final provider in AppState.I.providers) {
+      for (final model in provider.models) {
+        final id = model.trim();
+        if (id.isEmpty) continue;
+        options.putIfAbsent(
+          id,
+          () => V2PresetModelOption(id: id, label: ovidModelLabel(id)),
+        );
+      }
+    }
+    return options.values.toList(growable: false);
   }
 
   static V2ResponseWaitPageData _responseWait(
     BuildContext context,
     V2SettingsActions actions,
   ) {
+    // The persisted value the watchdog actually reads; AppState loads it from
+    // prefs at boot, so this is never a synthetic default.
     final seconds = AppState.I.responseTimeoutSec;
     return V2ResponseWaitPageData(
       seconds: seconds,
       onChanged: actions.setResponseWait,
-      onPreset: actions.setResponseWait,
     );
   }
 
-  /// Maps the OS answer onto the page's three-state model.
+  /// Maps the OS answer onto the page's four-state model.
   static V2PermissionAccess _permissionAccess(PermissionStatus status) {
-    if (status.isGranted || status.isLimited) return V2PermissionAccess.granted;
-    if (status.isPermanentlyDenied || status.isRestricted) {
-      return V2PermissionAccess.blocked;
+    if (status.isGranted || status.isLimited || status.isProvisional) {
+      return V2PermissionAccess.granted;
     }
+    if (status.isPermanentlyDenied || status.isRestricted) {
+      return V2PermissionAccess.permanentlyDenied;
+    }
+    if (status.isDenied) return V2PermissionAccess.denied;
     return V2PermissionAccess.notAsked;
   }
 
-  /// The five device permissions Ovid can ask for, with the real OS state.
+  /// Test seam: the loader's own row list is what proves only the permissions
+  /// this build's manifest declares are listed.
+  @visibleForTesting
+  static List<V2PermissionItem> permissionItemsForTest(
+    Map<String, PermissionStatus> statuses,
+  ) => _permissionItems(statuses);
+
+  /// Test seam for the OS answer → four-state mapping.
+  @visibleForTesting
+  static V2PermissionAccess permissionAccessForTest(PermissionStatus status) =>
+      _permissionAccess(status);
+
+  /// The two permissions this build's manifest declares: microphone for voice
+  /// input and notifications for run results. Camera, photos and storage are
+  /// never requested, so listing them would send the user to an OS page with
+  /// no entry for Ovid.
   static List<V2PermissionItem> _permissionItems(
     Map<String, PermissionStatus> statuses,
   ) {
-    const ids = <String>[
-      'camera',
-      'microphone',
-      'photos',
-      'notifications',
-      'files',
-    ];
+    const ids = <String>['microphone', 'notifications'];
     const meta = <String, ({String name, String reason, IconData icon})>{
-      'camera': (
-        name: 'Camera',
-        reason: 'Scan documents and QR codes.',
-        icon: Icons.photo_camera_outlined,
-      ),
       'microphone': (
         name: 'Microphone',
         reason: 'Voice input in Hindi, Hinglish, Punjabi and Tamil.',
         icon: Icons.mic_none_rounded,
       ),
-      'photos': (
-        name: 'Photos',
-        reason: 'Attach images to a chat.',
-        icon: Icons.photo_library_outlined,
-      ),
       'notifications': (
         name: 'Notifications',
         reason: 'Tell you when a long run finishes.',
         icon: Icons.notifications_outlined,
-      ),
-      'files': (
-        name: 'Files',
-        reason: 'Read and write files in your workspace.',
-        icon: Icons.folder_outlined,
       ),
     };
     return [
@@ -1026,35 +1117,20 @@ class V2SettingsRoutes {
 
   static V2AboutPageData _about(
     BuildContext context,
-    V2SettingsActions actions, {
-    V2SystemStatus systemStatus = V2SystemStatus.unknown,
-    VoidCallback? onSystemStatus,
-    VoidCallback? onRetrySystemStatus,
-  }) {
+    V2SettingsActions actions,
+  ) {
     return V2AboutPageData(
       // The build's real version/build, never a demo string.
       version: kAppVersion,
       build: kAppBuildNumber,
-      systemStatus: systemStatus,
       onCopyVersion: () => actions.copyVersion(context),
       onPrivacyPolicy: () => actions.openUrl(context, LegalLinks.privacyPolicy),
       onTerms: () => actions.openUrl(context, LegalLinks.terms),
       onContactSupport: () =>
           actions.openUrl(context, 'mailto:${LegalLinks.supportEmail}'),
-      onSystemStatus: onSystemStatus,
-      onRetrySystemStatus: onRetrySystemStatus,
       onDeleteAccount: () => actions.deleteAccount(context),
     );
   }
-
-  /// Maps the gateway's `/status` answer onto the About badge.
-  static V2SystemStatus _systemStatusOf(ServiceStatus status) =>
-      switch (status.overall) {
-        ServiceCheck.ok => V2SystemStatus.operational,
-        ServiceCheck.degraded => V2SystemStatus.degraded,
-        ServiceCheck.down => V2SystemStatus.error,
-        ServiceCheck.unknown => V2SystemStatus.unknown,
-      };
 
   static String _planName(String tier) =>
       tier == 'free' ? 'Free plan' : ovidPlanName(tier);
@@ -1249,6 +1325,88 @@ class V2MemorySource {
     }
   }
 
+  /// Rewrites one global fact in place, preserving its bullet/indent marker.
+  ///
+  /// Returns the text the service stored, or null when the file changed, the
+  /// fact disappeared or the write failed; the screen then keeps the old text.
+  Future<String?> editFact({
+    required String sessionId,
+    required V2MemoryScope scope,
+    required String id,
+    required String text,
+  }) async {
+    if (scope != V2MemoryScope.global) return null;
+    final next = text.trim();
+    if (next.isEmpty) return null;
+    final split = id.lastIndexOf('#');
+    if (split <= 0) return null;
+    final fileName = id.substring(0, split);
+    final line = int.tryParse(id.substring(split + 1));
+    if (line == null || line < 0) return null;
+    try {
+      final doc = await _client.readMemory(sessionId, fileName);
+      final lines = doc.content.split('\n');
+      if (line >= lines.length) return null;
+      final current = memoryFactsFrom(
+        fileName,
+        doc.content,
+      ).where((fact) => fact.line == line).firstOrNull;
+      if (current == null) return null;
+      final prefix = RegExp(
+        r'^(\s*(?:[-*+]|\d+[.)])\s+)?',
+      ).firstMatch(lines[line])?.group(1);
+      lines[line] = '${prefix ?? ''}$next';
+      await _client.writeMemory(
+        sessionId,
+        fileName,
+        lines.join('\n'),
+        ifRevision: doc.revision,
+      );
+      return next;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Appends one global fact to the shared `MEMORY.md`.
+  ///
+  /// Returns the stored entry (with its real line id), or null when the write
+  /// failed. The screen never invents a row for an unconfirmed write.
+  Future<V2MemoryEntry?> addFact({
+    required String sessionId,
+    required String text,
+  }) async {
+    final next = text.trim();
+    if (next.isEmpty) return null;
+    const fileName = 'MEMORY.md';
+    try {
+      final listing = await _client.memoryFiles(sessionId);
+      final exists = listing.files.any((file) => file.name == fileName);
+      final doc = exists
+          ? await _client.readMemory(sessionId, fileName)
+          : const MemoryFile(name: fileName, content: '', revision: '');
+      final base = doc.content;
+      final separator = base.isEmpty || base.endsWith('\n') ? '' : '\n';
+      final content = '$base$separator- $next\n';
+      final stored = await _client.writeMemory(
+        sessionId,
+        fileName,
+        content,
+        ifRevision: exists ? doc.revision : null,
+      );
+      // The server may normalise the body; locate the line it actually stored.
+      final facts = memoryFactsFrom(fileName, stored.content);
+      for (final fact in facts.reversed) {
+        if (fact.text == next) {
+          return V2MemoryEntry(id: fact.id, text: fact.text);
+        }
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<void> _forgetProject(String projectId) async {
     final rest = CloudRestClient.I;
     final project = Uri.encodeComponent(projectId);
@@ -1370,6 +1528,16 @@ class _NotificationsLoader extends StatefulWidget {
 class _NotificationsLoaderState extends State<_NotificationsLoader>
     with WidgetsBindingObserver {
   bool _blocked = false;
+  bool _loading = true;
+  bool _saving = false;
+  String? _error;
+  late bool _master = AppState.I.notificationsEnabled;
+
+  /// The native notifier exists only on a phone. Web and desktop have no
+  /// Android channel, so the page must say so instead of storing a preference
+  /// that can never fire.
+  static bool get _serviceAvailable =>
+      !kIsWeb && (Platform.isAndroid || Platform.isIOS);
 
   @override
   void initState() {
@@ -1390,9 +1558,26 @@ class _NotificationsLoaderState extends State<_NotificationsLoader>
   }
 
   Future<void> _check() async {
-    final allowed = await NotificationPermission.isEnabled();
-    if (!mounted) return;
-    setState(() => _blocked = !allowed);
+    if (mounted) {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
+    try {
+      final allowed = await NotificationPermission.isEnabled();
+      if (!mounted) return;
+      setState(() {
+        _blocked = !allowed;
+        _loading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = 'We could not read the notification permission.';
+      });
+    }
   }
 
   Future<void> _openSystem() async {
@@ -1400,14 +1585,61 @@ class _NotificationsLoaderState extends State<_NotificationsLoader>
     await _check();
   }
 
+  /// Writes the account switch. The loader mirrors the optimistic value so the
+  /// screen adopts it, then reads the persisted value back: a refused write
+  /// leaves AppState unchanged and the switch rolls back.
+  void _setMaster(bool value) {
+    if (_saving) return;
+    setState(() {
+      _master = value;
+      _saving = true;
+    });
+    unawaited(() async {
+      try {
+        await widget.actions.setNotificationsMaster(context, value);
+      } finally {
+        if (mounted) {
+          setState(() {
+            _master = AppState.I.notificationsEnabled;
+            _saving = false;
+          });
+        }
+      }
+    }());
+  }
+
+  void _toggleChannel(String id, bool value) {
+    if (_saving) return;
+    setState(() => _saving = true);
+    unawaited(() async {
+      try {
+        await widget.actions.setNotificationChannel(id, value);
+      } finally {
+        if (mounted) setState(() => _saving = false);
+      }
+    }());
+  }
+
   @override
   Widget build(BuildContext context) {
+    final status = _loading
+        ? V2NotificationsStatus.loading
+        : _error != null
+        ? V2NotificationsStatus.error
+        : V2NotificationsStatus.ready;
     return NotificationsPage(
       data: V2SettingsRoutes._notifications(
         context,
         widget.actions,
         notificationsBlocked: _blocked,
         onOpenSystem: _openSystem,
+        status: status,
+        serviceAvailable: _serviceAvailable,
+        saving: _saving,
+        masterEnabled: _master,
+        onMasterChanged: _setMaster,
+        onToggle: _toggleChannel,
+        onRetry: _check,
       ),
     );
   }
@@ -1509,145 +1741,6 @@ class _AccountHealthLoaderState extends State<_AccountHealthLoader> {
   }
 }
 
-/// Loads the signed-in account's memory files for the active chat. The page
-/// itself stays presentational; this wrapper owns the request and the
-/// destructive actions.
-class _MemoryFilesLoader extends StatefulWidget {
-  const _MemoryFilesLoader({required this.actions});
-
-  final V2SettingsActions actions;
-
-  @override
-  State<_MemoryFilesLoader> createState() => _MemoryFilesLoaderState();
-}
-
-class _MemoryFilesLoaderState extends State<_MemoryFilesLoader> {
-  V2MemoryFilesPageData _data = const V2MemoryFilesPageData(
-    status: V2MemoryFilesStatus.loading,
-  );
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    final sessionId = AppState.I.activeSessionId;
-    if (sessionId == null) {
-      if (!mounted) return;
-      setState(() {
-        _data = const V2MemoryFilesPageData(status: V2MemoryFilesStatus.empty);
-      });
-      return;
-    }
-    try {
-      final listing = await AccountSettingsClient.I.memoryFiles(sessionId);
-      if (!mounted) return;
-      final total = listing.files.fold<int>(0, (sum, f) => sum + f.sizeBytes);
-      setState(() {
-        _data = V2MemoryFilesPageData(
-          status: listing.files.isEmpty
-              ? V2MemoryFilesStatus.empty
-              : V2MemoryFilesStatus.ready,
-          totalSizeLabel: _size(total),
-          files: [
-            for (final file in listing.files)
-              V2MemoryFileEntry(
-                id: file.name,
-                name: file.name,
-                group: listing.shared
-                    ? V2MemoryFileGroup.global
-                    : V2MemoryFileGroup.session,
-                sizeLabel: _size(file.sizeBytes),
-                updatedLabel: '',
-                preview: '',
-              ),
-          ],
-        );
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _data = const V2MemoryFilesPageData(status: V2MemoryFilesStatus.error);
-      });
-    }
-  }
-
-  Future<void> _open(V2MemoryFileEntry entry) async {
-    final sessionId = AppState.I.activeSessionId;
-    if (sessionId == null) return;
-    try {
-      final file = await AccountSettingsClient.I.readMemory(
-        sessionId,
-        entry.name,
-      );
-      if (!mounted) return;
-      await showDialog<void>(
-        context: context,
-        builder: (dialogContext) => AlertDialog(
-          title: Text(entry.name),
-          content: SingleChildScrollView(child: Text(file.content)),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('Close'),
-            ),
-          ],
-        ),
-      );
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not open that file.')),
-        );
-      }
-    }
-  }
-
-  Future<void> _delete(V2MemoryFileEntry entry) async {
-    final sessionId = AppState.I.activeSessionId;
-    if (sessionId == null) return;
-    try {
-      await AccountSettingsClient.I.deleteMemory(sessionId, entry.name);
-      await _load();
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not delete that file.')),
-        );
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return MemoryFilesPage(
-      data: V2MemoryFilesPageData(
-        status: _data.status,
-        files: _data.files,
-        totalSizeLabel: _data.totalSizeLabel,
-        onOpen: (id) {
-          final entry = _data.files.where((f) => f.id == id).firstOrNull;
-          if (entry != null) _open(entry);
-        },
-        onDelete: (id) {
-          final entry = _data.files.where((f) => f.id == id).firstOrNull;
-          if (entry != null) _delete(entry);
-        },
-        onExportAll: () => widget.actions.exportData(context),
-        onRetry: _load,
-      ),
-    );
-  }
-
-  String _size(int bytes) {
-    if (bytes < 1024) return '$bytes B';
-    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
-  }
-}
-
 /// Loads the signed-in chat's real memory files for the Memory screen.
 class _MemoryLoader extends StatefulWidget {
   const _MemoryLoader({required this.actions});
@@ -1710,6 +1803,10 @@ class _MemoryLoaderState extends State<_MemoryLoader> {
   /// cross-chat facts, so its files become [V2MemoryEntry] rows rather than
   /// per-chat file rows.
   V2MemoryPageData _pageFor(V2MemorySnapshot snapshot) {
+    final sessionId = AppState.I.activeSessionId;
+    // The global fact list only exists in the shared scope, so that is the one
+    // scope with a real edit/add path. Chat-scope files stay read/forget only.
+    final canWriteFacts = snapshot.shared && sessionId != null;
     return V2SettingsRoutes._memory(
       context,
       widget.actions,
@@ -1727,17 +1824,28 @@ class _MemoryLoaderState extends State<_MemoryLoader> {
                   detail: V2SettingsRoutes._bytes(file.sizeBytes),
                 ),
             ],
-      onForgetMemory: (scope, id) => unawaited(_forget(scope, id)),
+      onForgetMemory: _forget,
+      onEditMemory: canWriteFacts
+          ? (scope, id, text) => _source.editFact(
+              sessionId: sessionId,
+              scope: scope,
+              id: id,
+              text: text,
+            )
+          : null,
+      onAddMemory: canWriteFacts
+          ? (text) => _source.addFact(sessionId: sessionId, text: text)
+          : null,
       onRetry: _load,
     );
   }
 
-  /// Deletes one row through the real memory API, then reloads so a failure
-  /// puts the row back instead of leaving the screen lying.
-  Future<void> _forget(V2MemoryScope scope, String id) async {
+  /// Deletes one row through the real memory API, then reloads. The bool is
+  /// the completion signal the screen needs: false keeps the row in place.
+  Future<bool> _forget(V2MemoryScope scope, String id) async {
     final sessionId = AppState.I.activeSessionId;
     final snapshot = _snapshot;
-    if (sessionId == null || snapshot == null) return;
+    if (sessionId == null || snapshot == null) return false;
     try {
       await _source.forget(
         sessionId: sessionId,
@@ -1746,18 +1854,21 @@ class _MemoryLoaderState extends State<_MemoryLoader> {
         snapshot: snapshot,
       );
       await _load();
+      return true;
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          SnackBar(
-            content: Text(
-              e is StateError ? e.message : 'Could not forget that memory.',
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            SnackBar(
+              content: Text(
+                e is StateError ? e.message : 'Could not forget that memory.',
+              ),
             ),
-          ),
-        );
+          );
+      }
       await _load();
+      return false;
     }
   }
 
@@ -2128,11 +2239,8 @@ class _PermissionsLoaderState extends State<_PermissionsLoader>
   String? _error;
 
   static const _permissions = <String, Permission>{
-    'camera': Permission.camera,
     'microphone': Permission.microphone,
-    'photos': Permission.photos,
     'notifications': Permission.notification,
-    'files': Permission.storage,
   };
 
   @override
@@ -2252,19 +2360,9 @@ class _PresetLoaderState extends State<_PresetLoader> {
     if (mounted) setState(() {});
   }
 
-  Future<void> _create() async {
-    final created = await widget.actions.createPreset(context);
-    if (created != null && mounted) setState(() {});
-  }
-
   @override
-  Widget build(BuildContext context) => AgentPresetsPage(
-    data: V2SettingsRoutes._presets(
-      context,
-      widget.actions,
-      onCreate: () => unawaited(_create()),
-    ),
-  );
+  Widget build(BuildContext context) =>
+      AgentPresetsPage(data: V2SettingsRoutes._presets());
 }
 
 /// Credentials screen kept live across a GitHub device-flow sign-in.
@@ -2278,11 +2376,20 @@ class _CredentialsLoader extends StatefulWidget {
 }
 
 class _CredentialsLoaderState extends State<_CredentialsLoader> {
+  final CredentialsApi _vault = CloudCredentialsApi();
+  List<V2BrowserCredential> _browser = const [];
+  bool _browserLoaded = false;
+
+  /// Placeholder shown for a vault secret. The server never returns the
+  /// plaintext, so the row can only mask a fixed marker.
+  static const _browserSecretMask = '••••••••';
+
   @override
   void initState() {
     super.initState();
     FirebaseService.I.addListener(_onChange);
     GitHubService.I.addListener(_onChange);
+    unawaited(_loadBrowserCredentials());
   }
 
   @override
@@ -2296,122 +2403,123 @@ class _CredentialsLoaderState extends State<_CredentialsLoader> {
     if (mounted) setState(() {});
   }
 
-  @override
-  Widget build(BuildContext context) => CredentialsPage(
-    data: V2SettingsRoutes._credentials(context, widget.actions),
-  );
-}
-
-/// About screen with the real build identity and the gateway's live status.
-class _AboutLoader extends StatefulWidget {
-  const _AboutLoader({required this.actions});
-
-  final V2SettingsActions actions;
-
-  @override
-  State<_AboutLoader> createState() => _AboutLoaderState();
-}
-
-class _AboutLoaderState extends State<_AboutLoader> {
-  V2SystemStatus _status = V2SystemStatus.checking;
-  ServiceStatus? _service;
-
-  @override
-  void initState() {
-    super.initState();
-    unawaited(_load());
-  }
-
-  Future<void> _load() async {
-    if (mounted) setState(() => _status = V2SystemStatus.checking);
+  Future<void> _loadBrowserCredentials() async {
     try {
-      final service = await AccountSettingsClient.I.serviceStatus();
+      final stored = await _vault.list();
       if (!mounted) return;
       setState(() {
-        _service = service;
-        _status = V2SettingsRoutes._systemStatusOf(service);
+        _browserLoaded = true;
+        _browser = [
+          for (final credential in stored)
+            V2BrowserCredential(
+              id: credential.id,
+              site: credential.site,
+              username: credential.username,
+              password: _browserSecretMask,
+            ),
+        ];
       });
     } catch (_) {
       if (!mounted) return;
-      setState(() {
-        _service = null;
-        _status = V2SystemStatus.error;
-      });
+      setState(() => _browserLoaded = true);
     }
   }
 
-  Future<void> _showStatus() async {
-    final service = _service;
-    if (service == null) {
-      await _load();
-      return;
+  /// Creates a vault login for real. The page has already collected it.
+  void _addBrowser(V2BrowserCredential credential) {
+    unawaited(_saveBrowser(credential, create: true));
+  }
+
+  /// Updates a vault login. An unchanged secret arrives as the mask, so the
+  /// write omits it and the stored plaintext stays on the server.
+  void _editBrowser(V2BrowserCredential credential) {
+    unawaited(_saveBrowser(credential, create: false));
+  }
+
+  Future<void> _saveBrowser(
+    V2BrowserCredential credential, {
+    required bool create,
+  }) async {
+    try {
+      if (create) {
+        await _vault.create(
+          label: credential.site,
+          site: credential.site,
+          username: credential.username,
+          secret: credential.password,
+          secretKind: 'password',
+        );
+      } else {
+        await _vault.update(
+          credential.id,
+          label: credential.site,
+          site: credential.site,
+          username: credential.username,
+          secret: credential.password == _browserSecretMask
+              ? null
+              : credential.password,
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not save the login.')),
+        );
+      }
     }
-    await showDialog<void>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Service status'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _StatusLine(label: 'Overall', check: service.overall),
-            _StatusLine(label: 'Storage', check: service.storage),
-            _StatusLine(label: 'Queue', check: service.queue),
-            _StatusLine(label: 'Agents', check: service.agents),
-            _StatusLine(label: 'Models', check: service.models),
-            if (service.checkedAt != null) ...[
-              const SizedBox(height: 8),
-              Text(
-                'Checked ${formatLocalDateTime(service.checkedAt!)}',
-                style: Theme.of(dialogContext).textTheme.bodySmall,
-              ),
-            ],
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('Close'),
-          ),
-        ],
-      ),
-    );
+    await _loadBrowserCredentials();
+  }
+
+  /// Deletes one vault login for real. The page has already confirmed.
+  void _deleteBrowser(V2BrowserCredential credential) {
+    unawaited(() async {
+      try {
+        await _vault.remove(credential.id);
+      } catch (_) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Could not delete the login.')),
+          );
+        }
+      }
+      await _loadBrowserCredentials();
+    }());
+  }
+
+  /// Revokes every saved credential without ending the account session.
+  ///
+  /// The GitHub OAuth token is revoked and every stored provider key is
+  /// cleared; the page has already removed its own secure-store secrets and
+  /// the browser logins by the time this runs.
+  Future<void> _revokeAll() async {
+    try {
+      for (final provider in [...AppState.I.providers]) {
+        if (provider.apiKey.trim().isEmpty) continue;
+        final error = await AppState.I.clearProviderApiKey(provider);
+        if (error != null) throw StateError(error);
+      }
+      await GitHubService.I.signOut();
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not revoke every credential.')),
+        );
+      }
+    }
   }
 
   @override
-  Widget build(BuildContext context) => AboutPage(
-    data: V2SettingsRoutes._about(
+  Widget build(BuildContext context) => CredentialsPage(
+    data: V2SettingsRoutes._credentials(
       context,
       widget.actions,
-      systemStatus: _status,
-      onSystemStatus: () => unawaited(_showStatus()),
-      onRetrySystemStatus: () => unawaited(_load()),
+      browserCredentials: _browserLoaded ? _browser : const [],
+      onAddBrowserCredential: _browserLoaded ? _addBrowser : null,
+      onEditBrowserCredential: _browserLoaded ? _editBrowser : null,
+      onDeleteBrowserCredential: _browserLoaded ? _deleteBrowser : null,
+      onRevokeAll: () => unawaited(_revokeAll()),
     ),
   );
-}
-
-class _StatusLine extends StatelessWidget {
-  const _StatusLine({required this.label, required this.check});
-
-  final String label;
-  final ServiceCheck check;
-
-  @override
-  Widget build(BuildContext context) {
-    final text = switch (check) {
-      ServiceCheck.ok => 'Operational',
-      ServiceCheck.degraded => 'Some issues',
-      ServiceCheck.down => 'Down',
-      ServiceCheck.unknown => 'Not reported',
-    };
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 4),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [Text(label), Text(text)],
-      ),
-    );
-  }
 }
 
 class V2PlanSpec {

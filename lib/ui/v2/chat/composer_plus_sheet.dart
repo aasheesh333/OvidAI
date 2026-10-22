@@ -51,7 +51,6 @@ class V2ComposerPlusData {
     this.photoAccessGranted = true,
     this.cameraAvailable = true,
     this.cameraUnavailableReason = 'This device does not have a camera.',
-    this.showConnectors = true,
   }) : assert(customConnectorsUsed >= 0, 'Usage cannot be negative');
 
   final V2ComposerPlusPlan plan;
@@ -73,10 +72,6 @@ class V2ComposerPlusData {
   /// Why Camera is disabled. The composer passes a build-accurate reason so a
   /// device that does have a camera is never told otherwise.
   final String cameraUnavailableReason;
-
-  /// Kept for callers that still pass the flag. The minimal sheet has four
-  /// rows and no Connectors row; connectors live in their own screen.
-  final bool showConnectors;
 
   bool get hasStudioFolder => (studioFolder?.trim().isNotEmpty ?? false);
 

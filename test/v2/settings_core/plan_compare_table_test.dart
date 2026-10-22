@@ -178,7 +178,7 @@ void main() {
     expect(header.style?.color, OColors.light.accent);
   });
 
-  testWidgets('current plan is announced as selected for screen readers', (
+  testWidgets('current plan is announced in the header label', (
     tester,
   ) async {
     final semantics = tester.ensureSemantics();
@@ -194,13 +194,15 @@ void main() {
       find.byKey(const ValueKey('plan-compare-header-go')),
     );
     expect(header.label, 'Ovid Go, current plan');
-    expect(header.flagsCollection.isSelected, Tristate.isTrue);
+    // A column header is a heading, not a control: the current column is named
+    // in the label and no selection state is published.
     expect(header.flagsCollection.isHeader, isTrue);
+    expect(header.flagsCollection.isSelected, Tristate.none);
 
     final freeHeader = tester.getSemantics(
       find.byKey(const ValueKey('plan-compare-header-free')),
     );
-    expect(freeHeader.flagsCollection.isSelected, Tristate.isFalse);
+    expect(freeHeader.flagsCollection.isSelected, Tristate.none);
 
     final storage = tester.getSemantics(
       find.byKey(const ValueKey('plan-compare-cell-free-storage')),

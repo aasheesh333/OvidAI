@@ -23,6 +23,9 @@ class V2RunRoutes {
   /// Shown when a session carries no analytics for the value.
   static const String notReported = 'Not reported';
 
+  /// The runtime's hard ceiling for one subagent run.
+  static const Duration _subagentCeiling = Duration(hours: 8);
+
   static Future<void> openTrajectory(
     BuildContext context,
     String sessionId,
@@ -43,6 +46,7 @@ class V2RunRoutes {
                   : () => _shareRun(routeContext, session),
               onOpenSource: (label) => _openSource(routeContext, label),
               onOpenSubagent: (id) => openSubagent(routeContext, id),
+              onRetry: () => AppState.I.loadSessions(),
               // onOpenFile / onRerun / onOpenPreview stay unset: the minimal
               // trajectory screen renders no file, rerun or preview control,
               // so a callback here would never reach the user. The share
@@ -74,6 +78,9 @@ class V2RunRoutes {
                   ? null
                   : () => _showFullLog(routeContext, session),
               onBackToChat: () => Navigator.of(routeContext).maybePop(),
+              // A load failure is recoverable: reload the session store and
+              // let the AnimatedBuilder rebuild from it.
+              onRetry: () => AppState.I.loadSessions(),
             );
           },
         ),
@@ -93,10 +100,6 @@ class V2RunRoutes {
       return const V2RunTrajectoryPageData(
         title: 'Run',
         runLabel: '',
-        prompt: '',
-        model: '',
-        tokensLabel: notReported,
-        durationLabel: notReported,
         status: V2RunTrajectoryStatus.error,
         errorMessage: 'This run is no longer available.',
       );
@@ -110,10 +113,6 @@ class V2RunRoutes {
       return V2RunTrajectoryPageData(
         title: session.title,
         runLabel: '',
-        prompt: _firstUserPrompt(session),
-        model: session.model,
-        tokensLabel: _tokensLabel(session),
-        durationLabel: _durationLabel(session),
         subagents: launches,
         status: V2RunTrajectoryStatus.empty,
       );
@@ -122,10 +121,6 @@ class V2RunRoutes {
     return V2RunTrajectoryPageData(
       title: session.title,
       runLabel: steps.length == 1 ? '1 step' : '${steps.length} steps',
-      prompt: _firstUserPrompt(session),
-      model: session.model,
-      tokensLabel: _tokensLabel(session),
-      durationLabel: _durationLabel(session),
       steps: steps,
       subagents: launches,
     );
@@ -177,31 +172,40 @@ class V2RunRoutes {
     final logLines = _logLines(session);
     final clock = now ?? DateTime.now();
     final end = working ? clock : session.lastActivityAt;
-    final elapsed = end.difference(session.createdAt);
+    final measured = end.difference(session.createdAt);
+    final elapsed = measured.isNegative ? Duration.zero : measured;
+    // The runtime cannot run a subagent longer than eight hours. A live run
+    // measured past that ceiling has timed out; report it from the real
+    // timestamps rather than waiting for a state transition that never came.
+    final timedOut = working && elapsed > _subagentCeiling;
 
     return V2SubagentPageData(
       name: (session.agentLabel ?? '').trim().isEmpty
           ? session.title
           : session.agentLabel!.trim(),
       instanceLabel: session.model,
-      working: working,
+      working: working && !timedOut,
       progress: state == 'finished' ? 1 : 0,
       // Only a finished run reports a definite 100 %; a running, stopped or
       // failed run has no measured progress in the session.
       progressKnown: state == 'finished',
-      stepLabel: _agentStateLabel(state),
+      stepLabel: timedOut ? 'Timed out' : _agentStateLabel(state),
       paceLabel: '',
       goal: session.title,
       files: _filesFrom(session),
       startedLabel: _timeOfDay(session.createdAt),
-      elapsedLabel: formatCompactDuration(
-        elapsed.isNegative ? Duration.zero : elapsed,
-      ),
+      elapsedLabel: formatCompactDuration(elapsed),
       timeLimitLabel: notReported,
       remainingLabel: '',
       logLines: logLines,
       totalLogLines: _toolCount(session),
       summary: _summaryFrom(session.agentResult),
+      logPath: '/workspace/.ovid/logs/subagent_${session.id}.log',
+      reportedStatus: timedOut
+          ? V2SubagentRunStatus.timedOut
+          : _reportedStatus(state),
+      createdAt: session.createdAt,
+      finishedAt: timedOut ? clock : (working ? null : session.lastActivityAt),
     );
   }
 
@@ -452,6 +456,7 @@ class V2RunRoutes {
   static V2RunStep? _stepFor(Message message) {
     final id = message.privateSyncId;
     final content = message.content.trim();
+    final startedAt = message.time;
     switch (message.kind) {
       case MsgKind.text:
       case MsgKind.streaming:
@@ -463,6 +468,10 @@ class V2RunRoutes {
           detail: cleanTruncate(content, 400),
           durationLabel: _elapsedLabel(message.elapsedMs),
           kind: V2RunStepKind.message,
+          startedAt: startedAt,
+          status: message.kind == MsgKind.streaming
+              ? V2RunStepStatus.running
+              : V2RunStepStatus.completed,
         );
       case MsgKind.reasoning:
         if (content.isEmpty) return null;
@@ -472,12 +481,18 @@ class V2RunRoutes {
           detail: cleanTruncate(content, 400),
           durationLabel: _elapsedLabel(message.elapsedMs),
           kind: V2RunStepKind.plan,
+          startedAt: startedAt,
         );
       case MsgKind.tool:
         final name = (message.toolName ?? '').trim();
         final title = (message.toolTitle ?? '').trim();
         final summary = (message.toolSummary ?? '').trim();
         final detail = message.toolDetail?.trim() ?? '';
+        final input = message.toolInput?.trim() ?? '';
+        final status = _toolStepStatus(message.toolState);
+        final result = detail.isNotEmpty
+            ? detail
+            : (input.isNotEmpty ? input : '');
         return V2RunStep(
           id: id,
           title: title.isNotEmpty ? title : (name.isNotEmpty ? name : 'Tool'),
@@ -485,7 +500,13 @@ class V2RunRoutes {
           durationLabel: _elapsedLabel(message.elapsedMs),
           kind: _toolKind(name),
           fileName: _toolFile(message),
-          expandedDetail: detail.isEmpty ? null : cleanTruncate(detail, 2000),
+          expandedDetail: result.isEmpty ? null : cleanTruncate(result, 2000),
+          startedAt: startedAt,
+          status: status,
+          errorMessage: status == V2RunStepStatus.failed
+              ? _toolError(message)
+              : null,
+          toolName: name.isEmpty ? null : name,
         );
       case MsgKind.turnTail:
         if (content.isEmpty) return null;
@@ -495,6 +516,7 @@ class V2RunRoutes {
           detail: cleanTruncate(content, 400),
           durationLabel: '',
           kind: V2RunStepKind.finish,
+          startedAt: startedAt,
         );
       case MsgKind.compact:
         if (content.isEmpty) return null;
@@ -504,6 +526,7 @@ class V2RunRoutes {
           detail: cleanTruncate(content, 400),
           durationLabel: '',
           kind: V2RunStepKind.plan,
+          startedAt: startedAt,
         );
       case MsgKind.imageGen:
         return V2RunStep(
@@ -512,6 +535,7 @@ class V2RunRoutes {
           detail: cleanTruncate(content, 400),
           durationLabel: _elapsedLabel(message.elapsedMs),
           kind: V2RunStepKind.preview,
+          startedAt: startedAt,
         );
       case MsgKind.htmlArtifact:
         return V2RunStep(
@@ -520,9 +544,47 @@ class V2RunRoutes {
           detail: cleanTruncate(content, 400),
           durationLabel: _elapsedLabel(message.elapsedMs),
           kind: V2RunStepKind.write,
+          startedAt: startedAt,
         );
     }
   }
+
+  /// The durable tool state, reduced to the three states the timeline shows.
+  static V2RunStepStatus _toolStepStatus(String state) =>
+      switch (state.trim().toLowerCase()) {
+        'running' ||
+        'streaming' ||
+        'in progress' ||
+        'working' => V2RunStepStatus.running,
+        'error' || 'failed' || 'failure' => V2RunStepStatus.failed,
+        // A stopped tool never reported a failure, so it is not marked as one.
+        'stopped' || 'cancelled' || 'canceled' => V2RunStepStatus.completed,
+        _ => V2RunStepStatus.completed,
+      };
+
+  /// The failure a tool step reported, preferring its full output.
+  static String? _toolError(Message message) {
+    for (final raw in [
+      message.toolDetail,
+      message.toolSummary,
+      message.content,
+    ]) {
+      final text = (raw ?? '').trim();
+      if (text.isNotEmpty) return cleanTruncate(text, 2000);
+    }
+    return null;
+  }
+
+  /// The runtime's lifecycle state as the typed status the screen expects.
+  ///
+  /// `finished` deliberately maps to null: only the subagent's own summary
+  /// may claim completion.
+  static V2SubagentRunStatus? _reportedStatus(String? state) => switch (state) {
+    'running' => V2SubagentRunStatus.running,
+    'failed' => V2SubagentRunStatus.failed,
+    'stopped' => V2SubagentRunStatus.cancelled,
+    _ => null,
+  };
 
   static V2RunStepKind _toolKind(String toolName) {
     final name = toolName.toLowerCase();
@@ -619,28 +681,6 @@ class V2RunRoutes {
     if (title.isNotEmpty) return title;
     final name = (message.toolName ?? '').trim();
     return name.isEmpty ? 'Tool' : name;
-  }
-
-  static String _firstUserPrompt(ChatSession session) {
-    for (final message in session.messages) {
-      if (message.role == 'user' && message.content.trim().isNotEmpty) {
-        return cleanTruncate(message.content.trim(), 400);
-      }
-    }
-    return '';
-  }
-
-  static String _tokensLabel(ChatSession session) {
-    final total =
-        session.analytics.inputTokens + session.analytics.outputTokens;
-    return total <= 0 ? notReported : '${formatCompactCount(total)} tokens';
-  }
-
-  static String _durationLabel(ChatSession session) {
-    final ms = session.analytics.llmMs + session.analytics.toolMs;
-    return ms <= 0
-        ? notReported
-        : formatCompactDuration(Duration(milliseconds: ms));
   }
 
   static String _elapsedLabel(int? ms) => ms == null || ms <= 0

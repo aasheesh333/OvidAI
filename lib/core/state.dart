@@ -380,7 +380,12 @@ class MessageAttachment {
   /// Presigned R2 download URL (P7/P8): cloud artifacts are fetched by URL,
   /// not from a local workspace.
   final String? url;
-  MessageAttachment({required this.name, required this.size, this.path, this.url});
+  MessageAttachment({
+    required this.name,
+    required this.size,
+    this.path,
+    this.url,
+  });
 
   factory MessageAttachment.fromJson(Map<String, dynamic> j) =>
       MessageAttachment(
@@ -573,7 +578,6 @@ class Message {
   };
 }
 
-
 class SessionAnalytics {
   int inputTokens;
   int outputTokens;
@@ -616,9 +620,11 @@ class SessionAnalytics {
   int get averageTtftMs => ttftSamples == 0 ? 0 : ttftMs ~/ ttftSamples;
   double get decodeTokensPerSecond =>
       llmMs <= 0 ? 0 : decodeTokens / (llmMs / 1000);
+
   /// Share of input tokens served from the provider prompt cache (0..100).
-  double get cachedPercent =>
-      inputTokens <= 0 ? 0 : (cacheReadTokens / inputTokens * 100).clamp(0, 100);
+  double get cachedPercent => inputTokens <= 0
+      ? 0
+      : (cacheReadTokens / inputTokens * 100).clamp(0, 100);
   double get contextFraction =>
       contextLimit <= 0 ? 0 : (contextTokens / contextLimit).clamp(0.0, 1.0);
 
@@ -1200,7 +1206,8 @@ Directory localWorkspaceDirFor(String id) {
 /// folder the user picked on shared storage (e.g. /sdcard/Documents/project)
 /// was deleted recursively on "Reset all data" and on chat delete, against
 /// the dialog's own promise "Not deleted: folders you picked outside the app".
-Future<void> _deleteLocalWorkspace(String id) => deleteLocalScratchWorkspace(id);
+Future<void> _deleteLocalWorkspace(String id) =>
+    deleteLocalScratchWorkspace(id);
 
 /// See [_deleteLocalWorkspace]; public for the regression test.
 @visibleForTesting
@@ -1424,9 +1431,7 @@ class AppState extends ChangeNotifier {
         onClear: collab.clear,
         onVerifyEmpty: collab.verifyEmpty,
       ),
-      resetDependencies: {
-        ResetStoreKind.collaboration.id: collab.lifecycle,
-      },
+      resetDependencies: {ResetStoreKind.collaboration.id: collab.lifecycle},
     );
     addListener(_queueProductionAccountBind);
     firebase.addListener(_queueProductionAccountBind);
@@ -1826,8 +1831,6 @@ class AppState extends ChangeNotifier {
     await _loadShellPreferences();
   }
 
-
-
   Future<bool> _initializeFirebaseForStartup() async {
     bool? available;
     final overridden = await _runStartupStage('firebase.initialize', () async {
@@ -1935,8 +1938,7 @@ class AppState extends ChangeNotifier {
     // newSession()/selectSession() in that window must not steal the restored
     // event or receive a mislabel.
     final root = sessionById(_pendingActiveRootId);
-    if (root != null && !root.isSubagent) {
-    }
+    if (root != null && !root.isSubagent) {}
     return true;
   }
 
@@ -2072,14 +2074,16 @@ class AppState extends ChangeNotifier {
       // app has no "unconfigured" state. An empty backfill (fresh install)
       // and the legacy 'Select a provider' sentinel both resolve to Ovid
       // Cloud's `auto` alias so the header can never read "Select model".
-      if (lastSelectedModel.isEmpty || lastSelectedModel == 'Select a provider') {
+      if (lastSelectedModel.isEmpty ||
+          lastSelectedModel == 'Select a provider') {
         lastSelectedModel = 'auto';
         lastSelectedProviderId = ovidCloudProviderId;
       }
       // Sessions still carrying the sentinel (created before the directive)
       // migrate on this same bootstrap.
       for (final session in sessions) {
-        if (session.model == 'Select a provider' || session.model.trim().isEmpty) {
+        if (session.model == 'Select a provider' ||
+            session.model.trim().isEmpty) {
           session.model = 'auto';
           session.providerId ??= ovidCloudProviderId;
           _markSessionDirty(session.id);
@@ -2352,16 +2356,14 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> persistProviderState() async {
-    final encoded = jsonEncode(
-      [
-        for (final provider in providers) provider.toPersistedJson(),
-        // Cloud catalog refreshes persist this same preference. Keep metadata
-        // until its secure key is explicitly moved/deleted, even across restart.
-        for (final entry in _legacyProviderMeta.entries)
-          if (providerById(entry.key) == null)
-            {'id': entry.key, 'name': entry.value.$1, 'baseUrl': entry.value.$2},
-      ],
-    );
+    final encoded = jsonEncode([
+      for (final provider in providers) provider.toPersistedJson(),
+      // Cloud catalog refreshes persist this same preference. Keep metadata
+      // until its secure key is explicitly moved/deleted, even across restart.
+      for (final entry in _legacyProviderMeta.entries)
+        if (providerById(entry.key) == null)
+          {'id': entry.key, 'name': entry.value.$1, 'baseUrl': entry.value.$2},
+    ]);
     _providerWrite = _providerWrite.then((_) async {
       try {
         final prefs = await SharedPreferences.getInstance();
@@ -3463,12 +3465,12 @@ class AppState extends ChangeNotifier {
       activeSessionId = null;
       providers.clear();
       _seed();
-        memoryEnabled = true;
+      memoryEnabled = true;
       showReasoning = true;
       githubSync = true;
       workflowEnabled = true;
       autoRunSafeCommands = true;
-        shareSessionMemory = false;
+      shareSessionMemory = false;
       lastSelectedModel = '';
       lastSelectedProviderId = null;
       try {
@@ -3878,6 +3880,7 @@ class AppState extends ChangeNotifier {
   /// Per-EVENT idle timeout (never-stop semantics: as long as chunks keep
   /// arriving the stream runs indefinitely; this is the max silence).
   int responseTimeoutSec = 300;
+
   /// SE-011: when the "Still working…" hint appears (it never cancels a run;
   /// the cloud enforces its own limits). Capped at 10 minutes.
   static const timeoutPresets = [30, 60, 120, 300, 600];
@@ -3936,13 +3939,19 @@ class AppState extends ChangeNotifier {
 
   Future<void> setResponseTimeout(int sec) async {
     sec = sec.clamp(minResponseTimeoutSec, maxResponseTimeoutSec);
+    final previous = responseTimeoutSec;
     responseTimeoutSec = sec;
     notifyListeners();
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setInt(_kResponseTimeout, sec);
     } catch (e) {
+      // The screen's rollback is only real when the write failure reaches it:
+      // restore the in-memory value and rethrow instead of swallowing.
+      responseTimeoutSec = previous;
+      notifyListeners();
       Diag.swallow('state', e);
+      rethrow;
     }
   }
 
@@ -4357,7 +4366,8 @@ class AppState extends ChangeNotifier {
   void newSession() {
     // Auto is the floor (owner directive 2026-10-18): a new chat NEVER
     // carries a "Select a provider" sentinel — the last selection or Auto.
-    final newModel = lastSelectedModel.isEmpty || lastSelectedModel == 'Select a provider'
+    final newModel =
+        lastSelectedModel.isEmpty || lastSelectedModel == 'Select a provider'
         ? 'auto'
         : lastSelectedModel;
     final s = ChatSession(
@@ -4545,11 +4555,7 @@ class AppState extends ChangeNotifier {
   /// conversation has not changed since (nothing was appended after the
   /// truncation). Restored rows get fresh local identities. Returns false
   /// when the undo is no longer safe.
-  bool restoreMessagesAt(
-    String sessionId,
-    int index,
-    List<Message> removed,
-  ) {
+  bool restoreMessagesAt(String sessionId, int index, List<Message> removed) {
     if (_settingsBusy || removed.isEmpty) return false;
     final s = sessionById(sessionId);
     if (s == null || s.messages.length != index) return false;
@@ -5219,7 +5225,6 @@ class AppState extends ChangeNotifier {
     unawaited(_persistCustomPresets());
   }
 
-
   // ── Per-session repo selection (Studio) ─────────────────────────────
   /// Repo bound to a session.  Falls back to [fallback] (the caller's
   /// global default — passed to avoid a circular import) when the session
@@ -5291,7 +5296,10 @@ class AppState extends ChangeNotifier {
   static const Map<String, (String, String)> legacyProviderCatalog = {
     'openai': ('OpenAI', 'https://api.openai.com/v1'),
     'anthropic': ('Anthropic', 'https://api.anthropic.com/v1'),
-    'google-gemini': ('Google Gemini', 'https://generativelanguage.googleapis.com/v1beta'),
+    'google-gemini': (
+      'Google Gemini',
+      'https://generativelanguage.googleapis.com/v1beta',
+    ),
     'deepseek': ('DeepSeek', 'https://api.deepseek.com/v1'),
     'xai': ('xAI', 'https://api.x.ai/v1'),
     'mistral-ai': ('Mistral AI', 'https://api.mistral.ai/v1'),

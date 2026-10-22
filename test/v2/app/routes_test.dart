@@ -16,6 +16,7 @@ import 'package:ovid_ai/ui/v2/collab/collab_live_page.dart';
 import 'package:ovid_ai/ui/v2/collab/collab_members_page.dart';
 import 'package:ovid_ai/ui/v2/runs/run_trajectory_page.dart';
 import 'package:ovid_ai/ui/v2/runs/subagent_page.dart';
+import 'package:ovid_ai/ui/v2/runs/subagent_summary.dart';
 import 'package:ovid_ai/ui/v2/studio/branch_picker_sheet.dart';
 import 'package:ovid_ai/ui/v2/studio/changes_page.dart';
 import 'package:ovid_ai/ui/v2/studio/live_preview_page.dart';
@@ -164,17 +165,58 @@ void main() {
 
       expect(data.status, V2RunTrajectoryStatus.ready);
       expect(data.title, 'Build landing page');
-      expect(data.prompt, 'Build a landing page');
-      expect(data.model, 'deepseek-chat');
       expect(data.steps, hasLength(3));
       expect(data.steps.first.title, 'You');
       expect(data.steps.first.kind, V2RunStepKind.message);
+      expect(data.steps.first.startedAt, DateTime(2026, 10, 20, 10));
+      expect(data.steps.first.status, V2RunStepStatus.completed);
       expect(data.steps[1].durationLabel, '1s');
+      expect(data.steps[1].startedAt, DateTime(2026, 10, 20, 10, 0, 2));
       expect(data.steps[2].title, 'Edit lib/app.dart');
       expect(data.steps[2].kind, V2RunStepKind.write);
       expect(data.steps[2].fileName, 'lib/app.dart');
-      expect(data.tokensLabel, '1.5K tokens');
-      expect(data.durationLabel, '3s');
+      expect(data.steps[2].toolName, 'fs_edit');
+      expect(data.steps[2].status, V2RunStepStatus.completed);
+      expect(data.steps[2].startedAt, DateTime(2026, 10, 20, 10, 0, 3));
+      // The recorded tool input reaches the expanded detail when the tool
+      // card carries no larger output.
+      expect(data.steps[2].expandedDetail, '{"path":"lib/app.dart"}');
+    });
+
+    test('running and failed tool states reach the step', () {
+      final session = ChatSession(
+        id: 'states',
+        title: 'Tool states',
+        model: 'deepseek-chat',
+        createdAt: DateTime(2026, 10, 20, 10),
+      );
+      session.messages.addAll([
+        Message(
+          role: 'assistant',
+          kind: MsgKind.tool,
+          toolName: 'run_shell',
+          toolSummary: 'npm test',
+          toolState: 'running',
+          time: DateTime(2026, 10, 20, 10, 0, 4),
+        ),
+        Message(
+          role: 'assistant',
+          kind: MsgKind.tool,
+          toolName: 'fs_write',
+          toolSummary: 'Write out/report.md',
+          toolDetail: 'Permission denied: out/report.md',
+          toolState: 'error',
+          time: DateTime(2026, 10, 20, 10, 0, 5),
+        ),
+      ]);
+
+      final data = V2RunRoutes.trajectoryDataFor(session);
+
+      expect(data.steps[0].status, V2RunStepStatus.running);
+      expect(data.steps[0].toolName, 'run_shell');
+      expect(data.steps[1].status, V2RunStepStatus.failed);
+      expect(data.steps[1].toolName, 'fs_write');
+      expect(data.steps[1].errorMessage, 'Permission denied: out/report.md');
     });
 
     test('child sessions appear as real subagent launches in order', () {
@@ -200,15 +242,6 @@ void main() {
       expect(data.subagents.first.agentName, 'Pricing research');
       expect(data.subagents.first.status, V2SubagentLaunchStatus.running);
       expect(data.subagents.last.status, V2SubagentLaunchStatus.failed);
-    });
-
-    test('a session without analytics reports nothing instead of numbers', () {
-      final session = _rootSession();
-
-      final data = V2RunRoutes.trajectoryDataFor(session);
-
-      expect(data.tokensLabel, V2RunRoutes.notReported);
-      expect(data.durationLabel, V2RunRoutes.notReported);
     });
 
     test('a session with no messages is empty', () {
@@ -246,6 +279,44 @@ void main() {
       expect(data.logLines.single.text, 'notes.md');
       expect(data.totalLogLines, 1);
       expect(data.timeLimitLabel, V2RunRoutes.notReported);
+      // The typed runtime state and the real clock, not display copy.
+      expect(data.reportedStatus, V2SubagentRunStatus.running);
+      expect(data.runStatus, V2SubagentRunStatus.running);
+      expect(data.createdAt, DateTime(2026, 10, 21, 10));
+      expect(data.finishedAt, isNull);
+      expect(data.logPath, '/workspace/.ovid/logs/subagent_sub-1.log');
+    });
+
+    test('stopped and failed runs carry their typed status and end time', () {
+      final stopped = _subagentSession()..agentState = 'stopped';
+      final stoppedData = V2RunRoutes.subagentDataFor(stopped);
+
+      expect(stoppedData.reportedStatus, V2SubagentRunStatus.cancelled);
+      expect(stoppedData.runStatus, V2SubagentRunStatus.cancelled);
+      expect(stoppedData.working, isFalse);
+      expect(stoppedData.finishedAt, isNotNull);
+
+      final failed = _subagentSession()..agentState = 'failed';
+      final failedData = V2RunRoutes.subagentDataFor(failed);
+
+      expect(failedData.reportedStatus, V2SubagentRunStatus.failed);
+      expect(failedData.runStatus, V2SubagentRunStatus.failed);
+    });
+
+    test('a run past the 8 hour ceiling reports timed out', () {
+      final session = _subagentSession();
+
+      final data = V2RunRoutes.subagentDataFor(
+        session,
+        now: DateTime(2026, 10, 21, 18, 1),
+      );
+
+      expect(data.reportedStatus, V2SubagentRunStatus.timedOut);
+      expect(data.runStatus, V2SubagentRunStatus.timedOut);
+      expect(data.working, isFalse);
+      expect(data.elapsedLabel, '8h 1m');
+      expect(data.createdAt, DateTime(2026, 10, 21, 10));
+      expect(data.finishedAt, DateTime(2026, 10, 21, 18, 1));
     });
 
     test('the strict JSON contract is parsed from the final answer', () {
@@ -337,40 +408,43 @@ void main() {
       expect(live.isMyTurn, isTrue);
     });
 
-    test('the turn belongs to the last unanswered author, not a placeholder', () {
-      final state = _collabState(local: 'p2');
-      final message = CollaborationEvent.fromWire({
-        'schemaVersion': 1,
-        'eventId': 'm1',
-        'sessionId': 'collab-1',
-        'eventSequence': 1,
-        'senderParticipantId': 'p1',
-        'kind': 'message',
-        'createdAt': DateTime.utc(2026, 10, 21, 10).toIso8601String(),
-        'payload': MessagePayload('Hello team').toWire(),
-      });
-      final withMessage = const CollaborationReducer().apply(state, message);
+    test(
+      'the turn belongs to the last unanswered author, not a placeholder',
+      () {
+        final state = _collabState(local: 'p2');
+        final message = CollaborationEvent.fromWire({
+          'schemaVersion': 1,
+          'eventId': 'm1',
+          'sessionId': 'collab-1',
+          'eventSequence': 1,
+          'senderParticipantId': 'p1',
+          'kind': 'message',
+          'createdAt': DateTime.utc(2026, 10, 21, 10).toIso8601String(),
+          'payload': MessagePayload('Hello team').toWire(),
+        });
+        final withMessage = const CollaborationReducer().apply(state, message);
 
-      expect(V2CollabRoutes.turnHolderId(withMessage), 'p1');
-      final live = V2CollabRoutes.liveDataFor(withMessage);
-      expect(live.turnHolderName, 'Priya Patel');
-      expect(live.isMyTurn, isFalse);
-      expect(live.capacity, maxActiveMembers);
-      expect(live.creatorPaysStorage, isTrue);
+        expect(V2CollabRoutes.turnHolderId(withMessage), 'p1');
+        final live = V2CollabRoutes.liveDataFor(withMessage);
+        expect(live.turnHolderName, 'Priya Patel');
+        expect(live.isMyTurn, isFalse);
+        expect(live.capacity, maxActiveMembers);
+        expect(live.creatorPaysStorage, isTrue);
 
-      final mine = CollaborationEvent.fromWire({
-        'schemaVersion': 1,
-        'eventId': 'm2',
-        'sessionId': 'collab-1',
-        'eventSequence': 2,
-        'senderParticipantId': 'p2',
-        'kind': 'message',
-        'createdAt': DateTime.utc(2026, 10, 21, 10, 1).toIso8601String(),
-        'payload': MessagePayload('My turn now').toWire(),
-      });
-      final mineState = const CollaborationReducer().apply(withMessage, mine);
-      expect(V2CollabRoutes.liveDataFor(mineState).isMyTurn, isTrue);
-    });
+        final mine = CollaborationEvent.fromWire({
+          'schemaVersion': 1,
+          'eventId': 'm2',
+          'sessionId': 'collab-1',
+          'eventSequence': 2,
+          'senderParticipantId': 'p2',
+          'kind': 'message',
+          'createdAt': DateTime.utc(2026, 10, 21, 10, 1).toIso8601String(),
+          'payload': MessagePayload('My turn now').toWire(),
+        });
+        final mineState = const CollaborationReducer().apply(withMessage, mine);
+        expect(V2CollabRoutes.liveDataFor(mineState).isMyTurn, isTrue);
+      },
+    );
 
     test('the roster maps roles, identity and capacity', () {
       final state = _collabState();
@@ -391,6 +465,169 @@ void main() {
 
       final owner = V2CollabRoutes.membersDataFor(_collabState(local: 'p1'));
       expect(owner.members[1].canRemove, isTrue);
+      // The wire model has no viewer role, so the route never invents one.
+      expect(
+        data.members.map((member) => member.role),
+        everyElement(isIn([V2CollabRole.owner, V2CollabRole.canChat])),
+      );
+    });
+
+    test('a closed room is ended, not an error', () {
+      final state = CollaborationState.bootstrap(
+        session: const CollaborationSession(
+          sessionId: 'collab-1',
+          ownerParticipantId: 'p1',
+          lifecycle: SessionLifecycle.closed,
+        ),
+        members: const [
+          Member(
+            participantId: 'p1',
+            role: MemberRole.owner,
+            status: MemberStatus.active,
+            displayName: 'Priya Patel',
+          ),
+          Member(
+            participantId: 'p2',
+            role: MemberRole.participant,
+            status: MemberStatus.active,
+            displayName: 'Rahul Verma',
+          ),
+        ],
+        localParticipantId: 'p2',
+        lastSequence: 0,
+      );
+
+      final data = V2CollabRoutes.liveDataFor(state);
+
+      expect(data.status, V2CollabLiveStatus.ended);
+      expect(data.endedMessage, 'This live chat has ended.');
+      expect(data.isMyTurn, isFalse);
+      expect(data.turnStartedAt, isNull);
+    });
+
+    test('a removed member sees the honest ended reason', () {
+      final state = CollaborationState.bootstrap(
+        session: const CollaborationSession(
+          sessionId: 'collab-1',
+          ownerParticipantId: 'p1',
+          lifecycle: SessionLifecycle.active,
+        ),
+        members: const [
+          Member(
+            participantId: 'p1',
+            role: MemberRole.owner,
+            status: MemberStatus.active,
+            displayName: 'Priya Patel',
+          ),
+        ],
+        localParticipantId: 'p2',
+        lastSequence: 0,
+      );
+
+      final data = V2CollabRoutes.liveDataFor(state);
+
+      expect(state.closeReason, CloseReason.localRemoved);
+      expect(data.status, V2CollabLiveStatus.ended);
+      expect(data.endedMessage, 'You were removed from this live chat.');
+    });
+
+    test('the real socket state reaches the screen', () {
+      final state = _collabState();
+
+      expect(
+        V2CollabRoutes.liveDataFor(state).connection,
+        V2CollabLiveConnection.connected,
+      );
+      expect(
+        V2CollabRoutes.liveDataFor(
+          state,
+          connection: V2CollabLiveConnection.disconnected,
+        ).connection,
+        V2CollabLiveConnection.disconnected,
+      );
+      expect(
+        V2CollabRoutes.connectionFor(null),
+        V2CollabLiveConnection.connected,
+      );
+    });
+
+    test('a server turn lease is passed, and no start is ever invented', () {
+      final session = CollaborationSession.fromWire({
+        'schemaVersion': 1,
+        'sessionId': 'collab-1',
+        'ownerParticipantId': 'p1',
+        'lifecycle': 'active',
+        'turn': {
+          'participantId': 'p1',
+          'startedAt': '2026-10-22T10:00:00.000Z',
+          'expiresAt': '2026-10-22T10:01:30.000Z',
+        },
+      });
+      final withTurn = CollaborationState.bootstrap(
+        session: session,
+        members: const [
+          Member(
+            participantId: 'p1',
+            role: MemberRole.owner,
+            status: MemberStatus.active,
+            displayName: 'Priya Patel',
+          ),
+          Member(
+            participantId: 'p2',
+            role: MemberRole.participant,
+            status: MemberStatus.active,
+            displayName: 'Rahul Verma',
+          ),
+        ],
+        localParticipantId: 'p2',
+        lastSequence: 0,
+      );
+
+      final data = V2CollabRoutes.liveDataFor(withTurn);
+      expect(data.turnStartedAt, DateTime.utc(2026, 10, 22, 10));
+      expect(data.turnDuration, const Duration(seconds: 90));
+      // The server's lease names the holder, so an empty transcript cannot
+      // misattribute the running turn to this device.
+      expect(data.turnHolderName, 'Priya Patel');
+      expect(data.isMyTurn, isFalse);
+
+      // Without a published lease there is no countdown and no made-up start.
+      final withoutTurn = V2CollabRoutes.liveDataFor(_collabState());
+      expect(withoutTurn.turnStartedAt, isNull);
+      expect(withoutTurn.turnTimeLeftLabel, isEmpty);
+    });
+
+    test('the route refuses another invite at the 50-member cap', () {
+      final members = <Member>[
+        const Member(
+          participantId: 'p0',
+          role: MemberRole.owner,
+          status: MemberStatus.active,
+        ),
+        for (var i = 1; i < maxActiveMembers; i++)
+          Member(
+            participantId: 'p$i',
+            role: MemberRole.participant,
+            status: MemberStatus.active,
+          ),
+      ];
+      final full = CollaborationState.bootstrap(
+        session: const CollaborationSession(
+          sessionId: 'collab-1',
+          ownerParticipantId: 'p0',
+          lifecycle: SessionLifecycle.active,
+        ),
+        members: members,
+        localParticipantId: 'p0',
+        lastSequence: 0,
+      );
+
+      expect(full.activeMembers, hasLength(maxActiveMembers));
+      expect(V2CollabRoutes.atCapacity(full), isTrue);
+      expect(V2CollabRoutes.atCapacity(_collabState()), isFalse);
+      expect(V2CollabRoutes.atCapacity(null), isFalse);
+      expect(V2CollabRoutes.membersDataFor(full).capacity, maxActiveMembers);
+      expect(V2CollabRoutes.membersDataFor(full).roomFull, isTrue);
     });
   });
 

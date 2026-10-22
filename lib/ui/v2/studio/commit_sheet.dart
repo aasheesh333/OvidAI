@@ -50,7 +50,6 @@ class V2CommitSheetData {
     this.branchLabel,
     this.behindCount = 0,
     this.protectedBranch = false,
-    this.pushNote,
     this.errorMessage,
   }) : assert(behindCount >= 0, 'behindCount cannot be negative');
 
@@ -68,9 +67,6 @@ class V2CommitSheetData {
 
   /// True when the branch rejects direct pushes, so Ovid opens a pull request.
   final bool protectedBranch;
-
-  /// Overrides the default push protection note.
-  final String? pushNote;
 
   final String? errorMessage;
 

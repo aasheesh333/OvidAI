@@ -44,14 +44,17 @@ import 'sidebar/projects_page.dart';
 import 'sidebar/session_actions_sheet.dart';
 import 'sidebar/sidebar.dart';
 import 'states/system_states_page.dart';
+import 'v2_preview_data.dart';
 import 'studio/branch_picker_sheet.dart';
 import 'studio/changes_page.dart';
 import 'studio/live_preview_page.dart';
 import 'studio/repo_picker_page.dart';
 import 'studio/studio_workspace_page.dart';
+
 /// Every UI v2 screen, in the order a reviewer should walk them. The builders
-/// use neutral/default data: screens show their real empty or disabled state,
-/// never sample content. Production never imports this file.
+/// use the gallery's honest content snapshots (see `v2_preview_data.dart`), so
+/// a reviewer sees the layout at real density instead of a screen stuck on its
+/// loading state. Production never imports this file.
 List<V2ScreenEntry> v2Screens = <V2ScreenEntry>[
   // ── Identity ────────────────────────────────────────────────────────────
   V2ScreenEntry(
@@ -151,7 +154,12 @@ List<V2ScreenEntry> v2Screens = <V2ScreenEntry>[
     title: 'Projects',
     group: 'Navigation',
     summary: 'Shared projects, storage and member stacks',
-    builder: (_) => const ProjectsPage(data: V2ProjectsData()),
+    builder: (_) => ProjectsPage(
+      data: previewProjectsData(),
+      onProjectTap: (_) {},
+      onProjectMemory: (_) {},
+      onCreateProject: (_) {},
+    ),
   ),
   V2ScreenEntry(
     id: 'session_actions',
@@ -159,9 +167,8 @@ List<V2ScreenEntry> v2Screens = <V2ScreenEntry>[
     title: 'Chat actions',
     group: 'Navigation',
     summary: 'Pin, rename, move, share, duplicate, export and delete',
-    builder: (_) => const SessionActionsSheet(
-      data: V2SessionActionsData(title: 'Chat'),
-    ),
+    builder: (_) =>
+        const SessionActionsSheet(data: V2SessionActionsData(title: 'Chat')),
   ),
 
   // ── Work surfaces ───────────────────────────────────────────────────────
@@ -307,9 +314,7 @@ List<V2ScreenEntry> v2Screens = <V2ScreenEntry>[
     title: 'Share chat',
     group: 'Sharing',
     summary: 'Chat-specific share with fork note',
-    builder: (_) => const ShareChatSheet(
-      data: V2ShareChatSheetData(link: ''),
-    ),
+    builder: (_) => const ShareChatSheet(data: V2ShareChatSheetData(link: '')),
   ),
   V2ScreenEntry(
     id: 'collab_live',
@@ -341,36 +346,14 @@ List<V2ScreenEntry> v2Screens = <V2ScreenEntry>[
     title: 'Run trajectory',
     group: 'Runs',
     summary: 'Steps, tools, sources and token usage',
-    builder: (_) => const RunTrajectoryPage(
-      data: V2RunTrajectoryPageData(
-        title: 'Run',
-        runLabel: '',
-        prompt: '',
-        model: 'Auto',
-        tokensLabel: '',
-        durationLabel: '',
-      ),
-    ),
+    builder: (_) => RunTrajectoryPage(data: previewRunTrajectoryData()),
   ),
   V2ScreenEntry(
     id: 'subagent',
     title: 'Subagent',
     group: 'Runs',
     summary: 'Progress, files and the full log',
-    builder: (_) => const SubagentPage(
-      data: V2SubagentPageData(
-        name: 'Subagent',
-        instanceLabel: '',
-        stepLabel: '',
-        paceLabel: '',
-        goal: '',
-        startedLabel: '',
-        elapsedLabel: '',
-        timeLimitLabel: '8 h',
-        remainingLabel: '',
-        totalLogLines: 0,
-      ),
-    ),
+    builder: (_) => SubagentPage(data: previewSubagentData()),
   ),
 
   // ── Settings ────────────────────────────────────────────────────────────
@@ -379,70 +362,70 @@ List<V2ScreenEntry> v2Screens = <V2ScreenEntry>[
     title: 'Settings hub',
     group: 'Settings',
     summary: 'Account, chat, models, data control and advanced',
-    builder: (_) => const SettingsHubPage(data: V2SettingsHubData()),
+    builder: (_) => SettingsHubPage(data: previewSettingsHubData()),
   ),
   V2ScreenEntry(
     id: 'account',
     title: 'Account',
     group: 'Settings',
-    summary: 'Profile, email, sign-in methods and deletion',
-    builder: (_) => const AccountPage(data: V2AccountData()),
+    summary: 'Profile, sign-in methods and data control',
+    builder: (_) => AccountPage(data: previewAccountData()),
   ),
   V2ScreenEntry(
     id: 'plan_billing',
     title: 'Plan & billing',
     group: 'Settings',
     summary: 'Free/Go/Plus/Pro, currency, history and restore',
-    builder: (_) => const PlanBillingPage(data: V2PlanBillingData()),
+    builder: (_) => PlanBillingPage(data: previewPlanBillingData()),
   ),
   V2ScreenEntry(
     id: 'usage',
     title: 'Usage',
     group: 'Settings',
     summary: 'Daily and monthly allowance, models and storage',
-    builder: (_) => const UsagePage(data: V2UsageData()),
+    builder: (_) => UsagePage(data: previewUsageData()),
   ),
   V2ScreenEntry(
     id: 'memory',
     title: 'Memory',
     group: 'Settings',
     summary: 'Master switch, shared memory and scopes',
-    builder: (_) => const MemoryPage(data: V2MemoryPageData()),
+    builder: (_) => MemoryPage(data: previewMemoryData()),
   ),
   V2ScreenEntry(
     id: 'data_control',
     title: 'Data control',
     group: 'Settings',
-    summary: 'Export, import, permissions and danger zone',
-    builder: (_) => const DataControlPage(data: V2DataControlPageData()),
+    summary: 'Export, import, local data and danger zone',
+    builder: (_) => DataControlPage(data: previewDataControlData()),
   ),
   V2ScreenEntry(
     id: 'storage',
     title: 'Storage',
     group: 'Settings',
     summary: 'Plan quota, breakdown and clean-up',
-    builder: (_) => const StoragePage(data: V2StoragePageData()),
+    builder: (_) => StoragePage(data: previewStorageData()),
   ),
   V2ScreenEntry(
     id: 'appearance',
     title: 'Appearance',
     group: 'Settings',
     summary: 'System/Light/Dark, text size and motion',
-    builder: (_) => const AppearancePage(data: V2AppearancePageData()),
+    builder: (_) => AppearancePage(data: previewAppearanceData()),
   ),
   V2ScreenEntry(
     id: 'credentials',
     title: 'Credentials',
     group: 'Settings',
     summary: 'Sign-in providers, GitHub and the cloud key',
-    builder: (_) => const CredentialsPage(data: V2CredentialsPageData()),
+    builder: (_) => CredentialsPage(data: previewCredentialsData()),
   ),
   V2ScreenEntry(
     id: 'account_health',
     title: 'Account health',
     group: 'Settings',
     summary: 'Plan, usage, storage and deletion',
-    builder: (_) => const AccountHealthPage(data: V2AccountHealthPageData()),
+    builder: (_) => AccountHealthPage(data: previewAccountHealthPageData()),
   ),
 
   // ── Settings extras ─────────────────────────────────────────────────────
@@ -450,42 +433,42 @@ List<V2ScreenEntry> v2Screens = <V2ScreenEntry>[
     id: 'about',
     title: 'About',
     group: 'Settings',
-    summary: 'Version, legal, support and system status',
-    builder: (_) => const AboutPage(data: V2AboutPageData()),
+    summary: 'Version and the three legal documents',
+    builder: (_) => AboutPage(data: previewAboutData()),
   ),
   V2ScreenEntry(
     id: 'notifications',
     title: 'Notifications',
     group: 'Settings',
-    summary: 'Runs, schedules, security and delivery',
-    builder: (_) => const NotificationsPage(data: V2NotificationsPageData()),
+    summary: 'Run and schedule channels, quiet hours and sound',
+    builder: (_) => NotificationsPage(data: previewNotificationsData()),
   ),
   V2ScreenEntry(
     id: 'presets',
     title: 'Agent presets',
     group: 'Settings',
-    summary: 'General, Coder, Researcher, Writer and custom',
-    builder: (_) => const AgentPresetsPage(data: V2AgentPresetsPageData()),
+    summary: 'Standard, Minimal, Studio, Code, Plan and custom',
+    builder: (_) => AgentPresetsPage(data: previewPresetsData()),
   ),
   V2ScreenEntry(
     id: 'response_wait',
     title: 'Response wait limit',
     group: 'Settings',
     summary: 'How long Ovid waits before asking',
-    builder: (_) => const ResponseWaitPage(data: V2ResponseWaitPageData()),
+    builder: (_) => ResponseWaitPage(data: previewResponseWaitData()),
   ),
   V2ScreenEntry(
     id: 'permissions',
     title: 'Permissions',
     group: 'Settings',
-    summary: 'Camera, microphone, photos, notifications, files',
-    builder: (_) => const PermissionsPage(data: V2PermissionsPageData()),
+    summary: 'Microphone and notifications, with the OS state',
+    builder: (_) => PermissionsPage(data: previewPermissionsData()),
   ),
   V2ScreenEntry(
     id: 'memory_files',
     title: 'Memory files',
     group: 'Settings',
     summary: 'Global, project and session files',
-    builder: (_) => const MemoryFilesPage(data: V2MemoryFilesPageData()),
+    builder: (_) => MemoryFilesPage(data: previewMemoryFilesData()),
   ),
 ];

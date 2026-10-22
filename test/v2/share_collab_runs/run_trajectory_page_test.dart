@@ -64,10 +64,6 @@ V2RunTrajectoryPageData _data({
   return V2RunTrajectoryPageData(
     title: 'Landing page redesign & build',
     runLabel: 'Run 18',
-    prompt: 'Redesign the landing page',
-    model: 'Flash 2.5',
-    tokensLabel: '18.4k tokens',
-    durationLabel: '2m 10s',
     steps: steps ?? _steps,
     subagents: subagents,
     status: status,

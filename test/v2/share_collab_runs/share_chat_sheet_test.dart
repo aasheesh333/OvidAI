@@ -34,6 +34,8 @@ const List<V2SharedChatMessage> _sampleRows = <V2SharedChatMessage>[
   ),
 ];
 
+const String _url = 'https://ovid.si/c/8f92a10c';
+
 V2ShareChatSheetData _data({
   bool viewerCanFork = false,
   bool active = true,
@@ -41,15 +43,27 @@ V2ShareChatSheetData _data({
   V2SharedChatAvailability availability = V2SharedChatAvailability.live,
   List<V2SharedChatMessage>? transcript,
   String errorMessage = 'We could not load the share link.',
+  V2ShareMode mode = V2ShareMode.readOnly,
+  bool revoked = false,
+  bool collabAvailable = true,
+  bool readOnlyAvailable = true,
+  String? collabUnavailableReason,
+  String? readOnlyUnavailableReason,
 }) {
   return V2ShareChatSheetData(
-    link: 'https://ovid.si/c/8f92a10c',
+    link: _url,
     shareId: '8f92a10c',
     creatorName: 'Meera Nair',
     viewerCanFork: viewerCanFork,
     active: active,
+    mode: mode,
     status: status,
     availability: availability,
+    revoked: revoked,
+    collabAvailable: collabAvailable,
+    readOnlyAvailable: readOnlyAvailable,
+    collabUnavailableReason: collabUnavailableReason,
+    readOnlyUnavailableReason: readOnlyUnavailableReason,
     transcript: transcript ?? (viewerCanFork ? _sampleRows : const []),
     errorMessage: errorMessage,
   );
@@ -60,9 +74,7 @@ List<V2SharedChatMessage> _longTranscript(int count) {
     for (var i = 0; i < count; i++)
       V2SharedChatMessage(
         id: 'm$i',
-        role: i.isEven
-            ? V2SharedChatRole.user
-            : V2SharedChatRole.assistant,
+        role: i.isEven ? V2SharedChatRole.user : V2SharedChatRole.assistant,
         text: 'Message $i',
       ),
   ];
@@ -82,11 +94,105 @@ void main() {
     );
 
     expect(find.text('Share this chat'), findsOneWidget);
-    expect(find.text('https://ovid.si/c/8f92a10c'), findsOneWidget);
+    expect(find.text(_url), findsOneWidget);
     expect(find.bySemanticsLabel('Copy link'), findsOneWidget);
     expect(find.text('Revoke link'), findsOneWidget);
     expect(find.text('Fork'), findsNothing);
     expect(find.textContaining('Forking makes a copy'), findsNothing);
+  });
+
+  testWidgets('an unavailable mode reaches the sheet with the real reason', (
+    tester,
+  ) async {
+    V2ShareMode? picked;
+    await pumpAt(
+      tester,
+      ShareChatSheet(
+        data: _data(
+          active: false,
+          collabAvailable: false,
+          collabUnavailableReason: 'Not configured',
+          readOnlyAvailable: false,
+          readOnlyUnavailableReason: 'Not signed in',
+        ),
+        onModeChanged: (mode) => picked = mode,
+        onCreateLinkForMode: (_) {},
+      ),
+    );
+
+    expect(find.text('Not configured'), findsWidgets);
+    expect(find.text('Not signed in'), findsWidgets);
+
+    await tester.tap(find.text('Collab'), warnIfMissed: false);
+    await tester.pump();
+    expect(picked, isNull);
+  });
+
+  testWidgets('create forwards the selected mode to the host', (tester) async {
+    var mode = V2ShareMode.readOnly;
+    V2ShareMode? created;
+    await pumpAt(
+      tester,
+      StatefulBuilder(
+        builder: (context, setState) => ShareChatSheet(
+          data: _data(active: false, mode: mode),
+          onModeChanged: (next) => setState(() => mode = next),
+          onCreateLinkForMode: (next) => created = next,
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Collab'));
+    await tester.pump();
+    expect(mode, V2ShareMode.collab);
+
+    await tester.tap(find.text('Create link'));
+    await tester.pump();
+    expect(created, V2ShareMode.collab);
+    expect(find.text('Creating link'), findsOneWidget);
+  });
+
+  testWidgets('an explicitly revoked link is the revoked state', (
+    tester,
+  ) async {
+    await pumpAt(
+      tester,
+      ShareChatSheet(
+        data: _data(revoked: true),
+        onCreateLink: () {},
+        onClose: () {},
+      ),
+    );
+
+    expect(find.text('Link revoked'), findsOneWidget);
+    expect(find.text('No one can open it now.'), findsOneWidget);
+    expect(find.text(_url), findsNothing);
+  });
+
+  testWidgets('switching modes is not mistaken for a revocation', (
+    tester,
+  ) async {
+    var mode = V2ShareMode.collab;
+    var active = true;
+    await pumpAt(
+      tester,
+      StatefulBuilder(
+        builder: (context, setState) => ShareChatSheet(
+          data: _data(mode: mode, active: active),
+          onModeChanged: (next) => setState(() {
+            mode = next;
+            active = false;
+          }),
+          onCreateLinkForMode: (_) {},
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Read only'));
+    await tester.pump();
+
+    expect(find.text('Link revoked'), findsNothing);
+    expect(find.text('Not shared yet'), findsOneWidget);
   });
 
   testWidgets('a recipient gets read-only content and one Fork action', (
@@ -240,10 +346,7 @@ void main() {
   testWidgets('loading and load errors stay inside the shared chat', (
     tester,
   ) async {
-    await pumpAt(
-      tester,
-      ShareChatSheet(data: _data(viewerCanFork: true)),
-    );
+    await pumpAt(tester, ShareChatSheet(data: _data(viewerCanFork: true)));
     // The default ready viewer already has its transcript; loading replaces it.
     await pumpAt(
       tester,
@@ -358,9 +461,7 @@ void main() {
       (label) => label.startsWith('Thinking.'),
     );
     final tool = labels.indexWhere((label) => label.startsWith('Tool.'));
-    final assistant = labels.indexWhere(
-      (label) => label == 'Assistant',
-    );
+    final assistant = labels.indexWhere((label) => label == 'Assistant');
     expect(user, isNot(-1), reason: 'labels: $labels');
     expect(thinking, isNot(-1), reason: 'labels: $labels');
     expect(tool, isNot(-1), reason: 'labels: $labels');
@@ -390,7 +491,8 @@ void main() {
           expect(
             tester.takeException(),
             isNull,
-            reason: '${width.toInt()} dp / ${scale}x / '
+            reason:
+                '${width.toInt()} dp / ${scale}x / '
                 '${dark ? 'dark' : 'light'}',
           );
           expect(find.text('Fork'), findsOneWidget);
@@ -454,13 +556,8 @@ void main() {
 /// Flattens the semantics tree in platform order, honouring the transcript's
 /// [OrdinalSortKey]s the same way TalkBack does.
 List<String> _labelsInReadingOrder(WidgetTester tester) {
-  final root = tester
-      .binding
-      .renderViews
-      .first
-      .owner
-      ?.semanticsOwner
-      ?.rootSemanticsNode;
+  final root =
+      tester.binding.renderViews.first.owner?.semanticsOwner?.rootSemanticsNode;
   final labels = <String>[];
   if (root == null) return labels;
 

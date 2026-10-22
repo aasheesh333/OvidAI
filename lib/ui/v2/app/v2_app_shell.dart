@@ -9,6 +9,7 @@ import '../../../core/chat_pins.dart';
 import '../../../core/collaboration/models.dart';
 import '../../../core/collaboration/production.dart';
 import '../../../core/cloud/cloud_agent_facade.dart';
+import '../../../core/cloud/cloud_rest.dart';
 import '../../../core/cloud/cloud_session_store.dart';
 import '../../../core/cloud/models.dart';
 import '../../../core/cloud/projects.dart';
@@ -251,8 +252,7 @@ class _V2AppShellState extends State<V2AppShell> {
         // page forever: the prompt and the answer would never paint.
         final messages = session == null
             ? const <Message>[]
-            : CloudAgentFacade.I.transcriptFor(session.id) ??
-                  session.messages;
+            : CloudAgentFacade.I.transcriptFor(session.id) ?? session.messages;
         final hasMessages = messages.isNotEmpty;
         final sessionId = session?.id;
         if (!hasMessages) {
@@ -502,6 +502,10 @@ class _V2AppShellState extends State<V2AppShell> {
       draft: _draftFor(app.activeSessionId),
       state: state,
       queuedCount: sessionId == null ? 0 : agent.queuedCountFor(sessionId),
+      autoOnly: _planAutoOnly,
+      subagentCount: sessionId == null
+          ? 0
+          : agent.subagentsOf(sessionId).length,
       limitResetLabel: _resetLabel(),
       permissionLabel: agent.mode.label,
       composerHint: 'Ask Ovid anything',
@@ -510,6 +514,12 @@ class _V2AppShellState extends State<V2AppShell> {
     );
   }
 
+  /// Free and Go are Auto-only; the model chip says so and the picker refuses
+  /// a manual pick. The same gate the picker applies, read from one place.
+  bool get _planAutoOnly {
+    final tier = AppState.I.ovidCloudTier;
+    return tier == 'free' || tier == '3x';
+  }
 
   /// The inline error a chat shows above its composer.
   ///
@@ -578,11 +588,11 @@ class _V2AppShellState extends State<V2AppShell> {
     final activity = agent.activityFor(session.id);
     return V2LiveChatData(
       title: 'Ovid Si',
+      sessionId: session.id,
       sessionTitle: session.title,
       modelLabel: _modelLabel(session),
       items: _items(session),
       running: running,
-      loading: false,
       statusLabel: stalled
           ? 'Still working…'
           : status != null && status.trim().isNotEmpty
@@ -594,6 +604,8 @@ class _V2AppShellState extends State<V2AppShell> {
       composerHint: 'Ask Ovid anything',
       queuedCount: agent.queuedCountFor(session.id),
       queuedPreview: queued.firstOrNull,
+      autoOnly: _planAutoOnly,
+      subagentCount: agent.subagentsOf(session.id).length,
     );
   }
 
@@ -690,7 +702,7 @@ class _V2AppShellState extends State<V2AppShell> {
   void _openModelPicker(BuildContext context) {
     final app = AppState.I;
     final tier = app.ovidCloudTier;
-    final autoOnly = tier == 'free' || tier == '3x';
+    final autoOnly = _planAutoOnly;
     final options = <V2ModelOption>[];
     final lookup = <String, ({String providerId, String modelId})>{
       'auto': (providerId: AppState.ovidCloudProviderId, modelId: 'auto'),
@@ -939,25 +951,47 @@ class _V2AppShellState extends State<V2AppShell> {
   Future<void> _showSessionActions(BuildContext context, String id) async {
     final session = AppState.I.sessionById(id);
     if (session == null) return;
+    // The transcript is the projection on the cloud path; the session row is
+    // only the fallback. The count must match what the chat actually shows.
+    final messages = CloudAgentFacade.I.transcriptFor(id) ?? session.messages;
     await showSessionActionsSheet(
       context,
       data: V2SessionActionsData(
         title: session.title,
         modelLabel: _modelLabel(session),
         timeLabel: _timeLabel(session.lastActivityAt),
-        messageCount: session.messages.length,
+        messageCount: messages.length,
         projectName: session.projectId == null
             ? null
             : ProjectsController.I.byId(session.projectId!)?.name,
         pinned: ChatPinsStore.I.isPinned(id),
       ),
-      onTogglePin: (value) => unawaited(ChatPinsStore.I.setPinned(id, value)),
-      onRename: () => _rename(id),
-      onMoveToProject: () => _moveToProject(context, id),
-      onShare: () => _shareChat(context, id),
-      onDuplicate: () => _duplicateChat(context, id),
-      onExportMarkdown: () => _copyMarkdown(context, id),
-      onDelete: () => _delete(id),
+      handlers: V2SessionActionsHandlers(
+        setPinned: (pinned) => ChatPinsStore.I.setPinned(id, pinned),
+        rename: (title) async {
+          final clean = title.trim();
+          if (clean.isEmpty) throw ArgumentError.value(title, 'title');
+          if (AppState.I.sessionById(id) == null) {
+            throw StateError('This chat is no longer available.');
+          }
+          AppState.I.renameSession(id, clean);
+        },
+        addToProject: () => _moveToProject(context, id),
+        share: () => _shareChat(context, id),
+        duplicate: () async {
+          final copy = AppState.I.duplicateSession(id);
+          if (copy == null) {
+            throw StateError('This chat is no longer available.');
+          }
+          if (context.mounted) {
+            _snack(context, 'Branched into “${copy.title}”.');
+          }
+        },
+        exportMarkdown: () => _copyMarkdown(context, id),
+        // The sheet owns the confirmation, which names this chat; the write
+        // here is the same durable delete every other surface uses.
+        delete: () => AppState.I.deleteSession(id),
+      ),
     );
   }
 
@@ -1019,17 +1053,12 @@ class _V2AppShellState extends State<V2AppShell> {
     );
   }
 
-  void _duplicateChat(BuildContext context, String id) {
-    final copy = AppState.I.duplicateSession(id);
-    if (copy == null) return;
-    _snack(context, 'Branched into “${copy.title}”.');
-  }
-
   Future<void> _copyMarkdown(BuildContext context, String id) async {
     final session = AppState.I.sessionById(id);
     if (session == null) return;
+    final messages = CloudAgentFacade.I.transcriptFor(id) ?? session.messages;
     final buffer = StringBuffer('# ${session.title}\n\n');
-    for (final message in session.messages) {
+    for (final message in messages) {
       if (message.kind != MsgKind.text && message.kind != MsgKind.streaming) {
         continue;
       }
@@ -1159,186 +1188,91 @@ class _V2AppShellState extends State<V2AppShell> {
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
-  Future<void> _rename(String id) async {
-    final session = AppState.I.sessionById(id);
-    if (session == null) return;
-    final controller = TextEditingController(text: session.title);
-    final title = await showDialog<String>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Rename chat'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          textCapitalization: TextCapitalization.sentences,
-          decoration: const InputDecoration(hintText: 'Chat name'),
-          onSubmitted: (value) => Navigator.pop(dialogContext, value),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, controller.text),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
-    );
-    controller.dispose();
-    final clean = title?.trim();
-    if (clean == null || clean.isEmpty) return;
-    AppState.I.renameSession(id, clean);
-  }
-
-  Future<void> _delete(String id) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Delete this chat?'),
-        content: const Text(
-          'Deleting removes this chat’s files and memory from the cloud. '
-          'This cannot be undone.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Keep'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-    await AppState.I.deleteSession(id);
-  }
-
   void _openProjects(BuildContext context) {
     _scaffoldKey.currentState?.closeDrawer();
     final controller = ProjectsController.I;
     unawaited(controller.refresh());
     Navigator.of(_navContext).push(
       MaterialPageRoute<void>(
-        builder: (_) => ProjectsPage(
-          data: V2ProjectsData(
-            projects: [
-              for (final project in controller.projects)
-                V2Project(
-                  id: project.id,
-                  name: project.name,
-                  chatCount: project.sessionCount,
-                  storageLabel: _bytes(project.fileBytes),
-                  updatedLabel: _timeLabel(project.updatedAt),
-                ),
-            ],
+        builder: (_) => ListenableBuilder(
+          listenable: controller,
+          builder: (context, _) => ProjectsPage(
+            data: V2ProjectsData(
+              projects: [
+                for (final project in controller.projects) _v2Project(project),
+              ],
+              status: controller.projects.isEmpty && controller.error != null
+                  ? V2ProjectsStatus.error
+                  : controller.projects.isEmpty &&
+                        controller.loading &&
+                        !controller.loadedOnce
+                  ? V2ProjectsStatus.loading
+                  : V2ProjectsStatus.content,
+              errorMessage: controller.error,
+            ),
+            createProject: (draft) async {
+              final created = await controller.create(draft.name);
+              if (created == null) {
+                return V2ProjectMutation.failed(
+                  controller.error ?? 'Could not create project.',
+                );
+              }
+              return V2ProjectMutation.ok(project: _v2Project(created));
+            },
+            renameProject: (project, name) async {
+              final ok = await controller.rename(project.id, name);
+              if (!ok) {
+                return V2ProjectMutation.failed(
+                  controller.error ?? 'Could not rename project.',
+                );
+              }
+              final dto = controller.byId(project.id);
+              return V2ProjectMutation.ok(
+                project: dto == null
+                    ? project.copyWith(name: name)
+                    : _v2Project(dto),
+              );
+            },
+            deleteProject: (project) async {
+              final ok = await controller.delete(project.id);
+              return ok
+                  ? const V2ProjectMutation.ok()
+                  : V2ProjectMutation.failed(
+                      controller.error ?? 'Could not delete project.',
+                    );
+            },
+            onProjectTap: (project) => _openProjectFromList(project),
+            onProjectMemory: (project) => _openProjectFromList(project),
+            onRetry: () => unawaited(controller.refresh()),
           ),
-          onCreateProject: (draft) async {
-            await controller.create(draft.name);
-            await controller.refresh();
-          },
-          onProjectTap: (project) {
-            // The project row opens its detail sheet, not an arbitrary chat.
-            Navigator.of(_navContext).pop();
-            unawaited(
-              _openProject(
-                V2SidebarProject(
-                  id: project.id,
-                  name: project.name,
-                  chatCount: project.chatCount,
-                  memoryFileCount:
-                      controller.byId(project.id)?.fileBreakdown.memory ?? 0,
-                ),
-              ),
-            );
-          },
-          onProjectActions: (project) => _projectActions(context, project),
         ),
       ),
     );
   }
 
-  Future<void> _projectActions(BuildContext context, V2Project project) async {
-    final action = await showOSheet<String>(
-      context,
-      builder: (sheetContext) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            OListRow(
-              title: 'Rename project',
-              icon: Icons.edit_outlined,
-              showChevron: false,
-              onTap: () => Navigator.pop(sheetContext, 'rename'),
-            ),
-            OListRow(
-              title: 'Delete project',
-              subtitle: 'Chats stay; grouping is removed',
-              icon: Icons.delete_outline_rounded,
-              danger: true,
-              showChevron: false,
-              onTap: () => Navigator.pop(sheetContext, 'delete'),
-            ),
-            const SizedBox(height: OSpace.s),
-          ],
+  V2Project _v2Project(ProjectDto project) => V2Project(
+    id: project.id,
+    name: project.name,
+    chatCount: project.sessionCount,
+    storageLabel: _bytes(project.fileBytes),
+    updatedLabel: _timeLabel(project.updatedAt),
+  );
+
+  /// The list opens the project as a sheet, so the list route is popped first
+  /// and the detail returns to the sidebar rather than to the list.
+  void _openProjectFromList(V2Project project) {
+    final dto = ProjectsController.I.byId(project.id);
+    Navigator.of(_navContext).pop();
+    unawaited(
+      _openProject(
+        V2SidebarProject(
+          id: project.id,
+          name: project.name,
+          chatCount: project.chatCount,
+          memoryFileCount: dto?.fileBreakdown.memory ?? 0,
         ),
       ),
     );
-    if (action == null || !context.mounted) return;
-    final controller = ProjectsController.I;
-    if (action == 'rename') {
-      final input = TextEditingController(text: project.name);
-      final name = await showDialog<String>(
-        context: context,
-        builder: (dialogContext) => AlertDialog(
-          title: const Text('Rename project'),
-          content: TextField(
-            controller: input,
-            autofocus: true,
-            textCapitalization: TextCapitalization.sentences,
-            onSubmitted: (value) => Navigator.pop(dialogContext, value),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('Cancel'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext, input.text),
-              child: const Text('Save'),
-            ),
-          ],
-        ),
-      );
-      input.dispose();
-      final clean = name?.trim();
-      if (clean == null || clean.isEmpty) return;
-      await controller.rename(project.id, clean);
-    } else {
-      final ok = await showDialog<bool>(
-        context: context,
-        builder: (dialogContext) => AlertDialog(
-          title: Text('Delete ${project.name}?'),
-          content: const Text('The chats inside stay in your sidebar.'),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext, false),
-              child: const Text('Keep'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext, true),
-              child: const Text('Delete'),
-            ),
-          ],
-        ),
-      );
-      if (ok != true) return;
-      await controller.delete(project.id);
-    }
-    await controller.refresh();
   }
 
   Future<void> _openProject(V2SidebarProject project) async {
@@ -1351,53 +1285,129 @@ class _V2AppShellState extends State<V2AppShell> {
     final quotaGb = _storageGb(AppState.I.ovidCloudTier);
     final quotaBytes = quotaGb * 1024 * 1024 * 1024;
     final usedBytes = dto?.fileBytes ?? 0;
-    await showProjectDetailSheet(
+
+    // The project-memory endpoint is real (`GET /projects/:id/memory`). A
+    // failure is shown in the sheet with Retry instead of pretending the
+    // project has no memory files.
+    var memoryFiles = const <V2ProjectMemoryFile>[];
+    String? memoryError;
+    try {
+      memoryFiles = await _projectMemoryFiles(project.id);
+    } catch (e) {
+      Diag.swallow('v2.project.memory', e);
+      memoryError = _projectMemoryError(e);
+    }
+
+    final initial = V2ProjectDetailData(
+      projectName: project.name,
+      chatCount: sessions.length,
+      chats: [
+        for (final session in sessions)
+          V2ProjectChat(
+            id: session.id,
+            title: session.title,
+            modelLabel: _modelLabel(session),
+            timeLabel: _timeLabel(session.lastActivityAt),
+          ),
+      ],
+      memoryFiles: memoryFiles,
+      storageLabel: usedBytes <= 0 ? '' : '${_bytes(usedBytes)} of $quotaGb GB',
+      storageFraction: quotaBytes <= 0
+          ? 0
+          : (usedBytes / quotaBytes).clamp(0.0, 1.0),
+      status: memoryError != null
+          ? V2ProjectDetailStatus.error
+          : sessions.isEmpty && memoryFiles.isEmpty && usedBytes <= 0
+          ? V2ProjectDetailStatus.empty
+          : V2ProjectDetailStatus.content,
+      errorMessage: memoryError,
+    );
+
+    if (!mounted) return;
+    await showOSheet<void>(
       _navContext,
-      data: V2ProjectDetailData(
-        projectName: project.name,
-        chatCount: sessions.length,
-        chats: [
-          for (final session in sessions)
-            V2ProjectChat(
-              id: session.id,
-              title: session.title,
-              modelLabel: _modelLabel(session),
-              timeLabel: _timeLabel(session.lastActivityAt),
-            ),
-        ],
-        // No project-memory read endpoint exists; the sheet says so by
-        // showing its empty section instead of inventing files.
-        memoryFiles: const [],
-        storageLabel: usedBytes <= 0
-            ? ''
-            : '${_bytes(usedBytes)} of $quotaGb GB',
-        storageFraction: quotaBytes <= 0
-            ? 0
-            : (usedBytes / quotaBytes).clamp(0.0, 1.0),
-        status: sessions.isEmpty && usedBytes <= 0
-            ? V2ProjectDetailStatus.empty
-            : V2ProjectDetailStatus.content,
+      builder: (_) => _ProjectDetailSheet(
+        initial: initial,
+        loadMemory: () => _projectMemoryFiles(project.id),
+        saveMemory: (draft) => _saveProjectMemory(project.id, draft),
+        deleteMemory: (file) => _deleteProjectMemory(project.id, file),
+        onChatTap: (chat) {
+          Navigator.of(_navContext).pop();
+          _selectSession(chat.id);
+        },
       ),
-      onChatTap: (chat) {
-        Navigator.of(_navContext).pop();
-        _selectSession(chat.id);
-      },
-      onRetry: () async {
-        Navigator.of(_navContext).pop();
-        await controller.refresh();
-        if (mounted) {
-          await _openProject(
-            V2SidebarProject(
-              id: project.id,
-              name: project.name,
-              chatCount: project.chatCount,
-              memoryFileCount: project.memoryFileCount,
-            ),
-          );
-        }
-      },
     );
   }
+
+  /// Reads every project-memory file, including its content: the editor opens
+  /// from this snapshot, so a file without content would be a save that wipes
+  /// the stored text.
+  Future<List<V2ProjectMemoryFile>> _projectMemoryFiles(
+    String projectId,
+  ) async {
+    final rest = CloudRestClient.I;
+    final listing = await rest.getJson(
+      '/projects/${Uri.encodeComponent(projectId)}/memory',
+    );
+    final raw = listing['items'];
+    if (raw is! List) return const <V2ProjectMemoryFile>[];
+    final files = <V2ProjectMemoryFile>[];
+    for (final item in raw) {
+      if (item is! Map) continue;
+      final name = item['name'];
+      if (name is! String || name.isEmpty) continue;
+      final size = (item['sizeBytes'] as num?)?.toInt() ?? 0;
+      final doc = await rest.getJson(
+        '/projects/${Uri.encodeComponent(projectId)}/memory/'
+        '${Uri.encodeComponent(name)}',
+      );
+      files.add(
+        V2ProjectMemoryFile(
+          id: name,
+          name: name,
+          sizeLabel: _bytes(size),
+          preview: doc['content'] as String? ?? '',
+        ),
+      );
+    }
+    return files;
+  }
+
+  Future<void> _saveProjectMemory(
+    String projectId,
+    V2ProjectMemoryDraft draft,
+  ) async {
+    final rest = CloudRestClient.I;
+    final name = draft.name.trim();
+    await rest.putJson(
+      '/projects/${Uri.encodeComponent(projectId)}/memory/'
+      '${Uri.encodeComponent(name)}',
+      body: <String, Object>{'content': draft.content},
+    );
+    // The endpoint is keyed by name, so a rename is a write under the new
+    // name followed by a delete of the old one.
+    final previous = draft.id;
+    if (previous != null && previous != name) {
+      await rest.delete(
+        '/projects/${Uri.encodeComponent(projectId)}/memory/'
+        '${Uri.encodeComponent(previous)}',
+      );
+    }
+  }
+
+  Future<void> _deleteProjectMemory(
+    String projectId,
+    V2ProjectMemoryFile file,
+  ) async {
+    await CloudRestClient.I.delete(
+      '/projects/${Uri.encodeComponent(projectId)}/memory/'
+      '${Uri.encodeComponent(file.id)}',
+    );
+  }
+
+  String _projectMemoryError(Object error) => error is CloudApiException
+      ? error.message
+      : 'Could not load this project’s memory. Try again.';
 
   int _storageGb(String tier) => switch (tier) {
     '3x' => 5,
@@ -1779,11 +1789,139 @@ class _V2AppShellState extends State<V2AppShell> {
   }
 }
 
-/// Owns the share sheet's real state.
+/// Hosts [ProjectDetailContent] with the project's real memory files.
 ///
-/// Read-only links come from [ConversationShareService] (create, list, revoke).
-/// Collab links come from the live collaboration session started for this
-/// chat, so switching the mode really changes what the link does.
+/// The list is loaded by the shell and handed in; the host owns only the
+/// memory section so a save/delete updates the open sheet instead of asking
+/// the person to close and reopen it. Every write goes through the shell's
+/// real API helpers and a failure leaves the old list in place.
+class _ProjectDetailSheet extends StatefulWidget {
+  const _ProjectDetailSheet({
+    required this.initial,
+    required this.loadMemory,
+    required this.saveMemory,
+    required this.deleteMemory,
+    required this.onChatTap,
+  });
+
+  final V2ProjectDetailData initial;
+  final Future<List<V2ProjectMemoryFile>> Function() loadMemory;
+  final Future<void> Function(V2ProjectMemoryDraft draft) saveMemory;
+  final Future<void> Function(V2ProjectMemoryFile file) deleteMemory;
+  final ValueChanged<V2ProjectChat>? onChatTap;
+
+  @override
+  State<_ProjectDetailSheet> createState() => _ProjectDetailSheetState();
+}
+
+class _ProjectDetailSheetState extends State<_ProjectDetailSheet> {
+  late List<V2ProjectMemoryFile> _files;
+  String? _error;
+  bool _loading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _files = widget.initial.memoryFiles;
+    _error = widget.initial.status == V2ProjectDetailStatus.error
+        ? widget.initial.errorMessage
+        : null;
+  }
+
+  V2ProjectDetailData get _data {
+    final base = widget.initial;
+    final empty =
+        base.chats.isEmpty &&
+        _files.isEmpty &&
+        base.storageLabel.trim().isEmpty &&
+        base.storageFraction <= 0;
+    return V2ProjectDetailData(
+      projectName: base.projectName,
+      shared: base.shared,
+      chatCount: base.chatCount,
+      chats: base.chats,
+      memoryFiles: _files,
+      storageLabel: base.storageLabel,
+      storageFraction: base.storageFraction,
+      status: _loading
+          ? V2ProjectDetailStatus.loading
+          : _error != null
+          ? V2ProjectDetailStatus.error
+          : empty
+          ? V2ProjectDetailStatus.empty
+          : V2ProjectDetailStatus.content,
+      errorMessage: _error,
+    );
+  }
+
+  Future<void> _reload() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final files = await widget.loadMemory();
+      if (!mounted) return;
+      setState(() {
+        _files = files;
+        _loading = false;
+      });
+    } catch (e) {
+      Diag.swallow('v2.project.memory', e);
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = e is CloudApiException
+            ? e.message
+            : 'Could not load this project’s memory. Try again.';
+      });
+    }
+  }
+
+  Future<void> _save(V2ProjectMemoryDraft draft) async {
+    try {
+      await widget.saveMemory(draft);
+      final files = await widget.loadMemory();
+      if (!mounted) return;
+      setState(() {
+        _files = files;
+        _error = null;
+      });
+    } catch (e) {
+      Diag.swallow('v2.project.memory.save', e);
+      if (!mounted) return;
+      showOSnack(context, 'Could not save this memory file. Try again.');
+    }
+  }
+
+  Future<void> _delete(V2ProjectMemoryFile file) async {
+    try {
+      await widget.deleteMemory(file);
+      final files = await widget.loadMemory();
+      if (!mounted) return;
+      setState(() {
+        _files = files;
+        _error = null;
+      });
+    } catch (e) {
+      Diag.swallow('v2.project.memory.delete', e);
+      if (!mounted) return;
+      showOSnack(context, 'Could not delete this memory file. Try again.');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ProjectDetailContent(
+      data: _data,
+      onChatTap: widget.onChatTap,
+      onSaveMemory: (draft) => unawaited(_save(draft)),
+      onDeleteMemory: (file) => unawaited(_delete(file)),
+      onRetry: () => unawaited(_reload()),
+    );
+  }
+}
+
 class _ChatShareHost extends StatefulWidget {
   const _ChatShareHost({required this.session, required this.onClose});
 
@@ -1806,10 +1944,44 @@ class _ChatShareHostState extends State<_ChatShareHost> {
   String _link = '';
   String _error = _createError;
   bool _busy = false;
+  bool _revoked = false;
   ConversationShare? _readShare;
   int _members = 1;
 
   ChatSession get _session => widget.session;
+
+  /// Real availability of each share mode, so the sheet disables a mode it
+  /// cannot create instead of failing after the person selects it.
+  bool get _signedIn => FirebaseService.I.isSignedIn;
+
+  bool get _collabConfigured => AppState.I.collaboration?.configured ?? false;
+
+  bool get _collabAvailable => _signedIn && _collabConfigured;
+
+  String? get _collabUnavailableReason {
+    if (!_signedIn) return 'Not signed in';
+    if (!_collabConfigured) return 'Not configured';
+    return null;
+  }
+
+  bool get _readOnlyAvailable => _signedIn && _service.available;
+
+  String? get _readOnlyUnavailableReason {
+    if (!_signedIn) return 'Not signed in';
+    if (!_service.available) return 'Not configured';
+    return null;
+  }
+
+  bool _isModeAvailable(V2ShareMode mode) => switch (mode) {
+    V2ShareMode.collab => _collabAvailable,
+    V2ShareMode.readOnly => _readOnlyAvailable,
+  };
+
+  String _modeUnavailableReason(V2ShareMode mode) =>
+      (mode == V2ShareMode.collab
+          ? _collabUnavailableReason
+          : _readOnlyUnavailableReason) ??
+      'Unavailable in this build.';
 
   /// The facade's live projection for a cloud chat; the local rows otherwise.
   List<Message> get _messages =>
@@ -1834,6 +2006,7 @@ class _ChatShareHostState extends State<_ChatShareHost> {
       setState(() {
         _status = V2ShareStatus.ready;
         _link = '';
+        _revoked = false;
         _readShare = null;
       });
       return;
@@ -1845,6 +2018,7 @@ class _ChatShareHostState extends State<_ChatShareHost> {
       setState(() {
         _readShare = share;
         _link = share?.url.toString() ?? '';
+        _revoked = false;
         _status = V2ShareStatus.ready;
       });
     } catch (error) {
@@ -1882,6 +2056,7 @@ class _ChatShareHostState extends State<_ChatShareHost> {
     setState(() {
       _status = V2ShareStatus.ready;
       _link = mine ? (collab.shareLink ?? '') : '';
+      _revoked = false;
       _members = state?.activeMembers.length ?? 1;
       _error = _createError;
     });
@@ -1893,6 +2068,7 @@ class _ChatShareHostState extends State<_ChatShareHost> {
       _mode = mode;
       _status = V2ShareStatus.loading;
       _link = '';
+      _revoked = false;
       _error = _createError;
     });
     unawaited(_load());
@@ -1900,6 +2076,13 @@ class _ChatShareHostState extends State<_ChatShareHost> {
 
   Future<void> _create() async {
     if (_busy) return;
+    if (!_isModeAvailable(_mode)) {
+      setState(() {
+        _status = V2ShareStatus.error;
+        _error = _modeUnavailableReason(_mode);
+      });
+      return;
+    }
     setState(() {
       _busy = true;
       _error = _createError;
@@ -1927,6 +2110,13 @@ class _ChatShareHostState extends State<_ChatShareHost> {
     }
   }
 
+  /// Creates a link for the mode the sheet actually passed, so a Collab
+  /// selection can never be created by the read-only branch.
+  Future<void> _createForMode(V2ShareMode mode) async {
+    if (mode != _mode) setState(() => _mode = mode);
+    await _create();
+  }
+
   Future<void> _createReadOnly() async {
     final snapshot = ConversationSnapshot.fromSession(
       _session,
@@ -1945,15 +2135,14 @@ class _ChatShareHostState extends State<_ChatShareHost> {
     setState(() {
       _readShare = share;
       _link = share.url.toString();
+      _revoked = false;
       _status = V2ShareStatus.ready;
     });
   }
 
   Future<void> _createCollab() async {
     if (!FirebaseService.I.isSignedIn) {
-      throw const ConversationShareException(
-        'Sign in to start a live chat.',
-      );
+      throw const ConversationShareException('Sign in to start a live chat.');
     }
     final collab = AppState.I.collaboration;
     if (collab == null) {
@@ -1981,6 +2170,7 @@ class _ChatShareHostState extends State<_ChatShareHost> {
     setState(() {
       _link = link;
       _members = collab.state?.activeMembers.length ?? 1;
+      _revoked = false;
       _status = V2ShareStatus.ready;
     });
   }
@@ -1991,13 +2181,17 @@ class _ChatShareHostState extends State<_ChatShareHost> {
         await AppState.I.collaboration?.revokeLink();
       } else {
         final share = _readShare;
-        if (share == null) return;
+        if (share == null) {
+          _snack('This link is no longer available.');
+          return;
+        }
         await _service.revoke(share.id);
         _readShare = null;
       }
       if (!mounted) return;
       setState(() {
         _link = '';
+        _revoked = true;
         _status = V2ShareStatus.ready;
       });
       _snack('Link revoked.');
@@ -2025,26 +2219,44 @@ class _ChatShareHostState extends State<_ChatShareHost> {
 
   @override
   Widget build(BuildContext context) {
-    final ready = _status == V2ShareStatus.ready;
-    return ShareChatSheet(
-      data: V2ShareChatSheetData(
-        link: _link,
-        mode: _mode,
-        memberCount: _members,
-        creatorName: FirebaseService.I.accountLabel,
-        active: _link.isNotEmpty,
-        status: _status,
-        errorMessage: _error,
-      ),
-      onCopyLink: _link.isEmpty ? null : _copy,
-      // The mode cards are only offered when this callback is wired.
-      onModeChanged: _setMode,
-      onCreateLink: ready && _link.isEmpty && !_busy
-          ? () => unawaited(_create())
-          : null,
-      onStopSharing: _link.isEmpty ? null : () => unawaited(_revoke()),
-      onRetry: () => unawaited(_load()),
-      onClose: widget.onClose,
+    return AnimatedBuilder(
+      // Signing in/out or the collaboration service becoming configured
+      // changes whether a mode can be offered at all.
+      animation: Listenable.merge([
+        FirebaseService.I,
+        AppState.I,
+        ?AppState.I.collaboration,
+      ]),
+      builder: (context, _) {
+        final ready = _status == V2ShareStatus.ready;
+        return ShareChatSheet(
+          data: V2ShareChatSheetData(
+            link: _link,
+            mode: _mode,
+            memberCount: _members,
+            creatorName: FirebaseService.I.accountLabel,
+            active: _link.isNotEmpty,
+            revoked: _revoked,
+            status: _status,
+            errorMessage: _error,
+            collabAvailable: _collabAvailable,
+            collabUnavailableReason: _collabUnavailableReason,
+            readOnlyAvailable: _readOnlyAvailable,
+            readOnlyUnavailableReason: _readOnlyUnavailableReason,
+          ),
+          onCopyLink: _link.isEmpty ? null : _copy,
+          // The mode cards are only offered when this callback is wired.
+          onModeChanged: _setMode,
+          // Per-mode create: the sheet passes the mode it showed, so Collab and
+          // Read only can never be created by the same branch.
+          onCreateLinkForMode: ready && _link.isEmpty && !_busy
+              ? (mode) => unawaited(_createForMode(mode))
+              : null,
+          onStopSharing: _link.isEmpty ? null : () => unawaited(_revoke()),
+          onRetry: () => unawaited(_load()),
+          onClose: widget.onClose,
+        );
+      },
     );
   }
 }

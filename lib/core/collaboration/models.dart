@@ -361,6 +361,98 @@ class _Closed {
 // Session / member
 // ---------------------------------------------------------------------------
 
+/// Server-owned single-sender turn lease.
+///
+/// The client never invents a start: [startedAt] and [deadline] are only ever
+/// what the server stamped. A session without a lease has a free turn (or a
+/// turn the server has not published yet), and the screen shows no countdown.
+class CollaborationTurn {
+  const CollaborationTurn({
+    required this.startedAt,
+    required this.deadline,
+    this.participantId,
+  });
+
+  /// Parses the optional server `turn` object. Absent means "no published
+  /// lease", which is not an error.
+  ///
+  /// Accepted shape (the second spelling of each alias is tolerated so an
+  /// older/newer gateway field name cannot silently drop the countdown):
+  /// `{participantId|holderParticipantId, startedAt, expiresAt|deadline}`.
+  factory CollaborationTurn.fromWire(Object? json) {
+    final r = _Closed(
+      json,
+      const {'startedAt'},
+      optional: const {
+        'participantId',
+        'holderParticipantId',
+        'expiresAt',
+        'deadline',
+      },
+    );
+    final startedAt = DateTime.parse(r.timestamp('startedAt'));
+    final String rawDeadline;
+    if (r.has('expiresAt')) {
+      rawDeadline = r.timestamp('expiresAt');
+      if (r.has('deadline') && r.timestamp('deadline') != rawDeadline) {
+        _reject(CollaborationWireReason.invalidValue);
+      }
+    } else if (r.has('deadline')) {
+      rawDeadline = r.timestamp('deadline');
+    } else {
+      _reject(CollaborationWireReason.missingField);
+    }
+    final deadline = DateTime.parse(rawDeadline);
+    if (!deadline.isAfter(startedAt)) {
+      _reject(CollaborationWireReason.invalidValue);
+    }
+    String? participantId;
+    if (r.has('participantId')) participantId = r.id('participantId');
+    if (r.has('holderParticipantId')) {
+      final holder = r.id('holderParticipantId');
+      if (participantId != null && participantId != holder) {
+        _reject(CollaborationWireReason.invalidValue);
+      }
+      participantId = holder;
+    }
+    return CollaborationTurn(
+      startedAt: startedAt,
+      deadline: deadline,
+      participantId: participantId,
+    );
+  }
+
+  /// When the server started this turn. Never a local clock reading.
+  final DateTime startedAt;
+
+  /// Absolute server deadline for this turn.
+  final DateTime deadline;
+
+  /// The participant holding the turn, when the server names one.
+  final String? participantId;
+
+  /// Turn length measured from [startedAt]; always positive.
+  Duration get duration => deadline.difference(startedAt);
+
+  bool isExpiredAt(DateTime now) => !now.isBefore(deadline);
+
+  Map<String, Object?> toWire() => {
+    'startedAt': startedAt.toUtc().toIso8601String(),
+    'expiresAt': deadline.toUtc().toIso8601String(),
+    if (participantId != null) 'participantId': participantId,
+  };
+
+  @override
+  bool operator ==(Object other) =>
+      other is CollaborationTurn &&
+      other.startedAt == startedAt &&
+      other.deadline == deadline &&
+      other.participantId == participantId;
+
+  @override
+  int get hashCode => Object.hash(startedAt, deadline, participantId);
+}
+
 /// Bounded session descriptor. The opaque route `SessionToken` is deliberately
 /// not part of this model so it cannot leak through state snapshots.
 class CollaborationSession {
@@ -368,15 +460,21 @@ class CollaborationSession {
     required this.sessionId,
     required this.ownerParticipantId,
     required this.lifecycle,
+    this.turn,
   });
 
   factory CollaborationSession.fromWire(Map<String, Object?> json) {
-    final r = _Closed(json, const {'schemaVersion', 'sessionId', 'ownerParticipantId', 'lifecycle'});
+    final r = _Closed(
+      json,
+      const {'schemaVersion', 'sessionId', 'ownerParticipantId', 'lifecycle'},
+      optional: const {'turn'},
+    );
     r.schemaVersion();
     return CollaborationSession(
       sessionId: r.id('sessionId'),
       ownerParticipantId: r.id('ownerParticipantId'),
       lifecycle: r.enumValue('lifecycle', SessionLifecycle.values),
+      turn: r.raw('turn') == null ? null : CollaborationTurn.fromWire(r.raw('turn')),
     );
   }
 
@@ -384,10 +482,14 @@ class CollaborationSession {
   final String ownerParticipantId;
   final SessionLifecycle lifecycle;
 
+  /// The current server-published turn lease, or null when none is published.
+  final CollaborationTurn? turn;
+
   CollaborationSession withLifecycle(SessionLifecycle next) => CollaborationSession(
     sessionId: sessionId,
     ownerParticipantId: ownerParticipantId,
     lifecycle: next,
+    turn: turn,
   );
 
   Map<String, Object?> toWire() => {
@@ -395,6 +497,7 @@ class CollaborationSession {
     'sessionId': sessionId,
     'ownerParticipantId': ownerParticipantId,
     'lifecycle': lifecycle.name,
+    if (turn != null) 'turn': turn!.toWire(),
   };
 
   @override
@@ -402,10 +505,11 @@ class CollaborationSession {
       other is CollaborationSession &&
       other.sessionId == sessionId &&
       other.ownerParticipantId == ownerParticipantId &&
-      other.lifecycle == lifecycle;
+      other.lifecycle == lifecycle &&
+      other.turn == turn;
 
   @override
-  int get hashCode => Object.hash(sessionId, ownerParticipantId, lifecycle);
+  int get hashCode => Object.hash(sessionId, ownerParticipantId, lifecycle, turn);
 }
 
 class Member {

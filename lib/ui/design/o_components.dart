@@ -570,9 +570,13 @@ class OChip extends StatelessWidget {
       child: Center(widthFactor: 1, heightFactor: 1, child: content),
     );
     if (onTap == null) {
+      // Informational chip: it is not a control, so it publishes neither the
+      // selected nor the enabled flag. A `selected: false` flag is still a
+      // state flag, which makes TalkBack treat a static chip as interactive;
+      // the state is carried in the spoken label instead.
+      final spoken = semanticLabel ?? label;
       return Semantics(
-        label: semanticLabel ?? label,
-        selected: selected,
+        label: selected ? '$spoken, selected' : spoken,
         child: ExcludeSemantics(child: body),
       );
     }

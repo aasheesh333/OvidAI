@@ -136,10 +136,6 @@ void main() {
         data: const V2RunTrajectoryPageData(
           title: 'Landing page',
           runLabel: 'Run 18',
-          prompt: 'Redesign the landing page',
-          model: 'Flash 2.5',
-          tokensLabel: '18.4k tokens',
-          durationLabel: '2m 10s',
           steps: _steps,
         ),
       ),

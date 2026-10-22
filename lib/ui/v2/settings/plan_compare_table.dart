@@ -503,11 +503,13 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
     required bool current,
   }) {
     final c = OColors.of(context);
+    // A column header is a heading, not a control: it is not selectable, so it
+    // must not publish the selected flag. The current column stays announced
+    // in the label.
     return Semantics(
       key: ValueKey<String>('plan-compare-header-${plan.id}'),
       container: true,
       header: true,
-      selected: current,
       label: current ? '${plan.name}, current plan' : plan.name,
       child: ExcludeSemantics(
         child: Padding(

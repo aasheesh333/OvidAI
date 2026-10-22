@@ -2,7 +2,6 @@ import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 
-
 /// One named agent preset (the tool gate agent-presets parity): a tool-roster
 /// composition plus a persona preamble. A session joins a preset; the
 /// tool gate in the retired local service consulted the roster on every run so the
@@ -40,6 +39,15 @@ class AgentPreset {
   /// Anthropic runs that enable a thinking budget, which rejects it.
   final double? temperature;
 
+  /// How long the composer waits for a quiet reply under this preset, in
+  /// seconds. Null means "follow the chat's Response wait setting"; the
+  /// Settings editor stores a real value once the user picks one.
+  final int? responseWaitSeconds;
+
+  /// The access mode this preset records (`safe`, `auto`, `drive`, `studio`).
+  /// Null means "follow the chat's current mode" rather than inventing one.
+  final String? permissionMode;
+
   const AgentPreset({
     required this.id,
     required this.label,
@@ -50,6 +58,8 @@ class AgentPreset {
     this.model,
     this.modelProviderId,
     this.temperature,
+    this.responseWaitSeconds,
+    this.permissionMode,
   });
 
   factory AgentPreset.fromJson(Map<String, dynamic> json) {
@@ -57,8 +67,12 @@ class AgentPreset {
       id: json['id'] as String? ?? '',
       label: json['label'] as String? ?? json['id'] as String? ?? '',
       description: json['description'] as String? ?? '',
-      allowedTools: (json['allowedTools'] as List?)?.map((e) => e.toString()).toList() ?? const [],
-      deniedTools: (json['deniedTools'] as List?)?.map((e) => e.toString()).toList() ?? const [],
+      allowedTools:
+          (json['allowedTools'] as List?)?.map((e) => e.toString()).toList() ??
+          const [],
+      deniedTools:
+          (json['deniedTools'] as List?)?.map((e) => e.toString()).toList() ??
+          const [],
       persona: json['persona'] as String? ?? '',
       model: (json['model'] as String? ?? '').trim().isEmpty
           ? null
@@ -67,6 +81,10 @@ class AgentPreset {
           ? null
           : (json['modelProviderId'] as String).trim(),
       temperature: (json['temperature'] as num?)?.toDouble(),
+      responseWaitSeconds: (json['responseWaitSeconds'] as num?)?.toInt(),
+      permissionMode: (json['permissionMode'] as String? ?? '').trim().isEmpty
+          ? null
+          : (json['permissionMode'] as String).trim(),
     );
   }
 
@@ -81,6 +99,8 @@ class AgentPreset {
     if (model != null && modelProviderId != null)
       'modelProviderId': modelProviderId,
     if (temperature != null) 'temperature': temperature,
+    if (responseWaitSeconds != null) 'responseWaitSeconds': responseWaitSeconds,
+    if (permissionMode != null) 'permissionMode': permissionMode,
   };
 
   AgentPreset copyWith({
@@ -93,8 +113,12 @@ class AgentPreset {
     String? model,
     String? modelProviderId,
     double? temperature,
+    int? responseWaitSeconds,
+    String? permissionMode,
     bool clearModel = false,
     bool clearTemperature = false,
+    bool clearResponseWait = false,
+    bool clearPermissionMode = false,
   }) {
     return AgentPreset(
       id: id ?? this.id,
@@ -107,9 +131,13 @@ class AgentPreset {
       modelProviderId: clearModel
           ? null
           : (model != null ? modelProviderId : this.modelProviderId),
-      temperature: clearTemperature
+      temperature: clearTemperature ? null : (temperature ?? this.temperature),
+      responseWaitSeconds: clearResponseWait
           ? null
-          : (temperature ?? this.temperature),
+          : (responseWaitSeconds ?? this.responseWaitSeconds),
+      permissionMode: clearPermissionMode
+          ? null
+          : (permissionMode ?? this.permissionMode),
     );
   }
 }
@@ -139,16 +167,34 @@ class PresetRegistry {
   static const minimal = AgentPreset(
     id: 'minimal',
     label: 'Minimal',
-    description: 'Chat + files + search + memory — no browser, images, '
+    description:
+        'Chat + files + search + memory — no browser, images, '
         'or subagent fan-out.',
     deniedTools: [
-      'browser_navigate', 'browser_open', 'browser_evaluate',
-      'browser_snapshot', 'browser_read', 'browser_scroll',
-      'browser_type', 'browser_click', 'browser_press_key',
-      'browser_wait_for', 'browser_resize', 'browser_new_tab',
-      'browser_switch_tab', 'browser_list_tabs', 'browser_close_tab',
-      'browser_close', 'browser_tabs',
-      'generate_image', 'edit_image', 'edit_images', 'resize_image', 'crop_image', 'workflow', 'ralph',
+      'browser_navigate',
+      'browser_open',
+      'browser_evaluate',
+      'browser_snapshot',
+      'browser_read',
+      'browser_scroll',
+      'browser_type',
+      'browser_click',
+      'browser_press_key',
+      'browser_wait_for',
+      'browser_resize',
+      'browser_new_tab',
+      'browser_switch_tab',
+      'browser_list_tabs',
+      'browser_close_tab',
+      'browser_close',
+      'browser_tabs',
+      'generate_image',
+      'edit_image',
+      'edit_images',
+      'resize_image',
+      'crop_image',
+      'workflow',
+      'ralph',
     ],
     persona:
         'You are a lean agent: prefer direct answers and small file '
@@ -160,7 +206,8 @@ class PresetRegistry {
   static const studio = AgentPreset(
     id: 'studio',
     label: 'Studio',
-    description: 'Authoring preset — images, web research, files, with a '
+    description:
+        'Authoring preset — images, web research, files, with a '
         'deliverables-first persona.',
     allowedTools: [],
     persona:
@@ -174,16 +221,32 @@ class PresetRegistry {
   static const code = AgentPreset(
     id: 'code',
     label: 'Code',
-    description: 'Repo work — shell, file edits, git. No browser or '
+    description:
+        'Repo work — shell, file edits, git. No browser or '
         'image generation.',
     deniedTools: [
-      'browser_navigate', 'browser_open', 'browser_evaluate',
-      'browser_snapshot', 'browser_read', 'browser_scroll',
-      'browser_type', 'browser_click', 'browser_press_key',
-      'browser_wait_for', 'browser_resize', 'browser_new_tab',
-      'browser_switch_tab', 'browser_list_tabs', 'browser_close_tab',
-      'browser_close', 'browser_tabs',
-      'generate_image', 'edit_image', 'edit_images', 'resize_image', 'crop_image',
+      'browser_navigate',
+      'browser_open',
+      'browser_evaluate',
+      'browser_snapshot',
+      'browser_read',
+      'browser_scroll',
+      'browser_type',
+      'browser_click',
+      'browser_press_key',
+      'browser_wait_for',
+      'browser_resize',
+      'browser_new_tab',
+      'browser_switch_tab',
+      'browser_list_tabs',
+      'browser_close_tab',
+      'browser_close',
+      'browser_tabs',
+      'generate_image',
+      'edit_image',
+      'edit_images',
+      'resize_image',
+      'crop_image',
     ],
     persona:
         'You are a coding agent inside the user\'s repository. '
@@ -287,9 +350,8 @@ class PresetRegistry {
 
   /// Catalog block for the system prompt so the model knows which
   /// composition it is running under.
-  static String catalogBlock() => all
-      .map((p) => '- ${p.id} (${p.label}): ${p.description}')
-      .join('\n');
+  static String catalogBlock() =>
+      all.map((p) => '- ${p.id} (${p.label}): ${p.description}').join('\n');
 
   /// Roster decision: true = tool allowed under this preset.
   static bool allows(AgentPreset preset, String tool) {
@@ -314,5 +376,4 @@ class PresetRegistry {
   /// Test seam (G7): the harness set, which now has exactly one definition.
   @visibleForTesting
   static Set<String> get harnessToolsForTest => _alwaysAllowed;
-
 }

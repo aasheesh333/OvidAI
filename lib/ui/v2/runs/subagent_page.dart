@@ -52,6 +52,9 @@ class V2SubagentPageData {
     this.summary,
     this.status = V2SubagentStatus.ready,
     this.errorMessage = 'We could not load this subagent.',
+    this.reportedStatus,
+    this.createdAt,
+    this.finishedAt,
   });
 
   final String name;
@@ -95,13 +98,31 @@ class V2SubagentPageData {
   final V2SubagentStatus status;
   final String errorMessage;
 
+  /// The runtime's typed lifecycle state, when the host has one.
+  ///
+  /// Hosts should pass this instead of relying on [stepLabel]: a display
+  /// string is copy, not a state machine. Null keeps the summary/legacy
+  /// fallback below.
+  final V2SubagentRunStatus? reportedStatus;
+
+  /// When the run really started. When supplied, the elapsed clock is
+  /// measured from this instant instead of parsed back out of
+  /// [elapsedLabel].
+  final DateTime? createdAt;
+
+  /// When the run really ended, or null while it is still running.
+  final DateTime? finishedAt;
+
   /// The run's real state.
   ///
-  /// A terminal summary wins because it is the subagent's own report. Without
-  /// one, a live `running` session is running, a failed or stopped session is
-  /// failed or cancelled, and a finished session is **unknown** — never
+  /// The host's typed [reportedStatus] wins when present. Otherwise a
+  /// terminal summary wins because it is the subagent's own report. Without
+  /// either, a live `running` session is running, a failed or stopped session
+  /// is failed or cancelled, and a finished session is **unknown** — never
   /// completed, because no summary means no completion claim.
   V2SubagentRunStatus get runStatus {
+    final typed = reportedStatus;
+    if (typed != null) return typed;
     final reported = v2SubagentRunStatusOf(summary?.status);
     if (reported != V2SubagentRunStatus.unknown) return reported;
     if (working) return V2SubagentRunStatus.running;
@@ -173,8 +194,12 @@ class _SubagentPageState extends State<SubagentPage> {
     super.didUpdateWidget(oldWidget);
     final wasRunning = _running;
     final previous = _computedElapsed;
-    if (oldWidget.data.elapsedLabel != widget.data.elapsedLabel) {
-      _baseElapsed = _parseDuration(widget.data.elapsedLabel);
+    final timestampsChanged =
+        oldWidget.data.createdAt != widget.data.createdAt ||
+        oldWidget.data.finishedAt != widget.data.finishedAt ||
+        oldWidget.data.elapsedLabel != widget.data.elapsedLabel;
+    if (timestampsChanged) {
+      _baseElapsed = _elapsedFrom(widget.data);
       _anchoredAt = _baseElapsed == null ? null : _now();
     }
     _running = widget.data.runStatus == V2SubagentRunStatus.running;
@@ -193,13 +218,27 @@ class _SubagentPageState extends State<SubagentPage> {
   }
 
   void _adopt(V2SubagentPageData data) {
-    _baseElapsed = _parseDuration(data.elapsedLabel);
+    _baseElapsed = _elapsedFrom(data);
     _anchoredAt = _baseElapsed == null ? null : _now();
     _running = data.runStatus == V2SubagentRunStatus.running;
     _syncTicker();
   }
 
   DateTime _now() => (widget.clock ?? DateTime.now)();
+
+  /// The host's measured elapsed time.
+  ///
+  /// Real timestamps win. A host that only supplies [elapsedLabel] still
+  /// works, but the route layer passes [createdAt]/[finishedAt] so the clock
+  /// is never reconstructed by parsing display copy.
+  Duration? _elapsedFrom(V2SubagentPageData data) {
+    final started = data.createdAt;
+    if (started == null) return _parseDuration(data.elapsedLabel);
+    final running = data.runStatus == V2SubagentRunStatus.running;
+    final end = data.finishedAt ?? (running ? _now() : started);
+    final elapsed = end.difference(started);
+    return elapsed.isNegative ? Duration.zero : elapsed;
+  }
 
   /// The real elapsed time: the host's measurement plus the time observed
   /// since, only while the run is actually running.

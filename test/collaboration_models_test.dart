@@ -332,9 +332,105 @@ void main() {
     };
     final session = CollaborationSession.fromWire(json);
     expect(session.lifecycle, SessionLifecycle.active);
+    expect(session.turn, isNull);
     expect(session.toWire(), json);
     expect(() => CollaborationSession.fromWire({...json, 'sessionToken': 'x'}),
         throwsA(isA<CollaborationWireException>()));
+  });
+
+  test('a server turn lease parses, round-trips and keeps real timing', () {
+    final json = {
+      'schemaVersion': 1,
+      'sessionId': 'sess-1',
+      'ownerParticipantId': 'p-owner',
+      'lifecycle': 'active',
+      'turn': {
+        'participantId': 'p-owner',
+        'startedAt': '2026-10-22T10:00:00.000Z',
+        'expiresAt': '2026-10-22T10:01:30.000Z',
+      },
+    };
+    final session = CollaborationSession.fromWire(json);
+    final turn = session.turn!;
+
+    expect(turn.participantId, 'p-owner');
+    expect(turn.startedAt, DateTime.utc(2026, 10, 22, 10));
+    expect(turn.deadline, DateTime.utc(2026, 10, 22, 10, 1, 30));
+    expect(turn.duration, const Duration(seconds: 90));
+    expect(session.toWire(), json);
+
+    // A lifecycle change never drops the server's lease.
+    expect(
+      session.withLifecycle(SessionLifecycle.closing).turn,
+      turn,
+    );
+  });
+
+  test('turn aliases are accepted and normalised', () {
+    final turn = CollaborationTurn.fromWire({
+      'holderParticipantId': 'p-2',
+      'startedAt': '2026-10-22T10:00:00Z',
+      'deadline': '2026-10-22T10:00:45Z',
+    });
+
+    expect(turn.participantId, 'p-2');
+    expect(turn.duration, const Duration(seconds: 45));
+    expect(turn.toWire(), {
+      'startedAt': '2026-10-22T10:00:00.000Z',
+      'expiresAt': '2026-10-22T10:00:45.000Z',
+      'participantId': 'p-2',
+    });
+  });
+
+  test('a turn without honest timing is rejected', () {
+    CollaborationWireReason reasonOfTurn(Object? json) {
+      try {
+        CollaborationTurn.fromWire(json);
+      } on CollaborationWireException catch (e) {
+        return e.reason;
+      }
+      fail('expected CollaborationWireException');
+    }
+
+    expect(
+      reasonOfTurn({'startedAt': '2026-10-22T10:00:00Z'}),
+      CollaborationWireReason.missingField,
+    );
+    expect(
+      reasonOfTurn({
+        'startedAt': '2026-10-22T10:00:00Z',
+        'expiresAt': '2026-10-22T10:00:00Z',
+      }),
+      CollaborationWireReason.invalidValue,
+    );
+    expect(
+      reasonOfTurn({
+        'startedAt': '2026-10-22T10:00:00Z',
+        'expiresAt': '2026-10-22T09:59:00Z',
+      }),
+      CollaborationWireReason.invalidValue,
+    );
+    expect(
+      reasonOfTurn({
+        'startedAt': '2026-10-22T10:00:00Z',
+        'expiresAt': '2026-10-22T10:01:00Z',
+        'participantId': 'p-1',
+        'holderParticipantId': 'p-2',
+      }),
+      CollaborationWireReason.invalidValue,
+    );
+    expect(
+      reasonOfTurn({
+        'startedAt': '2026-10-22T10:00:00Z',
+        'expiresAt': '2026-10-22T10:01:00Z',
+        'apiKey': 'sk-live-sentinel',
+      }),
+      CollaborationWireReason.credentialField,
+    );
+    expect(
+      reasonOfTurn('not-a-turn'),
+      CollaborationWireReason.wrongType,
+    );
   });
 
   test('ParticipantModelState holds labels and usage reference only', () {

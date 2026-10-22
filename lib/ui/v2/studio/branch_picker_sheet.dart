@@ -32,17 +32,12 @@ class V2BranchPickerData {
     this.status = V2BranchPickerStatus.content,
     this.current,
     this.branches = const <V2Branch>[],
-    this.stashNote = '',
     this.errorMessage,
   });
 
   final V2BranchPickerStatus status;
   final V2Branch? current;
   final List<V2Branch> branches;
-
-  /// Kept for wiring compatibility. The sheet no longer prints an explanatory
-  /// paragraph: switching branches is not destructive.
-  final String stashNote;
   final String? errorMessage;
 }
 

@@ -541,10 +541,17 @@ class _LegendRow extends StatelessWidget {
       ),
     );
 
+    // A legend entry is informational unless the host wired a filter: only a
+    // selectable row is a control, and only a control may announce a state.
+    // `selected: false` would still publish the selected flag (TalkBack then
+    // treats a plain legend line as an interactive node), so the flag is left
+    // unset instead.
+    final selectable = onTap != null;
     return Semantics(
       container: true,
-      button: onTap != null,
-      selected: selected,
+      button: selectable,
+      enabled: selectable ? true : null,
+      selected: selectable ? selected : null,
       label:
           '${entry.category.label}, $size, $percentage%'
           '${selected ? ', selected' : ''}',

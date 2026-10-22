@@ -123,10 +123,6 @@ class V2RunTrajectoryPageData {
   const V2RunTrajectoryPageData({
     required this.title,
     required this.runLabel,
-    required this.prompt,
-    required this.model,
-    required this.tokensLabel,
-    required this.durationLabel,
     this.steps = const [],
     this.subagents = const [],
     this.status = V2RunTrajectoryStatus.ready,
@@ -135,12 +131,8 @@ class V2RunTrajectoryPageData {
 
   final String title;
   final String runLabel;
-  final String prompt;
   final List<V2RunStep> steps;
   final List<V2SubagentLaunch> subagents;
-  final String model;
-  final String tokensLabel;
-  final String durationLabel;
   final V2RunTrajectoryStatus status;
   final String errorMessage;
 
@@ -439,16 +431,21 @@ class _RunTrajectoryPageState extends State<RunTrajectoryPage> {
     final detail = step.detail.trim();
     final error = step.errorMessage?.trim() ?? '';
     final failed = step.status == V2RunStepStatus.failed;
+    final showError = failed && error.isNotEmpty;
+    // A failure is shown once. Some hosts repeat the tool's failure as the
+    // step's one-line detail; rendering both would print the same sentence
+    // twice on the row.
+    final description = showError && detail == error ? '' : detail;
     return V2TimelineItem(
       id: step.id,
       title: title.isEmpty ? 'Step' : title,
-      description: detail.isEmpty ? null : detail,
+      description: description.isEmpty ? null : description,
       timeLabel: step.startedAt == null ? null : _clock(step.startedAt!),
       durationLabel: step.durationLabel.trim(),
       status: _statusFor(step),
       icon: failed ? null : _iconFor(step.kind),
       details: _detailsFor(step),
-      errorMessage: failed && error.isNotEmpty ? error : null,
+      errorMessage: showError ? error : null,
     );
   }
 

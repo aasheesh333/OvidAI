@@ -342,7 +342,12 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     title: 'Projects',
     group: 'Navigation',
     summary: 'Shared projects, storage and member stacks',
-    builder: (_) => ProjectsPage(data: previewProjectsData()),
+    builder: (_) => ProjectsPage(
+      data: previewProjectsData(),
+      onProjectTap: (_) {},
+      onProjectMemory: (_) {},
+      onCreateProject: (_) {},
+    ),
   ),
   V2ScreenEntry(
     id: 'project_detail',
@@ -411,10 +416,8 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     group: 'Work',
     summary: 'Switch branch or create one',
     isSheet: true,
-    builder: (_) => V2BranchPickerSheet(
-      data: previewBranchPickerData(),
-      showHandle: false,
-    ),
+    builder: (_) =>
+        V2BranchPickerSheet(data: previewBranchPickerData(), showHandle: false),
   ),
   V2ScreenEntry(
     id: 'changes',
@@ -630,8 +633,8 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     id: 'data_control',
     title: 'Data control',
     group: 'Settings',
-    summary: 'Export, import, permissions and danger zone',
-    builder: (_) => const DataControlPage(data: V2DataControlPageData()),
+    summary: 'Export, import, local data and danger zone',
+    builder: (_) => DataControlPage(data: previewDataControlData()),
   ),
   V2ScreenEntry(
     id: 'export_picker',
@@ -683,7 +686,7 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     title: 'Personalization',
     group: 'Settings',
     summary: 'Theme, memory, reasoning and text size',
-    builder: (_) => const AppearancePage(data: V2AppearancePageData()),
+    builder: (_) => AppearancePage(data: previewAppearanceData()),
   ),
   V2ScreenEntry(
     id: 'app_lock',
@@ -703,15 +706,15 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     id: 'account_health',
     title: 'Account health',
     group: 'Settings',
-    summary: 'Status, usage left, deletion state and services',
+    summary: 'Plan, usage, storage and deletion state',
     builder: (_) => AccountHealthPage(data: previewAccountHealthPageData()),
   ),
   V2ScreenEntry(
     id: 'about',
     title: 'About',
     group: 'Settings',
-    summary: 'Version, legal, support and system status',
-    builder: (_) => const AboutPage(data: V2AboutPageData()),
+    summary: 'Version and the three legal documents',
+    builder: (_) => AboutPage(data: previewAboutData()),
   ),
   V2ScreenEntry(
     id: 'legal',
@@ -725,13 +728,13 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     title: 'Notifications',
     group: 'Settings',
     summary: 'Master switch, channels, quiet hours and sound',
-    builder: (_) => const NotificationsPage(data: V2NotificationsPageData()),
+    builder: (_) => NotificationsPage(data: previewNotificationsData()),
   ),
   V2ScreenEntry(
     id: 'presets',
     title: 'Agent presets',
     group: 'Settings',
-    summary: 'General, Coder, Researcher, Writer and custom',
+    summary: 'Standard, Minimal, Studio, Code, Plan and custom',
     builder: (_) => AgentPresetsPage(data: previewPresetsData()),
   ),
   V2ScreenEntry(
@@ -739,13 +742,13 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     title: 'Response wait limit',
     group: 'Settings',
     summary: 'How long Ovid waits before asking',
-    builder: (_) => const ResponseWaitPage(data: V2ResponseWaitPageData()),
+    builder: (_) => ResponseWaitPage(data: previewResponseWaitData()),
   ),
   V2ScreenEntry(
     id: 'permissions',
     title: 'Permissions',
     group: 'Settings',
-    summary: 'Camera, microphone, photos, notifications, files',
+    summary: 'Microphone and notifications, with the OS state',
     builder: (_) => PermissionsPage(data: previewPermissionsData()),
   ),
   V2ScreenEntry(

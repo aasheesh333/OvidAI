@@ -113,9 +113,13 @@ class V2StudioRoutes {
     );
   }
 
-  /// Opens the live preview screen. No preview client exists yet, so the
-  /// screen keeps its waiting state and supplies no refresh/share/stop
-  /// handlers (the page hides controls without a handler).
+  /// Opens the live preview screen.
+  ///
+  /// There is no preview client yet: the gateway has no preview proxy/token
+  /// route, so there is no preview URL, no frame producer and no preview
+  /// lifetime. The screen therefore opens in its honest `unavailable` state.
+  /// No handler is supplied (reload/open/copy/stop/reconnect all need a live
+  /// session) and no deadline is passed, because a countdown would be invented.
   static Future<void> openLivePreview(
     BuildContext context,
     String repo,
@@ -270,7 +274,9 @@ class V2StudioRoutes {
     );
   }
 
-  /// No preview URL source exists yet; the screen opens in its start state.
+  /// No preview URL, frame producer or lifetime source exists yet; the screen
+  /// opens in its honest start state. [expiresAt] stays null because the
+  /// workspace knows no preview deadline.
   @visibleForTesting
   static V2LivePreviewData livePreviewDataFor({
     required String repo,
@@ -363,6 +369,13 @@ class _StudioWorkspaceHostState extends State<_StudioWorkspaceHost> {
     }
     if (port == null || !port.ready) {
       showOSnack(context, 'Connect GitHub to sync.');
+      return;
+    }
+    final binding = port.bindingFor(sessionId);
+    if (binding == null || !binding.ready) {
+      // The port's sync is a no-op without a binding; saying "finished" would
+      // report a sync that never happened.
+      showOSnack(context, 'Bind a repository and branch to sync.');
       return;
     }
     setState(() => _syncing = true);

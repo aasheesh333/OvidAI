@@ -650,7 +650,6 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
       data: const V2ComposerPlusData(
         cameraAvailable: false,
         cameraUnavailableReason: V2ComposerPlusSheet.cameraBuildReason,
-        showConnectors: false,
       ),
       onPhoto: () => unawaited(_pickAttachments(images: true)),
       onFile: () => unawaited(_pickAttachments(images: false)),

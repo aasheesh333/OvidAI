@@ -66,6 +66,11 @@ class V2ShareChatSheetData {
     this.creatorName = '',
     this.status = V2ShareStatus.ready,
     this.errorMessage = 'We could not load the share link.',
+    this.revoked = false,
+    this.collabAvailable = true,
+    this.collabUnavailableReason,
+    this.readOnlyAvailable = true,
+    this.readOnlyUnavailableReason,
     this.transcript = const <V2SharedChatMessage>[],
     this.availability = V2SharedChatAvailability.live,
   }) : assert(memberCount >= 1, 'A shared room always has at least one member');
@@ -106,6 +111,20 @@ class V2ShareChatSheetData {
 
   final String errorMessage;
 
+  /// True when the creator revoked the link. Forwarded to the owner sheet so
+  /// it does not have to infer a revocation from the link disappearing.
+  final bool revoked;
+
+  /// Whether the service that creates Collab rooms is available. An
+  /// unavailable mode is disabled with [collabUnavailableReason] instead of
+  /// failing after the person selects it.
+  final bool collabAvailable;
+  final String? collabUnavailableReason;
+
+  /// Whether the read-only share service is available.
+  final bool readOnlyAvailable;
+  final String? readOnlyUnavailableReason;
+
   /// Recipient-only transcript. The owner share surface ignores it.
   final List<V2SharedChatMessage> transcript;
 
@@ -130,6 +149,7 @@ class ShareChatSheet extends StatefulWidget {
     this.onForked,
     this.onStopSharing,
     this.onCreateLink,
+    this.onCreateLinkForMode,
     this.onRetry,
     this.onClose,
   });
@@ -154,6 +174,10 @@ class ShareChatSheet extends StatefulWidget {
 
   /// Creator-only: create a link for a chat that is not shared yet.
   final VoidCallback? onCreateLink;
+
+  /// Creator-only: create a link for an explicit mode. Preferred over
+  /// [onCreateLink] because Collab and Read only must not share a branch.
+  final ValueChanged<V2ShareMode>? onCreateLinkForMode;
 
   /// Reload the link or transcript after a failure.
   final VoidCallback? onRetry;
@@ -230,9 +254,7 @@ class _ShareChatSheetState extends State<ShareChatSheet> {
       if (sessionId.isEmpty) {
         throw const FormatException('The fork returned no session id.');
       }
-      if (!mounted ||
-          generation != _forkGeneration ||
-          shareId != _shareId) {
+      if (!mounted || generation != _forkGeneration || shareId != _shareId) {
         return;
       }
       setState(() {
@@ -241,9 +263,7 @@ class _ShareChatSheetState extends State<ShareChatSheet> {
       });
       widget.onForked?.call(sessionId);
     } catch (error) {
-      if (!mounted ||
-          generation != _forkGeneration ||
-          shareId != _shareId) {
+      if (!mounted || generation != _forkGeneration || shareId != _shareId) {
         return;
       }
       setState(() {
@@ -257,10 +277,10 @@ class _ShareChatSheetState extends State<ShareChatSheet> {
   /// errors keep theirs after stripping the class prefix, with an honest
   /// fallback for an empty message.
   static String _reason(Object error) {
-    final text = error
-        .toString()
-        .trim()
-        .replaceFirst(RegExp(r'^(?:Exception|Error):\s*'), '');
+    final text = error.toString().trim().replaceFirst(
+      RegExp(r'^(?:Exception|Error):\s*'),
+      '',
+    );
     return text.isEmpty ? 'Could not fork this chat. Try again.' : text;
   }
 
@@ -274,6 +294,10 @@ class _ShareChatSheetState extends State<ShareChatSheet> {
   /// remain injected; this screen adds no second copy of the share surface.
   Widget _buildOwner() {
     return ShareSheet(
+      // A mode change is a different sheet, not a revocation: remounting
+      // prevents the sheet's local "link went away" inference from painting a
+      // revoked card while the host loads the newly selected mode.
+      key: ValueKey<V2ShareMode>(widget.data.mode),
       data: V2ShareSheetData(
         link: widget.data.link,
         mode: widget.data.mode,
@@ -286,11 +310,17 @@ class _ShareChatSheetState extends State<ShareChatSheet> {
         copied: widget.data.copied,
         status: widget.data.status,
         errorMessage: widget.data.errorMessage,
+        revoked: widget.data.revoked,
+        collabAvailable: widget.data.collabAvailable,
+        collabUnavailableReason: widget.data.collabUnavailableReason,
+        readOnlyAvailable: widget.data.readOnlyAvailable,
+        readOnlyUnavailableReason: widget.data.readOnlyUnavailableReason,
       ),
       onCopyLink: widget.onCopyLink,
       onModeChanged: widget.onModeChanged,
       onStopSharing: widget.onStopSharing,
       onCreateLink: widget.onCreateLink,
+      onCreateLinkForMode: widget.onCreateLinkForMode,
       onRetry: widget.onRetry,
       onClose: widget.onClose,
       title: 'Share this chat',
@@ -706,6 +736,7 @@ Future<String?> showShareChatSheet(
   V2ShareChatForkHandler? onFork,
   VoidCallback? onStopSharing,
   VoidCallback? onCreateLink,
+  ValueChanged<V2ShareMode>? onCreateLinkForMode,
   VoidCallback? onRetry,
 }) {
   return showOSheet<String>(
@@ -715,10 +746,10 @@ Future<String?> showShareChatSheet(
       onCopyLink: onCopyLink,
       onModeChanged: onModeChanged,
       onFork: onFork,
-      onForked: (sessionId) =>
-          Navigator.maybePop(sheetContext, sessionId),
+      onForked: (sessionId) => Navigator.maybePop(sheetContext, sessionId),
       onStopSharing: onStopSharing,
       onCreateLink: onCreateLink,
+      onCreateLinkForMode: onCreateLinkForMode,
       onRetry: onRetry,
       onClose: () => Navigator.maybePop(sheetContext),
     ),

@@ -28,8 +28,11 @@ import 'schedules/run_timeline.dart';
 import 'schedules/schedules_page.dart';
 import 'schedules/schedule_runs_page.dart';
 import 'settings/account_health_page.dart';
+import 'settings/account_page.dart' hide V2AccountStatus;
+import 'settings/appearance_page.dart';
 import 'settings/confirm_typed_sheet.dart';
 import 'settings/credentials_page.dart';
+import 'settings/data_control_page.dart';
 import 'settings/export_picker_sheet.dart';
 import 'settings/memory_page.dart';
 import 'settings/plan_billing_page.dart';
@@ -41,9 +44,12 @@ import 'settings/storage_breakdown.dart';
 import 'settings/storage_page.dart';
 import 'settings/usage_charts.dart';
 import 'settings/usage_page.dart';
+import 'settings_extra/about_page.dart';
 import 'settings_extra/agent_presets_page.dart';
 import 'settings_extra/memory_files_page.dart';
+import 'settings_extra/notifications_page.dart';
 import 'settings_extra/permissions_page.dart';
+import 'settings_extra/response_wait_page.dart';
 import 'settings_extra/shared_memory_page.dart';
 import 'settings_extra/legal_page.dart';
 import 'share/share_chat_sheet.dart';
@@ -91,7 +97,7 @@ V2SettingsHubData previewSettingsHubData() {
           'account',
           'Account',
           Icons.manage_accounts_rounded,
-          'Profile, email and region',
+          'Profile, sign-in methods and data control',
         ),
         row(
           'plan_billing',
@@ -178,7 +184,7 @@ V2SettingsHubData previewSettingsHubData() {
           'permissions',
           'Permissions',
           Icons.verified_user_outlined,
-          'Camera, microphone and files',
+          'Microphone and notifications',
         ),
         row(
           'crash',
@@ -225,13 +231,13 @@ V2SettingsHubData previewSettingsHubData() {
           'account_health',
           'Account health',
           Icons.health_and_safety_outlined,
-          'Sign-in and deletion',
+          'Plan, usage and deletion',
         ),
         row(
           'about',
           'About',
           Icons.info_outline_rounded,
-          'Version, legal and support',
+          'Version and legal documents',
         ),
       ],
     ),
@@ -1226,10 +1232,6 @@ V2RunTrajectoryPageData previewRunTrajectoryData() {
   return const V2RunTrajectoryPageData(
     title: 'Auth refresh',
     runLabel: 'Run 4 of 7',
-    prompt: 'Refresh the auth token before the session opens.',
-    model: 'Ovid 2 Pro',
-    tokensLabel: '38.4K tokens',
-    durationLabel: '3m 12s',
     steps: <V2RunStep>[
       V2RunStep(
         id: 's1',
@@ -1244,9 +1246,7 @@ V2RunTrajectoryPageData previewRunTrajectoryData() {
         detail: 'Found the guard in lib/core/auth_guard.dart.',
         durationLabel: '4s',
         kind: V2RunStepKind.search,
-        sources: <V2RunSource>[
-          V2RunSource(label: 'lib/core/auth_guard.dart'),
-        ],
+        sources: <V2RunSource>[V2RunSource(label: 'lib/core/auth_guard.dart')],
       ),
       V2RunStep(
         id: 's3',
@@ -1327,10 +1327,7 @@ V2SchedulesData previewSchedulesData() {
         title: 'Weekly changelog',
         description: 'Draft the changelog from merged pull requests.',
         rule: 'Mondays at 6:00 PM',
-        cadence: const V2CadenceDraft(
-          hour: 18,
-          days: <int>{1},
-        ),
+        cadence: const V2CadenceDraft(hour: 18, days: <int>{1}),
         enabled: false,
       ),
       V2ScheduleItem(
@@ -1421,11 +1418,7 @@ V2ChangesData previewChangesData() {
         additions: 6,
         deletions: 2,
       ),
-      V2ChangedFile(
-        path: 'pubspec.yaml',
-        additions: 2,
-        deletions: 1,
-      ),
+      V2ChangedFile(path: 'pubspec.yaml', additions: 2, deletions: 1),
     ],
   );
 }
@@ -1462,9 +1455,7 @@ V2RepoPickerData previewRepoPickerData() {
         description: 'Marketing site.',
         language: 'TypeScript',
         updatedLabel: 'Updated yesterday',
-        branches: <V2RepoBranch>[
-          V2RepoBranch(name: 'main', isDefault: true),
-        ],
+        branches: <V2RepoBranch>[V2RepoBranch(name: 'main', isDefault: true)],
       ),
     ],
   );
@@ -1750,6 +1741,187 @@ V2UsageData previewUsageData() {
   );
 }
 
+/// A signed-in account with two linked providers and a data-control route.
+V2AccountData previewAccountData() {
+  return V2AccountData(
+    profile: const V2AccountProfile(
+      name: 'Aarav Sharma',
+      email: 'aarav@gmail.com',
+      role: 'Plus',
+      initials: 'AS',
+    ),
+    fields: const <V2AccountField>[
+      V2AccountField(
+        id: 'display_name',
+        label: 'Display name',
+        value: 'Aarav Sharma',
+        editable: true,
+      ),
+      V2AccountField(
+        id: 'email',
+        label: 'Email',
+        value: 'aarav@gmail.com',
+        verified: true,
+      ),
+    ],
+    connectedAccounts: const <V2ConnectedAccount>[
+      V2ConnectedAccount(
+        id: 'google',
+        name: 'Google',
+        detail: 'aarav@gmail.com',
+      ),
+      V2ConnectedAccount(id: 'github', name: 'GitHub', detail: '@aarav'),
+    ],
+    onEditProfile: () {},
+    onDataControl: () {},
+    onLinkAccount: () {},
+    onSignOut: () {},
+    onDeleteAccount: () {},
+  );
+}
+
+/// The hub's data-control destination: measured total, real chat rows and the
+/// account contact the delete confirmation names.
+V2DataControlPageData previewDataControlData() {
+  return V2DataControlPageData(
+    totalDataSizeLabel: '1.2 GB across 42 chats',
+    exportSessions: const <V2ExportSession>[
+      V2ExportSession(
+        id: 'auth-refresh',
+        name: 'Auth refresh',
+        sizeBytes: 3_100_000,
+        sizeLabel: '3.1 MB',
+        detail: '180 messages',
+      ),
+      V2ExportSession(
+        id: 'design-review',
+        name: 'Design review',
+        sizeBytes: 1_800_000,
+        sizeLabel: '1.8 MB',
+        detail: '64 messages',
+        selected: false,
+      ),
+    ],
+    hasData: true,
+    accountContact: 'aarav@gmail.com',
+    onExport: () {},
+    onChooseImport: () {},
+    onDeleteData: () {},
+    onExportSessionToggled: (_, _) {},
+    onRetry: () {},
+  );
+}
+
+/// Personalization with a real theme, text size and voice choice.
+V2AppearancePageData previewAppearanceData() {
+  return V2AppearancePageData(
+    themeMode: ThemeMode.dark,
+    textScale: 1.1,
+    voiceLanguageId: 'hinglish',
+    memoryEnabled: true,
+    shareSessionMemory: false,
+    showReasoning: true,
+    onThemeModeChanged: (_) {},
+    onTextScaleChanged: (_) {},
+    onVoiceLanguageChanged: (_) {},
+    onMemoryEnabledChanged: (_) {},
+    onShareSessionMemoryChanged: (_) {},
+    onShowReasoningChanged: (_) {},
+    onMemoryFilesTap: () {},
+  );
+}
+
+/// The shipped build plus the three legal documents.
+V2AboutPageData previewAboutData() {
+  return V2AboutPageData(
+    onCopyVersion: () {},
+    onPrivacyPolicy: () {},
+    onTerms: () {},
+    onContactSupport: () {},
+    onDeleteAccount: () {},
+  );
+}
+
+/// Notification channels the product can actually honour: the two run
+/// channels are live; shares, collaboration, sign-ins and billing are marked
+/// unavailable because no backend channel exists for them.
+V2NotificationsPageData previewNotificationsData() {
+  return V2NotificationsPageData(
+    masterEnabled: true,
+    activity: const <V2NotificationSetting>[
+      V2NotificationSetting(
+        id: 'agent_updates',
+        title: 'Run finished',
+        description: 'When Ovid completes a task.',
+      ),
+      V2NotificationSetting(
+        id: 'scheduler_results',
+        title: 'Schedule results',
+        description: 'When a scheduled run finishes.',
+      ),
+      V2NotificationSetting(
+        id: 'shares_invites',
+        title: 'Shares and invites',
+        description: 'When someone shares a chat or invites you.',
+        available: false,
+      ),
+      V2NotificationSetting(
+        id: 'collaboration',
+        title: 'Collaboration',
+        description: 'New messages in shared chats.',
+        available: false,
+      ),
+    ],
+    security: const <V2NotificationSetting>[
+      V2NotificationSetting(
+        id: 'new_signins',
+        title: 'New sign-ins',
+        description: 'When a new device signs in.',
+        available: false,
+      ),
+      V2NotificationSetting(
+        id: 'billing',
+        title: 'Billing',
+        description: 'Receipts, plan changes and payment issues.',
+        available: false,
+      ),
+    ],
+    sound: true,
+    quietHoursEnabled: true,
+    quietHoursStart: const TimeOfDay(hour: 22, minute: 0),
+    quietHoursEnd: const TimeOfDay(hour: 8, minute: 0),
+    sounds: const <V2ChannelSoundSetting>[
+      V2ChannelSoundSetting(
+        id: 'agent_updates',
+        title: 'Agent updates',
+        description: 'Runs that finish, need input or approval.',
+        value: V2NotificationSound.chime,
+      ),
+      V2ChannelSoundSetting(
+        id: 'scheduler_results',
+        title: 'Scheduled results',
+        description: 'Scheduled runs that finish or fail.',
+        value: V2NotificationSound.chime,
+      ),
+    ],
+    onToggle: (_, _) {},
+    onMasterChanged: (_) {},
+    onQuietHours: () {},
+    onQuietHoursEnabledChanged: (_) {},
+    onQuietHoursStartChanged: (_) {},
+    onQuietHoursEndChanged: (_) {},
+    onSoundChanged: (_, _) {},
+    onOpenSystem: () {},
+    onRetry: () {},
+  );
+}
+
+/// The persisted five-minute wait, so the gallery shows the slider instead of
+/// its loading skeleton.
+V2ResponseWaitPageData previewResponseWaitData() {
+  return V2ResponseWaitPageData(seconds: 300, onChanged: (_) async {});
+}
+
 /// Memory switched on, with global facts, two projects and a session file.
 V2MemoryPageData previewMemoryData() {
   return const V2MemoryPageData(
@@ -1833,7 +2005,7 @@ V2StoragePageData previewStorageData() {
 
 /// Google connected, GitHub connected, one browser login saved.
 V2CredentialsPageData previewCredentialsData() {
-  return const V2CredentialsPageData(
+  return V2CredentialsPageData(
     google: V2Credential(
       id: 'google',
       kind: V2CredentialKind.google,
@@ -1861,105 +2033,118 @@ V2CredentialsPageData previewCredentialsData() {
         password: '••••••••',
       ),
     ],
+    onDeleteBrowserCredential: (_) {},
+    onRevokeAll: () {},
   );
 }
 
 /// A healthy account with one day of real-looking usage.
 V2AccountHealthPageData previewAccountHealthPageData() {
-  return const V2AccountHealthPageData(
+  return V2AccountHealthPageData(
     planLabel: 'Plus',
     accountStatus: V2AccountStatus.active,
     todayUsageLabel: '8.2K tokens',
     todayUsageFraction: 0.16,
     storageUsedLabel: '1.2 GB of 15 GB',
     storageFraction: 0.08,
+    onOpenPlans: () {},
+    onOpenStorage: () {},
   );
 }
 
-/// The four built-in presets plus one custom.
+/// The five built-in presets plus one custom, with the wait and access mode
+/// the editor records.
 V2AgentPresetsPageData previewPresetsData() {
-  return const V2AgentPresetsPageData(
-    selectedId: 'coder',
+  return V2AgentPresetsPageData(
+    selectedId: 'code',
+    models: <V2PresetModelOption>[
+      V2PresetModelOption(id: 'auto', label: 'Auto'),
+      V2PresetModelOption(id: 'ovid-2-pro', label: 'Ovid 2 Pro'),
+      V2PresetModelOption(id: 'ovid-2-flash', label: 'Ovid 2 Flash'),
+    ],
     presets: <V2AgentPreset>[
       V2AgentPreset(
-        id: 'general',
-        name: 'General',
-        description: 'Balanced help for everyday questions.',
+        id: 'standard',
+        name: 'Standard',
+        description: 'Full tool roster — the default Ovid agent.',
         modelLabel: 'Auto',
         builtIn: true,
+        responseWaitSeconds: 300,
+        permissionModeId: 'auto',
       ),
       V2AgentPreset(
-        id: 'coder',
-        name: 'Coder',
-        description: 'Reads the repo before it writes anything.',
+        id: 'minimal',
+        name: 'Minimal',
+        description: 'Chat + files + search + memory — no browser or images.',
+        modelLabel: 'Auto',
+        builtIn: true,
+        responseWaitSeconds: 120,
+        permissionModeId: 'safe',
+      ),
+      V2AgentPreset(
+        id: 'studio',
+        name: 'Studio',
+        description: 'Authoring preset — images, web research and files.',
+        modelLabel: 'Ovid 2 Pro',
+        builtIn: true,
+        icon: Icons.palette_outlined,
+        responseWaitSeconds: 600,
+        permissionModeId: 'studio',
+      ),
+      V2AgentPreset(
+        id: 'code',
+        name: 'Code',
+        description: 'Repo work — shell, file edits and git.',
         modelLabel: 'Ovid 2 Pro',
         builtIn: true,
         icon: Icons.code_rounded,
+        responseWaitSeconds: 300,
+        permissionModeId: 'drive',
       ),
       V2AgentPreset(
-        id: 'researcher',
-        name: 'Researcher',
-        description: 'Cites sources and separates fact from guess.',
+        id: 'plan',
+        name: 'Plan',
+        description: 'Read-only planning — research, then propose.',
         modelLabel: 'Auto',
         builtIn: true,
-        icon: Icons.travel_explore_rounded,
-      ),
-      V2AgentPreset(
-        id: 'writer',
-        name: 'Writer',
-        description: 'Short sentences, one idea per paragraph.',
-        modelLabel: 'Ovid 2 Flash',
-        builtIn: true,
-        icon: Icons.edit_note_rounded,
+        icon: Icons.alt_route_rounded,
+        responseWaitSeconds: 300,
+        permissionModeId: 'safe',
       ),
       V2AgentPreset(
         id: 'custom-release',
         name: 'Release notes',
         description: 'Turns merged pull requests into a changelog.',
         modelLabel: 'Ovid 2 Pro',
+        modelId: 'ovid-2-pro',
+        responseWaitSeconds: 300,
+        permissionModeId: 'auto',
       ),
     ],
+    onApply: (_) async {},
+    onCreatePreset: (_) async {},
+    onUpdatePreset: (_, _) async {},
+    onDeletePreset: (_) async {},
   );
 }
 
-/// Two granted, one blocked, two not asked yet.
+/// The two permissions the manifest declares, with honest OS states.
 V2PermissionsPageData previewPermissionsData() {
   return const V2PermissionsPageData(
     permissions: <V2PermissionItem>[
       V2PermissionItem(
-        id: 'camera',
-        name: 'Camera',
-        reason: 'Scan a document or take a photo to send.',
+        id: 'microphone',
+        name: 'Microphone',
+        reason: 'Voice input in Hindi, Hinglish, Punjabi and Tamil.',
         status: V2PermissionAccess.granted,
-        icon: Icons.photo_camera_outlined,
-      ),
-      V2PermissionItem(
-        id: 'photos',
-        name: 'Photos',
-        reason: 'Attach an image from your library.',
-        status: V2PermissionAccess.granted,
-        icon: Icons.photo_library_outlined,
+        icon: Icons.mic_none_rounded,
       ),
       V2PermissionItem(
         id: 'notifications',
         name: 'Notifications',
-        reason: 'Tell you when a scheduled run finishes.',
-        status: V2PermissionAccess.blocked,
+        reason: 'Tell you when a long run finishes.',
+        status: V2PermissionAccess.denied,
         icon: Icons.notifications_outlined,
-      ),
-      V2PermissionItem(
-        id: 'microphone',
-        name: 'Microphone',
-        reason: 'Ask a question by voice.',
-        status: V2PermissionAccess.notAsked,
-        icon: Icons.mic_none_rounded,
-      ),
-      V2PermissionItem(
-        id: 'files',
-        name: 'Files',
-        reason: 'Open a workspace folder in Studio.',
-        status: V2PermissionAccess.notAsked,
-        icon: Icons.folder_open_rounded,
       ),
     ],
   );
@@ -2032,11 +2217,7 @@ V2BrowserData previewBrowserData() {
   return V2BrowserData(
     tabs: const <V2BrowserTab>[
       V2BrowserTab(id: 'docs', title: 'Ovid docs', host: 'docs.ovidsi.com'),
-      V2BrowserTab(
-        id: 'github',
-        title: 'PR #214 · GitHub',
-        host: 'github.com',
-      ),
+      V2BrowserTab(id: 'github', title: 'PR #214 · GitHub', host: 'github.com'),
       V2BrowserTab(
         id: 'news',
         title: 'Hacker News',
@@ -2087,7 +2268,10 @@ connector_detail.V2ConnectorDetailData previewConnectorDetailData() {
       ),
     ],
     tools: <connector_detail.V2ConnectorTool>[
-      connector_detail.V2ConnectorTool(id: 'repo_clone', name: 'Clone repository'),
+      connector_detail.V2ConnectorTool(
+        id: 'repo_clone',
+        name: 'Clone repository',
+      ),
       connector_detail.V2ConnectorTool(
         id: 'pr_open',
         name: 'Open pull request',

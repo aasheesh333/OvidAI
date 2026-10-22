@@ -58,25 +58,35 @@ class V2CollabRoutes {
   }
 
   /// Maps a live projection onto the shared live-chat screen.
+  ///
+  /// [connection] is the real transport state (see [connectionFor]); the
+  /// screen locks the composer when it is not connected. The projection never
+  /// infers connection from the last frame.
   @visibleForTesting
-  static V2CollabLivePageData liveDataFor(CollaborationState? state) {
+  static V2CollabLivePageData liveDataFor(
+    CollaborationState? state, {
+    V2CollabLiveConnection connection = V2CollabLiveConnection.connected,
+  }) {
     if (state == null) {
-      return const V2CollabLivePageData(
+      return V2CollabLivePageData(
         totalMembers: 0,
         turnHolderName: '',
         turnTimeLeftLabel: '',
         creatorPaysStorage: false,
         status: V2CollabLiveStatus.empty,
+        connection: connection,
       );
     }
 
     final active = state.activeMembers;
     final last = state.messages.isEmpty ? null : state.messages.last;
-    final closed = state.status == CollaborationStatus.closed;
+    final ended = state.status == CollaborationStatus.closed;
     final localName = state.names[state.localParticipantId] ?? '';
     final chatTitle = _chatTitle(state);
     final holderId = turnHolderId(state);
     final holderName = holderId == null ? '' : state.nameOf(holderId);
+    // Turn timing is only ever the server's. A closed room keeps no countdown.
+    final turn = ended ? null : state.session.turn;
 
     return V2CollabLivePageData(
       title: chatTitle.isEmpty ? 'Team chat' : chatTitle,
@@ -95,7 +105,6 @@ class V2CollabRoutes {
       totalMembers: active.length,
       typingName: null,
       turnHolderName: holderName,
-      // The projection carries no turn deadline, so the banner shows none.
       turnTimeLeftLabel: '',
       queueLabel: null,
       messages: [
@@ -113,22 +122,55 @@ class V2CollabRoutes {
       creatorPaysStorage: true,
       capacity: maxActiveMembers,
       // A free turn is this device's turn; a held turn belongs to its author.
-      isMyTurn: holderId == null || holderId == state.localParticipantId,
-      status: closed ? V2CollabLiveStatus.error : V2CollabLiveStatus.ready,
-      errorMessage: state.closeReason == CloseReason.localRemoved
+      // A closed room takes no turns.
+      isMyTurn: !ended && (holderId == null || holderId == state.localParticipantId),
+      status: ended ? V2CollabLiveStatus.ended : V2CollabLiveStatus.ready,
+      errorMessage: 'We could not load this live chat.',
+      endedMessage: state.closeReason == CloseReason.localRemoved
           ? 'You were removed from this live chat.'
           : 'This live chat has ended.',
+      connection: connection,
+      turnStartedAt: turn?.startedAt,
+      turnDuration: turn?.duration ?? const Duration(seconds: 90),
     );
   }
+
+  /// Maps the controller's real transport state to the screen's connection
+  /// enum. A projection that exists is connected until the coordinator reports
+  /// it stale; before the first projection the room is still connecting.
+  ///
+  /// A missing controller or an unavailable account has no live socket, so the
+  /// empty room stays neutral instead of claiming a dropped connection.
+  @visibleForTesting
+  static V2CollabLiveConnection connectionFor(
+    CollaborationProduction? controller,
+  ) {
+    if (controller == null || !controller.available) {
+      return V2CollabLiveConnection.connected;
+    }
+    if (controller.state == null) return V2CollabLiveConnection.connecting;
+    return controller.stale
+        ? V2CollabLiveConnection.disconnected
+        : V2CollabLiveConnection.connected;
+  }
+
+  /// True when the room already holds [maxActiveMembers] active members. The
+  /// route refuses to mint another invite at the cap; the screen disables the
+  /// control for the same reason, and the server rejects the join.
+  @visibleForTesting
+  static bool atCapacity(CollaborationState? state) =>
+      state != null && state.activeMembers.length >= maxActiveMembers;
 
   /// The participant who currently holds the single-sender turn, or null when
   /// the turn is free.
   ///
-  /// A running/queued model status is the strongest signal. Otherwise the
-  /// author of the last unanswered message holds the turn until an assistant
-  /// reply lands.
+  /// A server-published lease is authoritative. Otherwise a running/queued
+  /// model status is the strongest signal. Failing both, the author of the
+  /// last unanswered message holds the turn until an assistant reply lands.
   @visibleForTesting
   static String? turnHolderId(CollaborationState state) {
+    final leaseHolder = state.session.turn?.participantId;
+    if (leaseHolder != null) return leaseHolder;
     for (final entry in state.modelStates.entries) {
       if (entry.value.status == ModelExecutionStatus.running ||
           entry.value.status == ModelExecutionStatus.queued) {
@@ -206,21 +248,27 @@ class V2CollabRoutes {
   // Actions
   // ---------------------------------------------------------------------------
 
+  /// The real send path. It throws a user-facing reason (a String) so the
+  /// screen keeps the draft and shows the failure inline instead of dropping
+  /// it into a toast. It never reports success it did not get.
   static Future<void> _send(
-    BuildContext context,
     CollaborationProduction controller,
     CollaborationState state,
     String text,
   ) async {
     final holder = turnHolderId(state);
-    if (holder != null && holder != state.localParticipantId) {
-      _snack(context, 'Wait for ${state.nameOf(holder)} to finish the turn.');
-      return;
+    // The screen releases an expired server turn locally; the send path uses
+    // the same rule instead of refusing after the deadline has passed.
+    final lease = state.session.turn;
+    final released = lease != null && lease.isExpiredAt(DateTime.now());
+    if (!released &&
+        holder != null &&
+        holder != state.localParticipantId) {
+      throw 'Wait for ${state.nameOf(holder)} to finish the turn.';
     }
     final model = _defaultModel();
     if (model == null) {
-      _snack(context, 'Add a key or sign in to reply.');
-      return;
+      throw 'Add a key or sign in to reply.';
     }
     try {
       await controller.sendTurn(
@@ -230,7 +278,7 @@ class V2CollabRoutes {
         modelLabel: model.$2,
       );
     } catch (error) {
-      if (context.mounted) _snack(context, collaborationErrorMessage(error));
+      throw collaborationErrorMessage(error);
     }
   }
 
@@ -264,6 +312,15 @@ class V2CollabRoutes {
   ) async {
     if (!controller.isOwner) {
       _snack(context, 'Only the creator can invite.');
+      return;
+    }
+    // The route enforces the same hard cap as the roster and the server: a
+    // full room cannot mint another invite link.
+    if (atCapacity(controller.state)) {
+      _snack(
+        context,
+        'This room is full ($maxActiveMembers of $maxActiveMembers).',
+      );
       return;
     }
     try {
@@ -483,13 +540,21 @@ class _LiveCollabRouteState extends State<_LiveCollabRoute> {
       builder: (context, _) {
         final state = V2CollabRoutes.stateFor(controller, widget.sessionId);
         return CollabLivePage(
-          data: V2CollabRoutes.liveDataFor(state),
+          data: V2CollabRoutes.liveDataFor(
+            state,
+            connection: V2CollabRoutes.connectionFor(controller),
+          ),
           onOpenMembers: () =>
               V2CollabRoutes.openMembers(context, widget.sessionId),
-          onSend: state == null
+          // No server turn-queue endpoint exists, so no request control is
+          // drawn. A handler that silently did nothing would be a dead button.
+          onRequestTurnAsync: null,
+          onSendAsync: state == null
               ? null
-              : (text) =>
-                    V2CollabRoutes._send(context, controller, state, text),
+              : (text) => V2CollabRoutes._send(controller, state, text),
+          // The deadline is the server's; when it passes, re-read the room so
+          // the host's projection can catch up.
+          onTurnExpired: controller.refresh,
           onRetry: controller.refresh,
         );
       },
@@ -522,6 +587,9 @@ class _CollabMembersRouteState extends State<_CollabMembersRoute> {
       animation: controller,
       builder: (context, _) {
         final state = V2CollabRoutes.stateFor(controller, widget.sessionId);
+        // The wire model carries owner/participant only and exposes no role
+        // change operation, so `onRoleChanged` stays null and the screen hides
+        // the control instead of offering a change that could not persist.
         return CollabMembersPage(
           data: V2CollabRoutes.membersDataFor(state),
           onInvite: controller.available

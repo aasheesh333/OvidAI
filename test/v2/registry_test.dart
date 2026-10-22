@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ovid_ai/ui/v2/v2_preview_data.dart';
 import 'package:ovid_ai/ui/v2/v2_registry.dart';
 
 void main() {
@@ -48,5 +49,21 @@ void main() {
         'share_chat',
       ]),
     );
+  });
+
+  test('settings previews carry content state, not loading shells', () {
+    expect(previewResponseWaitData().seconds, isNotNull);
+    expect(previewRunTrajectoryData().steps, isNotEmpty);
+    expect(previewProjectsData().projects, isNotEmpty);
+    expect(previewNotificationsData().activity, isNotEmpty);
+    expect(previewPresetsData().presets, isNotEmpty);
+  });
+
+  test('permission preview lists only the manifest permissions', () {
+    final ids = previewPermissionsData().permissions
+        .map((permission) => permission.id)
+        .toList();
+
+    expect(ids, <String>['microphone', 'notifications']);
   });
 }

@@ -15,6 +15,7 @@ import 'package:ovid_ai/ui/v2/onboarding/phone_auth_sheet.dart';
 import 'package:ovid_ai/ui/v2/onboarding/sign_in_page.dart';
 import 'package:ovid_ai/ui/v2/schedules/schedule_editor_page.dart';
 import 'package:ovid_ai/ui/v2/schedules/schedule_runs_page.dart';
+import 'package:ovid_ai/ui/v2/settings/settings_rows.dart';
 import 'package:ovid_ai/ui/v2/studio/branch_picker_sheet.dart';
 import 'package:ovid_ai/ui/v2/v2_registry.dart';
 import 'package:ovid_ai/ui/v2/v2_screen_entry.dart';
@@ -346,6 +347,71 @@ void main() {
     });
   });
 
+  group('pattern list covers the three dead-control shapes', () {
+    testWidgets('a visible button with a null onPressed is disabled', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      await _pump(
+        tester,
+        const Scaffold(
+          body: Center(child: OButton(label: 'Continue', onPressed: null)),
+        ),
+      );
+      final button = find.widgetWithText(OButton, 'Continue');
+      expect(button, findsOneWidget);
+      final data = tester.getSemantics(button).getSemanticsData();
+      expect(data.flagsCollection.isEnabled, ui.Tristate.isFalse);
+      expect(data.hasAction(SemanticsAction.tap), isFalse);
+      handle.dispose();
+    });
+
+    testWidgets('a rendered row with a null callback exposes no tap', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      await _pump(
+        tester,
+        const Scaffold(
+          body: V2SettingsRow(
+            title: 'Storage',
+            icon: Icons.cloud_outlined,
+            onTap: null,
+          ),
+        ),
+      );
+      final row = find.bySemanticsLabel(RegExp(r'^Storage'));
+      expect(row, findsOneWidget);
+      final data = tester.getSemantics(row).getSemanticsData();
+      expect(data.hasAction(SemanticsAction.tap), isFalse);
+      handle.dispose();
+    });
+
+    testWidgets('a Retry with no handler is not rendered', (tester) async {
+      final handle = tester.ensureSemantics();
+      await _pump(
+        tester,
+        const Scaffold(
+          body: OErrorState(message: 'Could not load.', onRetry: null),
+        ),
+      );
+      expect(find.text('Try again'), findsNothing);
+      expect(find.text('Retry'), findsNothing);
+      handle.dispose();
+
+      // The same state with a real handler does show one Retry control.
+      final second = tester.ensureSemantics();
+      await _pump(
+        tester,
+        Scaffold(
+          body: OErrorState(message: 'Could not load.', onRetry: () {}),
+        ),
+      );
+      expect(find.text('Try again'), findsOneWidget);
+      second.dispose();
+    });
+  });
+
   test('production sources contain no known dead-control patterns', () {
     // Gallery and preview adapters are test harnesses: their callbacks exist
     // only to make the component visible and are never shipped.
@@ -355,19 +421,35 @@ void main() {
       'v2_preview_data.dart',
       'v2_gallery.dart',
     };
+    // Handler names that paint a real control. Data callbacks such as
+    // `onRequestTurnAsync` are deliberately not in this list: a null data
+    // callback is how a screen hides or disables its control.
+    const controlHandler =
+        r'on(?:Pressed|Tap|LongPress|Changed|Selected|Primary)';
+    // A null branch inside `enabled ? onTap : null` is the contract's explicit
+    // disabled state, not a dead control. The null pattern is therefore
+    // line-aware: a line carrying a ternary is skipped.
+    final nullHandler = RegExp('\\b$controlHandler\\s*:\\s*null\\b');
     final forbidden = <String, RegExp>{
-      'null pressed handler': RegExp(r'\bonPressed\s*:\s*null\b'),
       'empty closure handler': RegExp(
-        r'\b(onPressed|onTap|onChanged|onSelected|onPrimary)\s*:\s*'
+        '\\b$controlHandler\\s*:\\s*'
         r'(?:\([^)]*\)\s*)?(?:async\s*)?\{\s*\}',
       ),
+      'empty arrow handler': RegExp(
+        '\\b$controlHandler\\s*:\\s*'
+        r'\([^)]*\)\s*(?:async\s*)?=>\s*(?:null|Future<void>\.value\(\))\s*[,)]',
+      ),
+      'no-op function handler': RegExp(
+        '\\b$controlHandler\\s*:\\s*_?(?:noop|noOp|ignore)\\b',
+      ),
       'optional receiver in handler': RegExp(
-        r'\bon(?:Pressed|Tap|Changed|Selected|Primary)\s*:\s*'
+        '\\b$controlHandler\\s*:\\s*'
         r'\([^)]*\)\s*=>[^\n]*\?\.',
       ),
       'notReady placeholder': RegExp(r'\bnotReady\b'),
       'unavailable snackbar': RegExp(
-        r'SnackBar\s*\([^)]*(?:not available|unavailable|coming soon)',
+        r'SnackBar\s*\([^)]*'
+        r'(?:not available|unavailable|coming soon|not implemented|todo)',
         caseSensitive: false,
         dotAll: true,
       ),
@@ -382,6 +464,17 @@ void main() {
       final name = file.uri.pathSegments.last;
       if (harness.contains(name)) continue;
       final source = file.readAsStringSync();
+      final lines = source.split('\n');
+      for (final match in nullHandler.allMatches(source)) {
+        final line = '\n'.allMatches(source.substring(0, match.start)).length;
+        // `enabled ? onTap : null` is an explicitly disabled control, which
+        // the contract allows. Only a bare `onTap: null` is a violation.
+        if (lines[line].contains('?')) continue;
+        violations.add(
+          '${file.path}:${line + 1}: null control handler: '
+          '${match.group(0)!.replaceAll('\n', ' ')}',
+        );
+      }
       for (final entry in forbidden.entries) {
         for (final match in entry.value.allMatches(source)) {
           final line = '\n'.allMatches(source.substring(0, match.start)).length;

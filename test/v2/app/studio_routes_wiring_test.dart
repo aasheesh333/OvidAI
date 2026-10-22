@@ -10,6 +10,8 @@ import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/app/v2_studio_routes.dart';
 import 'package:ovid_ai/ui/v2/app/v2_work_routes.dart';
+import 'package:ovid_ai/ui/v2/studio/changes_page.dart';
+import 'package:ovid_ai/ui/v2/studio/live_preview_page.dart';
 import 'package:ovid_ai/ui/v2/studio/studio_workspace_page.dart';
 
 import '../../support/studio_fake_gateway.dart';
@@ -106,6 +108,8 @@ void main() {
     );
     app.sessions.add(session);
     app.activeSessionId = session.id;
+    app.setRepoForSession(session.id, 'acme/app');
+    app.setBranchForSession(session.id, 'main');
 
     port = _FakeStudioPort();
     StudioBindingPort.installForTest(port);
@@ -280,6 +284,25 @@ void main() {
       expect(port.syncCalls, 0);
     });
 
+    testWidgets('sync without a session binding reports it and does not call', (
+      tester,
+    ) async {
+      app
+        ..setRepoForSession('studio-session', '')
+        ..setBranchForSession('studio-session', '');
+      await _openWorkspace(tester, sessionId: 'studio-session');
+
+      await tester.tap(find.byKey(const Key('studio-sync')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Bind a repository and branch to sync.'),
+        findsOneWidget,
+      );
+      expect(find.text('Sync finished.'), findsNothing);
+      expect(port.syncCalls, 0);
+    });
+
     testWidgets('switching branch binds the session the chat gate reads', (
       tester,
     ) async {
@@ -409,15 +432,29 @@ void main() {
       // control that could not act. It must never paint a blank frame that
       // looks loaded.
       expect(find.text('No preview'), findsOneWidget);
-      expect(
-        find.text('Live preview is not connected yet.'),
-        findsOneWidget,
-      );
+      expect(find.text('Live preview is not connected yet.'), findsOneWidget);
       expect(find.text('Start preview'), findsNothing);
       expect(find.text('Share'), findsNothing);
       expect(find.text('Stop'), findsNothing);
       expect(find.byTooltip('Refresh'), findsNothing);
       expect(find.text('Reconnect'), findsNothing);
+
+      // The route passes nothing that would imply a live session or a
+      // deadline: every handler is absent and there is no countdown.
+      final preview = tester.widget<V2LivePreviewPage>(
+        find.byType(V2LivePreviewPage),
+      );
+      expect(preview.data.status, V2PreviewStatus.unavailable);
+      expect(preview.data.url, isEmpty);
+      expect(preview.data.expiresAt, isNull);
+      expect(preview.onReload, isNull);
+      expect(preview.onOpenInBrowser, isNull);
+      expect(preview.onCopyUrl, isNull);
+      expect(preview.onStop, isNull);
+      expect(preview.onReconnect, isNull);
+      expect(preview.onStart, isNull);
+      expect(preview.onRetry, isNull);
+      expect(preview.onCancel, isNull);
     });
 
     testWidgets('the changes route stays honestly empty', (tester) async {
@@ -433,6 +470,18 @@ void main() {
 
       expect(find.text('No changes to review'), findsOneWidget);
       expect(find.text('Back to workspace'), findsOneWidget);
+
+      // Without a diff source the route supplies no commit or sync handler,
+      // so the screen cannot offer a commit that would not commit anything.
+      final changes = tester.widget<V2ChangesPage>(find.byType(V2ChangesPage));
+      expect(changes.data.status, V2ChangesStatus.empty);
+      expect(changes.data.files, isEmpty);
+      expect(changes.canCommit, isFalse);
+      expect(changes.onCommit, isNull);
+      expect(changes.onCommitAsync, isNull);
+      expect(changes.onSync, isNull);
+      expect(changes.onRetry, isNull);
+      expect(find.byKey(const Key('studio-open-commit-sheet')), findsNothing);
     });
   });
 }

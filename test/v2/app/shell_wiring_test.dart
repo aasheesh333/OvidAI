@@ -148,6 +148,31 @@ void main() {
     return session;
   }
 
+  testWidgets('the share sheet is told why each mode is unavailable', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(400, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    liveSession();
+    await tester.pumpWidget(
+      MaterialApp(theme: OTheme.light(), home: const V2AppShell()),
+    );
+    await tester.pump();
+
+    await tester.tap(find.byIcon(Icons.more_vert_rounded));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Share chat'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Share this chat'), findsOneWidget);
+    // Signed out in this test: both modes are disabled with the real reason
+    // instead of failing only after the person picks one.
+    expect(find.text('Not signed in'), findsWidgets);
+    expect(find.text('Link revoked'), findsNothing);
+  });
+
   testWidgets('the bottom bar is mounted and the Settings tab navigates', (
     tester,
   ) async {
