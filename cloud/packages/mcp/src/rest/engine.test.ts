@@ -643,8 +643,9 @@ describe("s3 handler", () => {
 });
 
 describe("curated descriptor data", () => {
-  it("covers exactly the 16 REST curated ids in pinned order", () => {
-    expect(CURATED_DESCRIPTORS.map((d) => d.curatedId)).toEqual([
+  it("is the 16 original REST ids, then the 80-service expansion", () => {
+    // The first 16 are pinned forever (users already have them configured).
+    expect(CURATED_DESCRIPTORS.slice(0, 16).map((d) => d.curatedId)).toEqual([
       "gitlab",
       "jira",
       "linear",
@@ -662,6 +663,25 @@ describe("curated descriptor data", () => {
       "discord",
       "telegram",
     ]);
+    // 96 declarative + 4 native = the 100-connector catalogue.
+    expect(CURATED_DESCRIPTORS.length).toBe(96);
+    expect(new Set(CURATED_DESCRIPTORS.map((d) => d.curatedId)).size).toBe(96);
+    // Every expansion descriptor is fully declarative and self-consistent.
+    for (const d of CURATED_DESCRIPTORS.slice(16)) {
+      expect(d.tools.length, `${d.curatedId} needs at least one tool`).toBeGreaterThan(0);
+      for (const t of d.tools) {
+        expect(t.name, `${d.curatedId} tool name`).toMatch(/^[a-z][a-z0-9_]*$/);
+        // "" is legitimate: it means "the base URL itself" (a GraphQL or
+        // account-level POST/GET). Anything else must be root-relative, so a
+        // descriptor can never smuggle in a scheme or a host.
+        expect(
+          t.path === "" || t.path.startsWith("/"),
+          `${d.curatedId}.${t.name} path`,
+        ).toBe(true);
+        expect(t.path).not.toContain("://");
+        expect(t.inputSchema).toBeTypeOf("object");
+      }
+    }
   });
 
   it("has unique ids and object-shaped tool schemas across all descriptors", () => {

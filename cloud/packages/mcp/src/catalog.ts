@@ -1,10 +1,11 @@
 /**
  * The curated MCP catalog — THE lineup decision (spec §16 builder's latitude).
  *
- * 20 curated servers = 4 native (`github, filesystem, fetch, memory`) + 16
- * REST (dev: `gitlab, jira, linear, figma, sentry, exa`; data: `notion,
- * google-drive, airtable, supabase, firebase, mongodb, s3`; comms: `slack,
- * discord, telegram`).
+ * 100 curated servers = 4 native (`github, filesystem, fetch, memory`) + 96
+ * REST: the original 16 (dev: `gitlab, jira, linear, figma, sentry, exa`;
+ * data: `notion, google-drive, airtable, supabase, firebase, mongodb, s3`;
+ * comms: `slack, discord, telegram`) plus the 80-service expansion in
+ * `rest/descriptors/expanded.ts`.
  *
  * **Excluded, with reasons:** bitbucket/trello (GitHub+Jira cover the
  * demand); stripe (money surface is P9's); the whole infra family —
@@ -50,7 +51,7 @@ export interface CatalogManifestEntry {
   tools: McpToolDef[];
 }
 
-/** The 20 curated ids, pinned, in this order. */
+/** The 100 curated ids, pinned, in this order: 20 original + 80 expansion. */
 export const CURATED_IDS: readonly string[] = [
   "github",
   "filesystem",
@@ -72,6 +73,87 @@ export const CURATED_IDS: readonly string[] = [
   "slack",
   "discord",
   "telegram",
+  // ── The 80-service expansion (owner directive 2026-10-23) ──────────────
+  "vercel",
+  "cloudflare",
+  "asana",
+  "trello",
+  "clickup",
+  "shortcut",
+  "confluence",
+  "microsoft-teams",
+  "zoom",
+  "intercom",
+  "zendesk",
+  "freshdesk",
+  "twilio",
+  "whatsapp-business",
+  "mailchimp",
+  "sendgrid",
+  "klaviyo",
+  "dropbox",
+  "box",
+  "onedrive",
+  "sharepoint",
+  "google-docs",
+  "google-sheets",
+  "google-calendar",
+  "google-tasks",
+  "gmail",
+  "outlook",
+  "docusign",
+  "typeform",
+  "calendly",
+  "miro",
+  "canva",
+  "webflow",
+  "snowflake",
+  "bigquery",
+  "databricks",
+  "pinecone",
+  "elasticsearch",
+  "typesense",
+  "brave-search",
+  "tavily",
+  "serpapi",
+  "algolia",
+  "google-maps",
+  "mixpanel",
+  "amplitude",
+  "posthog",
+  "segment",
+  "metabase",
+  "redash",
+  "superset",
+  "stripe",
+  "paypal",
+  "razorpay",
+  "square",
+  "shopify",
+  "woocommerce",
+  "hubspot",
+  "salesforce",
+  "pipedrive",
+  "datadog",
+  "grafana",
+  "pagerduty",
+  "opsgenie",
+  "newrelic",
+  "rollbar",
+  "docker-hub",
+  "kubernetes",
+  "terraform-cloud",
+  "youtube",
+  "vimeo",
+  "spotify",
+  "imgur",
+  "cloudinary",
+  "mux",
+  "cloudflare-images",
+  "zapier",
+  "make",
+  "n8n",
+  "stackexchange",
 ];
 
 // ---------------------------------------------------------------------------

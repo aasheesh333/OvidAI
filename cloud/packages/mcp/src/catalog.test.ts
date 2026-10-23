@@ -1,11 +1,12 @@
 /**
- * Tests for the curated MCP catalog: the 20 pinned ids, the pure-data
+ * Tests for the curated MCP catalog: the 100 pinned ids, the pure-data
  * manifest, and THE shared-singleton proof — one handler instance per
  * curated server per process, per-user data injected per call.
  */
 
 import { describe, expect, it } from "vitest";
 import { CURATED_IDS, CURATED_MANIFEST, createCuratedCatalog } from "./catalog.js";
+import { EXPANDED_IDS } from "./rest/descriptors/index.js";
 import { createFetchHandler } from "./native/fetch.js";
 import { createMemoryHandler } from "./native/memory.js";
 import type { McpCallContext } from "./transports/native.js";
@@ -62,8 +63,10 @@ function makeCtx(uid: string, opts: { fetchImpl?: GuardedFetch; workspace?: unkn
 }
 
 describe("curated catalog", () => {
-  it("CURATED_IDS has exactly the 20 pinned ids, in this order", () => {
-    expect(CURATED_IDS).toEqual([
+  it("CURATED_IDS is the 20 original ids followed by the 80 expansion", () => {
+    // The first 20 are pinned forever: they are the ids users already have
+    // configured, so a reorder would silently re-map their credentials.
+    expect(CURATED_IDS.slice(0, 20)).toEqual([
       "github",
       "filesystem",
       "fetch",
@@ -85,7 +88,10 @@ describe("curated catalog", () => {
       "discord",
       "telegram",
     ]);
-    expect(CURATED_IDS.length).toBe(20);
+    // Owner directive: the catalogue is 100 connectors.
+    expect(CURATED_IDS.length).toBe(100);
+    expect(new Set(CURATED_IDS).size).toBe(100);
+    expect(CURATED_IDS.slice(20)).toEqual([...EXPANDED_IDS]);
   });
 
   it("CURATED_MANIFEST is pure data with a credential field on every gated entry", () => {
@@ -168,7 +174,7 @@ describe("curated catalog", () => {
     expect(new Set(ws.uids)).toEqual(new Set(["userA", "userB"]));
 
     // unknown ids resolve to nothing
-    expect(catalog.get("stripe")).toBeUndefined();
+    expect(catalog.get("not-a-real-service")).toBeUndefined();
     expect(catalog.get("")).toBeUndefined();
   });
 
@@ -176,7 +182,7 @@ describe("curated catalog", () => {
     const fetchFake = fakeFetch();
     const catalog = createCuratedCatalog({ fetchImpl: fetchFake.impl, workspace: fakeWorkspace().impl });
     const entries = catalog.entries();
-    expect(entries.length).toBe(20);
+    expect(entries.length).toBe(100);
     expect(entries.map((e) => e.curatedId)).toEqual([...CURATED_IDS]);
     for (const entry of entries) {
       const live = await entry.handler.listTools();
