@@ -39,6 +39,9 @@ import { registerMessageRoutes } from "./routes/messages.js";
 import { registerPreferenceRoutes } from "./routes/preferences.js";
 import { registerModelRoutes } from "./routes/models.js";
 import { registerPlanRoutes } from "./routes/plans.js";
+import { registerSearchRoutes } from "./routes/search.js";
+import { registerAccountHealthRoutes } from "./routes/accountHealth.js";
+import { registerDataControlRoutes } from "./routes/dataControl.js";
 import { registerAccountSettingsRoutes } from "./routes/accountSettings.js";
 import { registerMemoryRoutes } from "./routes/memory.js";
 import { registerPluginRoutes } from "./routes/plugins.js";
@@ -370,6 +373,12 @@ export function buildGateway(
       // The plan table, so the plan screen describes what the server bills
       // instead of keeping its own copy.
       registerPlanRoutes(scope, deps);
+      // P2 surfaces. Each module owns its own routes and registers nothing
+      // until the capability behind it exists — wired here once so a new
+      // module never has to touch this file.
+      registerSearchRoutes(scope, deps);
+      registerAccountHealthRoutes(scope, deps);
+      registerDataControlRoutes(scope, deps);
       // Wave 4: account settings (push, BYOK routing), custom presets, memory files.
       registerAccountSettingsRoutes(scope, deps);
       registerMemoryRoutes(scope, deps);
