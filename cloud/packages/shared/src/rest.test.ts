@@ -127,6 +127,15 @@ describe("rest schemas", () => {
     expect(() => messageDtoSchema.parse({ ...message, role: "ghost" })).toThrow();
   });
 
+  it("messageDtoSchema carries an optional reasoning field and still parses legacy rows", () => {
+    // Older rows (and every user/tool row) carry no reasoning — the field is
+    // additive, so a dto without it must stay valid.
+    expect(messageDtoSchema.parse(message)).toEqual(message);
+    const withReasoning = { ...message, reasoning: "weighed two options" };
+    expect(messageDtoSchema.parse(withReasoning)).toEqual(withReasoning);
+    expect(() => messageDtoSchema.parse({ ...message, reasoning: 42 })).toThrow();
+  });
+
   it("pageSchema(inner) parses a valid page", () => {
     const page = { items: [message], nextCursor: "cur" };
     expect(pageSchema(messageDtoSchema).parse(page)).toEqual(page);

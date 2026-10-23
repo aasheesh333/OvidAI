@@ -59,6 +59,14 @@ export interface MessageDto {
    * Absent when there are none.
    */
   attachments?: MessageAttachmentDto[];
+  /**
+   * The model's reasoning ("thinking") for this assistant turn, when the
+   * provider exposed it and the run captured it. Absent — not null — when the
+   * row has none, so a client that does not know the field sees an unchanged
+   * payload. Never part of `content`: it is display-only and the client
+   * renders it behind the "Show reasoning" switch (UserPreferences.showReasoning).
+   */
+  reasoning?: string;
 }
 
 /** Wave 1b: one file sent with a message (metadata only — never a URL). */
@@ -323,31 +331,47 @@ export const sendMessageBodySchema = z
  * GET/PATCH /cloud/v1/preferences. memoryEnabled=false removes the memory_*
  * tools from every run; shareSessionMemory=false (the default) confines
  * session_search to the current session — no other session's context reaches
- * a run unless the user @-tags it.
+ * a run unless the user @-tags it. showReasoning is a DISPLAY preference: the
+ * reasoning is always captured and stored, and this only says whether the
+ * client shows it by default.
  */
 export interface UserPreferences {
   memoryEnabled: boolean;
   shareSessionMemory: boolean;
+  showReasoning: boolean;
 }
 
 export const DEFAULT_USER_PREFERENCES: UserPreferences = Object.freeze({
   memoryEnabled: true,
   shareSessionMemory: false,
+  showReasoning: true,
 }) as UserPreferences;
 
 export const userPreferencesSchema: z.ZodType<UserPreferences> = z
-  .object({ memoryEnabled: z.boolean(), shareSessionMemory: z.boolean() })
+  .object({
+    memoryEnabled: z.boolean(),
+    shareSessionMemory: z.boolean(),
+    showReasoning: z.boolean(),
+  })
   .strict();
 
 export const userPreferencesPatchSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
     shareSessionMemory: z.boolean().optional(),
+    showReasoning: z.boolean().optional(),
   })
   .strict()
-  .refine((b) => b.memoryEnabled !== undefined || b.shareSessionMemory !== undefined, {
-    message: "At least one of 'memoryEnabled' or 'shareSessionMemory' is required.",
-  });
+  .refine(
+    (b) =>
+      b.memoryEnabled !== undefined ||
+      b.shareSessionMemory !== undefined ||
+      b.showReasoning !== undefined,
+    {
+      message:
+        "At least one of 'memoryEnabled', 'shareSessionMemory' or 'showReasoning' is required.",
+    },
+  );
 
 export type UserPreferencesPatch = Partial<UserPreferences>;
 
@@ -423,6 +447,7 @@ export const messageDtoSchema: z.ZodType<MessageDto> = z.object({
   attachments: z
     .array(z.object({ id: z.string().min(1), name: z.string(), sizeBytes: z.number().int().nonnegative() }))
     .optional(),
+  reasoning: z.string().optional(),
 });
 
 export function pageSchema<T>(inner: z.ZodType<T>): z.ZodType<Page<T>> {

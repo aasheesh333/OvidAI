@@ -20,12 +20,14 @@ describe.skipIf(!TEST_DATABASE_URL)("userPreferences repo (Wave 1a SE-005)", () 
     expect(await userPreferences.get(db, newId())).toEqual({
       memoryEnabled: true,
       shareSessionMemory: false,
+      showReasoning: true,
     });
     const uid = newId();
     await usersRepo.ensure(db, uid, null);
     expect(await userPreferences.get(db, uid)).toEqual({
       memoryEnabled: true,
       shareSessionMemory: false,
+      showReasoning: true,
     });
   });
 
@@ -48,14 +50,22 @@ describe.skipIf(!TEST_DATABASE_URL)("userPreferences repo (Wave 1a SE-005)", () 
     expect(await userPreferences.patch(db, uid, { memoryEnabled: false })).toEqual({
       memoryEnabled: false,
       shareSessionMemory: false,
+      showReasoning: true,
     });
     expect(await userPreferences.patch(db, uid, { shareSessionMemory: true })).toEqual({
       memoryEnabled: false,
       shareSessionMemory: true,
+      showReasoning: true,
+    });
+    expect(await userPreferences.patch(db, uid, { showReasoning: false })).toEqual({
+      memoryEnabled: false,
+      shareSessionMemory: true,
+      showReasoning: false,
     });
     expect(await userPreferences.get(db, uid)).toEqual({
       memoryEnabled: false,
       shareSessionMemory: true,
+      showReasoning: false,
     });
   });
 });

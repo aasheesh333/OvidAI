@@ -192,6 +192,7 @@ describe.skipIf(!TEST_DATABASE_URL)("repos against real postgres", () => {
     expect(ms[0]!.role).toBe("user");
     expect(ms[1]!.role).toBe("assistant");
     expect(ms[0]!.content).toBe("m0");
+    expect(ms[0]!.reasoning).toBeNull(); // no reasoning on an ordinary row
     expect(ms[0]!.createdAt).toBeInstanceOf(Date);
 
     const p1 = await messages.page(db, s.id, { limit: 2 });
@@ -208,6 +209,38 @@ describe.skipIf(!TEST_DATABASE_URL)("repos against real postgres", () => {
 
     const empty = await sessions.create(db, uid, "empty");
     expect(await messages.page(db, empty.id, { limit: 10 })).toEqual({ rows: [], nextCursor: null });
+  });
+
+  it("messages.append persists reasoning (nullable text) and page reads it back", async () => {
+    const uid = await seedUser();
+    const s = await sessions.create(db, uid, "reasoning");
+
+    // The common row: no reasoning passed → NULL, never an empty string.
+    const plain = await messages.append(db, { sessionId: s.id, role: "user", content: "ask" });
+    expect(plain.reasoning).toBeNull();
+
+    // An assistant row that captured provider thinking round-trips it, and a
+    // later page read (the history path) still carries it.
+    const withThinking = await messages.append(db, {
+      sessionId: s.id,
+      role: "assistant",
+      content: "the answer",
+      reasoning: "step one, step two",
+    });
+    expect(withThinking.reasoning).toBe("step one, step two");
+    const reread = (await messages.page(db, s.id, { limit: 1 })).rows[0]!;
+    expect(reread.id).toBe(withThinking.id);
+    expect(reread.content).toBe("the answer");
+    expect(reread.reasoning).toBe("step one, step two");
+
+    // An explicit null is the same absence as an omitted key.
+    const explicitNull = await messages.append(db, {
+      sessionId: s.id,
+      role: "assistant",
+      content: "no thinking",
+      reasoning: null,
+    });
+    expect(explicitNull.reasoning).toBeNull();
   });
 
   it("messages.append with clientMsgId + findByClientMsgId: per-session key, run-less conflict rows, unique index enforces it", async () => {

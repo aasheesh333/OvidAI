@@ -55,15 +55,21 @@ describe("Wave 1a send-body settings", () => {
 });
 
 describe("user preferences", () => {
-  it("defaults keep memory on and cross-session sharing off", () => {
-    expect(DEFAULT_USER_PREFERENCES).toEqual({ memoryEnabled: true, shareSessionMemory: false });
+  it("defaults keep memory on, cross-session sharing off, and reasoning shown", () => {
+    expect(DEFAULT_USER_PREFERENCES).toEqual({
+      memoryEnabled: true,
+      shareSessionMemory: false,
+      showReasoning: true,
+    });
     expect(userPreferencesSchema.parse(DEFAULT_USER_PREFERENCES)).toEqual(DEFAULT_USER_PREFERENCES);
   });
 
   it("patch is strict and needs at least one field", () => {
     expect(userPreferencesPatchSchema.parse({ memoryEnabled: false })).toEqual({ memoryEnabled: false });
+    expect(userPreferencesPatchSchema.parse({ showReasoning: false })).toEqual({ showReasoning: false });
     expect(() => userPreferencesPatchSchema.parse({})).toThrow();
     expect(() => userPreferencesPatchSchema.parse({ memoryEnabled: "no" })).toThrow();
+    expect(() => userPreferencesPatchSchema.parse({ showReasoning: "no" })).toThrow();
     expect(() => userPreferencesPatchSchema.parse({ memoryEnabled: true, other: 1 })).toThrow();
   });
 });

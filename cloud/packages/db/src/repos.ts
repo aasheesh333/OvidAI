@@ -141,6 +141,7 @@ export const users = {
 export interface UserPreferencesJson {
   memoryEnabled: boolean;
   shareSessionMemory: boolean;
+  showReasoning: boolean;
 }
 
 function preferencesFrom(raw: unknown): UserPreferencesJson {
@@ -148,6 +149,7 @@ function preferencesFrom(raw: unknown): UserPreferencesJson {
   return {
     memoryEnabled: typeof o.memoryEnabled === "boolean" ? o.memoryEnabled : true,
     shareSessionMemory: typeof o.shareSessionMemory === "boolean" ? o.shareSessionMemory : false,
+    showReasoning: typeof o.showReasoning === "boolean" ? o.showReasoning : true,
   };
 }
 
@@ -178,6 +180,7 @@ export const userPreferences = {
     if (typeof patch.shareSessionMemory === "boolean") {
       clean.shareSessionMemory = patch.shareSessionMemory;
     }
+    if (typeof patch.showReasoning === "boolean") clean.showReasoning = patch.showReasoning;
     const [row] = await db
       .insert(usersTable)
       .values({ uid, preferences: clean })
@@ -416,7 +419,18 @@ export const sessions = {
 export const messages = {
   async append(
     db: Db,
-    m: { sessionId: string; role: MessageRole; content: string; clientMsgId?: string },
+    m: {
+      sessionId: string;
+      role: MessageRole;
+      content: string;
+      clientMsgId?: string;
+      /**
+       * The provider's thinking for an assistant turn, when captured. Omitted
+       * → NULL (the common case: user/system/tool rows and models that expose
+       * no reasoning). Never folded into `content`.
+       */
+      reasoning?: string | null;
+    },
   ): Promise<MessageRow> {
     const [row] = await db
       .insert(messagesTable)
@@ -429,6 +443,7 @@ export const messages = {
         // key present → a duplicate (session, clientMsgId) raises 23505,
         // which the send-message route resolves into a replay/409.
         ...(m.clientMsgId !== undefined ? { clientMsgId: m.clientMsgId } : {}),
+        ...(m.reasoning !== undefined ? { reasoning: m.reasoning } : {}),
       })
       .returning();
     return row!;

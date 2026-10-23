@@ -268,7 +268,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1a send settings + preferences (real p
       const uid = testUid("w1a-prefs");
       const get = await h.app.inject({ method: "GET", url: "/cloud/v1/preferences", headers: authHeaders(uid) });
       expect(get.statusCode).toBe(200);
-      expect(get.json()).toEqual({ memoryEnabled: true, shareSessionMemory: false });
+      expect(get.json()).toEqual({ memoryEnabled: true, shareSessionMemory: false, showReasoning: true });
 
       const patch = await h.app.inject({
         method: "PATCH",
@@ -277,8 +277,22 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1a send settings + preferences (real p
         payload: { memoryEnabled: false },
       });
       expect(patch.statusCode).toBe(200);
-      expect(patch.json()).toEqual({ memoryEnabled: false, shareSessionMemory: false });
-      expect(await userPreferences.get(db, uid)).toEqual({ memoryEnabled: false, shareSessionMemory: false });
+      expect(patch.json()).toEqual({ memoryEnabled: false, shareSessionMemory: false, showReasoning: true });
+      expect(await userPreferences.get(db, uid)).toEqual({
+        memoryEnabled: false,
+        shareSessionMemory: false,
+        showReasoning: true,
+      });
+
+      // showReasoning is a first-class switch, not an unknown key.
+      const reasoning = await h.app.inject({
+        method: "PATCH",
+        url: "/cloud/v1/preferences",
+        headers: authHeaders(uid),
+        payload: { showReasoning: false },
+      });
+      expect(reasoning.statusCode).toBe(200);
+      expect(reasoning.json()).toEqual({ memoryEnabled: false, shareSessionMemory: false, showReasoning: false });
 
       for (const bad of [{}, { memoryEnabled: "no" }, { memoryEnabled: true, extra: 1 }]) {
         const res = await h.app.inject({

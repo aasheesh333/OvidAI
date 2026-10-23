@@ -155,6 +155,12 @@ export const messages = pgTable(
       .references(() => sessions.id),
     role: text("role").notNull(), // "user" | "assistant" | "system" | "tool"
     content: text("content").notNull(),
+    // The provider's reasoning ("thinking") for an assistant turn, when the
+    // model exposed it and the run captured it. NULL on every user/system/tool
+    // row and on assistant rows produced by a model that returns none. Kept
+    // out of `content` so the answer the user reads never contains it and
+    // search/compaction still see only the answer.
+    reasoning: text("reasoning"),
     // P8 Task 4: caller-chosen idempotency key for the send-message and
     // history-import paths. NULL for all pre-P8 rows — the unique index below
     // is partial (WHERE client_msg_id IS NOT NULL), so keyed and keyless

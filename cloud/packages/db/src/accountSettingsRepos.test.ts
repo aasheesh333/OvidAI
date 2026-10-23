@@ -40,7 +40,11 @@ describe.skipIf(!TEST_DATABASE_URL)("accountSettings + customPresets repos (Wave
     });
     await userPreferences.patch(db, uid, { shareSessionMemory: true });
 
-    expect(await userPreferences.get(db, uid)).toEqual({ memoryEnabled: false, shareSessionMemory: true });
+    expect(await userPreferences.get(db, uid)).toEqual({
+      memoryEnabled: false,
+      shareSessionMemory: true,
+      showReasoning: true,
+    });
     expect(await accountSettings.get(db, uid)).toEqual({
       notificationsEnabled: false,
       byokDefault: { keyId, model: "gpt-4.1" },
