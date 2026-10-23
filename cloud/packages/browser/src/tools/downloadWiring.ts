@@ -30,6 +30,7 @@ import {
   DOWNLOAD_MAX_BYTES,
   isAllowedTransferFilename,
   mimeTypeForFilename,
+  ownWorkspacePath,
   resolveWorkspaceDir,
   sanitizeFilename,
 } from "./transferPolicy.js";
@@ -148,6 +149,9 @@ export function wireDownloads(
           await rm(temp, { force: true }).catch(() => {});
           throw err;
         }
+        // Same hand-off as browser_download: the agent owns the file.
+        await ownWorkspacePath(deps, session.userId, dir);
+        await ownWorkspacePath(deps, session.userId, join(dir, name));
 
         // Wave 6 W4: the page's own download also lands in the account
         // Artifact Vault. Failure is non-fatal — the workspace copy exists.

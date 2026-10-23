@@ -142,6 +142,15 @@ export interface BrowserToolsDeps {
   cfg: BrowserEngineConfig;
   /** P2 seam; impl must mkdir -p. Tests inject a tmpdir. */
   workspaceDir(userId: string, sessionId: string): Promise<string>;
+  /**
+   * Hands a workspace path to the user's sandbox uid.
+   *
+   * The worker runs as root and writes downloads with writeFile + rename, so
+   * without this a download lands root-owned and the agent — which executes
+   * in the jail as the sandbox uid — can read it but never modify, move or
+   * delete it. Absent in dev/test, where there is no uid to hand off to.
+   */
+  ownPath?(userId: string, hostPath: string): Promise<void>;
   /** Engine → bridge.publishState hook (Task 14). */
   notifyState?(sessionId: string): void;
   /** Diagnostic sink for swallowed release-time persistence failures (Task 12). */

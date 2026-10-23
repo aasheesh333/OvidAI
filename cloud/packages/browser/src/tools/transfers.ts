@@ -43,6 +43,7 @@ import {
   isAllowedTransferMime,
   mimeTypeForFilename,
   normalizeMimeType,
+  ownWorkspacePath,
   resolveWorkspaceDir,
   resolveWorkspaceEntry,
   sanitizeFilename,
@@ -341,6 +342,11 @@ function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
           await rm(temp, { force: true }).catch(() => {});
           throw err;
         }
+        // The agent must be able to modify what it downloaded. The worker
+        // writes as root; the jail runs as the sandbox uid, so hand the file
+        // (and its directory, which deleting needs) to that uid.
+        await ownWorkspacePath(deps, ctx.userId, dir);
+        await ownWorkspacePath(deps, ctx.userId, dest);
 
         // Wave 6 W4: mirror the file into the account Artifact Vault. The
         // workspace copy is authoritative; a vault failure never fails the

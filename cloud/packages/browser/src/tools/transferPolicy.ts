@@ -281,3 +281,24 @@ export async function resolveWorkspaceDir(root: string, relDir: string): Promise
     return null;
   }
 }
+
+/**
+ * Hand a written workspace path to the user's sandbox uid.
+ *
+ * Best-effort by design: an ownership failure must not fail a download the
+ * user already has bytes for — the file is still readable, and the caller's
+ * report says nothing it cannot back up.
+ */
+export async function ownWorkspacePath(
+  deps: { ownPath?(userId: string, hostPath: string): Promise<void>; log?(msg: string, err?: unknown): void },
+  userId: string,
+  hostPath: string,
+): Promise<void> {
+  const own = deps.ownPath;
+  if (own === undefined) return;
+  try {
+    await own(userId, hostPath);
+  } catch (err) {
+    deps.log?.("workspace ownership hand-off failed", err);
+  }
+}

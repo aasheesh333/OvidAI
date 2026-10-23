@@ -1,5 +1,5 @@
 import { chown, mkdir, readdir, stat, statfs } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, join, resolve, sep } from "node:path";
 import type { CgroupManager } from "./cgroups.js";
 import type { SandboxConfig } from "./config.js";
 import { renderEtcBundle, renderHomeDotfiles, writeEnvFiles } from "./etcFiles.js";
@@ -120,6 +120,15 @@ export interface SandboxManager {
    * in the next.
    */
   browserWorkspaceDir(userId: string): Promise<string>;
+  /**
+   * Hand a host path inside the user's tree to that user's sandbox uid.
+   *
+   * Files the WORKER writes (browser downloads land via writeFile as root)
+   * are root-owned, and the agent runs in the jail as the sandbox uid — so
+   * without this it could read a download but never modify, move or delete
+   * it. No-op for a path outside the user's own tree.
+   */
+  ownPath(userId: string, hostPath: string): Promise<void>;
   get(userId: string): SandboxHandle | undefined;
   destroy(userId: string): Promise<void>;
   list(): SandboxInfo[];
@@ -588,6 +597,28 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     return dir;
   }
 
+  /**
+   * chown [hostPath] to the user's sandbox uid, but only when it really is
+   * inside that user's tree. A path outside it is refused rather than handed
+   * to a uid that has no business owning it.
+   */
+  async function ownPath(userId: string, hostPath: string): Promise<void> {
+    const attached = handles.get(userId);
+    let uid = attached?.uid ?? uidByUser.get(userId);
+    if (uid === undefined) {
+      uid = await deps.allocateUid(userId);
+      uidByUser.set(userId, uid);
+    }
+    const userRoot = join(config.workspacesRoot, String(uid));
+    const resolved = resolve(hostPath);
+    if (resolved !== userRoot && !resolved.startsWith(`${userRoot}${sep}`)) {
+      throw new Error(
+        `ownPath refused: ${hostPath} is outside this user's workspace tree`,
+      );
+    }
+    await chown(resolved, uid, uid);
+  }
+
   /** `{uid}/browser`, created + chowned. Shared by every chat of that user. */
   async function browserWorkspaceDir(userId: string): Promise<string> {
     const attached = handles.get(userId);
@@ -739,6 +770,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     attachSession,
     sessionWorkspaceDir,
     browserWorkspaceDir,
+    ownPath,
     get: (userId: string) => handles.get(userId),
     destroy: destroyUser,
     list: () =>

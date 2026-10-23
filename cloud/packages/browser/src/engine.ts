@@ -90,6 +90,12 @@ export interface BrowserEngineDeps {
    */
   workspaceDir?(userId: string, sessionId: string): Promise<string>;
   /**
+   * Hands a written workspace path to the user's sandbox uid, so the agent
+   * can modify a download it only had read access to. Optional: dev/test has
+   * no uid.
+   */
+  ownPath?(userId: string, hostPath: string): Promise<void>;
+  /**
    * Test seam: default prepareBrowserUidDrop(cfg). Runs at boot so a
    * configured browser uid that cannot be applied (non-root worker, missing
    * setpriv, unusable Chromium) fails loudly instead of falling back to root.
@@ -315,6 +321,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     persistence,
     cfg,
     workspaceDir,
+    ...(deps.ownPath !== undefined ? { ownPath: deps.ownPath } : {}),
     notifyState: (sessionId: string) => publishState(sessionId),
     log,
     now,

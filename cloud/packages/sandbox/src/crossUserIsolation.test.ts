@@ -13,7 +13,7 @@
 //     (resolveConfined), so `..`, absolute paths and symlinks cannot climb
 //     out into a sibling user's tree.
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -161,5 +161,26 @@ describe.skipIf(!isRoot)("shared surfaces stay inside one user's tree", () => {
     expect(a.workspaceDir.startsWith(`${a.studioDir}/`)).toBe(false);
     expect(a.workspaceDir.startsWith(`${a.browserDir}/`)).toBe(false);
     expect(a.studioDir).not.toBe(a.browserDir);
+  });
+});
+
+describe.skipIf(!isRoot)("ownPath — files the worker wrote belong to the agent", () => {
+  it("hands a file inside the user's tree to that user's uid", async () => {
+    const { manager, wsRoot } = await fixture();
+    const dir = await manager.browserWorkspaceDir("user-a");
+    const file = join(dir, "download.txt");
+    writeFileSync(file, "bytes");
+
+    await manager.ownPath("user-a", file);
+
+    const { statSync } = await import("node:fs");
+    const uid = statSync(join(wsRoot, "300001")).uid;
+    expect(statSync(file).uid).toBe(uid);
+  });
+
+  it("refuses a path outside the user's own tree", async () => {
+    const { manager, wsRoot } = await fixture();
+    const other = join(wsRoot, "999999", "browser");
+    await expect(manager.ownPath("user-a", other)).rejects.toThrow(/outside/);
   });
 });

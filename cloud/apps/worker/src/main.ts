@@ -734,6 +734,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     // (`{root}/{uid}/browser`) for every chat, so a download the agent made in
     // one chat is still there in the next. Chat workspaces stay per-session.
     workspaceDir: (userId: string) => manager.browserWorkspaceDir(userId),
+    // The worker writes downloads as root; hand each file to the sandbox uid
+    // so the agent can modify, move and delete it.
+    ownPath: (userId: string, hostPath: string) =>
+      manager.ownPath(userId, hostPath),
     // Wave 6 W4: owner-scoped credentials + the workspace/Artifact Vault
     // bridge. Both are server-side only; the model never sees a secret.
     credentials: createBrowserCredentialsPort({

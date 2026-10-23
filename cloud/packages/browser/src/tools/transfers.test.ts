@@ -436,3 +436,77 @@ describe("browser file bridge (W4)", () => {
     expect(await readFile(join(root, "browser/downloads/final.txt"), "utf8")).toBe("redirected bytes");
   });
 });
+
+// The agent must be able to modify what it downloaded. The worker writes as
+// root; the jail runs as the sandbox uid, so without an ownership hand-off a
+// download is readable but not writable/movable/deletable by the agent.
+describe("workspace ownership hand-off", () => {
+  it("owns a browser_download's file AND its directory", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const body = Buffer.from("downloaded bytes");
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/plain", "content-length": String(body.length) },
+        });
+      }),
+    );
+    const root = await mkdtemp(join(tmpdir(), "ovid-own-dl-"));
+    const h = await harness(root);
+    const owned: string[] = [];
+    h.deps.ownPath = async (_userId, hostPath) => {
+      owned.push(hostPath);
+    };
+
+    await exec(h, "browser_download", { url: "http://127.0.0.1:1/file.txt", filename: "file.txt" });
+
+    const file = join(root, "browser/downloads/file.txt");
+    expect(owned).toContain(file);
+    // The directory too: deleting a file needs write on its parent.
+    expect(owned).toContain(join(root, "browser/downloads"));
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("owns the page-download copy the listener writes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ovid-own-page-"));
+    const h = await harness(root);
+    await exec(h, "browser_list_tabs", {}); // wires the download listener
+    const owned: string[] = [];
+    h.deps.ownPath = async (_userId, hostPath) => {
+      owned.push(hostPath);
+    };
+    // The listener stats the browser's own copy before saving it.
+    const source = join(root, "tmp-source.pdf");
+    await writeFile(source, "pdf bytes");
+
+    await h.fireDownload({
+      url: () => "https://example.test/report.pdf",
+      suggestedFilename: () => "report.pdf",
+      page: () => (h.deps.registry.get("x") as SessionBrowser).tabs[0],
+      async path() {
+        return source;
+      },
+      async saveAs(dest: string) {
+        await writeFile(dest, "pdf bytes");
+      },
+      async delete() {},
+    });
+
+    expect(owned).toContain(join(root, "browser/downloads/report.pdf"));
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("does not own anything when no seam is wired (dev/test)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(Buffer.from("x"), { status: 200 })),
+    );
+    const root = await mkdtemp(join(tmpdir(), "ovid-own-none-"));
+    const h = await harness(root);
+    await expect(
+      exec(h, "browser_download", { url: "http://127.0.0.1:1/file.txt", filename: "f.txt" }),
+    ).resolves.toBeDefined();
+    await rm(root, { recursive: true, force: true });
+  });
+});
