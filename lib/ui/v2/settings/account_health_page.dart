@@ -43,6 +43,9 @@ class V2AccountHealthPageData {
     this.todayUsageFraction,
     this.storageUsedLabel = '',
     this.storageFraction,
+    this.tokensUsedLabel = '',
+    this.tokenCapLabel = '',
+    this.tokensRemainingLabel = '',
     this.deletionScheduledLabel = '',
     this.deletionKnown = false,
     this.loading = false,
@@ -84,6 +87,16 @@ class V2AccountHealthPageData {
 
   /// Share (0..1) of the storage quota already used, or null when unknown.
   final double? storageFraction;
+
+  /// Tokens recorded today, already formatted (`4.2M`). Empty when unknown —
+  /// an older gateway does not report token caps at all.
+  final String tokensUsedLabel;
+
+  /// The plan's daily token ceiling, already formatted (`50M`).
+  final String tokenCapLabel;
+
+  /// What is left of today's token allowance, already formatted.
+  final String tokensRemainingLabel;
 
   /// The date the data goes, e.g. `20 Nov 2026`.
   final String deletionScheduledLabel;
@@ -152,6 +165,21 @@ class V2AccountHealthPageData {
 
   String get storageText =>
       storageUsedLabel.trim().isEmpty ? unknown : storageUsedLabel.trim();
+
+  /// Tokens recorded today, already formatted. Unknown when the server did
+  /// not report it (an older gateway has no token caps at all).
+  String get tokensUsedText =>
+      tokensUsedLabel.trim().isEmpty ? unknown : tokensUsedLabel.trim();
+
+  /// The plan's daily ceiling.
+  String get tokenCapText =>
+      tokenCapLabel.trim().isEmpty ? unknown : tokenCapLabel.trim();
+
+  /// What is left today. Unknown when the server did not report it.
+  String get tokensRemainingText => tokensRemainingLabel.trim().isEmpty
+      ? unknown
+      : tokensRemainingLabel.trim();
+
 
   String get deletionText {
     if (deletionPending) {
@@ -224,6 +252,28 @@ class AccountHealthPage extends StatelessWidget {
                 icon: Icons.insights_outlined,
                 title: 'Today',
                 value: data.todayText,
+              ),
+              // The token rows are always present. The gateway reports them
+              // today; an older one answers nothing and the rows read `—`,
+              // which is the honest statement — hiding them would look like
+              // the account has no token allowance at all.
+              _HealthRow(
+                key: const ValueKey<String>('health-tokens'),
+                icon: Icons.data_usage_outlined,
+                title: 'Tokens used',
+                value: data.tokensUsedText,
+              ),
+              _HealthRow(
+                key: const ValueKey<String>('health-token-cap'),
+                icon: Icons.speed_outlined,
+                title: 'Token cap',
+                value: data.tokenCapText,
+              ),
+              _HealthRow(
+                key: const ValueKey<String>('health-tokens-left'),
+                icon: Icons.battery_5_bar_outlined,
+                title: 'Tokens left',
+                value: data.tokensRemainingText,
               ),
               _HealthRow(
                 key: const ValueKey<String>('health-storage'),

@@ -234,8 +234,7 @@ class AccountHealthUsage {
       cacheWriteTokens == null &&
       total == null;
 
-  /// Tokens actually recorded. Null when either half of the split is unknown:
-  /// a half-known total would be a guess, not a measurement.
+  /// Tokens actually recorded. Null when either half of the split is unknown:  /// a half-known total would be a guess, not a measurement.
   int? get totalTokens {
     final reported = total;
     if (reported != null) return reported;
@@ -272,6 +271,9 @@ class AccountHealthUsageWindow {
     this.until,
     this.used,
     this.remainingUsd,
+    this.tokensUsed,
+    this.tokenCap,
+    this.tokensRemaining,
   });
 
   final DateTime? since;
@@ -282,10 +284,28 @@ class AccountHealthUsageWindow {
   /// never `0`, which would claim the allowance is exhausted.
   final double? remainingUsd;
 
+  /// Input + output tokens recorded in this window, as the gateway counted
+  /// them. Null when the server did not answer the field (an older gateway),
+  /// never `0` — a zero would read as a measurement.
+  final int? tokensUsed;
+
+  /// The plan's ceiling for this window. Null when the server did not answer.
+  final int? tokenCap;
+
+  /// What is left. The gateway clamps at 0, so an exhausted window reads 0
+  /// and never a negative number.
+  final int? tokensRemaining;
+
   int? get usedTokens => used?.totalTokens;
 
   bool get isEmpty =>
-      since == null && until == null && used == null && remainingUsd == null;
+      since == null &&
+      until == null &&
+      used == null &&
+      remainingUsd == null &&
+      tokensUsed == null &&
+      tokenCap == null &&
+      tokensRemaining == null;
 
   static AccountHealthUsageWindow? tryParse(Object? raw) {
     final json = _map(raw);
@@ -295,6 +315,9 @@ class AccountHealthUsageWindow {
       until: _date(json['until']),
       used: AccountHealthUsage.tryParse(json['used']),
       remainingUsd: _usd(json['remainingUsd']),
+      tokensUsed: _int(json['tokensUsed']),
+      tokenCap: _int(json['tokenCap']),
+      tokensRemaining: _int(json['tokensRemaining']),
     );
     return window.isEmpty ? null : window;
   }

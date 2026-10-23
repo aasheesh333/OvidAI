@@ -68,10 +68,16 @@ class V2LiveThinking extends V2LiveChatItem {
     required super.id,
     required this.label,
     required this.details,
+    this.defaultExpanded = false,
   });
 
   final String label;
   final List<String> details;
+
+  /// The first-paint state when the reader has not toggled this row. A
+  /// stored thought follows the "Show reasoning" preference; live progress
+  /// rows stay folded.
+  final bool defaultExpanded;
 }
 
 class V2LiveTool extends V2LiveChatItem {
@@ -460,7 +466,10 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
   /// How close to the bottom still counts as "reading the tail".
   static const double _tailSlop = 96;
 
-  final Set<String> _expandedThinking = <String>{};
+  /// Explicit reader choices for thinking rows. An id absent here keeps the
+  /// row's own [V2LiveThinking.defaultExpanded], so a rebuild (or a new run)
+  /// never re-opens a row the reader folded away.
+  final Map<String, bool> _thinkingOverrides = <String, bool>{};
   final Set<String> _expandedTools = <String>{};
   final Set<String> _expandedTranscripts = <String>{};
 
@@ -884,13 +893,13 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
   }
 
   void _toggleThinking(V2LiveThinking item) {
-    final expanded = !_expandedThinking.contains(item.id);
+    final current = _thinkingOverrides[item.id] ?? item.defaultExpanded;
+    final expanded = !current;
     setState(() {
-      if (expanded) {
-        _expandedThinking.add(item.id);
-      } else {
-        _expandedThinking.remove(item.id);
-      }
+      // A reader's choice is stored even when it matches the default: the row
+      // must not re-open itself on the next rebuild just because the default
+      // says so.
+      _thinkingOverrides[item.id] = expanded;
     });
     widget.onThinkingToggle?.call(item.id, expanded);
   }
@@ -1482,7 +1491,7 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
         key: ValueKey('thinking-${message.id}'),
         label: message.label,
         details: message.details,
-        expanded: _expandedThinking.contains(message.id),
+        expanded: _thinkingOverrides[message.id] ?? message.defaultExpanded,
         // The live tail of an active run shimmers; a finished thought does not.
         running: widget.data.running && isTail,
         onToggle: () => _toggleThinking(message),
@@ -1961,10 +1970,10 @@ class _LiveComposer extends StatelessWidget {
                     maxLines: 3,
                     keyboardType: TextInputType.multiline,
                     textInputAction: TextInputAction.newline,
-                    style: OType.bodySm.copyWith(color: c.text),
+                    style: OType.body.copyWith(color: c.text),
                     decoration: InputDecoration(
                       hintText: running ? data.statusLabel : data.composerHint,
-                      hintStyle: OType.bodySm.copyWith(color: c.textFaint),
+                      hintStyle: OType.body.copyWith(color: c.textFaint),
                       hintMaxLines: 1,
                       filled: false,
                       isDense: true,

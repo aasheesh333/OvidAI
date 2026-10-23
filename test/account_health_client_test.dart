@@ -40,6 +40,9 @@ Map<String, Object?> _full() => {
         'cacheWriteTokens': 0,
       },
       'remainingUsd': null,
+      'tokensUsed': 1200,
+      'tokenCap': 50000000,
+      'tokensRemaining': 49998800,
     },
     'month': {
       'since': '2026-10-01T00:00:00.000Z',
@@ -53,6 +56,9 @@ Map<String, Object?> _full() => {
         'cacheWriteTokens': 0,
       },
       'remainingUsd': null,
+      'tokensUsed': 8900,
+      'tokenCap': 1500000000,
+      'tokensRemaining': 1499991100,
     },
   },
   'standing': {
@@ -99,6 +105,51 @@ void main() {
     // The gateway has no multi-IP detector; null means "not checked".
     expect(health.standing?.multiIpFlags, isNull);
     expect(health.standing?.deletion, isNull);
+
+    expect(health.usage?.today?.tokensUsed, 1200);
+    expect(health.usage?.today?.tokenCap, 50000000);
+    expect(health.usage?.today?.tokensRemaining, 49998800);
+    expect(health.usage?.month?.tokensUsed, 8900);
+    expect(health.usage?.month?.tokenCap, 1500000000);
+    expect(health.usage?.month?.tokensRemaining, 1499991100);
+  });
+
+  test('token fields are unknown when absent, never zero', () {
+    // An older gateway does not answer these keys. An absent field is
+    // unknown; a zero would read as a real measurement (and as a spent cap).
+    final absent = AccountHealth.fromJson(const {
+      'usage': {
+        'today': {'remainingUsd': null},
+        'month': {'remainingUsd': null},
+      },
+    });
+    expect(absent.usage?.today?.tokensUsed, isNull);
+    expect(absent.usage?.today?.tokenCap, isNull);
+    expect(absent.usage?.today?.tokensRemaining, isNull);
+
+    // A zero is a real value the server may send: an exhausted window.
+    final zero = AccountHealth.fromJson(const {
+      'usage': {
+        'today': {'tokensUsed': 0, 'tokenCap': 0, 'tokensRemaining': 0},
+      },
+    });
+    expect(zero.usage?.today?.tokensUsed, 0);
+    expect(zero.usage?.today?.tokenCap, 0);
+    expect(zero.usage?.today?.tokensRemaining, 0);
+
+    // Wrong type / negative / null values degrade to unknown.
+    final bad = AccountHealth.fromJson(const {
+      'usage': {
+        'today': {
+          'tokensUsed': 'many',
+          'tokenCap': -1,
+          'tokensRemaining': null,
+        },
+      },
+    });
+    expect(bad.usage?.today?.tokensUsed, isNull);
+    expect(bad.usage?.today?.tokenCap, isNull);
+    expect(bad.usage?.today?.tokensRemaining, isNull);
   });
 
   test('a missing or null field is unknown, never zero', () {

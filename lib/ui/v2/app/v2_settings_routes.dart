@@ -1101,6 +1101,12 @@ class V2SettingsRoutes {
         : _barePlanName(planId!);
 
     final todayTokens = usage?.today?.usedTokens;
+    // The gateway's own token arithmetic (it clamps the remainder at 0). An
+    // older gateway sends none of these, so they stay null and the rows are
+    // simply not drawn.
+    final tokensUsed = usage?.today?.tokensUsed;
+    final tokenCap = usage?.today?.tokenCap;
+    final tokensRemaining = usage?.today?.tokensRemaining;
     final usedBytes = storage?.usedBytes;
     final quotaBytes = storage?.quotaBytes;
 
@@ -1137,6 +1143,11 @@ class V2SettingsRoutes {
               (limits.dailyTokenCap ?? 0) <= 0
           ? null
           : (todayTokens / limits.dailyTokenCap!).clamp(0.0, 1.0).toDouble(),
+      tokensUsedLabel: tokensUsed == null ? '' : compactTokens(tokensUsed),
+      tokenCapLabel: tokenCap == null ? '' : compactTokens(tokenCap),
+      tokensRemainingLabel: tokensRemaining == null
+          ? ''
+          : compactTokens(tokensRemaining),
       storageUsedLabel: usedBytes == null || quotaBytes == null
           ? ''
           : '${_bytes(usedBytes)} of ${_bytes(quotaBytes)}',
