@@ -172,7 +172,11 @@ class V2CollabRoutes {
     final leaseHolder = state.session.turn?.participantId;
     if (leaseHolder != null) return leaseHolder;
     for (final entry in state.modelStates.entries) {
-      if (entry.value.status == ModelExecutionStatus.running ||
+      // `streaming` is the transport's own "still producing" flag and is
+      // independent of `status`: a peer between tool calls reports
+      // status=idle while it is still streaming. Either one holds the turn.
+      if (entry.value.streaming ||
+          entry.value.status == ModelExecutionStatus.running ||
           entry.value.status == ModelExecutionStatus.queued) {
         return entry.key;
       }
