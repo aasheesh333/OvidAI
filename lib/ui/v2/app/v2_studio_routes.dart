@@ -155,6 +155,7 @@ class V2StudioRoutes {
     StudioTreeSnapshot? snapshot,
     StudioTabsState tabs = StudioTabsState.empty,
     bool loading = false,
+    bool gitAvailable = true,
     String? errorMessage,
   }) {
     final name = repo.trim();
@@ -171,6 +172,7 @@ class V2StudioRoutes {
         repoName: name,
         branch: branchName,
         status: V2WorkspaceStatus.error,
+        gitAvailable: gitAvailable,
         errorMessage: errorMessage,
       );
     }
@@ -179,6 +181,7 @@ class V2StudioRoutes {
         repoName: name,
         branch: branchName,
         status: V2WorkspaceStatus.loading,
+        gitAvailable: gitAvailable,
       );
     }
 
@@ -200,6 +203,7 @@ class V2StudioRoutes {
           V2CodeLine(number: i + 1, text: rawLines[i]),
       ],
       saved: openPath.isEmpty || !tabs.dirtyPaths.contains(openPath),
+      gitAvailable: gitAvailable,
     );
   }
 
@@ -325,6 +329,10 @@ class _StudioWorkspaceHostState extends State<_StudioWorkspaceHost> {
   bool _loaded = false;
   bool _syncing = false;
 
+  /// `GET …/git`'s capability flag. False means the deployment has no git
+  /// transport yet; the header then draws no sync control.
+  bool _gitAvailable = true;
+
   /// The cloud workspace is per user, not per chat (R2), so every Studio
   /// surface reads the same bucket.
   String get _workspaceKey =>
@@ -349,6 +357,31 @@ class _StudioWorkspaceHostState extends State<_StudioWorkspaceHost> {
 
   Future<void> _load() async {
     final port = StudioBindingPort.instance;
+    final sessionId = widget.sessionId;
+    // The gateway is the authority on both "is GitHub connected" and "can
+    // this deployment run git". Both reads are best-effort: a failed read
+    // leaves the workspace in its empty state, never in a false "bound" one.
+    if (port != null) {
+      try {
+        await port.loadConnection();
+      } catch (_) {
+        // No connection: the page below shows its honest empty state.
+      }
+      if (sessionId != null) {
+        try {
+          final git = await port.loadSessionGit(sessionId);
+          if (git != null) {
+            _gitAvailable = git.available;
+            final binding = git.binding;
+            if (binding != null && mounted) {
+              setState(() => _branch = binding.branch);
+            }
+          }
+        } catch (_) {
+          // Keep the capability we already knew; draw no new claim.
+        }
+      }
+    }
     if (!(port?.ready ?? false)) {
       if (mounted) setState(() => _loaded = true);
       return;
@@ -393,19 +426,27 @@ class _StudioWorkspaceHostState extends State<_StudioWorkspaceHost> {
     }
   }
 
-  /// Binds the chosen branch on the session too, so the chat's STUDIO gate and
-  /// the workspace always name the same branch.
+  /// Switches the branch through the gateway's git service. A refusal (no
+  /// transport, dirty tree, failed switch) is reported verbatim and the
+  /// displayed branch is left untouched, so the header never names a branch
+  /// the workspace is not on.
   Future<void> _switchBranch(String branch) async {
     final sessionId = widget.sessionId;
     final port = StudioBindingPort.instance;
-    if (sessionId != null && port != null && port.ready) {
-      try {
-        await port.bind(sessionId, repo: widget.repo, branch: branch);
-      } catch (error) {
-        if (!mounted) return;
-        showOSnack(context, _studioErrorText(error));
-        return;
-      }
+    if (sessionId == null) {
+      showOSnack(context, 'Open Studio from a chat to switch branches.');
+      return;
+    }
+    if (port == null || !port.ready) {
+      showOSnack(context, 'Connect GitHub to switch branches.');
+      return;
+    }
+    try {
+      await port.switchBranch(sessionId, branch: branch);
+    } catch (error) {
+      if (!mounted) return;
+      showOSnack(context, _studioErrorText(error));
+      return;
     }
     if (!mounted) return;
     setState(() => _branch = branch);
@@ -478,6 +519,7 @@ class _StudioWorkspaceHostState extends State<_StudioWorkspaceHost> {
                 ? _remote.tabsState(_workspaceKey)
                 : StudioTabsState.empty,
             loading: loading,
+            gitAvailable: _gitAvailable,
             errorMessage: error,
           ),
           onBranchTap: () => V2StudioRoutes.openBranchPicker(

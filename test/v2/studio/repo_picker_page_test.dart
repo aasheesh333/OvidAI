@@ -118,27 +118,31 @@ void main() {
     expect(tokens, 1);
   });
 
-  testWidgets('a repository tap opens the branch step and never confirms early', (
-    tester,
-  ) async {
-    var confirms = 0;
-    await tester.pumpWidget(
-      _app(
-        V2RepoPickerPage(
-          data: const V2RepoPickerData(repos: _repos),
-          onConfirm: (_, _) => confirms++,
+  testWidgets(
+    'a repository tap opens the branch step and never confirms early',
+    (tester) async {
+      var confirms = 0;
+      await tester.pumpWidget(
+        _app(
+          V2RepoPickerPage(
+            data: const V2RepoPickerData(repos: _repos),
+            onConfirm: (_, _) => confirms++,
+          ),
         ),
-      ),
-    );
-    await tester.pumpAndSettle();
+      );
+      await tester.pumpAndSettle();
 
-    await tester.tap(find.text('acme/api-server'));
-    await tester.pumpAndSettle();
+      await tester.tap(find.text('acme/api-server'));
+      await tester.pumpAndSettle();
 
-    // The gate only opens on a repo **and** a branch.
-    expect(confirms, 0);
-    expect(find.byKey(const Key('repo-picker-branch-release')), findsOneWidget);
-  });
+      // The gate only opens on a repo **and** a branch.
+      expect(confirms, 0);
+      expect(
+        find.byKey(const Key('repo-picker-branch-release')),
+        findsOneWidget,
+      );
+    },
+  );
 
   testWidgets('requires a repository and branch before the primary enables', (
     tester,
@@ -675,5 +679,63 @@ void main() {
             '(${dark ? 'dark' : 'light'})',
       );
     }
+  });
+
+  testWidgets('reaching the end of the list asks for the next page', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(400, 360);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    var loads = 0;
+    final repos = <V2Repo>[
+      for (var i = 0; i < 12; i++)
+        V2Repo(id: '$i', name: 'repo-$i', owner: 'acme'),
+    ];
+    await tester.pumpWidget(
+      _app(
+        V2RepoPickerPage(
+          data: V2RepoPickerData(repos: repos),
+          onLoadMore: () async => loads++,
+          onConfirm: _noopConfirm,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(loads, 0);
+    await tester.drag(find.byType(CustomScrollView), const Offset(0, -600));
+    await tester.pump();
+
+    expect(loads, greaterThan(0));
+  });
+
+  testWidgets('no onLoadMore means the end of the list is the end', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(400, 360);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    final repos = <V2Repo>[
+      for (var i = 0; i < 12; i++)
+        V2Repo(id: '$i', name: 'repo-$i', owner: 'acme'),
+    ];
+    await tester.pumpWidget(
+      _app(
+        V2RepoPickerPage(
+          data: V2RepoPickerData(repos: repos),
+          onConfirm: _noopConfirm,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.drag(find.byType(CustomScrollView), const Offset(0, -600));
+    await tester.pump();
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('acme/repo-11'), findsOneWidget);
   });
 }

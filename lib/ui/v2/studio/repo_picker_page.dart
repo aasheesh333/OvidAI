@@ -106,6 +106,7 @@ class V2RepoPickerPage extends StatefulWidget {
     required this.data,
     this.onConfirm,
     this.onLoadBranches,
+    this.onLoadMore,
     this.onConnectGithub,
     this.onOpenToken,
     this.onSearch,
@@ -123,6 +124,12 @@ class V2RepoPickerPage extends StatefulWidget {
   /// Loads the real branch list for a repository when the data snapshot did
   /// not carry one. Returning an empty list is treated as "no branches".
   final Future<List<V2RepoBranch>> Function(V2Repo repo)? onLoadBranches;
+
+  /// Fetches the next repository page. The gateway pages with `hasMore`, so
+  /// the list is extended when the user reaches the end rather than fetching
+  /// an unbounded list up front. Null means the list is already complete.
+  final Future<void> Function()? onLoadMore;
+
   final VoidCallback? onConnectGithub;
   final VoidCallback? onOpenToken;
   final ValueChanged<String>? onSearch;
@@ -134,6 +141,7 @@ class V2RepoPickerPage extends StatefulWidget {
 
 class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
   final TextEditingController _search = TextEditingController();
+  final ScrollController _scroll = ScrollController();
   String _query = '';
   V2Repo? _selectedRepo;
   String? _selectedBranch;
@@ -142,9 +150,30 @@ class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
   String? _branchError;
 
   @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_maybeLoadMore);
+  }
+
+  @override
   void dispose() {
+    _scroll.removeListener(_maybeLoadMore);
+    _scroll.dispose();
     _search.dispose();
     super.dispose();
+  }
+
+  /// Asks for the next page when the repository list nears its end. The host
+  /// owns the "already loading" guard, so a burst of scroll events is safe.
+  void _maybeLoadMore() {
+    final loadMore = widget.onLoadMore;
+    if (loadMore == null || _selectedRepo != null) return;
+    if (!_scroll.hasClients) return;
+    final position = _scroll.position;
+    if (!position.hasContentDimensions) return;
+    if (position.pixels >= position.maxScrollExtent - 240) {
+      unawaited(loadMore());
+    }
   }
 
   void _onSearch(String value) {
@@ -303,6 +332,7 @@ class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
     if (!data.githubConnected) return _buildDisconnected(context);
     final repos = _visibleRepos;
     return CustomScrollView(
+      controller: _scroll,
       slivers: [
         SliverPadding(
           padding: const EdgeInsets.fromLTRB(

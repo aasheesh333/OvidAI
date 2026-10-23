@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:ovid_ai/core/chat_integration_ports.dart';
 import 'package:ovid_ai/core/cloud/studio_files.dart';
+import 'package:ovid_ai/core/cloud/studio_git_api.dart';
 import 'package:ovid_ai/core/cloud/studio_remote_client.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
@@ -61,6 +62,39 @@ class _FakeStudioPort extends StudioBindingPort {
     syncCalls++;
     final error = syncError;
     if (error != null) throw error;
+  }
+}
+
+/// A gateway-backed port whose deployment has no git transport yet: the
+/// connection and the repository page answer, the clone answers the gateway's
+/// 503 as the user sees it.
+class _RefusingStudioPort extends _FakeStudioPort {
+  @override
+  Future<StudioGithubConnection?> loadConnection() async =>
+      const StudioGithubConnection(connected: true, login: 'octocat');
+
+  @override
+  Future<StudioPage<StudioRepo>?> reposPage({
+    int page = 1,
+    int perPage = 30,
+  }) async => const StudioPage<StudioRepo>(
+    items: <StudioRepo>[
+      StudioRepo(id: 1, owner: 'acme', name: 'app', fullName: 'acme/app'),
+    ],
+    page: 1,
+    perPage: 30,
+    hasMore: false,
+  );
+
+  @override
+  Future<void> bind(
+    String sessionId, {
+    required String repo,
+    required String branch,
+  }) async {
+    throw const StudioAccessException(
+      'Git operations are not available on this deployment yet.',
+    );
   }
 }
 
@@ -413,6 +447,57 @@ void main() {
       expect(session.branch, 'main');
       expect(port.bindingFor(session.id)?.ready, isTrue);
       expect(find.byKey(const Key('studio-file-tree')), findsOneWidget);
+    });
+
+    testWidgets('a refused clone says so and opens no workspace', (
+      tester,
+    ) async {
+      // The gateway answers 503 `studio_git_unavailable` until the worker
+      // transport lands. The picker must relay that message and leave the
+      // session unbound — never show a workspace for a clone that did not
+      // happen.
+      final refusing = _RefusingStudioPort();
+      StudioBindingPort.installForTest(refusing);
+      app.setRepoForSession('studio-session', '');
+      app.setBranchForSession('studio-session', '');
+      final session = app.sessions
+          .where((s) => s.id == 'studio-session')
+          .single;
+      session.repo = null;
+      session.branch = null;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: OTheme.light(),
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => Center(
+                child: TextButton(
+                  onPressed: () => V2WorkRoutes.openRepoPicker(context),
+                  child: const Text('open picker'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open picker'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('acme/app'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('repo-picker-branch-main')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('repo-picker-primary')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Git operations are not available on this deployment yet.'),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('studio-file-tree')), findsNothing);
+      expect(session.repo, isNull);
+      expect(refusing.bindingFor('studio-session'), isNull);
     });
 
     testWidgets('the live preview route has no unwired controls', (

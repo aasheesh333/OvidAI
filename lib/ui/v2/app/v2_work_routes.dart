@@ -5,14 +5,15 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
 import '../../../core/cloud/artifact_vault.dart';
+import '../../../core/cloud/cloud_rest.dart';
+import '../../../core/cloud/cloud_session_store.dart';
+import '../../../core/cloud/studio_git_api.dart';
 import '../../../core/connectors/connector_api.dart';
 import '../../../core/chat_integration_ports.dart';
 import '../../../core/firebase_service.dart';
-import '../../../core/github_service.dart';
 import '../../../core/revenuecat_billing.dart';
 import '../../../core/state.dart';
 import '../../../core/session_artifacts.dart';
-import '../../github_login_sheet.dart';
 import '../browser/browser_live_page.dart';
 import '../connectors/connector_catalog_loader.dart';
 import '../connectors/connectors_page.dart';
@@ -21,7 +22,6 @@ import '../library/artifacts_page.dart';
 import '../schedules/schedules_flow.dart';
 import '../studio/repo_picker_page.dart';
 import 'v2_settings_actions.dart';
-import 'v2_settings_routes.dart';
 import 'v2_studio_routes.dart';
 
 /// Routes for the work surfaces (Studio, Browser, Artifacts, Schedules,
@@ -161,9 +161,13 @@ class V2WorkRoutes {
   /// built-in design catalogue and enabling one only set a local flag. The
   /// server is now the source of truth: what it does not serve, the screen
   /// does not offer.
+  ///
+  /// [actions] is nullable because the Studio picker opens this screen from
+  /// the workspace's empty state, which has no Settings surface to lend. The
+  /// catalogue read does not need it.
   static Future<void> openConnectors(
     BuildContext context,
-    V2SettingsActions actions,
+    V2SettingsActions? actions,
   ) async {
     V2ConnectorsData data;
     try {
@@ -417,114 +421,161 @@ class _ArtifactDetailHostState extends State<_ArtifactDetailHost> {
   }
 }
 
-/// The Studio binding backed by the signed-in GitHub account.
+/// The Studio binding backed by the GATEWAY's Studio routes.
 ///
-/// Repositories and branches come from the GitHub REST API with the token the
-/// device flow (or a PAT in Credentials) put in [GitHubService]; the chosen
-/// pair is written to the session, which is what the agent tools read. Nothing
-/// is cached or invented: signed out means `ready == false`.
+/// The gateway owns the GitHub token (the curated `github` MCP row) and the
+/// session→repo binding (`studio_repos`); it answers connection state, repo
+/// pages and branch pages directly from GitHub, and forwards clone / branch
+/// switch / sync to the worker's git service. This port is the thin client:
+/// no GitHub token, no direct api.github.com call.
+///
+/// The three git mutations answer `503 studio_git_unavailable` until the
+/// worker transport is wired. [bind] and [syncLatest] surface that refusal as
+/// a [StudioAccessException] carrying the gateway's own message — they never
+/// report a clone or sync that did not happen.
 class GitHubStudioBindingPort extends StudioBindingPort {
-  GitHubStudioBindingPort() {
-    GitHubService.I.addListener(notifyListeners);
-  }
+  GitHubStudioBindingPort({StudioGitApi? api}) : _api = api ?? StudioGitApi();
 
-  static const _api = 'https://api.github.com';
+  final StudioGitApi _api;
+
+  /// Cached `GET /studio/github` answer; [ready] is false until it is loaded
+  /// and says the user's GitHub integration is connected.
+  bool _connected = false;
+  String? _login;
 
   @override
-  bool get ready => GitHubService.I.isLoggedIn;
+  bool get ready => _connected;
+
+  @override
+  String? get accountLabel => _login;
 
   @override
   StudioBinding? bindingFor(String sessionId) {
-    final app = AppState.I;
-    final repo = app.getRepoForSession(sessionId);
-    if (repo == null || repo.trim().isEmpty) return null;
-    return StudioBinding(
-      repo: repo.trim(),
-      branch: app.getBranchForSession(sessionId),
-    );
+    // Session-scoped on purpose: the Studio send gate asks "has THIS chat
+    // selected a repo", and [AppState.getRepoForSession]'s last-selection
+    // fallback would let a brand-new chat inherit another chat's binding.
+    final session = AppState.I.sessionById(sessionId);
+    final repo = session?.repo?.trim() ?? '';
+    if (repo.isEmpty) return null;
+    return StudioBinding(repo: repo, branch: session?.branch?.trim() ?? '');
+  }
+
+  @override
+  Future<StudioGithubConnection?> loadConnection() async {
+    try {
+      final connection = await _api.github();
+      _connected = connection.connected;
+      _login = connection.login;
+      notifyListeners();
+      return connection;
+    } on CloudApiException catch (error) {
+      // Unreachable or misconfigured: no control may claim a connection.
+      _connected = false;
+      _login = null;
+      notifyListeners();
+      throw StudioAccessException(error.message);
+    }
   }
 
   @override
   Future<List<String>> listRepos() async {
-    final body = await _get('/user/repos?per_page=100&sort=updated');
-    if (body is! List) return const [];
-    return [
-      for (final row in body)
-        if (row is Map && row['full_name'] is String)
-          row['full_name'] as String,
-    ];
+    final page = await _api.repos(perPage: 100);
+    return [for (final repo in page.items) repo.fullName];
   }
 
   @override
+  Future<StudioPage<StudioRepo>?> reposPage({int page = 1, int perPage = 30}) =>
+      _api.repos(page: page, perPage: perPage);
+
+  @override
   Future<List<String>> listBranches(String repo) async {
-    final body = await _get('/repos/$repo/branches?per_page=100');
-    if (body is! List) return const [];
-    return [
-      for (final row in body)
-        if (row is Map && row['name'] is String) row['name'] as String,
-    ];
+    final parts = repo.split('/');
+    if (parts.length != 2 || parts[0].isEmpty || parts[1].isEmpty) {
+      throw const StudioAccessException(
+        'That repository address is not valid.',
+      );
+    }
+    final page = await _api.branches(parts[0], parts[1], perPage: 100);
+    return [for (final branch in page.items) branch.name];
   }
 
+  /// Clones the repository into the session workspace through the gateway.
+  ///
+  /// The local binding is written only from the clone result, so a refused or
+  /// failed clone can never open the Studio send gate.
   @override
   Future<void> bind(
     String sessionId, {
     required String repo,
     required String branch,
   }) async {
-    AppState.I
-      ..setRepoForSession(sessionId, repo)
-      ..setBranchForSession(sessionId, branch);
-    notifyListeners();
+    try {
+      // The clone route is session-scoped: the chat must exist on the server
+      // before there is a session to clone into. A chat that has never been
+      // sent is created here, exactly like its first message would.
+      final serverId = await CloudSessionStore.I.ensureServerSession(sessionId);
+      final result = await _api.clone(serverId, repo: repo, branch: branch);
+      AppState.I
+        ..setRepoForSession(sessionId, result.repo)
+        ..setBranchForSession(sessionId, result.branch);
+      notifyListeners();
+    } on StudioGitUnavailableException catch (error) {
+      throw StudioAccessException(error.message);
+    } on CloudApiException catch (error) {
+      throw StudioAccessException(error.message);
+    }
   }
 
-  /// Confirms the binding still resolves on GitHub before the next task.
+  @override
+  Future<void> switchBranch(String sessionId, {required String branch}) async {
+    try {
+      final result = await _api.switchBranch(sessionId, branch: branch);
+      AppState.I.setBranchForSession(sessionId, result.branch);
+      notifyListeners();
+    } on StudioGitUnavailableException catch (error) {
+      throw StudioAccessException(error.message);
+    } on CloudApiException catch (error) {
+      throw StudioAccessException(error.message);
+    }
+  }
+
+  /// Fetches and fast-forwards through the gateway.
+  ///
+  /// A `needs_merge` answer is a refusal to touch the tree (dirty worktree or
+  /// divergence), so it is reported as such instead of "sync finished".
   @override
   Future<void> syncLatest(String sessionId) async {
-    final binding = bindingFor(sessionId);
-    if (binding == null) return;
-    await _get('/repos/${binding.repo}');
+    try {
+      final result = await _api.sync(sessionId);
+      final binding = bindingFor(sessionId);
+      if (binding != null && binding.branch != result.branch) {
+        AppState.I.setBranchForSession(sessionId, result.branch);
+        notifyListeners();
+      }
+      if (result.needsMerge) throw StudioAccessException(result.message);
+    } on StudioGitUnavailableException catch (error) {
+      throw StudioAccessException(error.message);
+    } on CloudApiException catch (error) {
+      throw StudioAccessException(error.message);
+    }
   }
 
   @override
-  void dispose() {
-    GitHubService.I.removeListener(notifyListeners);
-    super.dispose();
-  }
-
-  Future<Object?> _get(String path) async {
-    final token = GitHubService.I.token;
-    if (token == null || token.isEmpty) {
-      throw const StudioAccessException('Sign in to GitHub to use Studio.');
-    }
-    final client = http.Client();
+  Future<StudioSessionGit?> loadSessionGit(String sessionId) async {
     try {
-      final response = await client
-          .get(
-            Uri.parse('$_api$path'),
-            headers: {
-              'Authorization': 'Bearer $token',
-              'Accept': 'application/vnd.github+json',
-            },
-          )
-          .timeout(const Duration(seconds: 20));
-      if (response.statusCode == 401) {
-        throw const StudioAccessException(
-          'GitHub sign-in expired. Connect GitHub again.',
-        );
+      final state = await _api.sessionGit(sessionId);
+      final binding = state?.binding;
+      if (binding != null) {
+        AppState.I
+          ..setRepoForSession(sessionId, binding.repo)
+          ..setBranchForSession(sessionId, binding.branch);
+        notifyListeners();
       }
-      if (response.statusCode == 403 || response.statusCode == 429) {
-        throw const StudioAccessException(
-          'GitHub rate-limited this request. Try again in a minute.',
-        );
-      }
-      if (response.statusCode != 200) {
-        throw const StudioAccessException(
-          'GitHub could not answer that request. Try again.',
-        );
-      }
-      return jsonDecode(response.body);
-    } finally {
-      client.close();
+      return state;
+    } on CloudApiException {
+      // A read that could not answer is not a binding; the caller keeps
+      // whatever it already knew and draws no capability claim.
+      return null;
     }
   }
 }
@@ -537,17 +588,19 @@ class StudioAccessException implements Exception {
   String toString() => message;
 }
 
-/// Loads the real repository list, the GitHub device flow and branch discovery
-/// for the Studio picker.
+/// Loads the gateway-backed connection state, repository pages and branch
+/// discovery for the Studio picker.
 ///
-/// Repository and branch data come from the installed [StudioBindingPort];
-/// without one the page says so instead of showing an empty "connected"
-/// screen. GitHub sign-in is the real RFC 8628 device flow.
+/// "Connected" is the GATEWAY's answer (`GET /studio/github`), which resolves
+/// the curated `github` connector row — the same token the worker's git
+/// service uses. A device-side GitHub login is not consulted: it would let the
+/// screen claim a connection the agent cannot use.
 class _RepoPickerHost extends StatefulWidget {
   const _RepoPickerHost({this.actions});
 
   /// Null when the picker was opened from the workspace's empty state, which
-  /// has no Settings actions to lend. The token shortcut is then hidden.
+  /// has no Settings actions to lend. "Connect GitHub" then has no route and
+  /// is not drawn.
   final V2SettingsActions? actions;
 
   @override
@@ -555,10 +608,19 @@ class _RepoPickerHost extends StatefulWidget {
 }
 
 class _RepoPickerHostState extends State<_RepoPickerHost> {
-  V2RepoPickerData _data = const V2RepoPickerData(
-    status: V2RepoPickerStatus.loading,
-  );
-  bool _portReady = false;
+  static const int _perPage = 30;
+
+  bool _loading = true;
+  bool _connected = false;
+  String? _login;
+  String? _error;
+  final List<V2Repo> _repos = <V2Repo>[];
+  int _page = 1;
+  bool _hasMore = false;
+  bool _loadingMore = false;
+
+  /// Guards a reload that overtakes an older in-flight one.
+  int _request = 0;
 
   @override
   void initState() {
@@ -568,49 +630,116 @@ class _RepoPickerHostState extends State<_RepoPickerHost> {
 
   Future<void> _load() async {
     final port = StudioBindingPort.instance;
-    final ready = port?.ready ?? false;
-    final repos = <V2Repo>[];
+    final request = ++_request;
+    if (port == null) {
+      if (mounted) setState(() => _loading = false);
+      return;
+    }
+    StudioGithubConnection? connection;
     String? error;
-    if (port != null && port.ready) {
+    try {
+      connection = await port.loadConnection();
+    } catch (e) {
+      error = e is StudioAccessException
+          ? e.message
+          : 'We could not reach Ovid Cloud. Check your connection and retry.';
+    }
+    if (!mounted || request != _request) return;
+    // A port with no gateway surface answers null: fall back to its own
+    // readiness and its own list rather than claiming "disconnected".
+    final connected = connection == null ? port.ready : connection.connected;
+    final repos = <V2Repo>[];
+    var page = 1;
+    var hasMore = false;
+    if (error == null && connected) {
       try {
-        for (final fullName in await port.listRepos()) {
-          final parts = fullName.split('/');
-          repos.add(
-            V2Repo(
-              id: fullName,
-              name: parts.length > 1 ? parts.last : fullName,
-              owner: parts.length > 1 ? parts.first : '',
-            ),
-          );
+        final first = await port.reposPage(page: 1, perPage: _perPage);
+        if (first != null) {
+          repos.addAll(first.items.map(_repoItem));
+          page = first.page;
+          hasMore = first.hasMore;
+        } else {
+          // A port without paging still answers its first list.
+          for (final fullName in await port.listRepos()) {
+            repos.add(_repoFromName(fullName));
+          }
         }
       } catch (e) {
         error = e is StudioAccessException
             ? e.message
             : 'We could not load your repositories. Check your connection and '
-                  'try again.';
+                  'retry.';
       }
     }
-    if (!mounted) return;
+    if (!mounted || request != _request) return;
     setState(() {
-      _portReady = ready;
-      _data = V2RepoPickerData(
-        status: error != null
-            ? V2RepoPickerStatus.error
-            : repos.isEmpty
-            ? V2RepoPickerStatus.empty
-            : V2RepoPickerStatus.content,
-        repos: repos,
-        githubConnected: ready,
-        accountLabel: GitHubService.I.login == null
-            ? null
-            : '@${GitHubService.I.login}',
-        errorMessage: error,
-      );
+      _loading = false;
+      _connected = connected;
+      _login = connection?.login ?? port.accountLabel;
+      _error = error;
+      _repos
+        ..clear()
+        ..addAll(repos);
+      _page = page;
+      _hasMore = hasMore;
     });
   }
 
+  /// Appends the next gateway page. A failed page leaves the list untouched;
+  /// scrolling again is the retry.
+  Future<void> _loadMore() async {
+    if (_loadingMore || !_hasMore) return;
+    final port = StudioBindingPort.instance;
+    if (port == null) return;
+    final request = _request;
+    setState(() => _loadingMore = true);
+    try {
+      final next = await port.reposPage(page: _page + 1, perPage: _perPage);
+      if (next == null || !mounted || request != _request) return;
+      final known = {for (final repo in _repos) repo.id};
+      setState(() {
+        _repos.addAll([
+          for (final repo in next.items.map(_repoItem))
+            if (!known.contains(repo.id)) repo,
+        ]);
+        _page = next.page;
+        _hasMore = next.hasMore;
+      });
+    } catch (_) {
+      // The next scroll retries; nothing is claimed about this page.
+    } finally {
+      if (mounted) setState(() => _loadingMore = false);
+    }
+  }
+
+  static V2Repo _repoItem(StudioRepo repo) => V2Repo(
+    id: repo.fullName,
+    name: repo.name,
+    owner: repo.owner,
+    description: repo.description,
+    isPrivate: repo.isPrivate,
+    defaultBranch: repo.defaultBranch.isEmpty ? null : repo.defaultBranch,
+  );
+
+  static V2Repo _repoFromName(String fullName) {
+    final parts = fullName.split('/');
+    return V2Repo(
+      id: fullName,
+      name: parts.length > 1 ? parts.last : fullName,
+      owner: parts.length > 1 ? parts.first : '',
+    );
+  }
+
+  /// "Connect GitHub" opens the CONNECTORS screen.
+  ///
+  /// The gateway resolves the token from the curated `github` MCP row, so that
+  /// row is the only connection Studio can use. The device-side GitHub login
+  /// is not consulted here: it never reaches the worker's git service, and
+  /// offering it would be a control that appears to connect Studio and does
+  /// not.
   Future<void> _connectGithub() async {
-    showGithubLoginSheet(context, onConnected: () => unawaited(_load()));
+    await V2WorkRoutes.openConnectors(context, widget.actions);
+    if (mounted) unawaited(_load());
   }
 
   Future<void> _confirm(V2Repo repo, String branch) async {
@@ -623,23 +752,19 @@ class _RepoPickerHostState extends State<_RepoPickerHost> {
     }
     if (sessionId == null) return;
     try {
+      // The port clones through the gateway and writes the binding from the
+      // clone result. A 503 `studio_git_unavailable` arrives here as the
+      // gateway's own plain message — never as a completed clone.
       await port.bind(sessionId, repo: repo.id, branch: branch);
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Could not bind that repository. Try again.'),
-          ),
-        );
-      }
+    } catch (e) {
+      if (!mounted) return;
+      _showMessage(
+        e is StudioAccessException
+            ? e.message
+            : 'Could not open that repository. Try again.',
+      );
       return;
     }
-    // The chat's STUDIO send gate reads the session's repo/branch. A port is
-    // expected to write them, but the route records the user's confirmed
-    // choice too so the gate and the workspace can never disagree.
-    AppState.I
-      ..setRepoForSession(sessionId, repo.id)
-      ..setBranchForSession(sessionId, branch);
     if (!mounted) return;
     await V2StudioRoutes.openWorkspace(
       context,
@@ -649,11 +774,41 @@ class _RepoPickerHostState extends State<_RepoPickerHost> {
     );
   }
 
+  void _showMessage(String message) {
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
   Future<List<V2RepoBranch>> _loadBranches(V2Repo repo) async {
     final port = StudioBindingPort.instance;
     if (port == null || !port.ready) return const <V2RepoBranch>[];
     final names = await port.listBranches(repo.id);
-    return [for (final name in names) V2RepoBranch(name: name)];
+    final preferred = repo.preferredBranch;
+    return [
+      for (final name in names)
+        V2RepoBranch(
+          name: name,
+          isDefault: preferred != null && name == preferred,
+        ),
+    ];
+  }
+
+  V2RepoPickerData get _data {
+    final error = _error;
+    return V2RepoPickerData(
+      status: _loading
+          ? V2RepoPickerStatus.loading
+          : error != null
+          ? V2RepoPickerStatus.error
+          : _repos.isEmpty
+          ? V2RepoPickerStatus.empty
+          : V2RepoPickerStatus.content,
+      repos: _repos,
+      githubConnected: _connected,
+      accountLabel: _login == null ? null : '@$_login',
+      errorMessage: error,
+    );
   }
 
   @override
@@ -662,14 +817,9 @@ class _RepoPickerHostState extends State<_RepoPickerHost> {
       data: _data,
       onRetry: () => unawaited(_load()),
       onConnectGithub: () => unawaited(_connectGithub()),
-      // Token entry lives on the Credentials screen, where the real secure
-      // store and validation already exist.
-      onOpenToken: widget.actions == null
-          ? null
-          : () =>
-                V2SettingsRoutes.open(context, 'credentials', widget.actions!),
       onLoadBranches: _loadBranches,
-      onConfirm: _portReady
+      onLoadMore: _hasMore ? _loadMore : null,
+      onConfirm: _connected
           ? (repo, branch) => unawaited(_confirm(repo, branch))
           : null,
     );

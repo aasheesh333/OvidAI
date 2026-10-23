@@ -137,6 +137,36 @@ void main() {
     expect(find.byKey(const Key('studio-sync')), findsOneWidget);
   });
 
+  testWidgets('no git transport draws no sync control and no branch tap', (
+    tester,
+  ) async {
+    var syncs = 0;
+    var branchTaps = 0;
+    await tester.pumpWidget(
+      _app(
+        V2StudioWorkspacePage(
+          data: const V2StudioWorkspaceData(
+            repoName: 'acme/landing-page',
+            branch: 'main',
+            gitAvailable: false,
+          ),
+          onSync: () => syncs++,
+          onBranchTap: () => branchTaps++,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The branch is still named (it is a fact), but nothing suggests the
+    // deployment can act on it: no sync icon at all, and the chip is inert.
+    expect(find.byKey(const Key('studio-branch-chip')), findsOneWidget);
+    expect(find.byKey(const Key('studio-sync')), findsNothing);
+    await tester.tap(find.byKey(const Key('studio-branch-chip')));
+    await tester.pump();
+    expect(branchTaps, 0);
+    expect(syncs, 0);
+  });
+
   testWidgets('empty state picks a repository', (tester) async {
     var picked = 0;
     await tester.pumpWidget(
@@ -205,11 +235,7 @@ void main() {
   ) async {
     await tester.pumpWidget(
       _app(
-        V2StudioWorkspacePage(
-          data: _data,
-          onCommit: () {},
-          onPreview: () {},
-        ),
+        V2StudioWorkspacePage(data: _data, onCommit: () {}, onPreview: () {}),
       ),
     );
     await tester.pumpAndSettle();
@@ -314,9 +340,7 @@ void main() {
       await tester.pumpWidget(_app(const V2StudioWorkspacePage(data: _data)));
       await tester.pumpAndSettle();
 
-      final tree = tester.getSize(
-        find.byKey(const Key('studio-tree-column')),
-      );
+      final tree = tester.getSize(find.byKey(const Key('studio-tree-column')));
       expect(tree.width, entry.value, reason: '${entry.key} dp tree width');
 
       // The editor sits to the right of the fixed tree column; the code
@@ -542,7 +566,9 @@ void main() {
     // repository builds only the visible rows.
     expect(find.byKey(const Key('v2-file-tree-scroll')), findsOneWidget);
     expect(
-      tester.widget<V2FileTree>(find.byKey(const Key('studio-file-tree'))).scrollable,
+      tester
+          .widget<V2FileTree>(find.byKey(const Key('studio-file-tree')))
+          .scrollable,
       isTrue,
     );
   });

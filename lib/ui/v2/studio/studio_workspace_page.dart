@@ -57,6 +57,7 @@ class V2StudioWorkspaceData {
     this.openFilePath = '',
     this.codeLines = const <V2CodeLine>[],
     this.saved = true,
+    this.gitAvailable = true,
     this.errorMessage,
   });
 
@@ -72,6 +73,11 @@ class V2StudioWorkspaceData {
   final String openFilePath;
   final List<V2CodeLine> codeLines;
   final bool saved;
+
+  /// False when the gateway reports `studio_git_unavailable`: clone, branch
+  /// switch and sync cannot run. The header then draws no sync control and
+  /// the branch chip is not tappable — nothing that would pretend to work.
+  final bool gitAvailable;
   final String? errorMessage;
 }
 
@@ -216,6 +222,7 @@ class _V2StudioWorkspacePageState extends State<V2StudioWorkspacePage> {
               _HeaderActions(
                 branch: data.branch,
                 syncCount: data.syncCount,
+                gitAvailable: data.gitAvailable,
                 onBranchTap: widget.onBranchTap,
                 onSync: widget.onSync,
                 onViewRuns: widget.onViewRuns,
@@ -332,6 +339,7 @@ class _HeaderActions extends StatelessWidget {
   const _HeaderActions({
     required this.branch,
     required this.syncCount,
+    required this.gitAvailable,
     this.onBranchTap,
     this.onSync,
     this.onViewRuns,
@@ -339,6 +347,10 @@ class _HeaderActions extends StatelessWidget {
 
   final String branch;
   final int syncCount;
+
+  /// False when the deployment has no git transport: the sync control is not
+  /// drawn and the branch chip is informational only.
+  final bool gitAvailable;
   final VoidCallback? onBranchTap;
   final VoidCallback? onSync;
   final VoidCallback? onViewRuns;
@@ -352,7 +364,7 @@ class _HeaderActions extends StatelessWidget {
           constraints: const BoxConstraints(maxWidth: 148),
           child: OPressable(
             key: const Key('studio-branch-chip'),
-            onTap: onBranchTap,
+            onTap: gitAvailable ? onBranchTap : null,
             semanticLabel: 'Branch $branch',
             child: ExcludeSemantics(
               child: SizedBox(
@@ -378,22 +390,25 @@ class _HeaderActions extends StatelessWidget {
             tooltip: 'Run log',
             onPressed: onViewRuns,
           ),
-        OIconButton(
-          key: const Key('studio-sync'),
-          icon: Icons.sync_rounded,
-          semanticLabel: 'Sync changes',
-          tooltip: 'Sync',
-          onPressed: onSync,
-          badge: syncCount > 0
-              ? Text(
-                  '$syncCount',
-                  style: OType.caption.copyWith(
-                    color: OColors.of(context).onAccent,
-                    fontWeight: FontWeight.w600,
-                  ),
-                )
-              : null,
-        ),
+        // No git transport means no sync control at all: a disabled icon
+        // would still suggest the action exists on this deployment.
+        if (gitAvailable)
+          OIconButton(
+            key: const Key('studio-sync'),
+            icon: Icons.sync_rounded,
+            semanticLabel: 'Sync changes',
+            tooltip: 'Sync',
+            onPressed: onSync,
+            badge: syncCount > 0
+                ? Text(
+                    '$syncCount',
+                    style: OType.caption.copyWith(
+                      color: OColors.of(context).onAccent,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  )
+                : null,
+          ),
       ],
     );
   }

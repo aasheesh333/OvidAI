@@ -25,6 +25,8 @@ library;
 
 import 'package:flutter/foundation.dart';
 
+import 'cloud/studio_git_api.dart';
+
 /// One project row shown by the composer `@` menu and the ⋮ "Add to Project"
 /// sheet.
 @immutable
@@ -176,4 +178,39 @@ abstract class StudioBindingPort extends ChangeNotifier {
 
   /// True while [syncLatest] runs for [sessionId].
   bool syncingFor(String sessionId) => false;
+
+  // -------------------------------------------------------------------------
+  // Gateway-backed Studio surface (optional)
+  //
+  // The defaults below keep a port that predates the gateway honest: it can
+  // answer nothing extra, and callers fall back to [ready] + the methods
+  // above. The shipping implementation overrides every one of them.
+  // -------------------------------------------------------------------------
+
+  /// `GET /studio/github` — the gateway's own connection state. Returns null
+  /// when this port has no gateway. Implementations cache the answer into
+  /// [ready].
+  Future<StudioGithubConnection?> loadConnection() async => null;
+
+  /// The connected account's login, when known.
+  String? get accountLabel => null;
+
+  /// One page of `GET /studio/repos`, or null when this port cannot page.
+  Future<StudioPage<StudioRepo>?> reposPage({
+    int page = 1,
+    int perPage = 30,
+  }) async => null;
+
+  /// `GET /studio/sessions/:id/git` — the session's binding and whether the
+  /// deployment can run git at all. Null when this port has no gateway or the
+  /// chat has no server session yet.
+  Future<StudioSessionGit?> loadSessionGit(String sessionId) async => null;
+
+  /// Switches [sessionId]'s branch through the gateway. The default falls
+  /// back to [bind] so a port that only knows how to bind still works.
+  Future<void> switchBranch(String sessionId, {required String branch}) async {
+    final current = bindingFor(sessionId);
+    if (current == null) return;
+    await bind(sessionId, repo: current.repo, branch: branch);
+  }
 }
