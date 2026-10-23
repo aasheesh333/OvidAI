@@ -24,10 +24,16 @@ describe.skipIf(!TEST_DATABASE_URL)("migrate-cli against real postgres", () => {
   // keeps the CLI test isolated from repos.test.ts (which drops/re-migrates
   // the shared TEST_DATABASE_URL schema concurrently).
   const scratchDb = `migrate_cli_test_${Date.now()}_${process.pid}`;
-  const scratchUrl = TEST_DATABASE_URL!.replace(/\/[^/]*$/, `/${scratchDb}`);
+  /** Built in beforeAll — see the comment there. */
+  let scratchUrl = "";
   let admin: postgres.Sql | undefined;
 
   beforeAll(async () => {
+    // Resolved here, not at describe scope: vitest runs a skipped describe's
+    // callback to collect its tests, so dereferencing TEST_DATABASE_URL there
+    // throws on every machine without a test database — the package then
+    // fails instead of skipping.
+    scratchUrl = TEST_DATABASE_URL!.replace(/\/[^/]*$/, `/${scratchDb}`);
     admin = postgres(TEST_DATABASE_URL!, { max: 1, onnotice: () => {} });
     await admin.unsafe(`CREATE DATABASE ${scratchDb}`);
   }, 30_000);

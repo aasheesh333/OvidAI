@@ -109,11 +109,15 @@ interface PlanRow {
 
 describe.skipIf(!TEST_DATABASE_URL)("0025 plan table migration against real postgres", () => {
   const scratchDb = `plan_align_test_${Date.now()}_${process.pid}`;
-  const scratchUrl = TEST_DATABASE_URL!.replace(/\/[^/]*$/, `/${scratchDb}`);
   let admin: postgres.Sql | undefined;
   let sql: postgres.Sql;
 
   beforeAll(async () => {
+    // Resolved HERE, not at describe scope: vitest still runs a skipped
+    // describe's callback to collect its tests, so dereferencing
+    // TEST_DATABASE_URL there throws on every machine without a test
+    // database — turning "skip" into "the whole package fails".
+    const scratchUrl = TEST_DATABASE_URL!.replace(/\/[^/]*$/, `/${scratchDb}`);
     admin = postgres(TEST_DATABASE_URL!, { max: 1, onnotice: () => {} });
     await admin.unsafe(`CREATE DATABASE ${scratchDb}`);
     // Every migration up to and including 0025. On an empty plans table 0025
