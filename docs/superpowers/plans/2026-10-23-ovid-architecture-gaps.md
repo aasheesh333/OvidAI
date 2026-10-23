@@ -258,3 +258,71 @@ it("a file written in session A is not visible in session B", async () => {
 **Deferred deliberately:** hibernation, regional gateways, prompt-injection delimiters, SSRF allowlist for MCP URLs, artifact CDN TTL — these are scale/security hardening that need their own design pass, not a gap fix.
 
 **Ordering:** T1 before T2 (Studio root depends on the session workspace seam). T3 and T4 are independent of each other and of T1. T5 and T6 are independent server changes. T7 is client-only. T8 is Python-only. T9 is last because it touches copy that T3 changes.
+
+---
+
+## Task 10: The 50-subagent cap is CONCURRENT, not lifetime
+
+**Spec (owner, correcting the earlier reading):** "50 se jyada subagents dispatch nahi kar sakta ek sath mtlb ek sath ek session me 50 concurrent subagent active nahi ho sakte jab purane subagent done to new dispatch"
+
+**Why:** `subagents.ts:29-32` pins the cap as a LIFETIME TOTAL and never releases a slot (`reserveSlot` only increments; `unreserveSlot` runs solely when no child row was created). A chat that has ever run 50 subagents can never delegate again.
+
+**Files:**
+- Modify: `cloud/packages/agent-core/src/subagents.ts`
+- Test: `cloud/packages/agent-core/src/subagents.concurrent.test.ts` (new)
+
+**Interfaces:**
+- Produces: `SubagentSupervisor.activeCount(sessionId: string): number`
+- Changes: `reserveSlot` counts ACTIVE children; `releaseSlot` runs on every settle path where a child was created
+- Removes: the lifetime `slotCounts` cache and `countChildrenUnderRoot` as the cap source (the store method stays for lineage reads)
+
+**Design:** a root session is processed by exactly one worker at a time, and children run in-process inside the parent's dispatch call, so the supervisor's own active set is the authoritative concurrency count. No durable read is needed to enforce it, and a restart loses only dead children.
+
+- [ ] **Step 1: Failing test** — dispatch 50 children that stay running; the 51st is refused with `subagent_limit_exceeded`; settle one; the next dispatch is accepted.
+- [ ] **Step 2: Confirm it fails** (today the 51st is refused but the settle does not free anything).
+- [ ] **Step 3: Implement** active counting + release.
+- [ ] **Step 4: Pass + commit** — `fix(subagents): cap concurrent children at 50, not the lifetime total`
+
+---
+
+## Task 11: `dispatch_agents` — real parallel delegation
+
+**Spec (owner):** "main agent 85 percent kaam subagents se karayega"
+
+**Why:** the tool round is a `for` loop (`loop.ts:1199`), so even 50 `dispatch_agent` calls in one turn run one at a time. With an 8-hour child budget, sequential delegation makes a 50-child plan take days.
+
+**Files:**
+- Modify: `cloud/packages/agent-core/src/tools/subagentTools.ts`
+- Test: `cloud/packages/agent-core/src/tools/subagentBatch.test.ts` (new)
+
+**Interfaces:**
+- Produces: tool `dispatch_agents` with `{ tasks: Array<{prompt, tools?, disallowedTools?, agentType?}> }`, returns a JSON array of the same five-key summaries, in task order
+- Consumes: `SubagentSupervisor.dispatch` (Task 10's cap applies)
+
+**Design:** additive, not a loop rewrite. The batch tool is one tool call, so the loop's sequential round does not serialise the children. Failures are per-task: a refused or failed child returns its own error entry instead of failing the batch.
+
+- [ ] **Step 1: Failing test** — three tasks whose children finish out of order all return, in task order, and they ran concurrently (wall clock < sum).
+- [ ] **Step 2: Confirm it fails** (`dispatch_agents` does not exist).
+- [ ] **Step 3: Implement** `Promise.all` over the tasks, bounded by the supervisor's own cap.
+- [ ] **Step 4: Pass + commit** — `feat(subagents): dispatch many children in parallel`
+
+---
+
+## Task 12: Browser files are shared per user, like Studio
+
+**Spec (owner):** "har user ka 100 percent workspace isolated ho and usme har session 100 percent isolated ho bass studio screen and browser screen shared ho"
+
+**Why:** `engine.ts:163` gives the browser a PER-SESSION directory (`{uid}/sessions/{id}`), so a download in one chat is invisible in another, and the browser surface resets per chat.
+
+**Files:**
+- Modify: `cloud/packages/browser/src/engine.ts:152-164`
+- Modify: `cloud/apps/worker/src/main.ts:737,751`
+- Test: `cloud/packages/browser/src/workspaceScope.test.ts` (new)
+
+**Interfaces:**
+- Produces: `workspacePathFor(root, userId)` → `{root}/{userId}/browser` (no session segment)
+
+- [ ] **Step 1: Failing test** — two sessions of one user resolve to the same browser directory; two users never do.
+- [ ] **Step 2: Confirm it fails.**
+- [ ] **Step 3: Implement** the shared path + the worker wiring.
+- [ ] **Step 4: Pass + commit** — `fix(browser): one shared browser workspace per user`
