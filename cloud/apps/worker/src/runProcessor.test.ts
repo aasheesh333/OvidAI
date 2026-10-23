@@ -2034,6 +2034,35 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(await readMirror(seeded.sessionId)).toEqual(evts);
     });
 
+    it("materializes session memory at the spec path before the first turn", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakePort({ exitCode: 0, stdout: "hi\n", stderr: "" });
+      const sse = await startTurnSse([textTurn("done")]);
+
+      // The durable copy the private store holds for this chat.
+      const memory = createPrivateMemoryStore(db);
+      await memory.save(
+        seeded.uid,
+        { sessionId: seeded.sessionId, shared: false },
+        "MEMORY.md",
+        "# Session\n- user prefers TypeScript",
+      );
+
+      const processor = createFullAgentRunProcessor(makeFullDeps(sse.url, sbx.port));
+      try {
+        await processor(jobOf(seeded));
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+
+      const written = sbx.writes.find(
+        (w) => w.path === "/workspace/.ovid/session_memory.md",
+      );
+      expect(written).toBeDefined();
+      expect(written!.content).toContain("user prefers TypeScript");
+    });
+
     it("full processor: every model call's usage lands in run_usage (Wave 3 ledger)", async () => {
       const seeded = await seedRun();
       const sbx = makeFakePort({ exitCode: 0, stdout: "hi\n", stderr: "" });

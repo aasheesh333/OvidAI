@@ -8,6 +8,41 @@ export const MEMORY_LIMITS = { maxFileBytes: 32 * 1024, maxFiles: 32, maxContext
 /** Legacy location only: preserved, not imported/read by production memory tools. */
 export const MEMORY_DIR = ".ovid/memory";
 export const MEMORY_ENTRYPOINT = "MEMORY.md";
+
+/**
+ * The spec's session-memory path (SI spec §2.B.1): the file the agent's own
+ * file tools can open inside the sandbox. The private store stays the durable
+ * copy; this path is the materialized view the spec names.
+ */
+export const SESSION_MEMORY_PATH = "/workspace/.ovid/session_memory.md";
+
+/**
+ * Write the stored session entrypoint to [SESSION_MEMORY_PATH].
+ *
+ * Called at run start (so the file exists before the first turn) and after a
+ * save. Best-effort by design: the private store is the record, and a sandbox
+ * write failure must never fail a run or a save.
+ */
+export async function mirrorSessionMemory(deps: {
+  store: PrivateMemoryStore;
+  userId: string;
+  sessionId: string;
+  write(path: string, content: string): Promise<void>;
+  shareSessionMemory?: boolean;
+}): Promise<void> {
+  try {
+    const doc = await deps.store.read(
+      deps.userId,
+      { sessionId: deps.sessionId, shared: deps.shareSessionMemory === true },
+      MEMORY_ENTRYPOINT,
+    );
+    if (doc === null || doc.content.trim() === "") return;
+    await deps.write(SESSION_MEMORY_PATH, doc.content);
+  } catch {
+    // A missing sandbox or an unreadable store leaves no file; the prompt
+    // still carries the memory context.
+  }
+}
 export class MemoryFormatError extends Error {
   constructor(message: string) { super(message); this.name = "MemoryFormatError"; }
 }
@@ -35,6 +70,11 @@ export function createMemoryTools(deps: {
   shareSessionMemory?: boolean;
   /** Owner-checked sessions explicitly tagged for this run only, read-only. */
   referencedSessionIds?: readonly string[];
+  /**
+   * Materializes the session entrypoint at [SESSION_MEMORY_PATH] after a save,
+   * so the spec's file stays in step with the durable copy. Best-effort.
+   */
+  mirrorEntrypoint?: (ctx: ToolContext, content: string) => Promise<void>;
 }): Tool[] {
   const { store } = deps;
   const referenced = new Set(deps.referencedSessionIds ?? []);
@@ -90,6 +130,18 @@ export function createMemoryTools(deps: {
         const before = old?.revision ?? memoryRevision("");
         if (expected !== undefined && expected !== before) return { content: `Memory conflict: expected revision ${expected}, current revision ${before}. Reload before saving.`, isError: true };
         const saved = await store.save(ctx.userId, ns, name, content, expected);
+        // Spec §2.B.1: the entrypoint is also a file at the documented path.
+        if (name === MEMORY_ENTRYPOINT && ns.sessionId === ctx.sessionId) {
+          const mirror = deps.mirrorEntrypoint;
+          if (mirror !== undefined) {
+            try {
+              await mirror(ctx, content);
+            } catch {
+              // The durable save stands; a sandbox write failure is not a
+              // failed save.
+            }
+          }
+        }
         return { content: JSON.stringify({ status: "saved", name, revision: saved.revision }) };
       }),
     },

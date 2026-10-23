@@ -47,6 +47,8 @@ import {
   createGuardedEgressFetch,
   createHookEngine,
   createMemoryTools,
+  mirrorSessionMemory,
+  SESSION_MEMORY_PATH,
   memoryContextBlock,
   createOpenAiAgentTransport,
   createPostgresSessionStateStore,
@@ -1650,6 +1652,10 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
         store: privateMemory,
         shareSessionMemory: o.shareSessionMemory,
         referencedSessionIds: o.referencedSessionIds,
+        // Spec §2.B.1: keep /workspace/.ovid/session_memory.md in step with
+        // the durable copy.
+        mirrorEntrypoint: (toolCtx, content) =>
+          o.sandbox.writeFile(toolCtx.userId, SESSION_MEMORY_PATH, content),
       }) : []),
       ...createGoalTodoTools({ state, sinkFactory: sinkFor }),
       createSessionSearchTool({ db: deps.db, crossSession: o.shareSessionMemory }),
@@ -1780,6 +1786,20 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     // for session isolation).
     const prefs = await userPreferences.get(deps.db, userId);
     const memoryEnabled = prefs.memoryEnabled;
+
+    // Spec §2.B.1: session memory is a FILE at
+    // /workspace/.ovid/session_memory.md. The private store stays the durable
+    // copy; this materializes it so the agent's own file tools see the file
+    // the spec names, before the first turn. Best-effort.
+    if (memoryEnabled) {
+      await mirrorSessionMemory({
+        store: privateMemory,
+        userId,
+        sessionId,
+        shareSessionMemory: prefs.shareSessionMemory === true,
+        write: (path, content) => runSandbox.writeFile(userId, path, content),
+      });
+    }
 
     // W1 (R1): project memory reaches MAIN AGENT runs only, and only when
     // this chat belongs to a project OR the user explicitly @-tagged projects
