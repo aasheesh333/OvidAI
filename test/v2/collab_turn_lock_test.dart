@@ -7,7 +7,10 @@
 // assistant's, so nobody holds the turn" — every other member could send.
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ovid_ai/core/collaboration/client.dart'
+    show CollaborationClientException;
 import 'package:ovid_ai/core/collaboration/models.dart';
+import 'package:ovid_ai/core/collaboration/production.dart';
 import 'package:ovid_ai/core/collaboration/reducer.dart';
 import 'package:ovid_ai/ui/v2/app/v2_collab_routes.dart';
 import 'package:ovid_ai/ui/v2/chat/composer_mentions.dart';
@@ -122,6 +125,37 @@ void main() {
     );
 
     expect(V2CollabRoutes.liveDataFor(applied).isMyTurn, isTrue);
+  });
+
+  test('a turn_locked refusal is one plain sentence, never a code', () {
+    const error = CollaborationClientException(
+      'raw upstream copy',
+      statusCode: 409,
+      code: 'turn_locked',
+    );
+
+    final sentence = collaborationErrorMessage(error);
+    expect(sentence, collabTurnLockedSentence);
+    expect(
+      sentence,
+      "Another participant's reply is still streaming. Send when it finishes.",
+    );
+    // The same words the web client shows, and no machine code in sight.
+    expect(sentence.contains('_'), isFalse);
+    expect(sentence.contains('raw upstream copy'), isFalse);
+  });
+
+  test('a gateway without /chat says so, and keeps the read-only path', () {
+    final sentence = collaborationErrorMessage(
+      const CollaborationClientException(
+        'Live sessions are unavailable',
+        statusCode: 404,
+        code: 'collab_unavailable',
+      ),
+    );
+    expect(sentence, collabUnavailableSentence);
+    expect(sentence.contains('_'), isFalse);
+    expect(sentence.toLowerCase(), contains('read-only'));
   });
 }
 

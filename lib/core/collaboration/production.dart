@@ -111,11 +111,29 @@ class CollaborationSeedMessage {
   final String text;
 }
 
+/// The gateway's own `turn_locked` copy, kept verbatim so the Android app and
+/// the web client say exactly the same sentence.
+const String collabTurnLockedSentence =
+    "Another participant's reply is still streaming. Send when it finishes.";
+
+/// What to say when the gateway has no `/chat` routes at all.
+///
+/// The collaboration routes are not committed on the gateway yet; only the
+/// legacy `/shares` surface is. The client treats that as "not deployed" and
+/// keeps the read-only share path usable.
+const String collabUnavailableSentence =
+    "Live sessions aren't available yet. Share a read-only link instead.";
+
 /// User-facing reason for a collaboration failure (never echoes tokens).
 String collaborationErrorMessage(Object error) {
   if (error is CollaborationClientException) {
     return switch (error.code) {
-      'session_full' => 'This session is full (10/10).',
+      // The single-sender rule refused this send. One plain sentence, the
+      // same words the web client shows; never the machine code.
+      'turn_locked' => collabTurnLockedSentence,
+      'collab_unavailable' => collabUnavailableSentence,
+      'session_full' =>
+        'This session is full ($maxActiveMembers/$maxActiveMembers).',
       'invite_invalid' || 'invite_not_found' =>
         'This link was revoked or has expired. Ask the owner for a new link.',
       'membership_revoked' => 'The owner removed you from this session.',

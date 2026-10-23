@@ -144,6 +144,23 @@ void main() {
       .having((e) => e.toString(), 'fixed', 'Invalid collaboration response.')));
   });
 
+  test('a gateway without /chat reports "not deployed", not an invalid response',
+      () async {
+    final client = CollaborationClient(
+      baseUri: Uri.parse('https://collab.example.test'),
+      accessToken: () async => 'token',
+      appCheckToken: () async => 'check',
+      httpClient: MockClient((_) async => http.Response(jsonEncode({
+        'error': {'code': 'not_found', 'message': 'Route not found.'},
+      }), 404, headers: {'cache-control': 'no-store'})),
+    );
+    await expectLater(client.state('tok'), throwsA(
+      isA<CollaborationClientException>()
+        .having((e) => e.code, 'code', 'collab_unavailable')
+        .having((e) => e.message, 'message', isNot(contains('Route not found'))),
+    ));
+  });
+
   for (final entry in {'rate_limited': 'Collaboration rate limit exceeded',
     'quota_exhausted': 'Collaboration quota exceeded'}.entries) {
     test('decodes fixed ${entry.key} error', () async {

@@ -327,7 +327,7 @@ void main() {
       await owner.release();
     });
 
-    test('the 11th joiner sees a clear full-session message', () async {
+    test('a full session sees a clear message, with the real cap', () async {
       server.joinError = 'session_full';
       final guest = make();
       await guest.bind('alice', 1);
@@ -337,7 +337,10 @@ void main() {
       } catch (error) {
         caught = error;
       }
-      expect(collaborationErrorMessage(caught!), 'This session is full (10/10).');
+      expect(
+        collaborationErrorMessage(caught!),
+        'This session is full ($maxActiveMembers/$maxActiveMembers).',
+      );
       expect(guest.sessionToken, isNull);
       await guest.release();
     });

@@ -27,6 +27,8 @@ const _errorMessages = <String, String>{
   'member_not_found': 'Member not found',
   'session_closed': 'Session is closed',
   'session_full': 'Session is full',
+  // The single-sender rule: another participant's turn is still running.
+  'turn_locked': 'Another participant is replying',
   'owner_not_removable': 'Owner cannot be removed',
   'event_id_conflict': 'Event conflicts with an existing event',
   'request_already_used': 'Request was already used',
@@ -39,6 +41,9 @@ const _errorMessages = <String, String>{
   'quota_exhausted': 'Collaboration quota exceeded',
   'payload_too_large': 'Collaboration payload is too large',
   'temporarily_unavailable': 'The collaboration service is temporarily unavailable',
+  // The gateway answered "no such route": the collaboration surface is not
+  // deployed. Never confuse this with a failure of this room.
+  'collab_unavailable': 'Live sessions are unavailable',
 };
 
 class CollaborationClientException implements Exception {
@@ -471,6 +476,18 @@ class CollaborationClient {
       }
       if (response.statusCode < 200 || response.statusCode >= 300) {
         final parsed = _asMap(jsonDecode(text));
+        // The gateway's own answer for an unmounted route is the CLOUD
+        // envelope (`{ error: { code, message } }`), not this contract. The
+        // collaboration routes are not deployed yet, so report that instead
+        // of "invalid response" — a real missing room still arrives inside
+        // the collaboration envelope with `session_not_found`.
+        if (response.statusCode == 404 && parsed['schemaVersion'] == null) {
+          throw const CollaborationClientException(
+            'Live sessions are unavailable',
+            statusCode: 404,
+            code: 'collab_unavailable',
+          );
+        }
         _exact(parsed, const {'schemaVersion', 'code', 'message'});
         final code = parsed['code'];
         if (parsed['schemaVersion'] != collaborationSchemaVersion ||
