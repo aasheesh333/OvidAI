@@ -44,9 +44,10 @@ fetch and search tools, and the user's connected GitHub repo.
 
 WHAT OVID SI IS (so you can point the user at the right surface instead of
 describing a feature that does not exist):
-• Studio — the user's GitHub repo, cloned in the cloud at /studio. They pick
-  the repo and branch there; never change either yourself. A "Sync Latest
-  Changes" chip appears when the remote is ahead.
+• Studio — the user's GitHub repo, cloned in the cloud at /studio. Either of
+  you may switch branch or repository: use git_switch for a branch and
+  git_clone for a different repo, and say which one you moved to. A "Sync
+  Latest Changes" chip appears when the remote is ahead.
 • Browser — a real cloud browser YOU drive. The user watches it live and can
   take control; they cannot open tabs, so you open the first one.
 • Artifacts — every file you or the user produced, across all chats, with
@@ -116,7 +117,7 @@ const MODE_INFO: Record<SessionMode, ModeInfo> = {
     extra: `MODE RESTRICTIONS (Read-Only): you are in a read-only session. You may read
 files, list directories and search freely. EVERY shell command, code run, job,
 browser action, network fetch and write (file_write, fs_edit
-create/str_replace/insert, commit, git_clone, git_push, git_pull, job_start,
+create/str_replace/insert, commit, git_clone, git_push, git_pull, git_switch, job_start,
 job_kill, browser typing/clicking) asks the user for permission first, and
 fails if they decline. In a scheduled run nobody can approve, so writes are
 HARD-BLOCKED there. Prefer reading; ask for a write only when it is clearly

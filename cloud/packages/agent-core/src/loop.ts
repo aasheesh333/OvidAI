@@ -305,6 +305,7 @@ const MUTATING_TOOLS: ReadonlySet<string> = new Set([
   "git_clone",
   "git_push",
   "git_pull",
+  "git_switch",
   "job_start",
   "job_kill",
   "browser_click",
@@ -539,6 +540,7 @@ const SANDBOX_BACKED_TOOLS: ReadonlySet<string> = new Set([
   "git_clone",
   "git_pull",
   "git_push",
+  "git_switch",
   "commit",
 ]);
 

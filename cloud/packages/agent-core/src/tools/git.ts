@@ -48,6 +48,7 @@ const TOOL_TIMEOUTS: Record<string, number> = {
   git_push: 300_000, // 5 min
   git_pull: 300_000, // 5 min
   git_clone: 300_000, // 5 min
+  git_switch: 120_000, // 2 min — checkout is local, but a big tree can be slow
 };
 const DEFAULT_TIMEOUT_MS = 120_000;
 const REPO_TREE_TIMEOUT_MS = 60_000; // REST call, no sandbox exec
@@ -314,6 +315,118 @@ export function createGitTools(deps: {
         if (res.exitCode !== 0) return exited(sandbox, "git_clone", ctx, res);
         const out = compose(res).trim();
         return finish(sandbox, "git_clone", ctx, out === "" ? `cloned ${url} ✓` : out);
+      },
+    ),
+
+    // -- git_switch ------------------------------------------------------------------
+    //
+    // Spec Screen 2: the AGENT can switch branches autonomously, not only the
+    // user via the UI dropdown. Two guards keep that safe:
+    //  · a dirty working tree is refused unless the caller forces it — a bare
+    //    `git checkout` would silently carry uncommitted work to another
+    //    branch (or fail in a way the model misreads);
+    //  · the switch is individually confirmed (allowAlways false), like commit.
+    tool(
+      "git_switch",
+      "Switch a cloned repository to another branch (or create one with `create`). " +
+        "Refuses when the working tree has uncommitted changes unless `force` is set.",
+      {
+        type: "object",
+        properties: {
+          branch: { type: "string", description: "Branch to check out." },
+          path: {
+            type: "string",
+            description: "Repository directory inside the workspace (default: the workspace root).",
+          },
+          create: {
+            type: "boolean",
+            description: "Create the branch if it does not exist (git checkout -b).",
+          },
+          force: {
+            type: "boolean",
+            description: "Switch even with uncommitted changes (they follow you).",
+          },
+        },
+        required: ["branch"],
+      },
+      async (args, ctx) => {
+        const branch = (optStr(args, "branch") ?? "").trim();
+        if (branch === "") {
+          return { content: 'git_switch needs a "branch".', isError: true };
+        }
+        // Same gate as git_clone: a ref reaches a shell, so anything that
+        // could be read as an option or a second command is refused outright.
+        if (
+          /\s/.test(branch) ||
+          branch.includes("..") ||
+          branch.startsWith("-") ||
+          /[;&|`$<>]/.test(branch)
+        ) {
+          return {
+            content: `git_switch: refusing suspicious branch name "${branch}".`,
+            isError: true,
+          };
+        }
+        const rel = (optStr(args, "path") ?? "").trim();
+        if (rel.startsWith("-") || rel.includes("..") || /[;&|`$<>]/.test(rel)) {
+          return {
+            content: `git_switch: refusing suspicious path "${rel}".`,
+            isError: true,
+          };
+        }
+        const create = args["create"] === true;
+        const force = args["force"] === true;
+        const at = rel === "" ? "git" : `git -C ${shq(rel)}`;
+
+        if (!force) {
+          const status = await sandbox.exec(ctx.userId, {
+            cmd: `${at} status --porcelain`,
+            cwd: ".",
+            timeoutMs: DEFAULT_TIMEOUT_MS,
+            callKey: ctx.callKey,
+          });
+          if (status.exitCode !== 0) return exited(sandbox, "git_switch", ctx, status);
+          if (status.stdout.trim() !== "") {
+            return {
+              content:
+                "git_switch refused: the working tree has uncommitted changes, and " +
+                "switching now would carry them onto the other branch. Commit or stash " +
+                "them first, or pass force: true to switch anyway.",
+              isError: true,
+            };
+          }
+        }
+
+        const decision = await approvals.approve(ctx, {
+          approvalId: randomUUID(),
+          kind: "tool",
+          tool: "git_switch",
+          summary: `${create ? "Create and switch to" : "Switch to"} branch ${branch}`,
+          detail:
+            `SWITCH BRANCH\nTarget: ${branch}` +
+            (create ? "\nCreates the branch." : "") +
+            (rel === "" ? "" : `\nRepository: ${rel}`),
+          allowAlways: false,
+          pathTargets: [],
+          hostTargets: [],
+        });
+        if (!allowed(decision)) return { content: "DENIED by user" };
+
+        const cmd = `${at} checkout ${create ? "-b " : ""}${shq(branch)}`;
+        const res = await sandbox.exec(ctx.userId, {
+          cmd,
+          cwd: ".",
+          timeoutMs: TOOL_TIMEOUTS.git_switch ?? DEFAULT_TIMEOUT_MS,
+          callKey: ctx.callKey,
+        });
+        if (res.exitCode !== 0) return exited(sandbox, "git_switch", ctx, res);
+        const out = compose(res).trim();
+        return finish(
+          sandbox,
+          "git_switch",
+          ctx,
+          out === "" ? `on branch ${branch} ✓` : out,
+        );
       },
     ),
 

@@ -114,13 +114,20 @@ const byName = (tools: ReturnType<typeof createGitTools>, name: string) => {
 // ---------------------------------------------------------------------------
 
 describe("createGitTools", () => {
-  it("advertises exactly the seven git tools", () => {
+  it("advertises exactly the eight git tools", () => {
     const { sandbox } = fakeSandbox();
     const { gate } = fakeGate("allow");
     const names = gitTools(sandbox, gate).map((t) => t.spec.name).sort();
-    expect(names).toEqual(
-      ["commit", "git_clone", "git_diff", "git_log", "git_pull", "git_push", "git_status"],
-    );
+    expect(names).toEqual([
+      "commit",
+      "git_clone",
+      "git_diff",
+      "git_log",
+      "git_pull",
+      "git_push",
+      "git_status",
+      "git_switch",
+    ]);
   });
 
   it("git_status runs the porcelain status command in the workspace with the callKey threaded", async () => {
