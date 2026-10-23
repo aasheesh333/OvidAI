@@ -243,6 +243,14 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
   bool _paywallSeen = false;
   bool _purchasing = false;
   String? _paywallError;
+
+  /// The gateway's plan table (`GET /cloud/v1/plans`). Null until the request
+  /// answers; the paywall renders no plan cards until then, and an error when
+  /// the request fails. It never falls back to a hardcoded table.
+  List<V2PlanOption>? _serverPlans;
+  bool _plansLoading = false;
+  String? _plansError;
+
   String _selectedPlanId = 'plus';
   V2PaywallPeriod _paywallPeriod = V2PaywallPeriod.monthly;
 
@@ -348,6 +356,49 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
         _paywallSeen = false;
       }
     });
+    // A signed-in account on the tour is about to see the paywall: read the
+    // plan table before it paints, so the cards never come from a local copy.
+    if (_booted &&
+        _auth.isSignedIn &&
+        _auth.accountReady &&
+        !_paywallSeen &&
+        _step != _Step.done &&
+        _serverPlans == null &&
+        !_plansLoading &&
+        _plansError == null) {
+      unawaited(_loadPlans());
+    }
+  }
+
+  /// Reads `GET /cloud/v1/plans`, the same table the Plan & billing screen
+  /// uses. A failure is shown as an error; it is never replaced with invented
+  /// prices or limits.
+  Future<void> _loadPlans() async {
+    if (_plansLoading) return;
+    setState(() {
+      _plansLoading = true;
+      _plansError = null;
+    });
+    try {
+      final plans = await fetchServerPlanOptions();
+      if (!mounted) return;
+      setState(() {
+        _serverPlans = plans;
+        _plansLoading = false;
+        if (plans.isNotEmpty &&
+            !plans.any((plan) => plan.id == _selectedPlanId)) {
+          _selectedPlanId = plans.first.id;
+        }
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _serverPlans = null;
+        _plansLoading = false;
+        _plansError =
+            'We could not load plans. Check your connection and try again.';
+      });
+    }
   }
 
   @override
@@ -537,6 +588,10 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
       _paywallSeen = false;
       _signInError = null;
       _lastSignInAction = null;
+      // The next account must read its own plan table.
+      _serverPlans = null;
+      _plansLoading = false;
+      _plansError = null;
       _step = _Step.signIn;
     });
   }
@@ -750,8 +805,9 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
         selectedPlanId: _selectedPlanId,
         currency: _currencyId == 'inr' ? V2Currency.inr : V2Currency.usd,
         period: _paywallPeriod,
+        loading: _plansLoading,
         purchasing: _purchasing,
-        error: _paywallError,
+        error: _paywallError ?? _plansError,
         // Say plainly when a plan will not be charged for. A demo build has
         // no store at all, so the note must appear there too — otherwise the
         // paywall looks like a real purchase flow.
@@ -774,7 +830,9 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
       onPurchase: _purchasing ? null : _purchasePlan,
       onStartTrial: _purchasing ? null : _startTrial,
       onContinueFree: _purchasing ? null : _finishPaywall,
-      onRetry: _purchasing || _paywallError == null ? null : _retryPurchase,
+      onRetry: _purchasing || (_paywallError == null && _plansError == null)
+          ? null
+          : _retryPaywall,
       onRestorePurchases: _purchasing || widget.restorePurchases == null
           ? null
           : _restorePaywall,
@@ -799,11 +857,15 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
       ? kRevenueCatUnconfirmedReason
       : null;
 
-  /// The canonical cards, carrying the store's localised prices and whether
-  /// Play sells each period. Falls back to the product-spec prices only when
-  /// the store has not answered.
+  /// The canonical cards from the gateway's plan table, carrying the store's
+  /// localised prices and whether Play sells each period.
+  ///
+  /// The plan names, prices and limits are the server's. Nothing is read from
+  /// a local table: while the request is in flight the list is empty (the
+  /// paywall shows skeletons), and a failure leaves it empty with the error.
   List<V2PlanOption> _paywallPlans() {
-    const base = V2PaywallData();
+    final serverPlans = _serverPlans;
+    if (serverPlans == null) return const [];
     final play = PlayBillingService.I;
     // Only Play's own purchase path can be gated by Play's catalogue. A
     // confirmed RevenueCat fallback (or Test Store) may sell a package Play
@@ -811,26 +873,36 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
     final route = _billingRoute();
     final playCatalogue =
         route != BillingRoute.revenueCat && route != BillingRoute.demo;
-    return [
-      for (final plan in base.plans)
-        plan.withStore(
-          monthlyPrice: play.productFor(plan.tier)?.price,
-          yearlyPrice: play
-              .productFor(plan.tier, period: OvidBillingPeriod.yearly)
-              ?.price,
-          currency:
-              play.productFor(plan.tier)?.currencyCode ??
-              play
-                  .productFor(plan.tier, period: OvidBillingPeriod.yearly)
-                  ?.currencyCode,
+    final cards = <V2PlanOption>[];
+    for (final option in serverPlans) {
+      final monthly = play.productFor(option.tier);
+      final yearly = play.productFor(
+        option.tier,
+        period: OvidBillingPeriod.yearly,
+      );
+      cards.add(
+        option.withStore(
+          monthlyPrice: monthly?.price,
+          yearlyPrice: yearly?.price,
+          currency: monthly?.currencyCode ?? yearly?.currencyCode,
           monthlyAvailable: playCatalogue && play.loaded
-              ? play.hasProduct(plan.tier)
+              ? play.hasProduct(option.tier)
               : null,
           yearlyAvailable: playCatalogue && play.loaded
-              ? play.hasProduct(plan.tier, period: OvidBillingPeriod.yearly)
+              ? play.hasProduct(option.tier, period: OvidBillingPeriod.yearly)
               : null,
         ),
-    ];
+      );
+    }
+    return cards;
+  }
+
+  void _retryPaywall() {
+    if (_plansError != null) {
+      unawaited(_loadPlans());
+      return;
+    }
+    _retryPurchase();
   }
 
   /// Runs the purchase for [planId] and [period]. A caller that only wired the

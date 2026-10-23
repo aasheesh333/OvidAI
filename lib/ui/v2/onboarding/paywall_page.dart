@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/billing_products.dart';
+import '../../../core/cloud/plans_client.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_screen.dart';
@@ -78,22 +79,72 @@ class V2PlanOption {
   final String id;
   final String name;
 
-  /// Monthly price. The yearly price is a separate, explicitly supplied
-  /// number: multiplying a monthly price by 12 (or even 10) in the UI would
-  /// invent an amount the store never charges.
-  final int priceUsd;
-  final int priceInr;
+  /// Monthly price from the server's plan table. Null means the server did
+  /// not send one, which is unknown — the card renders `—`, never `0`.
+  ///
+  /// The yearly price is a separate, explicitly supplied number: the server
+  /// table has no yearly column, so the UI never derives one from the monthly
+  /// amount (multiplying by 12, or even 10, would invent an amount the store
+  /// never charges).
+  final int? priceUsd;
+  final int? priceInr;
 
-  /// Yearly price. Null means the plan is not sold yearly; the card says so
-  /// and disables its CTA instead of showing a made-up figure.
+  /// Yearly price. Null means no source supplied one; the card says so and
+  /// disables its CTA instead of showing a made-up figure. A server plan never
+  /// sets these.
   final int? priceUsdYearly;
   final int? priceInrYearly;
 
-  final int storageGb;
-  final bool autoOnly;
+  /// Null when the server did not describe storage. Never a stand-in for 0.
+  final int? storageGb;
+
+  /// Null when the server did not say whether manual models are unlocked.
+  final bool? autoOnly;
 
   /// At most three are shown; the card is a comparison, not a feature list.
   final List<String> features;
+
+  /// Builds a card from one row of `GET /cloud/v1/plans`.
+  ///
+  /// This is the only production path that produces a plan: names, prices and
+  /// limits come from the server, and a limit the server does not send stays
+  /// null so the card renders `—`. The retired "50M tokens a day" claim is
+  /// absent because the backend enforces USD allowances and has no token
+  /// counter, and no yearly price is derived because the table has none.
+  factory V2PlanOption.fromServer(CloudPlan plan) {
+    final id = plan.canonicalId;
+    final known = isKnownPlanId(plan.id) || isKnownPlanId(id);
+    final serverName = plan.name.trim();
+    // An unrecognised tier keeps the server's own name when it has one. With
+    // no name it is "Unknown" — never coerced to Free.
+    final name = serverName.isNotEmpty && serverName != plan.id
+        ? serverName
+        : known
+        ? _canonicalPlanName(id)
+        : 'Unknown';
+    final manualModels = plan.manualModels;
+    return V2PlanOption(
+      id: id,
+      name: name,
+      priceUsd: plan.priceUsd?.toInt(),
+      priceInr: plan.priceInr?.toInt(),
+      storageGb: plan.storageGb,
+      autoOnly: manualModels == null ? null : !manualModels,
+      features: [
+        plan.storageGb == null ? 'Storage: —' : '${plan.storageGb} GB storage',
+        plan.customConnectors == null
+            ? 'Connectors: —'
+            : plan.customConnectors == 0
+            ? 'No custom connectors'
+            : '${plan.customConnectors} custom connectors',
+        manualModels == null
+            ? 'Models: —'
+            : manualModels
+            ? 'Manual models'
+            : 'Manual models locked',
+      ],
+    );
+  }
 
   /// The store's own localised price for each period, when the store was
   /// queried and sells it. Displayed instead of the canonical table so the
@@ -167,7 +218,8 @@ class V2PlanOption {
   }
 
   /// null = the store has not been queried; false = it does not sell [period].
-  bool? storeAvailableFor(V2PaywallPeriod period) => period == V2PaywallPeriod.yearly
+  bool? storeAvailableFor(V2PaywallPeriod period) =>
+      period == V2PaywallPeriod.yearly
       ? storeYearlyAvailable
       : storeMonthlyAvailable;
 
@@ -236,64 +288,35 @@ class V2PlanOption {
   String get shortName => name.replaceFirst(RegExp(r'^Ovid\s+'), '');
 
   /// The canonical product table: Free and Go only run the Auto model, Plus
-  /// and Pro unlock manual model choice.
-  String get modelAccessLabel => autoOnly ? 'Auto only' : 'Auto + manual';
+  /// and Pro unlock manual model choice. Null means the server did not say.
+  String get modelAccessLabel => autoOnly == null
+      ? '—'
+      : autoOnly!
+      ? 'Auto only'
+      : 'Auto + manual';
 
   /// Monthly suffix, kept for callers that predate the period toggle.
   String get pricePeriod => periodSuffix(V2PaywallPeriod.monthly);
 }
 
+/// Reads the gateway's plan table through the one [PlansClient] and maps each
+/// row to a card.
+///
+/// This is the paywall's data source: there is no second client and no local
+/// table. A failure propagates so the screen can say the plans did not load
+/// instead of showing numbers the server never sent.
+Future<List<V2PlanOption>> fetchServerPlanOptions({PlansClient? client}) async {
+  final plans = await (client ?? PlansClient()).fetch();
+  return [for (final plan in plans) V2PlanOption.fromServer(plan)];
+}
+
 @immutable
 class V2PaywallData {
   const V2PaywallData({
-    this.plans = const [
-      V2PlanOption(
-        id: 'free',
-        name: 'Ovid Free',
-        priceUsd: 0,
-        priceInr: 0,
-        priceUsdYearly: 0,
-        priceInrYearly: 0,
-        storageGb: 3,
-        autoOnly: true,
-        features: ['3 GB storage', '50M tokens a day', 'Manual models locked'],
-      ),
-      V2PlanOption(
-        id: 'go',
-        name: 'Ovid Go',
-        priceUsd: 5,
-        priceInr: 499,
-        priceUsdYearly: 50,
-        priceInrYearly: 4990,
-        storageGb: 5,
-        autoOnly: true,
-        features: [
-          '5 GB storage',
-          '5 custom connectors',
-          'Manual models locked',
-        ],
-      ),
-      V2PlanOption(
-        id: 'plus',
-        name: 'Ovid Plus',
-        priceUsd: 18,
-        priceInr: 1799,
-        priceUsdYearly: 180,
-        priceInrYearly: 17990,
-        storageGb: 15,
-        features: ['15 GB storage', 'Manual models', '20 custom connectors'],
-      ),
-      V2PlanOption(
-        id: 'pro',
-        name: 'Ovid Pro',
-        priceUsd: 99,
-        priceInr: 9999,
-        priceUsdYearly: 990,
-        priceInrYearly: 99990,
-        storageGb: 75,
-        features: ['75 GB storage', 'Manual models', '20 custom connectors'],
-      ),
-    ],
+    // No plan table lives here. The host passes the rows it read from
+    // `GET /cloud/v1/plans`; without them the screen shows its honest empty
+    // or error state rather than a hardcoded table that may be wrong.
+    this.plans = const [],
     this.selectedPlanId = 'plus',
     this.currency = V2Currency.usd,
     this.period = V2PaywallPeriod.monthly,
@@ -360,8 +383,9 @@ class V2PaywallData {
 /// Last step of the tour: one header, one period row, honest plan cards and a
 /// single footer action.
 ///
-/// The page is presentational. The host owns the billing calls so this file
-/// stays free of Firebase/plugin imports (and compiles for the web gallery):
+/// The page is presentational. The host owns the billing calls; the only
+/// network source here is the plan table read by [fetchServerPlanOptions]
+/// through [PlansClient]. No billing plugin is called from this file.
 ///
 /// * [onPurchase] receives the exact plan, tier, period and catalogue product
 ///   id. It must call the real purchase seam for that product.
@@ -981,12 +1005,14 @@ class _PaywallPageState extends State<PaywallPage> {
                       child: OPill(
                         key: Key('plan-access-${plan.id}'),
                         label: plan.modelAccessLabel,
-                        tone: plan.autoOnly
-                            ? OPillTone.neutral
-                            : OPillTone.success,
-                        icon: plan.autoOnly
+                        tone: plan.autoOnly == false
+                            ? OPillTone.success
+                            : OPillTone.neutral,
+                        icon: plan.autoOnly == false
+                            ? Icons.tune_rounded
+                            : plan.autoOnly == true
                             ? Icons.lock_outline_rounded
-                            : Icons.tune_rounded,
+                            : Icons.remove_rounded,
                       ),
                     ),
                   ),
@@ -1239,6 +1265,15 @@ class _ToggleOption extends StatelessWidget {
     );
   }
 }
+
+/// The display name used only when the server sent no name of its own.
+String _canonicalPlanName(String id) => switch (id) {
+  'free' => 'Ovid Free',
+  'go' => 'Ovid Go',
+  'plus' => 'Ovid Plus',
+  'pro' => 'Ovid Pro',
+  _ => 'Unknown',
+};
 
 String _groupDigits(int value) {
   final digits = value.toString();

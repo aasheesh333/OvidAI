@@ -33,6 +33,44 @@ class _Step {
   final bool hasClose;
 }
 
+/// The server-shaped table the paywall renders. No yearly price exists in the
+/// server table, so none is invented here.
+const _paywallData = V2PaywallData(
+  trialDays: 7,
+  plans: [
+    V2PlanOption(
+      id: 'free',
+      name: 'Ovid Free',
+      priceUsd: 0,
+      priceInr: 0,
+      storageGb: 3,
+      autoOnly: true,
+    ),
+    V2PlanOption(
+      id: 'go',
+      name: 'Ovid Go',
+      priceUsd: 5,
+      priceInr: 499,
+      storageGb: 5,
+      autoOnly: true,
+    ),
+    V2PlanOption(
+      id: 'plus',
+      name: 'Ovid Plus',
+      priceUsd: 18,
+      priceInr: 1799,
+      storageGb: 15,
+    ),
+    V2PlanOption(
+      id: 'pro',
+      name: 'Ovid Pro',
+      priceUsd: 99,
+      priceInr: 9999,
+      storageGb: 75,
+    ),
+  ],
+);
+
 final _steps = <_Step>[
   _Step(
     name: 'welcome',
@@ -49,11 +87,7 @@ final _steps = <_Step>[
   ),
   _Step(
     name: 'sign-in',
-    screen: () => SignInPage(
-      onBack: () {},
-      onGoogle: () {},
-      onPhone: () {},
-    ),
+    screen: () => SignInPage(onBack: () {}, onGoogle: () {}, onPhone: () {}),
     primaryKey: const Key('sign-in-submit'),
     stepLabel: 'STEP 3 OF 4',
     hasBack: true,
@@ -61,6 +95,7 @@ final _steps = <_Step>[
   _Step(
     name: 'paywall',
     screen: () => PaywallPage(
+      data: _paywallData,
       onClose: () {},
       onStartTrial: (_) {},
       onContinueFree: () {},
@@ -203,7 +238,13 @@ void main() {
       tester,
     ) async {
       for (final step in _steps) {
-        await _pump(tester, step.screen(), width: 320, height: 640, textScale: 2);
+        await _pump(
+          tester,
+          step.screen(),
+          width: 320,
+          height: 640,
+          textScale: 2,
+        );
 
         expect(tester.takeException(), isNull, reason: step.name);
         final cta = tester.getRect(find.byKey(step.primaryKey));

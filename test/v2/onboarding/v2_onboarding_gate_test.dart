@@ -1,14 +1,86 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:ui' as ui;
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:ovid_ai/core/auth_identity.dart';
 import 'package:ovid_ai/core/auth_phone_flow.dart';
+import 'package:ovid_ai/core/cloud/cloud_rest.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/app/v2_onboarding_gate.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+/// The gateway's real shape (`GET /cloud/v1/plans`, camelCase). Go's storage
+/// is 7 GB here only so a test can tell the server answer from the retired
+/// hardcoded 5 GB table. No row carries a yearly price.
+String _plansJson() => jsonEncode({
+  'plans': [
+    {
+      'id': 'free',
+      'tier': 'free',
+      'name': 'Ovid Free',
+      'priceUsd': 0,
+      'priceInr': 0,
+      'manualModels': false,
+      'storageGb': 3,
+      'customConnectors': 0,
+    },
+    {
+      'id': 'go',
+      'tier': 'go',
+      'name': 'Ovid Go',
+      'priceUsd': 5,
+      'priceInr': 499,
+      'manualModels': false,
+      'storageGb': 7,
+      'customConnectors': 5,
+    },
+    {
+      'id': 'plus',
+      'tier': 'plus',
+      'name': 'Ovid Plus',
+      'priceUsd': 18,
+      'priceInr': 1799,
+      'manualModels': true,
+      'storageGb': 15,
+      'customConnectors': 20,
+    },
+    {
+      'id': 'pro',
+      'tier': 'pro',
+      'name': 'Ovid Pro',
+      'priceUsd': 99,
+      'priceInr': 9999,
+      'manualModels': true,
+      'storageGb': 75,
+      'customConnectors': 20,
+    },
+  ],
+});
+
+final _requestPaths = <String>[];
+
+CloudRestClient _plansClient() => CloudRestClient(
+  httpClient: MockClient((request) async {
+    _requestPaths.add(request.url.path);
+    return http.Response(_plansJson(), 200);
+  }),
+  headers: CloudHeaders.forTest(),
+  restBase: 'https://rest.test',
+);
+
+CloudRestClient _unreachableClient() => CloudRestClient(
+  httpClient: MockClient(
+    (_) async =>
+        http.Response('{"error":{"code":"internal","message":"down"}}', 503),
+  ),
+  headers: CloudHeaders.forTest(),
+  restBase: 'https://rest.test',
+);
 
 /// Fake auth surface: mirrors the two facts the gate trusts
 /// (`isSignedIn` / `accountReady`) without Firebase.
@@ -181,6 +253,12 @@ Future<void> _tap(WidgetTester tester, Finder finder) async {
 void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues(<String, Object>{});
+    _requestPaths.clear();
+    CloudRestClient.installForTest(_plansClient());
+  });
+
+  tearDown(() {
+    CloudRestClient.installForTest(CloudRestClient());
   });
 
   testWidgets('splash renders first while startup is pending', (tester) async {
@@ -415,6 +493,51 @@ void main() {
     expect(find.text('APP CHILD'), findsOneWidget);
   });
 
+  testWidgets('the paywall reads the server plan table', (tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      'ovid_welcome_version_v2': '1',
+      'ovid_onboarding_language': 'en',
+    });
+    await _pumpGate(tester, auth: _FakeAuth());
+
+    await _tap(tester, find.text('Continue with Google'));
+
+    expect(_requestPaths, contains('/plans'));
+    expect(find.text('Ovid Go'), findsOneWidget);
+    expect(find.text(r'$5'), findsOneWidget);
+    // 7 GB is the server's answer, not the retired hardcoded 5 GB table.
+    expect(find.text('7 GB storage'), findsOneWidget);
+    expect(find.text('5 GB storage'), findsNothing);
+    // The backend has no token counter; the claim must not appear.
+    expect(find.text('50M tokens a day'), findsNothing);
+  });
+
+  testWidgets('an unreachable plan table is shown honestly', (tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      'ovid_welcome_version_v2': '1',
+      'ovid_onboarding_language': 'en',
+    });
+    CloudRestClient.installForTest(_unreachableClient());
+    await _pumpGate(tester, auth: _FakeAuth());
+
+    await _tap(tester, find.text('Continue with Google'));
+
+    expect(find.text('Plans did not load'), findsOneWidget);
+    expect(
+      find.text(
+        'We could not load plans. Check your connection and try again.',
+      ),
+      findsOneWidget,
+    );
+    // No hardcoded table is shown when the server cannot be reached.
+    expect(find.text('Ovid Free'), findsNothing);
+    expect(find.text('Ovid Go'), findsNothing);
+    expect(find.text(r'$5'), findsNothing);
+    expect(find.byKey(const Key('paywall-trial')), findsNothing);
+    // The error state offers a real retry.
+    expect(find.text('Try again'), findsOneWidget);
+  });
+
   testWidgets('the paywall currency choice is persisted', (tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{
       'ovid_welcome_version_v2': '1',
@@ -575,10 +698,7 @@ void main() {
     });
     await _pumpGate(tester, auth: _FakeAuth(), testStore: true);
     await _tap(tester, find.text('Continue with Google'));
-    expect(
-      find.text('Demo: plans unlock without a charge.'),
-      findsOneWidget,
-    );
+    expect(find.text('Demo: plans unlock without a charge.'), findsOneWidget);
   });
 
   testWidgets('a real build shows no test-mode note', (tester) async {
@@ -588,10 +708,7 @@ void main() {
     });
     await _pumpGate(tester, auth: _FakeAuth(), testStore: false);
     await _tap(tester, find.text('Continue with Google'));
-    expect(
-      find.text('Demo: plans unlock without a charge.'),
-      findsNothing,
-    );
+    expect(find.text('Demo: plans unlock without a charge.'), findsNothing);
   });
 
   testWidgets('Continue with Free from the paywall enters the app', (

@@ -9,11 +9,82 @@ import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/onboarding/paywall_page.dart';
 import 'package:ovid_ai/ui/v2/onboarding/purchase_banner.dart';
 
+/// A server-shaped plan table: the values `GET /cloud/v1/plans` sends. No row
+/// has a yearly price because the server table has none.
+const _plans = <V2PlanOption>[
+  V2PlanOption(
+    id: 'free',
+    name: 'Ovid Free',
+    priceUsd: 0,
+    priceInr: 0,
+    storageGb: 3,
+    autoOnly: true,
+    features: ['3 GB storage', 'No custom connectors', 'Manual models locked'],
+  ),
+  V2PlanOption(
+    id: 'go',
+    name: 'Ovid Go',
+    priceUsd: 5,
+    priceInr: 499,
+    storageGb: 5,
+    autoOnly: true,
+    features: ['5 GB storage', '5 custom connectors', 'Manual models locked'],
+  ),
+  V2PlanOption(
+    id: 'plus',
+    name: 'Ovid Plus',
+    priceUsd: 18,
+    priceInr: 1799,
+    storageGb: 15,
+    autoOnly: false,
+    features: ['15 GB storage', '20 custom connectors', 'Manual models'],
+  ),
+  V2PlanOption(
+    id: 'pro',
+    name: 'Ovid Pro',
+    priceUsd: 99,
+    priceInr: 9999,
+    storageGb: 75,
+    autoOnly: false,
+    features: ['75 GB storage', '20 custom connectors', 'Manual models'],
+  ),
+];
+
+V2PaywallData _data({
+  List<V2PlanOption> plans = _plans,
+  String selectedPlanId = 'plus',
+  V2Currency currency = V2Currency.usd,
+  V2PaywallPeriod period = V2PaywallPeriod.monthly,
+  String? currentPlanId,
+  bool loading = false,
+  bool purchasing = false,
+  String? error,
+  V2PurchaseBannerStatus? purchaseStatus,
+  String? purchaseDetail,
+  String? testModeNote,
+  String? checkoutBlockedReason,
+  int trialDays = 7,
+}) => V2PaywallData(
+  plans: plans,
+  selectedPlanId: selectedPlanId,
+  currency: currency,
+  period: period,
+  currentPlanId: currentPlanId,
+  loading: loading,
+  purchasing: purchasing,
+  error: error,
+  purchaseStatus: purchaseStatus,
+  purchaseDetail: purchaseDetail,
+  testModeNote: testModeNote,
+  checkoutBlockedReason: checkoutBlockedReason,
+  trialDays: trialDays,
+);
+
 Future<void> _pump(
   WidgetTester tester, {
   bool dark = false,
   bool settle = true,
-  V2PaywallData data = const V2PaywallData(trialDays: 7),
+  V2PaywallData? data,
   ValueChanged<String>? onPlanSelected,
   ValueChanged<V2Currency>? onCurrencyChanged,
   ValueChanged<V2PaywallPeriod>? onPeriodChanged,
@@ -43,7 +114,7 @@ Future<void> _pump(
         child: child!,
       ),
       home: PaywallPage(
-        data: data,
+        data: data ?? _data(),
         onPlanSelected: onPlanSelected,
         onCurrencyChanged: onCurrencyChanged,
         onPeriodChanged: onPeriodChanged,
@@ -117,38 +188,50 @@ void main() {
       expect(find.text(r'$18'), findsNothing);
     });
 
-    testWidgets('yearly prices are ten months, never twelve', (tester) async {
+    testWidgets('yearly has no server price: a dash, never an amount', (
+      tester,
+    ) async {
       await _pump(tester, onPurchase: (_) async {});
 
       await _tapPeriod(tester, 'yearly');
 
-      expect(find.text(r'$50'), findsOneWidget);
-      expect(find.text(r'$180'), findsOneWidget);
-      expect(find.text(r'$990'), findsOneWidget);
+      // The server table has no yearly column. Every paid card says so and
+      // disables its CTA; Free is a real zero labelled "forever".
       expect(find.text('/ year'), findsNWidgets(3));
       expect(find.text('forever'), findsOneWidget);
-      // Twelve months would be these numbers; the UI must never make them up.
-      expect(find.text(r'$60'), findsNothing);
-      expect(find.text(r'$216'), findsNothing);
-      expect(find.text(r'$1,188'), findsNothing);
+      expect(
+        find.text('No yearly price for this plan.'),
+        findsAtLeastNWidgets(3),
+      );
+      for (final invented in [
+        r'$50',
+        r'$180',
+        r'$990',
+        r'$60',
+        r'$216',
+        r'$1,188',
+        '₹4,990',
+        '₹17,990',
+        '₹99,990',
+      ]) {
+        expect(find.text(invented), findsNothing, reason: invented);
+      }
 
       await tester.tap(find.byKey(const Key('paywall-currency-inr')));
       await tester.pumpAndSettle();
-
-      expect(find.text('₹4,990'), findsOneWidget);
-      expect(find.text('₹17,990'), findsOneWidget);
-      expect(find.text('₹99,990'), findsOneWidget);
+      expect(find.text('₹4,990'), findsNothing);
+      expect(find.text('₹17,990'), findsNothing);
+      expect(find.text('₹99,990'), findsNothing);
     });
 
-    test('the default yearly prices are exactly ten monthly payments', () {
-      const data = V2PaywallData();
-      for (final plan in data.plans) {
+    test('no server plan carries a yearly amount', () {
+      for (final plan in _plans) {
+        // Free is a real zero, not a yearly price.
+        if (plan.isFree) continue;
         for (final currency in V2Currency.values) {
-          final monthly = plan.amountFor(currency, V2PaywallPeriod.monthly)!;
-          final yearly = plan.amountFor(currency, V2PaywallPeriod.yearly)!;
           expect(
-            yearly,
-            monthly * 10,
+            plan.amountFor(currency, V2PaywallPeriod.yearly),
+            isNull,
             reason: '${plan.id} ${currency.name} yearly',
           );
         }
@@ -185,7 +268,7 @@ void main() {
     });
 
     test('every card stays inside the copy budget', () {
-      const data = V2PaywallData();
+      final data = _data();
       for (final plan in data.plans) {
         expect(plan.features.length, lessThanOrEqualTo(3), reason: plan.id);
         for (final feature in plan.features) {
@@ -230,8 +313,52 @@ void main() {
       tester,
     ) async {
       final purchases = <V2PaywallPurchase>[];
+      // A host that has a real yearly source supplies it explicitly. The
+      // server table has no yearly price, so the paywall never derives one.
+      const yearlyData = V2PaywallData(
+        trialDays: 7,
+        plans: [
+          V2PlanOption(
+            id: 'free',
+            name: 'Ovid Free',
+            priceUsd: 0,
+            priceInr: 0,
+            storageGb: 3,
+            autoOnly: true,
+          ),
+          V2PlanOption(
+            id: 'go',
+            name: 'Ovid Go',
+            priceUsd: 5,
+            priceInr: 499,
+            priceUsdYearly: 50,
+            priceInrYearly: 4990,
+            storageGb: 5,
+            autoOnly: true,
+          ),
+          V2PlanOption(
+            id: 'plus',
+            name: 'Ovid Plus',
+            priceUsd: 18,
+            priceInr: 1799,
+            priceUsdYearly: 180,
+            priceInrYearly: 17990,
+            storageGb: 15,
+          ),
+          V2PlanOption(
+            id: 'pro',
+            name: 'Ovid Pro',
+            priceUsd: 99,
+            priceInr: 9999,
+            priceUsdYearly: 990,
+            priceInrYearly: 99990,
+            storageGb: 75,
+          ),
+        ],
+      );
       await _pump(
         tester,
+        data: yearlyData,
         onPurchase: (purchase) async => purchases.add(purchase),
       );
 
@@ -342,7 +469,7 @@ void main() {
       final purchases = <V2PaywallPurchase>[];
       await _pump(
         tester,
-        data: const V2PaywallData(),
+        data: _data(trialDays: 0),
         onPurchase: (purchase) async => purchases.add(purchase),
       );
 
@@ -375,7 +502,9 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(trials, ['go']);
-      expect(find.text('Yearly checkout is not connected.'), findsWidgets);
+      // The server table has no yearly price, so the yearly CTA is disabled
+      // before the legacy callback is ever considered.
+      expect(find.text('No yearly price for this plan.'), findsWidgets);
     });
   });
 
@@ -535,7 +664,7 @@ void main() {
       final completer = Completer<void>();
       await _pump(
         tester,
-        data: const V2PaywallData(),
+        data: _data(),
         onPurchase: (_) {
           purchases++;
           return completer.future;
@@ -568,7 +697,7 @@ void main() {
     ) async {
       await _pump(
         tester,
-        data: const V2PaywallData(purchasing: true),
+        data: _data(purchasing: true),
         onPurchase: (_) async {},
         settle: false,
       );
@@ -622,7 +751,7 @@ void main() {
       var purchases = 0;
       await _pump(
         tester,
-        data: const V2PaywallData(error: 'Your last purchase did not finish.'),
+        data: _data(error: 'Your last purchase did not finish.'),
         onRetry: () => retries++,
         onPurchase: (_) async => purchases++,
       );
@@ -643,7 +772,7 @@ void main() {
       var purchases = 0;
       await _pump(
         tester,
-        data: const V2PaywallData(currentPlanId: '7x'),
+        data: _data(currentPlanId: '7x'),
         onManageSubscription: () => managed++,
         onPurchase: (_) async => purchases++,
       );
@@ -683,11 +812,7 @@ void main() {
     testWidgets('each card is a group with name, price, period and CTA', (
       tester,
     ) async {
-      await _pump(
-        tester,
-        data: const V2PaywallData(),
-        onPurchase: (_) async {},
-      );
+      await _pump(tester, data: _data(trialDays: 0), onPurchase: (_) async {});
 
       final group = _semantics(
         tester,
@@ -873,9 +998,7 @@ void main() {
       MaterialApp(
         theme: OTheme.light(),
         home: PaywallPage(
-          data: const V2PaywallData(
-            testModeNote: 'Test mode: purchases are simulated.',
-          ),
+          data: _data(testModeNote: 'Test mode: purchases are simulated.'),
           onPurchase: (_) async {},
         ),
       ),
@@ -900,9 +1023,7 @@ void main() {
       var retries = 0;
       await _pump(
         tester,
-        data: const V2PaywallData(
-          purchaseStatus: V2PurchaseBannerStatus.testStore,
-        ),
+        data: _data(purchaseStatus: V2PurchaseBannerStatus.testStore),
         onRetry: () => retries++,
         onPurchase: (_) async {},
       );
@@ -920,7 +1041,7 @@ void main() {
       var managed = 0;
       await _pump(
         tester,
-        data: const V2PaywallData(
+        data: _data(
           purchaseStatus: V2PurchaseBannerStatus.failed,
           purchaseDetail: 'Card declined (test card).',
         ),
@@ -952,9 +1073,7 @@ void main() {
     ) async {
       await _pump(
         tester,
-        data: const V2PaywallData(
-          purchaseStatus: V2PurchaseBannerStatus.nothingToRestore,
-        ),
+        data: _data(purchaseStatus: V2PurchaseBannerStatus.nothingToRestore),
         onPurchase: (_) async {},
       );
 
@@ -972,7 +1091,7 @@ void main() {
         dark: true,
         width: 320,
         textScale: 2,
-        data: const V2PaywallData(
+        data: _data(
           purchaseStatus: V2PurchaseBannerStatus.failed,
           purchaseDetail: 'The store did not confirm the purchase in time.',
         ),
