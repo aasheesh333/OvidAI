@@ -320,7 +320,7 @@ class _SettingsHubPageState extends State<SettingsHubPage> {
     );
   }
 
-  /// At most five sections, in one order, with no row that cannot act.
+  /// At most six sections, in the owner's order, with no row that cannot act.
   ///
   /// A row whose handler is missing is dropped: a settings row that cannot
   /// reach real state is a dead control, not a disabled one.
