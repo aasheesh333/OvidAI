@@ -77,17 +77,20 @@ class V2PlanLimits {
   /// Canonical id (`free`, `go`, `plus`, `pro`).
   final String id;
   final String name;
-  final int storageGb;
-  final int filesPerWindow;
+
+  /// Null means the server did not describe this limit. It is NOT zero: zero
+  /// would claim the plan grants nothing, which is a different statement.
+  final int? storageGb;
+  final int? filesPerWindow;
 
   /// `day` for Free, `3 h` for the paid plans.
   final String fileWindowLabel;
-  final int filesPerProject;
-  final bool manualModels;
-  final num autoMultiplier;
-  final int customConnectors;
-  final int dailyTokenCap;
-  final int monthlyTokenCap;
+  final int? filesPerProject;
+  final bool? manualModels;
+  final num? autoMultiplier;
+  final int? customConnectors;
+  final int? dailyTokenCap;
+  final int? monthlyTokenCap;
 
   static const free = V2PlanLimits(
     id: 'free',
@@ -188,35 +191,55 @@ class V2PlanLimits {
     monthlyTokenCap: monthlyTokenCap,
   );
 
-  String get storageLabel => '$storageGb GB';
+  String get storageLabel => storageGb == null ? '—' : '$storageGb GB';
 
   /// `50 files / day` or `80 files / 3 h`.
-  String get filesLabel => '$filesPerWindow files / $fileWindowLabel';
+  String get filesLabel =>
+      filesPerWindow == null ? '—' : '$filesPerWindow files / $fileWindowLabel';
 
-  String get filesPerProjectLabel => '$filesPerProject files max / project';
+  String get filesPerProjectLabel =>
+      filesPerProject == null ? '—' : '$filesPerProject files max / project';
 
-  String get modelAccessLabel =>
-      manualModels ? 'Auto + manual models' : 'Auto only';
+  String get modelAccessLabel => manualModels == null
+      ? '—'
+      : manualModels!
+      ? 'Auto + manual models'
+      : 'Auto only';
 
-  String get autoMultiplierLabel => '${formatMultiplier(autoMultiplier)}×';
+  String get autoMultiplierLabel =>
+      autoMultiplier == null ? '—' : '${formatMultiplier(autoMultiplier!)}×';
 
-  String get autoAllowanceLabel =>
-      '${formatMultiplier(autoMultiplier)}× Free allowance';
+  String get autoAllowanceLabel => autoMultiplier == null
+      ? '—'
+      : '${formatMultiplier(autoMultiplier!)}× Free allowance';
 
-  String get customConnectorsLabel => customConnectors == 0
+  String get customConnectorsLabel => customConnectors == null
+      ? '—'
+      : customConnectors == 0
       ? 'No custom connectors'
       : '$customConnectors custom connectors';
 
-  String get dailyCapLabel =>
-      dailyTokenCap <= 0 ? 'No token cap' : _groupDigits(dailyTokenCap);
+  String get dailyCapLabel => dailyTokenCap == null
+      ? '—'
+      : dailyTokenCap! <= 0
+      ? 'No token cap'
+      : _groupDigits(dailyTokenCap!);
 
-  String get monthlyCapLabel =>
-      monthlyTokenCap <= 0 ? 'No token cap' : _groupDigits(monthlyTokenCap);
+  String get monthlyCapLabel => monthlyTokenCap == null
+      ? '—'
+      : monthlyTokenCap! <= 0
+      ? 'No token cap'
+      : _groupDigits(monthlyTokenCap!);
 
-  String get dailyCapDescription =>
-      dailyTokenCap <= 0 ? 'No token cap' : '$dailyCapLabel tokens / 24 h';
+  String get dailyCapDescription => dailyTokenCap == null
+      ? '—'
+      : dailyTokenCap! <= 0
+      ? 'No token cap'
+      : '$dailyCapLabel tokens / 24 h';
 
-  String get monthlyCapDescription => monthlyTokenCap <= 0
+  String get monthlyCapDescription => monthlyTokenCap == null
+      ? '—'
+      : monthlyTokenCap! <= 0
       ? 'No token cap'
       : '$monthlyCapLabel tokens / 30 days';
 }
@@ -225,81 +248,6 @@ class V2PlanLimits {
 String formatMultiplier(num value) => value == value.roundToDouble()
     ? value.toInt().toString()
     : value.toString();
-
-/// The authoritative prices from the product spec (§11): Go $5 / ₹499,
-/// Plus $18 / ₹1,799, Pro $99 / ₹9,999, Free $0.
-///
-/// Yearly is ten monthly payments (two months free), the same rule
-/// `V2SettingsRoutes` applies when it builds the live plan list. This table is
-/// the fallback for a caller that omits a price; it is never used to override
-/// a price the caller (or the store) supplies. A period without a known price
-/// resolves to null and the card disables its CTA instead of inventing
-/// `monthly × 12`, which is a number the store would never charge.
-@immutable
-class V2PlanPrices {
-  const V2PlanPrices({
-    required this.monthlyUsd,
-    required this.monthlyInr,
-    required this.yearlyUsd,
-    required this.yearlyInr,
-  });
-
-  final int monthlyUsd;
-  final int monthlyInr;
-  final int yearlyUsd;
-  final int yearlyInr;
-
-  int monthly(V2Currency currency) =>
-      currency == V2Currency.inr ? monthlyInr : monthlyUsd;
-
-  int yearly(V2Currency currency) =>
-      currency == V2Currency.inr ? yearlyInr : yearlyUsd;
-
-  static const free = V2PlanPrices(
-    monthlyUsd: 0,
-    monthlyInr: 0,
-    yearlyUsd: 0,
-    yearlyInr: 0,
-  );
-
-  static const go = V2PlanPrices(
-    monthlyUsd: 5,
-    monthlyInr: 499,
-    yearlyUsd: 50,
-    yearlyInr: 4990,
-  );
-
-  static const plus = V2PlanPrices(
-    monthlyUsd: 18,
-    monthlyInr: 1799,
-    yearlyUsd: 180,
-    yearlyInr: 17990,
-  );
-
-  static const pro = V2PlanPrices(
-    monthlyUsd: 99,
-    monthlyInr: 9999,
-    yearlyUsd: 990,
-    yearlyInr: 99990,
-  );
-
-  static const plans = <V2PlanPrices>[free, go, plus, pro];
-
-  /// Resolves a plan id (`go`, `3x`) or a display name (`Ovid Plus`) to the
-  /// canonical price row.
-  static V2PlanPrices? forPlan(String id, [String? name]) {
-    final canonical =
-        V2PlanLimits.forId(id) ??
-        (name == null ? null : V2PlanLimits.forId(name));
-    return switch (canonical?.id) {
-      'free' => free,
-      'go' => go,
-      'plus' => plus,
-      'pro' => pro,
-      _ => null,
-    };
-  }
-}
 
 @immutable
 class V2Plan {
@@ -311,7 +259,7 @@ class V2Plan {
     required this.priceInr,
     this.priceUsdYearly = 0,
     this.priceInrYearly = 0,
-    this.storageGb = 0,
+    this.storageGb,
     this.autoOnly = false,
     this.limits,
     this.features = const [],
@@ -329,9 +277,14 @@ class V2Plan {
   final String tagline;
   final int priceUsd;
   final int priceInr;
+
+  /// Yearly prices are only set when the store reported one. No server table
+  /// carries a yearly price, so the plan screen never derives one.
   final int priceUsdYearly;
   final int priceInrYearly;
-  final int storageGb;
+
+  /// Null when the caller has no server value. Never a stand-in for zero.
+  final int? storageGb;
   final bool autoOnly;
 
   /// Optional explicit limits. When null the canonical [V2PlanLimits] for
@@ -374,48 +327,38 @@ class V2Plan {
     final canonical = V2PlanLimits.forId(id) ?? V2PlanLimits.forId(name);
     final base = limits ?? canonical;
     if (base == null) {
+      // Nothing known about this plan: every limit is unknown, not zero.
       return V2PlanLimits(
         id: id,
         name: name,
         storageGb: storageGb,
-        filesPerWindow: 0,
-        fileWindowLabel: 'day',
-        filesPerProject: 0,
-        manualModels: !autoOnly,
-        autoMultiplier: 1,
-        customConnectors: 0,
-        dailyTokenCap: 0,
-        monthlyTokenCap: 0,
+        filesPerWindow: null,
+        fileWindowLabel: '',
+        filesPerProject: null,
+        manualModels: autoOnly ? false : null,
+        autoMultiplier: null,
+        customConnectors: null,
+        dailyTokenCap: null,
+        monthlyTokenCap: null,
       );
     }
-    if (storageGb > 0 && storageGb != base.storageGb) {
-      return base.withStorage(storageGb);
+    final gb = storageGb;
+    if (gb != null && gb > 0 && gb != base.storageGb) {
+      return base.withStorage(gb);
     }
     return base;
   }
 
-  /// The product-spec prices for this plan, when it is one of the four plans
-  /// the spec prices. Custom/server plans have no canonical row.
-  V2PlanPrices? get canonicalPrices => V2PlanPrices.forPlan(id, name);
-
-  /// The price for [period], or null when neither the caller nor the product
-  /// spec knows one. Free is always 0, never null.
+  /// The price for [period], or null when no real source supplied one.
   ///
-  /// A yearly request never borrows the monthly price (and never multiplies
-  /// it): a plan with no yearly price is not sold yearly.
+  /// The plan table has no yearly price, so a yearly request never borrows
+  /// (and never multiplies) the monthly amount. Free is always a real 0.
   int? amount(V2Currency currency, V2BillingPeriod period) {
     if (canonicalId == 'free') return 0;
-    final canonical = canonicalPrices;
-    if (period == V2BillingPeriod.monthly) {
-      final monthly = currency == V2Currency.inr ? priceInr : priceUsd;
-      if (monthly > 0) return monthly;
-      final fallback = canonical?.monthly(currency) ?? 0;
-      return fallback > 0 ? fallback : null;
-    }
-    final yearly = currency == V2Currency.inr ? priceInrYearly : priceUsdYearly;
-    if (yearly > 0) return yearly;
-    final fallback = canonical?.yearly(currency) ?? 0;
-    return fallback > 0 ? fallback : null;
+    final value = period == V2BillingPeriod.monthly
+        ? (currency == V2Currency.inr ? priceInr : priceUsd)
+        : (currency == V2Currency.inr ? priceInrYearly : priceUsdYearly);
+    return value > 0 ? value : null;
   }
 
   bool hasPrice(V2Currency currency, V2BillingPeriod period) =>
@@ -652,7 +595,9 @@ class PlanBillingPage extends StatelessWidget {
       priceAvailable: plan.hasPrice(data.currency, data.period),
       storageGb: limits.storageGb,
       filesPerWindow: limits.filesPerWindow,
-      fileWindowHours: _fileWindowHours(limits.fileWindowLabel),
+      fileWindowHours: limits.filesPerWindow == null
+          ? null
+          : _fileWindowHours(limits.fileWindowLabel),
       filesPerProject: limits.filesPerProject,
       manualModels: limits.manualModels,
       autoMultiplier: limits.autoMultiplier,
@@ -961,11 +906,13 @@ class _PlanCard extends StatelessWidget {
     // The store was queried and does not sell this period (e.g. the yearly
     // base plan has not been created in Play Console yet).
     final storeMissing =
-        !current && !free && !missingProduct && plan.storeAvailableFor(period) == false;
+        !current &&
+        !free &&
+        !missingProduct &&
+        plan.storeAvailableFor(period) == false;
     // No purchase path in this build can both take money and unlock the plan
     // (e.g. RevenueCat with no server confirmation route).
-    final checkoutBlocked =
-        !current && !free && checkoutBlockedReason != null;
+    final checkoutBlocked = !current && !free && checkoutBlockedReason != null;
     final unavailable =
         checkoutBlocked || missingProduct || missingPrice || storeMissing;
     final canBuy = !current && onPurchase != null && !unavailable;

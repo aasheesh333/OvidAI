@@ -168,9 +168,7 @@ void main() {
     expect(header.style?.color, OColors.light.accent);
   });
 
-  testWidgets('current plan is announced in the header label', (
-    tester,
-  ) async {
+  testWidgets('current plan is announced in the header label', (tester) async {
     final semantics = tester.ensureSemantics();
     await tester.pumpWidget(
       _app(
@@ -420,8 +418,6 @@ void main() {
     // token cap on the card and another in the table.
     for (final plan in V2PlanComparePlan.canonical) {
       final limits = V2PlanLimits.forIdOrFree(plan.id);
-      final prices = V2PlanPrices.forPlan(plan.id);
-      expect(prices, isNotNull, reason: '${plan.id} has spec prices');
       expect(plan.name, limits.name, reason: '${plan.id} name');
       expect(plan.storageGb, limits.storageGb, reason: '${plan.id} storage');
       expect(
@@ -468,7 +464,14 @@ void main() {
       );
       expect(
         plan.priceLabel,
-        '\$${prices!.monthlyUsd}',
+        // The canonical table's own monthly store prices.
+        switch (plan.id) {
+          'free' => r'$0',
+          'go' => r'$5',
+          'plus' => r'$18',
+          'pro' => r'$99',
+          _ => fail('unexpected plan ${plan.id}'),
+        },
         reason: '${plan.id} price',
       );
     }

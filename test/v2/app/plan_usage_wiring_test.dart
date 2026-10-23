@@ -64,6 +64,71 @@ String _usageJson({String tier = 'free'}) {
   });
 }
 
+String _plansJson() => jsonEncode({
+  'plans': [
+    {
+      'id': 'free',
+      'tier': 'free',
+      'name': 'Free',
+      'priceUsd': 0,
+      'priceInr': 0,
+      'mult': 1,
+      'windowHours': 24,
+      'aliases': ['free'],
+      'manualModels': false,
+      'storageGb': 3,
+      'customConnectors': 0,
+      'projectFiles': 80,
+      'uploads': {'count': 50, 'windowHours': 24},
+    },
+    {
+      'id': 'go',
+      'tier': 'go',
+      'name': 'Ovid Go',
+      'priceUsd': 5,
+      'priceInr': 499,
+      'mult': 1.5,
+      'windowHours': 24,
+      'aliases': ['3x'],
+      'manualModels': false,
+      'storageGb': 5,
+      'customConnectors': 5,
+      'projectFiles': 100,
+      'uploads': {'count': 80, 'windowHours': 3},
+    },
+    {
+      'id': 'plus',
+      'tier': 'plus',
+      'name': 'Ovid Plus',
+      'priceUsd': 18,
+      'priceInr': 1799,
+      'mult': 5,
+      'windowHours': 24,
+      'aliases': ['7x'],
+      'manualModels': true,
+      'storageGb': 15,
+      'customConnectors': 20,
+      'projectFiles': 150,
+      'uploads': {'count': 80, 'windowHours': 3},
+    },
+    {
+      'id': 'pro',
+      'tier': 'pro',
+      'name': 'Ovid Pro',
+      'priceUsd': 99,
+      'priceInr': 9999,
+      'mult': 20,
+      'windowHours': 24,
+      'aliases': ['15x'],
+      'manualModels': true,
+      'storageGb': 75,
+      'customConnectors': 20,
+      'projectFiles': 250,
+      'uploads': {'count': 80, 'windowHours': 3},
+    },
+  ],
+});
+
 String _historyJson() {
   final now = DateTime.now();
   String day(int ago) {
@@ -114,14 +179,18 @@ void main() {
     AppState.createForTest();
 
     OvidCloudService.idTokenOverrideForTest = () async => 'usage-test-token';
-    OvidCloudService.httpClientFactoryForTest = () => MockClient((request) async {
-      paths.add(request.url.path);
-      return http.Response(_usageJson(), 200);
-    });
+    OvidCloudService.httpClientFactoryForTest = () =>
+        MockClient((request) async {
+          paths.add(request.url.path);
+          return http.Response(_usageJson(), 200);
+        });
     CloudRestClient.installForTest(
       CloudRestClient(
         httpClient: MockClient((request) async {
           paths.add(request.url.path);
+          if (request.url.path.endsWith('/plans')) {
+            return http.Response(_plansJson(), 200);
+          }
           return http.Response(_historyJson(), 200);
         }),
         headers: CloudHeaders.forTest(),
@@ -200,10 +269,11 @@ void main() {
   testWidgets('Plan cards are enabled per plan and the current one is not', (
     tester,
   ) async {
-    OvidCloudService.httpClientFactoryForTest = () => MockClient((request) async {
-      paths.add(request.url.path);
-      return http.Response(_usageJson(tier: '3x'), 200);
-    });
+    OvidCloudService.httpClientFactoryForTest = () =>
+        MockClient((request) async {
+          paths.add(request.url.path);
+          return http.Response(_usageJson(tier: '3x'), 200);
+        });
     final usage = CloudUsageStore.acquire(AppState.I);
     final actions = V2SettingsActions(usage);
     final context = await mount(tester);
@@ -219,15 +289,16 @@ void main() {
 
     expect(find.byType(PlanBillingPage), findsOneWidget);
 
-    // Go (server tier 3x) is current: marked and disabled.
+    // Go (server tier 3x) is current: marked and disabled. The plan table's
+    // canonical id is `go`, so that is the card's key.
     final go = tester.widget<OButton>(
-      find.byKey(const ValueKey<String>('plan-cta-3x')),
+      find.byKey(const ValueKey<String>('plan-cta-go')),
     );
     expect(go.onPressed, isNull);
     expect(go.label, 'Current plan');
 
     // Plus and Pro are real, per-plan purchases.
-    for (final tier in ['7x', '15x']) {
+    for (final tier in ['plus', 'pro']) {
       final cta = tester.widget<OButton>(
         find.byKey(ValueKey<String>('plan-cta-$tier')),
       );

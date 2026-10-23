@@ -28,7 +28,7 @@ double? v2PlanStorageQuotaGb(String plan) {
   final limits =
       V2PlanLimits.forId(raw) ??
       V2PlanLimits.forId(raw.replaceAll(RegExp(r'\s+plan$'), ''));
-  return limits?.storageGb.toDouble();
+  return limits?.storageGb?.toDouble();
 }
 
 /// One coloured part of the storage bar and its legend row.

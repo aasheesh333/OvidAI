@@ -41,39 +41,53 @@ class V2PlanComparePlan {
   /// showing (no price, no store product). The price cell then says so instead
   /// of printing a `—` next to a period suffix.
   final bool priceAvailable;
-  final int storageGb;
+
+  /// Null means the server did not describe this limit; the cell renders `—`
+  /// rather than claiming zero.
+  final int? storageGb;
 
   /// Product-spec file-intake window (50 / day on Free, 80 / 3 h on the paid
   /// plans). It is **not enforced** anywhere yet
   /// (`docs/architecture/FEATURE_GAPS.md` §4.2), so the table shows only the
   /// enforced per-project cap.
-  final int filesPerWindow;
-  final int fileWindowHours;
-  final int filesPerProject;
+  final int? filesPerWindow;
+  final int? fileWindowHours;
+  final int? filesPerProject;
 
   /// Plus and Pro unlock manual model choice; Free and Go are Auto only.
-  final bool manualModels;
+  final bool? manualModels;
 
   /// Allowance over the Free auto allowance (1, 1.5, 5, 20).
-  final num autoMultiplier;
-  final int customConnectors;
-  final int dailyTokenCap;
-  final int monthlyTokenCap;
+  final num? autoMultiplier;
+  final int? customConnectors;
+  final int? dailyTokenCap;
+  final int? monthlyTokenCap;
 
-  String get storageLabel => '$storageGb GB';
+  String get storageLabel => storageGb == null ? '—' : '$storageGb GB';
 
-  String get filesPerProjectLabel => '$filesPerProject max';
+  String get filesPerProjectLabel =>
+      filesPerProject == null ? '—' : '$filesPerProject max';
 
-  String get modelAccessLabel => manualModels ? 'Auto + manual' : 'Auto only';
+  String get modelAccessLabel => manualModels == null
+      ? '—'
+      : manualModels!
+      ? 'Auto + manual'
+      : 'Auto only';
 
-  String get autoMultiplierLabel => '${_formatNumber(autoMultiplier)}×';
+  String get autoMultiplierLabel =>
+      autoMultiplier == null ? '—' : '${_formatNumber(autoMultiplier!)}×';
 
-  String get customConnectorsLabel =>
-      customConnectors == 0 ? 'None' : '$customConnectors';
+  String get customConnectorsLabel => customConnectors == null
+      ? '—'
+      : customConnectors == 0
+      ? 'None'
+      : '$customConnectors';
 
-  String get dailyTokenCapLabel => _formatTokens(dailyTokenCap);
+  String get dailyTokenCapLabel =>
+      dailyTokenCap == null ? '—' : _formatTokens(dailyTokenCap!);
 
-  String get monthlyTokenCapLabel => _formatTokens(monthlyTokenCap);
+  String get monthlyTokenCapLabel =>
+      monthlyTokenCap == null ? '—' : _formatTokens(monthlyTokenCap!);
 
   /// The authoritative product table, ready for a caller that has no server
   /// payload yet. Prices are the USD monthly amounts.
@@ -328,7 +342,9 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
                             label: 'Model access',
                             semanticLabel: 'Model access',
                             value: (plan) => _modelsCell(context, plan),
-                            semanticValue: (plan) => plan.manualModels
+                            semanticValue: (plan) => plan.manualModels == null
+                                ? 'not reported'
+                                : plan.manualModels!
                                 ? 'Auto and manual models'
                                 : 'Auto only, manual models are not available',
                           ),
@@ -362,9 +378,14 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
                             semanticLabel: 'Custom connectors',
                             value: (plan) => _text(
                               plan.customConnectorsLabel,
-                              muted: plan.customConnectors == 0,
+                              muted:
+                                  plan.customConnectors == null ||
+                                  plan.customConnectors == 0,
                             ),
-                            semanticValue: (plan) => plan.customConnectors == 0
+                            semanticValue: (plan) =>
+                                plan.customConnectors == null
+                                ? 'not reported'
+                                : plan.customConnectors == 0
                                 ? 'No custom connectors'
                                 : '${plan.customConnectors} custom connectors',
                           ),
@@ -379,7 +400,9 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
                             label: 'Token caps',
                             semanticLabel: 'Token caps',
                             value: (plan) => _tokensCell(context, plan),
-                            semanticValue: (plan) => plan.dailyTokenCap <= 0
+                            semanticValue: (plan) => plan.dailyTokenCap == null
+                                ? 'not reported'
+                                : plan.dailyTokenCap! <= 0
                                 ? 'No token cap'
                                 : '${plan.dailyTokenCapLabel} tokens per 24 hours, '
                                       '${plan.monthlyTokenCapLabel} tokens per 30 days',
@@ -659,22 +682,25 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
 
   Widget _modelsCell(BuildContext context, V2PlanComparePlan plan) {
     final c = OColors.of(context);
+    final manual = plan.manualModels;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Icon(
-          plan.manualModels
+          manual == null
+              ? Icons.remove_rounded
+              : manual
               ? Icons.check_circle_outline_rounded
               : Icons.lock_outline_rounded,
           size: 14,
-          color: plan.manualModels ? c.success : c.textFaint,
+          color: manual == true ? c.success : c.textFaint,
         ),
         const SizedBox(width: OSpace.iconGap),
         Expanded(
           child: Text(
             plan.modelAccessLabel,
             style: OType.caption.copyWith(
-              color: plan.manualModels ? c.text : c.textMuted,
+              color: manual == true ? c.text : c.textMuted,
               fontWeight: FontWeight.w500,
             ),
           ),
@@ -685,9 +711,13 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
 
   Widget _tokensCell(BuildContext context, V2PlanComparePlan plan) {
     final c = OColors.of(context);
+    // An unreported cap is unknown, not "no cap" and not zero.
+    if (plan.dailyTokenCap == null) {
+      return Text('—', style: OType.caption.copyWith(color: c.textMuted));
+    }
     // Paid plans are not token-capped (server/mint/ovid_plans.py); a zero cap
     // means "no cap", not a zero allowance.
-    if (plan.dailyTokenCap <= 0) {
+    if (plan.dailyTokenCap! <= 0) {
       return Text(
         'No token cap',
         style: OType.caption.copyWith(color: c.textMuted),

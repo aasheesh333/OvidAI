@@ -120,7 +120,7 @@ class V2UsageData {
     final supplied = dailyLimitLabel.trim();
     if (supplied.isNotEmpty) return supplied;
     final cap = planLimits.dailyTokenCap;
-    return cap <= 0 ? '' : _compactCap(cap);
+    return cap == null || cap <= 0 ? '' : _compactCap(cap);
   }
 
   String get monthlyUsedText =>
@@ -132,7 +132,7 @@ class V2UsageData {
     final supplied = monthlyLimitLabel.trim();
     if (supplied.isNotEmpty) return supplied;
     final cap = planLimits.monthlyTokenCap;
-    return cap <= 0 ? '' : _compactCap(cap);
+    return cap == null || cap <= 0 ? '' : _compactCap(cap);
   }
 
   /// The account's request and image counters for today, straight from

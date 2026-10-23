@@ -759,34 +759,9 @@ void main() {
     }
   });
 
-  test('the product spec prices are the canonical table', () {
-    // Go $5 / ₹499, Plus $18 / ₹1,799, Pro $99 / ₹9,999, Free $0.
-    expect(
-      [
-        for (final prices in V2PlanPrices.plans)
-          (
-            prices.monthlyUsd,
-            prices.monthlyInr,
-            prices.yearlyUsd,
-            prices.yearlyInr,
-          ),
-      ],
-      const [
-        (0, 0, 0, 0),
-        (5, 499, 50, 4990),
-        (18, 1799, 180, 17990),
-        (99, 9999, 990, 99990),
-      ],
-    );
-    // Yearly is ten monthly payments, not twelve.
-    for (final prices in V2PlanPrices.plans) {
-      expect(prices.yearlyUsd, prices.monthlyUsd * 10);
-      expect(prices.yearlyInr, prices.monthlyInr * 10);
-    }
-  });
-
   test('a period without a price resolves to null, never monthly × 12', () {
-    // A canonical plan with no yearly price falls back to the spec price.
+    // No server table carries a yearly price, so a plan built from its
+    // monthly price alone must not invent one.
     const go = V2Plan(
       id: 'go',
       name: 'Go',
@@ -794,13 +769,10 @@ void main() {
       priceUsd: 5,
       priceInr: 499,
     );
-    expect(go.amount(V2Currency.usd, V2BillingPeriod.yearly), 50);
-    expect(go.amount(V2Currency.inr, V2BillingPeriod.yearly), 4990);
-    expect(go.hasPrice(V2Currency.usd, V2BillingPeriod.yearly), isTrue);
-    expect(
-      go.priceLabel(V2Currency.usd, period: V2BillingPeriod.yearly),
-      r'$50',
-    );
+    expect(go.amount(V2Currency.usd, V2BillingPeriod.yearly), isNull);
+    expect(go.amount(V2Currency.inr, V2BillingPeriod.yearly), isNull);
+    expect(go.hasPrice(V2Currency.usd, V2BillingPeriod.yearly), isFalse);
+    expect(go.priceLabel(V2Currency.usd, period: V2BillingPeriod.yearly), '—');
 
     // A plan the spec does not price has no yearly amount at all.
     const team = V2Plan(
@@ -942,7 +914,7 @@ void main() {
     expect(purchases, hasLength(3));
   });
 
-  testWidgets('a plan without a yearly price still sells its yearly SKU', (
+  testWidgets('a plan without a yearly price disables the yearly CTA', (
     tester,
   ) async {
     _phoneSize(tester);
@@ -967,14 +939,17 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    // The spec price fills the gap; $60 (monthly × 12) would be wrong.
-    expect(_inCard('go', r'$50'), findsOneWidget);
+    // No yearly price exists, so the card says so. $50 (monthly × 10) and
+    // $60 (monthly × 12) are both numbers the store never quoted.
+    expect(_inCard('go', '—'), findsOneWidget);
+    expect(_inCard('go', r'$50'), findsNothing);
     expect(_inCard('go', r'$60'), findsNothing);
-    await tester.tap(find.byKey(const ValueKey<String>('plan-cta-go')));
-    await tester.pump();
-
-    expect(purchases.single.productId, 'ovid_plus_yearly');
-    expect(purchases.single.period, V2BillingPeriod.yearly);
+    expect(find.text('No yearly price for Go.'), findsOneWidget);
+    final cta = tester.widget<OButton>(
+      find.byKey(const ValueKey<String>('plan-cta-go')),
+    );
+    expect(cta.onPressed, isNull);
+    expect(purchases, isEmpty);
   });
 
   testWidgets('the current plan stays disabled in yearly mode too', (

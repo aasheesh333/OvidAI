@@ -20,6 +20,7 @@ import '../../../core/cloud/artifact_vault.dart';
 import '../../../core/cloud/cloud_rest.dart';
 import '../../../core/cloud/cloud_session_store.dart';
 import '../../../core/cloud/credentials.dart';
+import '../../../core/cloud/plans_client.dart';
 import '../../../core/cloud/projects.dart';
 import '../../../core/cloud/usage_history.dart';
 import '../../../core/commands.dart';
@@ -140,16 +141,14 @@ class V2SettingsRoutes {
   /// update-required have no endpoint or version feed yet, so they stay false
   /// rather than being guessed — the page then says "All clear", which is the
   /// truth it can stand behind.
-  static Widget _systemStates(
-    BuildContext context,
-    V2SettingsActions actions,
-  ) {
+  static Widget _systemStates(BuildContext context, V2SettingsActions actions) {
     // The shell already holds the one live store; reading it through the
     // actions avoids a second `acquire` whose consumer count is never
     // released (which would keep the store, its AppState listener and its
     // lifecycle observer alive after the shell is gone).
     final usage = actions.usage.usage;
-    final limited = usage != null && usage.hasRemainingPct && usage.remainingPct <= 0;
+    final limited =
+        usage != null && usage.hasRemainingPct && usage.remainingPct <= 0;
     return V2SystemStatesPage(
       data: V2SystemStatesData(
         offline: ConnectionService.I.offline,
@@ -316,9 +315,21 @@ class V2SettingsRoutes {
     return verified == true && fb.uid == expectedUid;
   }
 
+  /// Builds the plan screen from the gateway's plan table.
+  ///
+  /// `GET /cloud/v1/plans` is the only source of a plan's name, price and
+  /// limits. Before this, the screen carried its own copy keyed by the old
+  /// `3x` / `7x` / `15x` aliases with a Free default, so a paying Go, Plus or
+  /// Pro account was shown "Free, $0, 3 GB". The server's answer also carries
+  /// the authoritative limits: a `null` limit is unknown and renders `—`,
+  /// never `0`.
   static V2PlanBillingData _plans(
     BuildContext context,
     V2SettingsActions actions, {
+    List<CloudPlan>? serverPlans,
+    bool plansLoading = false,
+    String? plansError,
+    VoidCallback? onReloadPlans,
     V2Currency currency = V2Currency.usd,
     V2BillingPeriod period = V2BillingPeriod.monthly,
     ValueChanged<V2Currency>? onCurrencyChanged,
@@ -326,10 +337,6 @@ class V2SettingsRoutes {
   }) {
     final usage = actions.usage.usage;
     final app = AppState.I;
-    final catalog = usage != null && usage.plans.isNotEmpty
-        ? usage.plans
-        : OvidPlanCatalog.plans;
-    final plans = <V2Plan>[];
     final play = PlayBillingService.I;
     // Play's catalogue only gates the CTA when Play is the attempted path. A
     // confirmed RevenueCat fallback (or Test Store) may sell products Play does
@@ -341,56 +348,47 @@ class V2SettingsRoutes {
     );
     final playCatalogue =
         route != BillingRoute.revenueCat && route != BillingRoute.demo;
-    for (final plan in catalog) {
-      final tier = plan.tier;
-      final spec = _planSpec(tier);
-      final limits = V2PlanLimits.forIdOrFree(tier);
-      final monthlyProduct = play.productFor(tier);
-      final yearlyProduct = play.productFor(
-        tier,
-        period: OvidBillingPeriod.yearly,
-      );
-      plans.add(
-        V2Plan(
-          id: tier,
-          name: spec.name,
-          tagline: spec.tagline,
-          priceUsd: spec.usd,
-          priceInr: spec.inr,
-          priceUsdYearly: spec.usd * 10,
-          priceInrYearly: spec.inr * 10,
-          // What Google Play actually charges, when the store has answered.
-          // The canonical prices above stay the fallback only.
-          storePriceMonthly: monthlyProduct?.price,
-          storePriceYearly: yearlyProduct?.price,
-          storeCurrency:
-              monthlyProduct?.currencyCode ?? yearlyProduct?.currencyCode,
-          storeMonthlyAvailable: playCatalogue && play.loaded
-              ? monthlyProduct != null
-              : null,
-          storeYearlyAvailable: playCatalogue && play.loaded
-              ? yearlyProduct != null
-              : null,
-          storageGb: spec.storageGb,
-          autoOnly: !limits.manualModels,
-          features: spec.features,
-          popular: tier == '7x',
-        ),
-      );
+
+    final plans = <V2Plan>[];
+    if (serverPlans != null) {
+      // The endpoint answered: its rows are the whole truth, including an
+      // empty list (nothing is on sale).
+      for (final plan in serverPlans) {
+        plans.add(_cardFromServerPlan(plan, play, playCatalogue));
+      }
+    } else if (usage != null && usage.plans.isNotEmpty) {
+      // The older `/usage.plans` shape, for a server that predates `/plans`.
+      for (final plan in usage.plans) {
+        plans.add(_cardFromUsagePlan(plan, play, playCatalogue));
+      }
+    } else if (!plansLoading && plansError == null) {
+      // Offline seed, used only when no request has answered and none failed.
+      for (final plan in OvidPlanCatalog.plans) {
+        plans.add(_cardFromUsagePlan(plan, play, playCatalogue));
+      }
     }
+
     // The server's answer is the only source that can confirm the plan
     // (state.dart restores a display-only cache); until it answers, fall back
     // to the cached tier for the badge only. Purchases re-check with
     // `isServerConfirmed` inside [V2SettingsActions.buyPlan].
     final currentTier = confirmedPlanTier ?? app.ovidCloudTier;
+    final status = plans.isNotEmpty
+        ? V2PlanBillingStatus.ready
+        : plansLoading
+        ? V2PlanBillingStatus.loading
+        : plansError != null
+        ? V2PlanBillingStatus.error
+        : V2PlanBillingStatus.empty;
     return V2PlanBillingData(
-      status: plans.isEmpty
-          ? V2PlanBillingStatus.empty
-          : V2PlanBillingStatus.ready,
+      status: status,
       currency: currency,
       period: period,
       currentPlanId: currentTier,
       plans: plans,
+      errorMessage:
+          plansError ??
+          'We could not load plans. Check your connection and try again.',
       // RevenueCat present but no server route can confirm its charge: every
       // paid card disables its CTA with this real reason. Only once Play has
       // answered, so a page opened during startup cannot stay disabled after
@@ -424,8 +422,128 @@ class V2SettingsRoutes {
         );
       },
       onRestorePurchases: () => actions.restorePurchases(context),
-      onRetry: actions.refreshUsage,
+      onRetry: () {
+        actions.refreshUsage();
+        onReloadPlans?.call();
+      },
     );
+  }
+
+  /// One card from a `GET /plans` row. Every number is the server's; a null
+  /// limit stays null so the screen renders `—`.
+  static V2Plan _cardFromServerPlan(
+    CloudPlan plan,
+    PlayBillingService play,
+    bool playCatalogue,
+  ) {
+    final id = plan.canonicalId;
+    final spec = _planSpec(id);
+    final limits = V2PlanLimits(
+      id: id,
+      name: plan.name,
+      storageGb: plan.storageGb,
+      filesPerWindow: plan.uploads?.count,
+      fileWindowLabel: _fileWindowLabel(
+        plan.uploads?.windowHours ?? plan.windowHours,
+      ),
+      filesPerProject: plan.projectFiles,
+      manualModels: plan.manualModels,
+      autoMultiplier: plan.mult,
+      customConnectors: plan.customConnectors,
+      // The backend has no token counter: allowances are USD. An unreported
+      // cap is unknown, not the retired "50M tokens a day" claim.
+      dailyTokenCap: null,
+      monthlyTokenCap: null,
+    );
+    return _planCard(
+      id: id,
+      name: plan.name.isEmpty ? spec.name : plan.name,
+      tagline: spec.tagline,
+      priceUsd: plan.priceUsd,
+      priceInr: plan.priceInr,
+      limits: limits,
+      play: play,
+      playCatalogue: playCatalogue,
+    );
+  }
+
+  /// One card from the older `/usage.plans` shape. It carries a price but no
+  /// limits, so the canonical table supplies those.
+  static V2Plan _cardFromUsagePlan(
+    OvidPlan plan,
+    PlayBillingService play,
+    bool playCatalogue,
+  ) {
+    final id =
+        V2PlanLimits.forId(plan.tier)?.id ??
+        V2PlanLimits.forId(plan.id)?.id ??
+        plan.id;
+    final spec = _planSpec(id);
+    return _planCard(
+      id: id,
+      name: plan.name.isEmpty ? spec.name : plan.name,
+      tagline: spec.tagline,
+      priceUsd: plan.priceUsd,
+      // `/usage.plans` has no rupee product price. Null is unknown; the card
+      // shows `—` rather than a converted number.
+      priceInr: null,
+      limits: V2PlanLimits.forId(id),
+      play: play,
+      playCatalogue: playCatalogue,
+    );
+  }
+
+  static V2Plan _planCard({
+    required String id,
+    required String name,
+    required String tagline,
+    required num? priceUsd,
+    required num? priceInr,
+    required V2PlanLimits? limits,
+    required PlayBillingService play,
+    required bool playCatalogue,
+  }) {
+    // Play and RevenueCat sell the legacy tier ids (`3x` / `7x` / `15x`).
+    final storeTier = V2PlanProducts.tierForPlan(id);
+    final monthlyProduct = play.productFor(storeTier);
+    final yearlyProduct = play.productFor(
+      storeTier,
+      period: OvidBillingPeriod.yearly,
+    );
+    return V2Plan(
+      id: id,
+      name: name,
+      tagline: tagline,
+      priceUsd: priceUsd?.round() ?? 0,
+      priceInr: priceInr?.round() ?? 0,
+      // No server table carries a yearly price, so none is derived. Only the
+      // store's own price can fill a yearly card.
+      priceUsdYearly: 0,
+      priceInrYearly: 0,
+      // What Google Play actually charges, when the store has answered.
+      storePriceMonthly: monthlyProduct?.price,
+      storePriceYearly: yearlyProduct?.price,
+      storeCurrency:
+          monthlyProduct?.currencyCode ?? yearlyProduct?.currencyCode,
+      storeMonthlyAvailable: playCatalogue && play.loaded
+          ? monthlyProduct != null
+          : null,
+      storeYearlyAvailable: playCatalogue && play.loaded
+          ? yearlyProduct != null
+          : null,
+      limits: limits,
+      autoOnly: limits?.manualModels == false,
+      // No feature copy is rendered on the card; the comparison table is the
+      // one place limits are stated.
+      features: const [],
+      popular: id == 'plus',
+    );
+  }
+
+  /// `24` → `day`, `3` → `3 h`; unknown stays empty.
+  static String _fileWindowLabel(int? hours) {
+    if (hours == null || hours <= 0) return '';
+    return hours == 24 ? 'day' : '$hours h';
   }
 
   /// Builds the Usage screen from the two real sources:
@@ -459,6 +577,8 @@ class V2SettingsRoutes {
         ? AppState.I.ovidCloudTier
         : usage.tier;
     final limits = V2PlanLimits.forIdOrFree(tier);
+    final dailyCap = limits.dailyTokenCap ?? 0;
+    final monthlyCap = limits.monthlyTokenCap ?? 0;
     final today = usage.today;
     final recorded = history.history;
 
@@ -500,17 +620,15 @@ class V2SettingsRoutes {
     final remaining = usage.remainingFraction;
     final dailyFraction = remaining != null
         ? (1 - remaining).clamp(0.0, 1.0)
-        : (dailyTokens == null || limits.dailyTokenCap <= 0
+        : (dailyTokens == null || dailyCap <= 0
               ? 0.0
-              : (dailyTokens / limits.dailyTokenCap).clamp(0.0, 1.0));
+              : (dailyTokens / dailyCap).clamp(0.0, 1.0));
 
     return V2UsageData(
       status: V2UsageStatus.ready,
       planId: tier,
       dailyUsedLabel: dailyTokens == null ? '' : compactTokens(dailyTokens),
-      dailyLimitLabel: limits.dailyTokenCap <= 0
-          ? ''
-          : compactTokens(limits.dailyTokenCap),
+      dailyLimitLabel: dailyCap <= 0 ? '' : compactTokens(dailyCap),
       dailyFraction: dailyFraction,
       // The page derives a live countdown from this instant; no static string.
       resetsAt: usage.resetsAt,
@@ -520,9 +638,7 @@ class V2SettingsRoutes {
       monthlyUsedLabel: monthlyTokens == null
           ? ''
           : compactTokens(monthlyTokens),
-      monthlyLimitLabel: limits.monthlyTokenCap <= 0
-          ? ''
-          : compactTokens(limits.monthlyTokenCap),
+      monthlyLimitLabel: monthlyCap <= 0 ? '' : compactTokens(monthlyCap),
       days: _usageDays(recorded, history.days),
       range: history.days == 7
           ? V2UsageRange.sevenDays
@@ -531,7 +647,9 @@ class V2SettingsRoutes {
       models: _usageModels(usage, recorded),
       requestsLabel: requests == null ? '' : '$requests',
       imagesLabel: images == null ? '' : '$images',
-      storageLimitLabel: '${limits.storageGb} GB',
+      storageLimitLabel: limits.storageGb == null
+          ? ''
+          : '${limits.storageGb} GB',
       onRangeChanged: (range) =>
           unawaited(history.setDays(range == V2UsageRange.sevenDays ? 7 : 30)),
       onUpgrade: upgrade,
@@ -723,7 +841,8 @@ class V2SettingsRoutes {
     V2ExportSessionToggle? onExportSessionToggled,
   }) {
     final spec = _planSpec(AppState.I.ovidCloudTier);
-    final quotaBytes = spec.storageGb * 1024 * 1024 * 1024;
+    final storageGb = spec.storageGb;
+    final quotaBytes = storageGb == null ? 0 : storageGb * 1024 * 1024 * 1024;
     final firebase = FirebaseService.I;
     // The gateway compares the typed value with the account's registered
     // EMAIL. It stores no phone, so a phone is never offered as a
@@ -749,11 +868,15 @@ class V2SettingsRoutes {
       crashReports: FirebaseService.I.consentGiven,
       hasData: AppState.I.sessions.isNotEmpty,
       accountContact: contact,
-      storageUsedLabel: '${_bytes(totalBytes)} of ${spec.storageGb} GB',
+      storageUsedLabel: storageGb == null
+          ? ''
+          : '${_bytes(totalBytes)} of $storageGb GB',
       storageFraction: quotaBytes <= 0
           ? 0
           : (totalBytes / quotaBytes).clamp(0.0, 1.0),
-      storageFreeLabel: _bytes((quotaBytes - totalBytes).clamp(0, quotaBytes)),
+      storageFreeLabel: quotaBytes <= 0
+          ? ''
+          : _bytes((quotaBytes - totalBytes).clamp(0, quotaBytes)),
       onExportImport: export,
       onExport: export,
       onExportSessionToggled: onExportSessionToggled,
@@ -816,15 +939,16 @@ class V2SettingsRoutes {
     VoidCallback? onRetry,
   }) {
     final spec = _planSpec(AppState.I.ovidCloudTier);
+    final storageGb = spec.storageGb;
     // Cache lives on the device, so it is shown but never counted against the
     // account's cloud quota.
     final used = artifactsBytes + sessionsBytes;
     double gb(int bytes) => bytes / (1024 * 1024 * 1024);
     return V2StoragePageData(
       usedGb: gb(used),
-      totalGb: spec.storageGb.toDouble(),
+      totalGb: storageGb?.toDouble() ?? 0,
       planName: _planName(AppState.I.ovidCloudTier),
-      quotaLabel: '${spec.storageGb} GB included',
+      quotaLabel: storageGb == null ? '' : '$storageGb GB included',
       slices: [
         if (artifactsBytes > 0)
           V2StorageSlice(
@@ -970,9 +1094,11 @@ class V2SettingsRoutes {
     final limits = planId == null ? null : V2PlanLimits.forId(planId);
     // Only a plan the table knows gets a display name. An unknown tier must
     // not fall back to "Free" and claim a plan the server did not name.
+    // `_planName` resolves canonical ids (`go` / `plus` / `pro`) as well as the
+    // legacy aliases, so a paying account is not labelled Free.
     final planName = limits == null
         ? (plan?.name ?? '')
-        : ovidPlanName(planId!);
+        : _barePlanName(planId!);
 
     final todayTokens = usage?.today?.usedTokens;
     final usedBytes = storage?.usedBytes;
@@ -1328,49 +1454,72 @@ class V2SettingsRoutes {
     );
   }
 
+  /// The account's plan name for a settings row, resolved by canonical id.
+  ///
+  /// `ovidPlanName` cannot be used on its own: its offline table is keyed by
+  /// the old aliases, so `ovidPlanName('go')` falls through to Free. Resolving
+  /// the id first (and refusing to name an unknown plan Free) keeps a paying
+  /// Go/Plus/Pro account from being labelled Free.
   static String _planName(String tier) =>
-      tier == 'free' ? 'Free plan' : ovidPlanName(tier);
+      canonicalPlanId(tier) == 'free' ? 'Free plan' : _barePlanName(tier);
 
-  static V2PlanSpec _planSpec(String tier) {
-    switch (tier) {
-      case '3x':
-        return const V2PlanSpec(
-          name: 'Go',
-          tagline: 'For everyday work',
-          usd: 5,
-          inr: 499,
-          storageGb: 5,
-          features: ['Auto models', '5 GB storage', '5 custom connectors'],
-        );
-      case '7x':
-        return const V2PlanSpec(
-          name: 'Plus',
-          tagline: 'For serious builders',
-          usd: 18,
-          inr: 1799,
-          storageGb: 15,
-          features: ['All models', '15 GB storage', '20 custom connectors'],
-        );
-      case '15x':
-        return const V2PlanSpec(
-          name: 'Pro',
-          tagline: 'For teams and heavy use',
-          usd: 99,
-          inr: 9999,
-          storageGb: 75,
-          features: ['All models', '75 GB storage', '20 custom connectors'],
-        );
-      default:
-        return const V2PlanSpec(
-          name: 'Free',
-          tagline: 'Start building',
-          usd: 0,
-          inr: 0,
-          storageGb: 3,
-          features: ['Auto model', '3 GB storage', '50M tokens a day'],
-        );
-    }
+  /// The bare plan name (`Free`, `Go`, `Plus`, `Pro`) for a tier.
+  static String _barePlanName(String tier) {
+    final canonical = canonicalPlanId(tier);
+    final spec = _planSpec(canonical);
+    if (spec.name == 'Unknown') return 'Unknown';
+    final live =
+        OvidPlanCatalog.plans
+            .where((plan) => V2PlanLimits.forId(plan.tier)?.id == canonical)
+            .firstOrNull ??
+        OvidPlanCatalog.plans
+            .where((plan) => V2PlanLimits.forId(plan.id)?.id == canonical)
+            .firstOrNull;
+    final name = live?.name ?? spec.name;
+    return Distribution.billingDemo ? '$name (demo)' : name;
   }
+
+  /// The display copy for a plan, resolved by canonical id.
+  ///
+  /// The server stores canonical ids (`go` / `plus` / `pro`), but existing
+  /// `users.tier` rows still hold the aliases the mint wrote (`3x` / `7x` /
+  /// `15x`) and older seeds (`starter` / `max`). Both spellings resolve here
+  /// through the same mapping the server uses, so a stale stored tier still
+  /// renders the right plan instead of falling into Free.
+  ///
+  /// Prices and limits are deliberately absent: they come from the server's
+  /// plan table, never from a local copy.
+  static V2PlanSpec _planSpec(String tier) {
+    return switch (canonicalPlanId(tier)) {
+      'free' => const V2PlanSpec(
+        name: 'Free',
+        tagline: 'Start building',
+        storageGb: 3,
+      ),
+      'go' => const V2PlanSpec(
+        name: 'Go',
+        tagline: 'For everyday work',
+        storageGb: 5,
+      ),
+      'plus' => const V2PlanSpec(
+        name: 'Plus',
+        tagline: 'For serious builders',
+        storageGb: 15,
+      ),
+      'pro' => const V2PlanSpec(
+        name: 'Pro',
+        tagline: 'For teams and heavy use',
+        storageGb: 75,
+      ),
+      // Unknown is its own answer. Calling it Free would describe a plan the
+      // server never named.
+      _ => const V2PlanSpec(name: 'Unknown', tagline: '', storageGb: null),
+    };
+  }
+
+  /// Test seam: id resolution for the plan screen.
+  @visibleForTesting
+  static V2PlanSpec planSpecForTest(String tier) => _planSpec(tier);
 }
 
 /// One fact parsed out of a shared memory file.
@@ -1633,12 +1782,19 @@ class _PlanLoaderState extends State<_PlanLoader> {
   V2Currency _currency = V2Currency.usd;
   V2BillingPeriod _period = V2BillingPeriod.monthly;
 
+  /// The gateway's plan table. Null until `GET /plans` answers; an empty list
+  /// is a real answer ("nothing is on sale").
+  List<CloudPlan>? _serverPlans;
+  bool _plansLoading = true;
+  String? _plansError;
+
   @override
   void initState() {
     super.initState();
     widget.actions.usage.addListener(_onChange);
     // The plan badge must reflect the server, not a stale cached tier.
     widget.actions.refreshUsage();
+    unawaited(_loadPlans());
   }
 
   @override
@@ -1651,12 +1807,44 @@ class _PlanLoaderState extends State<_PlanLoader> {
     if (mounted) setState(() {});
   }
 
+  /// Reads the one source of names, prices and limits.
+  ///
+  /// The screen used to carry its own plan copy; a failure here must not fall
+  /// back to invented numbers, so an error is shown until a retry answers.
+  Future<void> _loadPlans() async {
+    if (mounted) {
+      setState(() {
+        _plansLoading = true;
+        _plansError = null;
+      });
+    }
+    try {
+      final plans = await PlansClient().fetch();
+      if (!mounted) return;
+      setState(() {
+        _serverPlans = plans;
+        _plansLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _plansLoading = false;
+        _plansError =
+            'We could not load plans. Check your connection and try again.';
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return PlanBillingPage(
       data: V2SettingsRoutes._plans(
         context,
         widget.actions,
+        serverPlans: _serverPlans,
+        plansLoading: _plansLoading,
+        plansError: _plansError,
+        onReloadPlans: () => unawaited(_loadPlans()),
         currency: _currency,
         period: _period,
         onCurrencyChanged: (value) => setState(() => _currency = value),
@@ -2082,11 +2270,7 @@ class _MemoryLoaderState extends State<_MemoryLoader> {
         ScaffoldMessenger.of(context)
           ..hideCurrentSnackBar()
           ..showSnackBar(
-            SnackBar(
-              content: Text(
-                'Could not forget that memory. Try again.',
-              ),
-            ),
+            SnackBar(content: Text('Could not forget that memory. Try again.')),
           );
       }
       await _load();
@@ -2756,19 +2940,12 @@ class _CredentialsLoaderState extends State<_CredentialsLoader> {
 }
 
 class V2PlanSpec {
-  const V2PlanSpec({
-    required this.name,
-    required this.tagline,
-    required this.usd,
-    required this.inr,
-    required this.storageGb,
-    required this.features,
-  });
+  const V2PlanSpec({required this.name, required this.tagline, this.storageGb});
 
   final String name;
   final String tagline;
-  final int usd;
-  final int inr;
-  final int storageGb;
-  final List<String> features;
+
+  /// The plan's R2 quota, or null when the tier is unknown. Prices are not
+  /// here: they come from the server's plan table.
+  final int? storageGb;
 }
