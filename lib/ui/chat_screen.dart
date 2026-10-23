@@ -3005,23 +3005,16 @@ class _ChatScreenState extends State<ChatScreen>
           bottom: MediaQuery.viewInsetsOf(sheetContext).bottom,
         ),
         child: DraggableScrollableSheet(
-          initialChildSize:
-              MediaQuery.viewInsetsOf(sheetContext).bottom > 0 ||
-                  MediaQuery.textScalerOf(sheetContext).scale(14) > 20
-              ? 0.92
-              : 0.5,
-          minChildSize:
-              MediaQuery.viewInsetsOf(sheetContext).bottom > 0 ||
-                  MediaQuery.textScalerOf(sheetContext).scale(14) > 20
-              ? 0.6
-              : 0.32,
+          // The picker contains a provider card and its retry action. At the
+          // compact half-height extent that card can place the action below
+          // the sheet's hit-test region, especially at the accessible text
+          // scale. Start tall enough for the card; users can still drag it
+          // down after the first frame.
+          initialChildSize: 0.92,
+          minChildSize: 0.6,
           maxChildSize: 0.92,
           snap: true,
-          snapSizes:
-              MediaQuery.viewInsetsOf(sheetContext).bottom > 0 ||
-                  MediaQuery.textScalerOf(sheetContext).scale(14) > 20
-              ? const [0.6, 0.92]
-              : const [0.5, 0.92],
+          snapSizes: const [0.6, 0.92],
           builder: (ctx, scrollController) =>
               _ModelPickerSheet(scrollController: scrollController),
         ),

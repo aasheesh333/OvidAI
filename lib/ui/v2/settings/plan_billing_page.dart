@@ -973,28 +973,32 @@ class _PlanCard extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: OSpace.s),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    ExcludeSemantics(
-                      child: Text(
-                        priceLabel,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.h2.copyWith(
-                          color: plan.popular ? c.accent : c.text,
+                Flexible(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      ExcludeSemantics(
+                        child: Text(
+                          priceLabel,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.end,
+                          style: OType.h2.copyWith(
+                            color: plan.popular ? c.accent : c.text,
+                          ),
                         ),
                       ),
-                    ),
-                    ExcludeSemantics(
-                      child: Text(
-                        plan.periodSuffix(period),
-                        maxLines: 1,
-                        style: OType.caption.copyWith(color: c.textMuted),
+                      ExcludeSemantics(
+                        child: Text(
+                          plan.periodSuffix(period),
+                          maxLines: 1,
+                          textAlign: TextAlign.end,
+                          style: OType.caption.copyWith(color: c.textMuted),
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ],
             ),

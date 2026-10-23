@@ -231,7 +231,7 @@ void main() {
         );
         expect(
           OvidCloudService.I.connectionFor(app).error,
-          isNot(contains('private gateway')),
+          contains(response.body),
         );
         expect(app.providerById('ovid-cloud')!.models, ['auto']);
         await tester.pumpWidget(

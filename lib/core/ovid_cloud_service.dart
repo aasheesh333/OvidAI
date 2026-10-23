@@ -875,6 +875,7 @@ class OvidCloudService extends ChangeNotifier {
       scope,
       CloudConnectionState(CloudConnectionStatus.failed, error: message),
     );
+    String catalogBody = '';
     try {
       final base = scope.baseUrl.endsWith('/')
           ? scope.baseUrl
@@ -888,6 +889,7 @@ class OvidCloudService extends ChangeNotifier {
           )
           .timeout(const Duration(seconds: 15));
       scope.check();
+      catalogBody = res.body;
       if (res.statusCode != 200) {
         final code = _errorCode(res.body);
         // An expired/revoked scoped key requires a fresh mint. Gateways that
@@ -908,7 +910,8 @@ class OvidCloudService extends ChangeNotifier {
             'Ovid Cloud usage limit reached (402). Upgrade or wait for reset.',
           429 => 'Ovid Cloud is busy (429). Retry in a moment.',
           _ =>
-            'Ovid Cloud model catalog unavailable (${res.statusCode}). Retry.',
+            'Ovid Cloud model catalog unavailable (${res.statusCode}): '
+                '${res.body.trim()} Retry.',
         });
         return;
       }
@@ -930,7 +933,8 @@ class OvidCloudService extends ChangeNotifier {
       }
       if (ids.isEmpty) {
         failed(
-          'Ovid Cloud returned no chat models. Retry to refresh the catalog.',
+          'Ovid Cloud returned no chat models: ${catalogBody.trim()} '
+          'Retry to refresh the catalog.',
         );
         return;
       }
@@ -945,7 +949,9 @@ class OvidCloudService extends ChangeNotifier {
     } on CloudUsageException {
       rethrow;
     } on FormatException {
-      failed('Ovid Cloud returned an invalid model catalog. Retry.');
+      failed(
+        'Ovid Cloud returned an invalid model catalog: $catalogBody Retry.',
+      );
     } catch (e) {
       Diag.swallow('ovid_cloud.models', e);
       failed(

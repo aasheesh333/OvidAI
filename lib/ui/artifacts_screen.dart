@@ -467,28 +467,39 @@ class _ArtifactsScreenState extends State<ArtifactsScreen> {
             runSpacing: 8,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              AetherSegmentedControl<ArtifactFilter>(
-                key: const ValueKey('artifacts-filter'),
-                value: _filter,
-                onChanged: (f) => setState(() => _filter = f),
-                options: [
-                  (
-                    value: ArtifactFilter.all,
-                    label: l10n.artifactsFilterAll,
-                    icon: null,
-                  ),
-                  (
-                    value: ArtifactFilter.uploaded,
-                    label: l10n.artifactsFilterUploaded,
-                    icon: null,
-                  ),
-                  (
-                    value: ArtifactFilter.generated,
-                    label: l10n.artifactsFilterGenerated,
-                    icon: null,
-                  ),
-                ],
-              ),
+              if (MediaQuery.textScalerOf(context).scale(14) > 20)
+                _ArtifactFilterDropdown(
+                  value: _filter,
+                  onChanged: (f) => setState(() => _filter = f),
+                  labels: {
+                    ArtifactFilter.all: l10n.artifactsFilterAll,
+                    ArtifactFilter.uploaded: l10n.artifactsFilterUploaded,
+                    ArtifactFilter.generated: l10n.artifactsFilterGenerated,
+                  },
+                )
+              else
+                AetherSegmentedControl<ArtifactFilter>(
+                  key: const ValueKey('artifacts-filter'),
+                  value: _filter,
+                  onChanged: (f) => setState(() => _filter = f),
+                  options: [
+                    (
+                      value: ArtifactFilter.all,
+                      label: l10n.artifactsFilterAll,
+                      icon: null,
+                    ),
+                    (
+                      value: ArtifactFilter.uploaded,
+                      label: l10n.artifactsFilterUploaded,
+                      icon: null,
+                    ),
+                    (
+                      value: ArtifactFilter.generated,
+                      label: l10n.artifactsFilterGenerated,
+                      icon: null,
+                    ),
+                  ],
+                ),
               if (widget.sessionId != null)
                 FilterChip(
                   key: const ValueKey('artifacts-scope-all'),
@@ -628,6 +639,56 @@ class _ArtifactRow extends StatelessWidget {
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Compact local filter for the guest Artifacts view. A segmented control's
+/// three 48 dp targets wrap into a tall stack at 200% text on a 320 dp phone;
+/// one accessible dropdown preserves the same choices without overflow.
+class _ArtifactFilterDropdown extends StatelessWidget {
+  const _ArtifactFilterDropdown({
+    required this.value,
+    required this.onChanged,
+    required this.labels,
+  });
+
+  final ArtifactFilter value;
+  final ValueChanged<ArtifactFilter> onChanged;
+  final Map<ArtifactFilter, String> labels;
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<ArtifactFilter>(
+      key: const ValueKey('artifacts-filter'),
+      initialValue: value,
+      position: PopupMenuPosition.under,
+      onSelected: onChanged,
+      itemBuilder: (context) => [
+        for (final option in ArtifactFilter.values)
+          PopupMenuItem(
+            value: option,
+            child: Text(labels[option]!),
+          ),
+      ],
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(AetherRadius.rPill),
+          border: Border.all(color: Aether.hairline),
+          color: Aether.surfaceAlt,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(
+              child: Text(labels[value]!, maxLines: 1, overflow: TextOverflow.ellipsis),
+            ),
+            const SizedBox(width: 6),
+            Icon(Icons.expand_more_rounded, size: 16, color: Aether.textMuted),
+          ],
         ),
       ),
     );
