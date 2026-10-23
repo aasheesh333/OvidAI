@@ -473,6 +473,43 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
     const { id: sessionId } = request.params as { id: string };
     const { uid, email } = request.principal;
 
+    // 0. Key-abuse admission — FIRST, before ownership, body validation, mint,
+    //    any write or the queue. One Ovid key belongs to one person; a key
+    //    seen from abnormally many independent networks in the policy window
+    //    is treated as stolen/shared and refused (0 requests). The decision
+    //    itself is the pure `evaluateIpAnomaly`; the guard only resolves the
+    //    trusted client IP and appends the observation.
+    //
+    //    Client IP: `request.socket.remoteAddress` (the socket peer) plus
+    //    X-Forwarded-For ONLY when that peer is a configured reverse proxy.
+    //    `request.ip` is NOT used: trustProxy is deliberately off, so a
+    //    direct client could otherwise choose its own address. See
+    //    clientIp.ts for the exact hop read and the Caddy contract.
+    //
+    //    EMAIL FOLLOW-UP: the product also requires emailing the account
+    //    owner on a block. The gateway has NO mailer today (no SMTP or
+    //    provider dependency in this package), so this task deliberately
+    //    does not send mail and does not fake one. This log line is the hook
+    //    a future mailer/notification consumer uses.
+    if (deps.ipAnomaly !== undefined) {
+      const decision = await deps.ipAnomaly.admit(uid, {
+        peerAddress: request.socket.remoteAddress,
+        forwardedFor: request.headers["x-forwarded-for"],
+      });
+      if (decision.block) {
+        request.log.warn(
+          { uid, reason: decision.reason },
+          "ip anomaly: send refused (key blocked)",
+        );
+        return sendError(
+          reply,
+          403,
+          "ip_anomaly_blocked",
+          "This account is temporarily blocked after unusual network activity. Contact support if this is unexpected.",
+        );
+      }
+    }
+
     // 1. Ownership FIRST: wrong owner and unknown session are both 404 (never
     //    403), before body validation so nobody can probe a session they
     //    don't own through validation behavior. The shape guard folds a

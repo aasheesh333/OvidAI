@@ -38,6 +38,9 @@ import { createWorkerClient } from "./workerClient.js";
 import { createRedisPtyBridge } from "./wsPty.js";
 import { createRedisApprovalPublisher, createWsSocketRegistry } from "./ws.js";
 import { createSystemHub } from "./systemChannel.js";
+import { DEFAULT_IP_ANOMALY_POLICY } from "./anomaly.js";
+import { createIpAnomalyGuard } from "./ipAnomalyGuard.js";
+import { createIpObservationStore } from "./ipObservations.js";
 
 /**
  * Composition root — intentionally untested-thin (Task 10's e2e exercises the
@@ -235,6 +238,23 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
     );
   }
   const activity = createActivityTracker(redisC);
+  // IP fan-out admission (stolen/shared-key detection). Observations are
+  // cache-class state: the cache redis (REDIS_C_URL) is the right home, and
+  // losing a key only weakens detection for one window — never a send.
+  // The trusted-proxy set is boot-validated config; a blocked send is
+  // refused before any DB/mint/queue work (routes/messages.ts).
+  const ipAnomaly = createIpAnomalyGuard({
+    store: createIpObservationStore(redisC, {
+      windowMs: DEFAULT_IP_ANOMALY_POLICY.windowMs,
+    }),
+    trustedProxyCidrs: cfg.trustedProxyCidrs,
+    onError: (err) => {
+      console.warn(
+        "[gateway] ip-observation store unavailable; send admitted (fail-open):",
+        err,
+      );
+    },
+  });
   const worker = createWorkerClient({
     baseUrl: cfg.workerInternalUrl,
     token: cfg.internalToken,
@@ -288,6 +308,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       storage,
       ...(cfg.cdn !== undefined ? { cdn: cfg.cdn } : {}),
       activity,
+      ipAnomaly,
       worker,
       inlineMaxBytes: cfg.fileInlineMaxBytes,
       putMaxBytes: cfg.putMaxBytes,

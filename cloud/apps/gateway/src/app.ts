@@ -63,6 +63,7 @@ import type { ApprovalPublisher, WsDeps, WsSocketRegistry } from "./ws.js";
 import type { BrowserChannelDeps } from "./browserChannel.js";
 import { PtyBridgeError, type PtyBridge } from "./wsPty.js";
 import type { SystemHub } from "./systemChannel.js";
+import type { IpAnomalyGuard } from "./ipAnomalyGuard.js";
 
 export interface GatewayDeps {
   db: Db;
@@ -157,6 +158,18 @@ export interface GatewayDeps {
    * createActivityTracker(redisC).
    */
   activity?: ActivityTracker;
+  /**
+   * IP fan-out admission for POST /sessions/:id/messages. main() wires a
+   * Redis-backed observation store + the pure decision function; a block
+   * refuses the send (typed 403 ip_anomaly_blocked) BEFORE ownership, body
+   * validation, mint, writes or enqueue.
+   *
+   * OPTIONAL only so pre-existing compositions (spine/e2e/unit suites) stay
+   * source-compatible. ABSENT = the check is skipped; production always
+   * wires it. The guard fails OPEN on a Redis outage (`store_unavailable`),
+   * documented in ipAnomalyGuard.ts.
+   */
+  ipAnomaly?: IpAnomalyGuard;
   /**
    * P7 Task 12: the worker file-service proxy — the gateway's only view of
    * workspace bytes. OPTIONAL for the same composition-compat reason; when

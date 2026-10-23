@@ -1,5 +1,6 @@
 import type { CdnConfig } from "@ovid/storage";
 import { loadCdnConfig } from "@ovid/storage";
+import { parseTrustedProxyCidrs } from "./clientIp.js";
 
 /**
  * OVID_APPCHECK_MODE — how the gateway treats `X-Firebase-AppCheck`.
@@ -49,6 +50,13 @@ export interface GatewayEnv {
   hydrateWaitMs: number;
   /** REDIS_C_URL — cache-class redis (activity keys); falls back to redisQUrl. */
   redisCUrl: string;
+  /**
+   * OVID_TRUSTED_PROXY_CIDRS — the socket peers allowed to supply
+   * X-Forwarded-For (comma/space separated CIDRs). Defaults to loopback +
+   * RFC1918, the reverse proxy's own address space. See clientIp.ts for the
+   * exact hop read and why request.ip is never used.
+   */
+  trustedProxyCidrs: string[];
   /**
    * P5 Task 15: AES-256 master key (64 hex chars) for MCP/plugin envelope
    * sealing. REQUIRED when authMode is `firebase`; in `test` mode an empty
@@ -169,6 +177,12 @@ export function loadGatewayEnv(raw: NodeJS.ProcessEnv): GatewayEnv {
   // (same fallback the worker documents with a boot-time warning).
   const redisCUrl = raw.REDIS_C_URL?.trim() || (raw.REDIS_Q_URL?.trim() ?? "");
 
+  // Trusted reverse proxies: validated at boot so a typo fails loudly rather
+  // than silently changing who may supply X-Forwarded-For.
+  const trustedProxyCidrs = parseTrustedProxyCidrs(
+    raw.OVID_TRUSTED_PROXY_CIDRS,
+  );
+
   // The internal token is required (non-empty) in firebase mode; it is
   // INVOKED from the return object so the required-var evaluation order
   // stays pinned (DATABASE_URL…OVID_INTERNAL_MINT_URL, then the worker URL,
@@ -258,6 +272,7 @@ export function loadGatewayEnv(raw: NodeJS.ProcessEnv): GatewayEnv {
     presignTtlSeconds,
     hydrateWaitMs,
     redisCUrl,
+    trustedProxyCidrs,
     masterKey: requiredMasterKey(),
     mcpRedirectUri,
     appCheckMode,
