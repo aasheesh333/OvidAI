@@ -1,0 +1,37 @@
+{
+  "updated": "2026-10-23T09:45:00Z",
+  "sessions": {
+    "web-cloud": {
+      "branch": "feat/ovid-cloud",
+      "workdir": "/root/OvidAI",
+      "owns": [
+        "cloud/apps/gateway/**",
+        "cloud/packages/shared/**",
+        "cloud/packages/db/**",
+        "COORDINATION.md",
+        "/root/OvidWeb/**"
+      ],
+      "do_not_touch": [
+        "lib/**", "test/**", "android/**", "pubspec.yaml",
+        "cloud/packages/agent-core/**",
+        "cloud/packages/browser/**",
+        "cloud/packages/sandbox/**"
+      ]
+    },
+    "flutter-android": {
+      "branch": "feat/ovid-si-rebuild",
+      "workdir": "/root/.local/share/opencode/worktree/d5f2a3/ovid-si-rebuild",
+      "owns": [
+        "lib/**", "test/**", "android/**", "pubspec.yaml",
+        "cloud/packages/agent-core/**",
+        "cloud/packages/browser/**",
+        "cloud/packages/sandbox/**"
+      ],
+      "do_not_touch": [
+        "cloud/apps/gateway/**",
+        "cloud/packages/shared/**",
+        "cloud/packages/db/**"
+      ]
+    }
+  }
+}
