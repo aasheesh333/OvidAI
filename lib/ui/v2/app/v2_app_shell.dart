@@ -1834,7 +1834,7 @@ class _V2AppShellState extends State<V2AppShell> {
                   'connectors',
                   'Connectors',
                   Icons.extension_rounded,
-                  'Apps and MCP servers Ovid can use',
+                  'External apps',
                 ),
               ],
             ),
@@ -1874,7 +1874,7 @@ class _V2AppShellState extends State<V2AppShell> {
                   'crash',
                   'Crash reports',
                   Icons.bug_report_outlined,
-                  'Crash logs and anonymous usage counts',
+                  'Crash logs and usage counts',
                 ),
                 _settingsRow(
                   'storage',
@@ -1911,7 +1911,7 @@ class _V2AppShellState extends State<V2AppShell> {
                   'app_lock',
                   'App lock',
                   Icons.lock_outline_rounded,
-                  'Require a PIN when Ovid returns',
+                  'Require a PIN on return',
                 ),
                 _settingsRow(
                   'account_health',

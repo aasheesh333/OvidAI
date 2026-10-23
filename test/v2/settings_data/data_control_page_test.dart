@@ -236,7 +236,7 @@ void main() {
 
     // The row names what leaves the device, and the switch is the stored value.
     expect(find.text('Crash reports'), findsOneWidget);
-    expect(find.text('Crash logs and anonymous usage counts'), findsOneWidget);
+    expect(find.text('Crash logs and usage counts'), findsOneWidget);
     final toggle = find.byKey(const ValueKey<String>('crash-reports-switch'));
     expect(tester.widget<Switch>(toggle).value, isFalse);
 

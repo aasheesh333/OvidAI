@@ -2,7 +2,6 @@
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/connectors/connector_api.dart';
-import 'package:ovid_ai/ui/v2/connectors/catalog_data.dart';
 import 'package:ovid_ai/ui/v2/connectors/connector_catalog_loader.dart';
 import 'package:ovid_ai/ui/v2/connectors/connectors_page.dart';
 

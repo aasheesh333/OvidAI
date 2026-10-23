@@ -325,7 +325,7 @@ class _DataControlPageState extends State<DataControlPage> {
       key: const ValueKey<String>('crash-reports-row'),
       icon: Icons.bug_report_outlined,
       title: 'Crash reports',
-      subtitle: 'Crash logs and anonymous usage counts',
+      subtitle: 'Crash logs and usage counts',
       showChevron: false,
       onTap: toggle,
       trailing: Semantics(

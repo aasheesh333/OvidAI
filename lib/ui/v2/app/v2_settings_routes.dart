@@ -915,7 +915,7 @@ class V2SettingsRoutes {
         id: 'token',
         kind: V2CredentialKind.token,
         title: 'Access token',
-        subtitle: 'Personal token for custom providers',
+        subtitle: 'Token for custom providers',
         connected: false,
       ),
       browserCredentials: browserCredentials,
