@@ -16,6 +16,10 @@ import {
 } from "@ovid/mcp";
 import type { McpServerDto } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
+import {
+  assertConnectorSlotAvailable,
+  ConnectorLimitReachedError,
+} from "../planGate.js";
 import { badRequest, isUuid, notFound, sendError, zodBadRequest } from "./http.js";
 
 /**
@@ -69,6 +73,20 @@ const patchBodySchema = z
     secrets: z.record(z.string(), z.unknown()).optional(),
   })
   .strict();
+
+/**
+ * The plan's CUSTOM-connector cap (Free 0, Go 5, Plus/Pro 20).
+ *
+ * Only rows the user created count: a curated row is the same shared server
+ * with the caller's credentials, so it never consumes a custom slot.
+ * `assertConnectorSlotAvailable` existed but nothing called it, so Go and
+ * Plus/Pro had no cap at all.
+ */
+async function assertCustomSlot(deps: GatewayDeps, uid: string, tier: string): Promise<void> {
+  const rows = await mcpServersRepo.list(deps.db, uid);
+  const custom = rows.filter((row) => row.curatedId === null).length;
+  assertConnectorSlotAvailable(tier, custom);
+}
 
 const MCP_SERVER_NOT_FOUND = "MCP server not found.";
 const SERVER_EXISTS = "An MCP server with this name already exists.";
@@ -264,8 +282,17 @@ export function registerMcpServerRoutes(app: FastifyInstance, deps: GatewayDeps)
       if (deps.crypto === undefined) {
         return sendError(reply, 503, "unavailable", "MCP secret sealing is not configured.");
       }
-      if ((await users.getTier(deps.db, uid)) === "free") {
+      const tier = await users.getTier(deps.db, uid);
+      if (tier === "free") {
         return sendError(reply, 402, "pro_required", PRO_REQUIRED_MESSAGE);
+      }
+      try {
+        await assertCustomSlot(deps, uid, tier);
+      } catch (err) {
+        if (err instanceof ConnectorLimitReachedError) {
+          return sendError(reply, err.status, err.code, err.message);
+        }
+        throw err;
       }
 
       let imported: ImportedMcp[];
@@ -329,8 +356,17 @@ export function registerMcpServerRoutes(app: FastifyInstance, deps: GatewayDeps)
     }
     const invalid = validateTransport(parsed.data);
     if (invalid !== null) return badRequest(reply, invalid);
-    if ((await users.getTier(deps.db, uid)) === "free") {
+    const tier = await users.getTier(deps.db, uid);
+    if (tier === "free") {
       return sendError(reply, 402, "pro_required", PRO_REQUIRED_MESSAGE);
+    }
+    try {
+      await assertCustomSlot(deps, uid, tier);
+    } catch (err) {
+      if (err instanceof ConnectorLimitReachedError) {
+        return sendError(reply, err.status, err.code, err.message);
+      }
+      throw err;
     }
 
     const imported: ImportedMcp = {

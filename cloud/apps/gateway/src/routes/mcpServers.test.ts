@@ -67,6 +67,64 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp server routes (real postgres)"
     });
   }
 
+  async function seedTier(uid: string, tier: string): Promise<void> {
+    await users.ensure(db, uid, `${uid}@stub.test`);
+    await db.$client.unsafe("UPDATE users SET tier = $2 WHERE uid = $1", [uid, tier]);
+  }
+
+  async function addCustom(uid: string, n: number) {
+    return postServer(uid, {
+      name: `custom-${n}`,
+      transport: "http",
+      url: `https://mcp${n}.example.test/mcp`,
+    });
+  }
+
+  it("go plan: 5 custom connectors allowed, the 6th refused with connector_limit_reached", async () => {
+    const uid = testUid("mcp-go-cap");
+    await seedTier(uid, "go");
+    for (let i = 1; i <= 5; i++) {
+      expect((await addCustom(uid, i)).statusCode).toBe(201);
+    }
+    const sixth = await addCustom(uid, 6);
+    expect(sixth.statusCode).toBe(403);
+    expect(sixth.json()).toMatchObject({ error: { code: "connector_limit_reached" } });
+  });
+
+  it("deleting a custom connector frees its slot", async () => {
+    const uid = testUid("mcp-go-free-slot");
+    await seedTier(uid, "go");
+    const created: string[] = [];
+    for (let i = 1; i <= 5; i++) {
+      const res = await addCustom(uid, i);
+      created.push((res.json() as { id: string }).id);
+    }
+    expect((await addCustom(uid, 6)).statusCode).toBe(403);
+
+    const del = await app.inject({
+      method: "DELETE",
+      url: `/cloud/v1/mcp/servers/${created[0]!}`,
+      headers: authHeaders(uid),
+    });
+    expect(del.statusCode).toBe(204);
+
+    expect((await addCustom(uid, 7)).statusCode).toBe(201);
+  });
+
+  it("curated connectors do not consume a custom slot", async () => {
+    const uid = testUid("mcp-curated-not-counted");
+    await seedTier(uid, "go");
+    for (let i = 1; i <= 5; i++) {
+      expect((await addCustom(uid, i)).statusCode).toBe(201);
+    }
+    // A curated credential row is the same shared server, not a custom one.
+    const curated = await postServer(uid, {
+      curatedId: "github",
+      secrets: { GITHUB_TOKEN: "tok" },
+    });
+    expect(curated.statusCode).toBe(201);
+  });
+
   it("POST custom as free → 402 pro_required with the exact PRO_REQUIRED_MESSAGE", async () => {
     const uid = testUid("mcp-free");
     const res = await postServer(uid, {
