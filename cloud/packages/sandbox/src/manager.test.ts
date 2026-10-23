@@ -647,3 +647,48 @@ describe.skipIf(!isRoot)("attachSession — Studio repos stay reachable", () => 
     expect(rec.bwrapArgv.join(" ")).not.toContain("/studio");
   });
 });
+
+describe.skipIf(!isRoot)("browserWorkspaceDir — one shared browser per user", () => {
+  it("is the same directory for every session of one user", async () => {
+    const fx = await freshFixture();
+    const a = await fx.manager.browserWorkspaceDir("u1");
+    const b = await fx.manager.browserWorkspaceDir("u1");
+    expect(a).toBe(b);
+    expect(a).toBe(join(fx.wsRoot, "200001", "browser"));
+    expect(existsSync(a)).toBe(true);
+  });
+
+  it("never crosses users", async () => {
+    const fx = await freshFixture();
+    const a = await fx.manager.browserWorkspaceDir("u1");
+    const b = await fx.manager.browserWorkspaceDir("u2");
+    expect(a).not.toBe(b);
+    expect(a).toBe(join(fx.wsRoot, "200001", "browser"));
+    expect(b).toBe(join(fx.wsRoot, "200002", "browser"));
+  });
+
+  it("sits beside the session workspaces, not inside one", async () => {
+    const fx = await freshFixture();
+    const dir = await fx.manager.browserWorkspaceDir("u1");
+    const sessionDir = await fx.manager.sessionWorkspaceDir("u1", "sess-a");
+    expect(dir.startsWith(join(fx.wsRoot, "200001", "sessions"))).toBe(false);
+    expect(sessionDir.startsWith(dir)).toBe(false);
+  });
+});
+
+describe.skipIf(!isRoot)("cross-user jail binds", () => {
+  it("binds only this user's workspace and Studio root — never another user's", async () => {
+    const fx = await freshFixture();
+    const a = await fx.manager.attachSession("u1", "chat-1");
+    const b = await fx.manager.attachSession("u2", "chat-1");
+    fx.launcher.nextScript = { stdout: ["ok\n"], exitCode: 0 };
+
+    await a.exec({ command: "true" });
+    const argv = fx.launcher.spawns[0]!.bwrapArgv.join(" ");
+
+    expect(argv).toContain(`${a.workspaceDir} /workspace`);
+    expect(argv).toContain(`${a.studioDir} /studio`);
+    expect(argv).not.toContain(b.workspaceDir);
+    expect(argv).not.toContain(String(b.studioDir));
+  });
+});

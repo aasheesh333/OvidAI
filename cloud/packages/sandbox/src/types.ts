@@ -21,6 +21,8 @@ export interface JailContext {
   etcDir: string;
   /** HOST path bound at `/studio` (the user's cloned repos). Absent → no mount. */
   studioDir?: string;
+  /** HOST path bound at `/browser` (the user's shared browser files). */
+  browserDir?: string;
 }
 
 /** Exactly one of `command` (parsed by bash -c) or `argv` (exec'd directly). */

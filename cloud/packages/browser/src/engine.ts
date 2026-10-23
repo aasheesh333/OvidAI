@@ -145,22 +145,24 @@ export interface BrowserEngine {
 const MONITOR_INTERVAL_MS = 10_000;
 
 /**
- * The session workspace path from raw ids. Both components come from the
- * caller and land in a filesystem path, so they are held to the stateStore's
- * id regex — `../` (or any separator) can never escape the workspaces root.
+ * The browser's file area for one user: `{root}/{userId}/browser`.
+ *
+ * The browser is a SHARED surface, like Studio: a download the agent made in
+ * one chat is still there in the next, because it is the same browser. Chat
+ * workspaces stay per-session (the agent's own sandbox is isolated); only the
+ * browser and Studio roots are user-scoped.
+ *
+ * `userId` comes from the caller and lands in a filesystem path, so it is held
+ * to the stateStore's id regex — `../` (or any separator) can never escape the
+ * workspaces root.
  */
-export function workspacePathFor(root: string, userId: string, sessionId: string): string {
+export function workspacePathFor(root: string, userId: string): string {
   if (!STATE_ID_RE.test(userId)) {
     throw new Error(
       `browser workspace: userId must match /^[A-Za-z0-9_-]{1,64}$/ (got ${JSON.stringify(userId)})`,
     );
   }
-  if (!STATE_ID_RE.test(sessionId)) {
-    throw new Error(
-      `browser workspace: sessionId must match /^[A-Za-z0-9_-]{1,64}$/ (got ${JSON.stringify(sessionId)})`,
-    );
-  }
-  return join(root, userId, "sessions", sessionId);
+  return join(root, userId, "browser");
 }
 
 export interface TakeoverOwnerState {
@@ -194,9 +196,9 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
   const fetchImpl = deps.fetchImpl ?? createSsrfGuardedFetch(cfg);
   const workspaceDir: (userId: string, sessionId: string) => Promise<string> =
     deps.workspaceDir ??
-    (async (userId: string, sessionId: string) => {
+    (async (userId: string) => {
       const root = process.env.OVID_WORKSPACES_ROOT ?? "/workspaces/users";
-      const dir = workspacePathFor(root, userId, sessionId);
+      const dir = workspacePathFor(root, userId);
       await mkdir(dir, { recursive: true });
       return dir;
     });

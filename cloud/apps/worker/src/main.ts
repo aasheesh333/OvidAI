@@ -730,12 +730,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     cfg: browserEngineCfg,
     redisFactory: () => new Redis(cfg.redisQUrl),
     persistence: browserPersistence,
-    // P2's session seam: allocates the numeric sandbox uid and creates
-    // `{root}/{uid}/sessions/{sessionId}`. Browser artifacts live in this
-    // per-session sibling of the agent workspace (the agent itself runs in
-    // `{root}/{uid}/workspace` — see the P7 block below).
-    workspaceDir: (userId: string, sessionId: string) =>
-      manager.workspaceDir(userId, sessionId),
+    // The browser is a SHARED surface per user, like Studio: one directory
+    // (`{root}/{uid}/browser`) for every chat, so a download the agent made in
+    // one chat is still there in the next. Chat workspaces stay per-session.
+    workspaceDir: (userId: string) => manager.browserWorkspaceDir(userId),
     // Wave 6 W4: owner-scoped credentials + the workspace/Artifact Vault
     // bridge. Both are server-side only; the model never sees a secret.
     credentials: createBrowserCredentialsPort({
@@ -748,8 +746,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       events,
       workspaceObjects: workspaceObjectsRepo,
       eventMirror: eventMirrorRepo,
-      workspaceDir: (userId: string, sessionId: string) =>
-        manager.workspaceDir(userId, sessionId),
+      workspaceDir: (userId: string) => manager.browserWorkspaceDir(userId),
     }),
   });
 

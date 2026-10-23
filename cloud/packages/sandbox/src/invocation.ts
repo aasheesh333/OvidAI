@@ -2,6 +2,7 @@ import type { SandboxConfig } from "./config.js";
 
 /** Jail-side mount point every workspace is bound at. */
 export const JAIL_STUDIO = "/studio";
+export const JAIL_BROWSER = "/browser";
 export const JAIL_WORKSPACE = "/workspace";
 
 /** Jail-side mount point every per-sandbox home is bound at. */
@@ -26,6 +27,12 @@ export interface JailSpec {
    * the jail then has no `/studio` at all.
    */
   studioDir?: string;
+  /**
+   * Host path of the user's shared browser directory, bound at `/browser`
+   * read-write. Also user-scoped (never per chat), so a file the agent
+   * downloaded in one chat is visible in the next.
+   */
+  browserDir?: string;
   /** Jail path to start in; default "/workspace". */
   cwd?: string;
   /** Merged over {@link BASE_JAIL_ENV}; keys sorted for golden determinism. */
@@ -94,6 +101,9 @@ export function buildBwrapArgs(
   // to read and edit the repo it was opened from.
   if (spec.studioDir !== undefined && spec.studioDir !== "") {
     args.push("--bind", spec.studioDir, JAIL_STUDIO);
+  }
+  if (spec.browserDir !== undefined && spec.browserDir !== "") {
+    args.push("--bind", spec.browserDir, JAIL_BROWSER);
   }
 
   // Namespaces. setuid needs bwrap to create the userns itself; rootmap joins

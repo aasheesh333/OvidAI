@@ -57,6 +57,11 @@ export interface SandboxHandle {
    * that user sees the same `/studio`, while `/workspace` stays per-chat.
    */
   readonly studioDir?: string;
+  /**
+   * HOST path of the user's shared browser directory, bound at `/browser`.
+   * Same rule: user-scoped, never per chat.
+   */
+  readonly browserDir?: string;
   readonly jailWorkspaceDir: string;
   exec(req: ExecRequest): Promise<ExecResult>;
   /** Task 9: interactive PTY session under a pty-{id} leaf of this env. */
@@ -108,6 +113,13 @@ export interface SandboxManager {
    * created, chowned and quota-applied. The same path `attachSession` binds.
    */
   sessionWorkspaceDir(userId: string, sessionId: string): Promise<string>;
+  /**
+   * Host path of the user's SHARED browser directory (`{uid}/browser`),
+   * created and chowned. One per user, never per chat: the browser is a
+   * shared surface like Studio, so a download made in one chat is still there
+   * in the next.
+   */
+  browserWorkspaceDir(userId: string): Promise<string>;
   get(userId: string): SandboxHandle | undefined;
   destroy(userId: string): Promise<void>;
   list(): SandboxInfo[];
@@ -576,6 +588,22 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     return dir;
   }
 
+  /** `{uid}/browser`, created + chowned. Shared by every chat of that user. */
+  async function browserWorkspaceDir(userId: string): Promise<string> {
+    const attached = handles.get(userId);
+    let uid = attached?.uid ?? uidByUser.get(userId);
+    if (uid === undefined) {
+      uid = await deps.allocateUid(userId);
+      uidByUser.set(userId, uid);
+    }
+    const userRoot = join(config.workspacesRoot, String(uid));
+    const dir = join(userRoot, "browser");
+    await mkdir(dir, { recursive: true });
+    await chown(userRoot, uid, uid);
+    await chown(dir, uid, uid);
+    return dir;
+  }
+
   /**
    * A per-session VIEW of the user's env. One cgroup and one `.home` are
    * shared (an env per chat would burn an admission slot per chat); only the
@@ -602,7 +630,10 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     const studioDir = join(config.workspacesRoot, String(base.uid), "workspace");
     await mkdir(studioDir, { recursive: true });
     await chown(studioDir, base.uid, base.uid);
-    const ctx: JailContext = { ...parentCtx, workspaceDir, studioDir };
+    // The browser is the other shared surface: one directory per user, so a
+    // download made in one chat is visible in the next.
+    const browserDir = await browserWorkspaceDir(userId);
+    const ctx: JailContext = { ...parentCtx, workspaceDir, studioDir, browserDir };
 
     const ptys = new Map<string, PtySession>();
     let jobRegistry: JobRegistry | undefined;
@@ -614,6 +645,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       workspaceDir,
       homeDir: base.homeDir,
       studioDir,
+      browserDir,
       jailWorkspaceDir: JAIL_WORKSPACE,
       exec: (req: ExecRequest) => execOnce(ctx, req),
       createPty: async (req: PtyRequest, handlers: PtyHandlers) => {
@@ -706,6 +738,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     attach,
     attachSession,
     sessionWorkspaceDir,
+    browserWorkspaceDir,
     get: (userId: string) => handles.get(userId),
     destroy: destroyUser,
     list: () =>

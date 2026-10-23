@@ -775,13 +775,14 @@ describe("BrowserEngine uid-drop boot contract", () => {
 });
 
 describe("engine path + takeover hardening", () => {
-  it("workspacePathFor rejects ../ (and separators) in userId and sessionId", () => {
+  it("workspacePathFor rejects ../ (and separators) in userId", () => {
     const root = "/workspaces/users";
-    expect(workspacePathFor(root, "u1", "chat-1")).toBe("/workspaces/users/u1/sessions/chat-1");
-    expect(() => workspacePathFor(root, "../escape", "chat-1")).toThrow(/userId/);
-    expect(() => workspacePathFor(root, "u1", "../escape")).toThrow(/sessionId/);
-    expect(() => workspacePathFor(root, "u/1", "chat-1")).toThrow(/userId/);
-    expect(() => workspacePathFor(root, "u1", "a".repeat(65))).toThrow(/sessionId/);
+    // The browser is a per-USER shared surface (like Studio), so the path has
+    // no session segment at all.
+    expect(workspacePathFor(root, "u1")).toBe("/workspaces/users/u1/browser");
+    expect(() => workspacePathFor(root, "../escape")).toThrow(/userId/);
+    expect(() => workspacePathFor(root, "u/1")).toThrow(/userId/);
+    expect(() => workspacePathFor(root, "a".repeat(65))).toThrow(/userId/);
   });
 
   it("canTakeOver refuses a different holder and a non-attached viewer", () => {

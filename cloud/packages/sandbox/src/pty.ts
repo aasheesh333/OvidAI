@@ -86,6 +86,7 @@ export async function createPtySession(
     homeDir: ctx.homeDir,
     etcDir: ctx.etcDir,
     ...(ctx.studioDir !== undefined ? { studioDir: ctx.studioDir } : {}),
+    ...(ctx.browserDir !== undefined ? { browserDir: ctx.browserDir } : {}),
     // TERM is pinned from BASE_JAIL_ENV — the jail env is the single source of
     // truth for the payload's terminal type, not the caller.
     env: { ...req.env, TERM: BASE_JAIL_ENV.TERM },
