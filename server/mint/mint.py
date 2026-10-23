@@ -13,6 +13,7 @@
 # the deploy steps, the Redis keys and the /usage API contract).
 
 import os
+import importlib
 import time
 import threading
 import json
@@ -331,10 +332,37 @@ KEY_IP_FANOUT_BLOCK_S = int(os.environ.get("KEY_IP_FANOUT_BLOCK_S", str(24 * 360
 KEY_IP_EMAIL_QUEUE = "security:key_ip:emails"
 KEY_IP_EMAIL_QUEUE_MAX = int(os.environ.get("KEY_IP_EMAIL_QUEUE_MAX", "1000"))
 # Injectable transport: KEY_IP_EMAIL_FACTORY=module:attribute (returns a
-# callable) or a test assignment. Unset → the sweeper logs the event and keeps
-# it in the sanitized /admin/alerts history.
+# callable) or a test assignment. With neither, the built-in Resend transport
+# is used when OVID_MAIL_API_KEY + OVID_MAIL_FROM are set. With no transport at
+# all the sweeper logs the event and keeps it in the sanitized /admin/alerts
+# history — the event is never silently dropped.
 KEY_IP_EMAIL_HOOK = None       # enqueue hook used by the guard (tests override)
-KEY_IP_EMAIL_SENDER = None     # delivery callable used by flush_key_ip_emails()
+
+
+def _build_email_sender():
+    """KEY_IP_EMAIL_FACTORY wins; else the built-in transport if configured."""
+    factory = os.environ.get("KEY_IP_EMAIL_FACTORY", "").strip()
+    if factory:
+        try:
+            module_name, _, attr = factory.partition(":")
+            target = getattr(importlib.import_module(module_name), attr)
+            sender = target() if callable(target) else target
+            if callable(sender):
+                return sender
+            print("[mint] KEY_IP_EMAIL_FACTORY did not return a callable", flush=True)
+        except Exception as e:  # noqa: BLE001 — a bad factory must not break mint
+            print(f"[mint] KEY_IP_EMAIL_FACTORY failed: {type(e).__name__}", flush=True)
+    try:
+        from mail import sender_from_env  # single-file deploy: next to mint.py
+    except ImportError:  # pragma: no cover - repo layout
+        try:
+            from server.mint.mail import sender_from_env
+        except ImportError:
+            return None
+    return sender_from_env()
+
+
+KEY_IP_EMAIL_SENDER = _build_email_sender()   # delivery callable for flush_key_ip_emails()
 
 # Response redaction: fields that must never leave a non-mint endpoint.
 SENSITIVE_FIELDS = frozenset({
