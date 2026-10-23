@@ -20,6 +20,7 @@ import {
   CLOUD_PRESET_IDS,
   MAX_PROJECT_REFS,
   MAX_SESSION_REFS,
+  manualModelsAllowed,
   MintInternalError,
   regenerateBodySchema,
   sendMessageBodySchema,
@@ -533,6 +534,12 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
       }
     }
 
+    // 2d-pre. Provision the users row before the per-turn settings are
+    //    validated: its tier decides whether a named model is allowed at all
+    //    (step 2d) and sets the queue priority (step 5). The upsert is
+    //    idempotent, and it must happen before the FK-dependent writes below.
+    const user = await users.ensure(deps.db, uid, email);
+
     // 2d. Wave 1a per-turn settings — validated BEFORE mint and any write
     //     (and after the replay check: a retry of an accepted send replays
     //     the original answer whatever its settings say now).
@@ -547,6 +554,20 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
       if (raw === "" || isAutoModel(base)) {
         modelPin = null;
       } else {
+        // Plan gate, server-side. The picker greys these out for Free and Go,
+        // but a greyed control is a courtesy, not a boundary: a modified
+        // client could still POST a premium model, and one request on a
+        // $99/1M-token model would spend a free account's month. The tier is
+        // read here, at the moment of the send, from the same users row the
+        // queue priority uses.
+        if (!manualModelsAllowed(user.tier)) {
+          return sendError(
+            reply,
+            402,
+            "manual_model_not_allowed",
+            "Choosing a model is a paid-plan feature. Use Auto, or upgrade in Settings.",
+          );
+        }
         const known = await readModelCatalog(deps, request.log);
         if (known !== null && !known.has(base.toLowerCase())) {
           return sendError(
@@ -607,10 +628,6 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
       }
     }
     const projectRefs = rawProjectRefs;
-
-    // 3. Provision the users row (FK target for everything below); its tier
-    //    sets the queue priority (free → 2, anything else → 1).
-    const user = await users.ensure(deps.db, uid, email);
 
     // 4. Key provisioning BEFORE any write: if mint fails, no message row,
     //    no run row and no queue job are left behind (ordering pinned by
