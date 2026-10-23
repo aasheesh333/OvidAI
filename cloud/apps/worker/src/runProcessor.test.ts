@@ -144,8 +144,8 @@ interface FakeSandbox {
   handle: SandboxHandle;
   /** Every exec request the fake handle received (blocked commands must leave this empty). */
   execs: ExecRequest[];
-  /** Every attach(userId, opts) call — pins the tier pass-through. */
-  attachCalls: Array<{ userId: string; tier?: "free" | "pro" }>;
+  /** Every attach/attachSession call — pins the tier + session pass-through. */
+  attachCalls: Array<{ userId: string; tier?: "free" | "pro"; sessionId?: string }>;
   workspaceDir: string;
 }
 
@@ -177,6 +177,15 @@ function makeFakeSandbox(opts: { execResult?: Partial<ExecResult>; attachError?:
   const manager = {
     attach: async (userId: string, sbxOpts?: { tier?: "free" | "pro" }) => {
       attachCalls.push({ userId, tier: sbxOpts?.tier });
+      if (opts.attachError !== undefined) throw opts.attachError;
+      return handle;
+    },
+    attachSession: async (
+      userId: string,
+      sessionId: string,
+      sbxOpts?: { tier?: "free" | "pro" },
+    ) => {
+      attachCalls.push({ userId, tier: sbxOpts?.tier, sessionId });
       if (opts.attachError !== undefined) throw opts.attachError;
       return handle;
     },
@@ -946,8 +955,10 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         content: "wrote 3 bytes",
       });
 
-      // tier passed through to attach
-      expect(sbx.attachCalls).toEqual([{ userId: seeded.uid, tier: "free" }]);
+      // tier AND session passed through to attachSession (per-session workspace)
+      expect(sbx.attachCalls).toEqual([
+        { userId: seeded.uid, tier: "free", sessionId: seeded.sessionId },
+      ]);
 
       // the model context: system prompt first, history, assistant tool_calls,
       // then the role:"tool" result message
