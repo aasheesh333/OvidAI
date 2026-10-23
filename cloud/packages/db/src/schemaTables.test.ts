@@ -28,7 +28,7 @@ describe.skipIf(!TEST_DATABASE_URL)("scheduler schema against real postgres", ()
       await admin.unsafe(`DROP SCHEMA IF EXISTS drizzle CASCADE`);
       await admin.unsafe(`DROP SEQUENCE IF EXISTS users_sandbox_uid_seq CASCADE`);
       await admin.unsafe(
-        `DROP TABLE IF EXISTS browser_credentials, private_memory_files, schedules, schedule_runs, devices, notifications,` +
+        `DROP TABLE IF EXISTS browser_credentials, studio_repos, private_memory_files, schedules, schedule_runs, devices, notifications,` +
           ` grants, file_manifests, workspace_objects, attachments, session_event_mirror, session_agent_state, runs, messages, sessions, users,` +
           ` plans, mint_settings, user_plan_overrides, mint_audit, billing_purchases, image_jobs,` +
           ` image_deleted_accounts, image_cards, image_card_history, image_probe_log, image_probe_state,` +

@@ -1017,3 +1017,45 @@ export const runUsage = pgTable(
 );
 
 export type RunUsageRow = typeof runUsage.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// Studio repo binding (gateway route layer).
+//
+// A Studio session is bound to ONE repository and ONE branch. The binding is
+// server-side because the two operations that follow a clone — "switch
+// branch" and "sync latest" — need to know which directory in the workspace
+// to act on, and the client must not be the only memory of it (a reload would
+// otherwise orphan the clone). `repo_dir` is workspace-relative and validated
+// by the worker before any git command runs.
+//
+// The GitHub credential is deliberately NOT here: it stays in the user's
+// curated `github` MCP integration, sealed with the master key, and the
+// worker resolves it per job. Nothing in this table is a secret.
+// ---------------------------------------------------------------------------
+export const studioRepos = pgTable(
+  "studio_repos",
+  {
+    // One repo per session: the primary key is the session.
+    sessionId: char("session_id", { length: 36 })
+      .primaryKey()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.uid, { onDelete: "cascade" }),
+    /** Canonical `owner/name` (never a URL, never a credential). */
+    repo: text("repo").notNull(),
+    /** Workspace-relative clone directory (one folder, no nesting). */
+    repoDir: text("repo_dir").notNull(),
+    branch: text("branch").notNull(),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("studio_repos_user_id_idx").on(t.userId),
+    check("studio_repos_repo_len_check", sql`length(${t.repo}) BETWEEN 1 AND 2048`),
+    check("studio_repos_dir_len_check", sql`length(${t.repoDir}) BETWEEN 1 AND 255`),
+    check("studio_repos_branch_len_check", sql`length(${t.branch}) BETWEEN 1 AND 255`),
+  ],
+);
+
+export type StudioRepoRow = typeof studioRepos.$inferSelect;
