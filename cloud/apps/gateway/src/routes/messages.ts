@@ -62,6 +62,9 @@ export function toMessageDto(
     role: row.role as MessageDto["role"],
     content: row.content,
     createdAt: row.createdAt.toISOString(),
+    // Absent (not null) when the row captured no reasoning: the field is
+    // additive, so a client that predates it sees an unchanged payload.
+    ...(row.reasoning !== null && row.reasoning !== "" ? { reasoning: row.reasoning } : {}),
     ...(files !== undefined && files.length > 0
       ? { attachments: files.map((f) => ({ id: f.id, name: f.name, sizeBytes: f.size })) }
       : {}),

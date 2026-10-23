@@ -448,6 +448,9 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
           sessionId: sid,
           role: i % 2 === 0 ? "user" : "assistant",
           content: `m${i}`,
+          // Only the assistant turn captured provider thinking; every other
+          // row must come back without the field at all.
+          ...(i === 3 ? { reasoning: "considered the alternatives" } : {}),
         }),
       );
     }
@@ -465,6 +468,14 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
     expect(allBody.nextCursor).toBeNull();
     expect(allBody.items[0]).toMatchObject({ sessionId: sid, role: "user", content: "m4" });
     expect(Date.parse(allBody.items[0]!.createdAt)).not.toBeNaN();
+    // Reasoning rides the DTO when the row captured it, and is omitted (not
+    // null) for every row that did not — older clients see no change.
+    expect(allBody.items[0]!.reasoning).toBeUndefined();
+    expect(allBody.items[1]).toMatchObject({
+      role: "assistant",
+      content: "m3",
+      reasoning: "considered the alternatives",
+    });
 
     // Walk pages of 2 with before=nextCursor.
     const p1 = await handle.app.inject({
