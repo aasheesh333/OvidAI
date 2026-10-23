@@ -1099,6 +1099,17 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
                 maxRuntimeMs,
                 deadline,
               });
+              // Spec §2.A.3: checkpoint before settling, so a task that needs
+              // more than 8 h can be re-dispatched from where it stopped
+              // instead of from zero.
+              await log?.append({
+                type: "subagent_checkpoint",
+                status: "timeout",
+                max_runtime_ms: maxRuntimeMs,
+                deadline,
+                partial_output: partial.text,
+                resumed_from_checkpoint: false,
+              });
               break;
             }
 
@@ -1181,7 +1192,9 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
           partialOutput: partial.text,
           error:
             finalStatus === "timeout"
-              ? `Subagent exceeded the maximum runtime of ${maxRuntimeMs} ms and was stopped.`
+              ? `Subagent exceeded the maximum runtime of ${maxRuntimeMs} ms and was ` +
+                "stopped. It checkpointed its progress (see the partial findings and " +
+                "its log); dispatch it again with that context to continue."
               : finalStatus === "failed"
                 ? "Subagent run failed."
                 : finalStatus === "cancelled"
