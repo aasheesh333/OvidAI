@@ -3132,11 +3132,7 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
         }
         final recents = allRecents.where((r) {
           final p = app.providerById(r.providerId);
-          if (p == null) return false;
-          if (p.id == AppState.ovidCloudProviderId &&
-              !cloudModels.contains(r.model.split('·').first.trim())) {
-            return false;
-          }
+          if (p == null || p.id == AppState.ovidCloudProviderId) return false;
           if (q.isEmpty) return true;
           final baseModel = r.model.split('·').first.trim();
           return _matchesQuery(q, baseModel) ||

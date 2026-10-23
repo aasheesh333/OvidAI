@@ -29,7 +29,7 @@ class CloudUsageStatus extends StatelessWidget {
         final String pillLabel;
         if (hasError) {
           pillColor = Aether.danger;
-          pillLabel = 'UNAVAILABLE';
+          pillLabel = 'ERROR';
         } else if (loading) {
           pillColor = Aether.accent;
           pillLabel = 'REFRESHING';
@@ -39,12 +39,13 @@ class CloudUsageStatus extends StatelessWidget {
         }
 
         final rows = <Widget>[
-          Row(
-            mainAxisSize: MainAxisSize.min,
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            crossAxisAlignment: WrapCrossAlignment.center,
             children: [
               AetherPill(label: pillLabel, color: pillColor),
-              if (loading) ...[
-                const SizedBox(width: 8),
+              if (loading)
                 SizedBox(
                   width: 12,
                   height: 12,
@@ -53,7 +54,6 @@ class CloudUsageStatus extends StatelessWidget {
                     valueColor: AlwaysStoppedAnimation<Color>(Aether.textMuted),
                   ),
                 ),
-              ],
             ],
           ),
         ];

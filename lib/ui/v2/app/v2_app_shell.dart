@@ -733,6 +733,17 @@ class _V2AppShellState extends State<V2AppShell> {
           }
         case MsgKind.text:
         case MsgKind.streaming:
+          if (message.role != 'user' &&
+              message.reasoning?.trim().isNotEmpty == true) {
+            items.add(
+              V2LiveThinking(
+                id: '${message.privateSyncId}-reasoning',
+                label: 'Thought for a moment',
+                details: [message.reasoning!.trim()],
+                defaultExpanded: AppState.I.showReasoning,
+              ),
+            );
+          }
           if (message.role == 'user') {
             items.add(
               V2LiveUserMessage(
