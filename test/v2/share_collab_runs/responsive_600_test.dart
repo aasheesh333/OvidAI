@@ -44,19 +44,20 @@ const _members = [
   ),
 ];
 
-const _steps = [
-  V2RunStep(
-    id: 's1',
-    title: 'Read your message',
-    detail: '',
-    durationLabel: '0.2s',
+const _workers = [
+  V2SubagentLaunch(
+    id: 'w1',
+    agentName: 'Explorer',
+    taskSummary: 'Find every caller.',
+    timeLabel: '10:43',
+    durationLabel: '2m 10s',
   ),
-  V2RunStep(
-    id: 's2',
-    title: 'Searched the web',
-    detail: '',
+  V2SubagentLaunch(
+    id: 'w2',
+    agentName: 'QA runner',
+    taskSummary: 'Run the regression suite.',
+    timeLabel: '10:45',
     durationLabel: '54.2s',
-    kind: V2RunStepKind.search,
   ),
 ];
 
@@ -133,7 +134,7 @@ void main() {
         data: const V2RunTrajectoryPageData(
           title: 'Landing page',
           runLabel: 'Run 18',
-          steps: _steps,
+          subagents: _workers,
         ),
       ),
     );

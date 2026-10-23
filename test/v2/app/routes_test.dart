@@ -152,7 +152,9 @@ void main() {
   });
 
   group('run trajectory mapping', () {
-    test('a root session maps its own steps, tokens and duration', () {
+    test('a root session maps no workers, so the trajectory is empty', () {
+      // The main agent's own messages and tool calls are the chat, not the
+      // trajectory. Without a child session there is nothing to show.
       final session = _rootSession();
       session.analytics.add(
         inputTokens: 1200,
@@ -161,62 +163,35 @@ void main() {
         toolMs: 600,
       );
 
-      final data = V2RunRoutes.trajectoryDataFor(session);
+      final data = V2RunRoutes.trajectoryDataFor(
+        session,
+        allSessions: [session],
+      );
 
-      expect(data.status, V2RunTrajectoryStatus.ready);
-      expect(data.title, 'Build landing page');
-      expect(data.steps, hasLength(3));
-      expect(data.steps.first.title, 'You');
-      expect(data.steps.first.kind, V2RunStepKind.message);
-      expect(data.steps.first.startedAt, DateTime(2026, 10, 20, 10));
-      expect(data.steps.first.status, V2RunStepStatus.completed);
-      expect(data.steps[1].durationLabel, '1s');
-      expect(data.steps[1].startedAt, DateTime(2026, 10, 20, 10, 0, 2));
-      expect(data.steps[2].title, 'Edit lib/app.dart');
-      expect(data.steps[2].kind, V2RunStepKind.write);
-      expect(data.steps[2].fileName, 'lib/app.dart');
-      expect(data.steps[2].toolName, 'fs_edit');
-      expect(data.steps[2].status, V2RunStepStatus.completed);
-      expect(data.steps[2].startedAt, DateTime(2026, 10, 20, 10, 0, 3));
-      // The recorded tool input reaches the expanded detail when the tool
-      // card carries no larger output.
-      expect(data.steps[2].expandedDetail, '{"path":"lib/app.dart"}');
+      expect(data.status, V2RunTrajectoryStatus.empty);
+      expect(data.subagents, isEmpty);
+      expect(data.runLabel, isEmpty);
     });
 
-    test('running and failed tool states reach the step', () {
-      final session = ChatSession(
-        id: 'states',
-        title: 'Tool states',
-        model: 'deepseek-chat',
-        createdAt: DateTime(2026, 10, 20, 10),
+    test('a root session with a child maps only that worker', () {
+      final root = _rootSession();
+      final child = _subagentSession();
+
+      final data = V2RunRoutes.trajectoryDataFor(
+        root,
+        allSessions: [root, child],
       );
-      session.messages.addAll([
-        Message(
-          role: 'assistant',
-          kind: MsgKind.tool,
-          toolName: 'run_shell',
-          toolSummary: 'npm test',
-          toolState: 'running',
-          time: DateTime(2026, 10, 20, 10, 0, 4),
-        ),
-        Message(
-          role: 'assistant',
-          kind: MsgKind.tool,
-          toolName: 'fs_write',
-          toolSummary: 'Write out/report.md',
-          toolDetail: 'Permission denied: out/report.md',
-          toolState: 'error',
-          time: DateTime(2026, 10, 20, 10, 0, 5),
-        ),
-      ]);
 
-      final data = V2RunRoutes.trajectoryDataFor(session);
-
-      expect(data.steps[0].status, V2RunStepStatus.running);
-      expect(data.steps[0].toolName, 'run_shell');
-      expect(data.steps[1].status, V2RunStepStatus.failed);
-      expect(data.steps[1].toolName, 'fs_write');
-      expect(data.steps[1].errorMessage, 'Permission denied: out/report.md');
+      expect(data.status, V2RunTrajectoryStatus.ready);
+      expect(data.subagents, hasLength(1));
+      expect(data.subagents.single.id, 'sub-1');
+      expect(data.subagents.single.agentName, 'Pricing research');
+      expect(data.subagents.single.taskSummary, 'Research pricing');
+      expect(data.subagents.single.status, V2SubagentLaunchStatus.running);
+      // The worker's own recorded tool call is carried, not the parent's.
+      expect(data.subagents.single.toolCount, 1);
+      // The header must not claim a step count the screen does not show.
+      expect(data.runLabel, isEmpty);
     });
 
     test('child sessions appear as real subagent launches in order', () {
@@ -250,7 +225,7 @@ void main() {
       final data = V2RunRoutes.trajectoryDataFor(session);
 
       expect(data.status, V2RunTrajectoryStatus.empty);
-      expect(data.steps, isEmpty);
+      expect(data.subagents, isEmpty);
     });
 
     test('a missing session is an error', () {

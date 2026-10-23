@@ -1213,55 +1213,30 @@ V2LiveChatData previewLiveChatData() {
   );
 }
 
-/// A finished run with five steps and one subagent.
+/// A finished run with two workers, the only rows the trajectory shows.
 V2RunTrajectoryPageData previewRunTrajectoryData() {
   return V2RunTrajectoryPageData(
     title: 'Auth refresh',
     runLabel: 'Run 4 of 7',
     startedAt: DateTime(2026, 10, 22, 10, 41),
     endedAt: DateTime(2026, 10, 22, 10, 43, 30),
-    steps: const <V2RunStep>[
-      V2RunStep(
-        id: 's1',
-        title: 'Plan the change',
-        detail: 'Two failing tests pointed at the refresh path.',
-        durationLabel: '12s',
-        kind: V2RunStepKind.plan,
-      ),
-      V2RunStep(
-        id: 's2',
-        title: 'Search the workspace',
-        detail: 'Found the guard in lib/core/auth_guard.dart.',
-        durationLabel: '4s',
-        kind: V2RunStepKind.search,
-        toolName: 'workspace_search',
-        sources: <V2RunSource>[V2RunSource(label: 'lib/core/auth_guard.dart')],
-      ),
-      V2RunStep(
-        id: 's3',
-        title: 'Edit auth_service.dart',
-        detail: 'Refreshed the token once before retrying.',
-        durationLabel: '48s',
-        kind: V2RunStepKind.write,
-        toolName: 'fs_edit',
-        fileName: 'auth_service.dart',
-        fileMeta: '+14 −6',
-      ),
-      V2RunStep(
-        id: 's4',
-        title: 'Run the auth tests',
-        detail: 'Both tests now pass.',
-        durationLabel: '1m 20s',
-        kind: V2RunStepKind.finish,
-      ),
-    ],
     subagents: <V2SubagentLaunch>[
       V2SubagentLaunch(
         id: 'sub1',
         agentName: 'Explorer',
         taskSummary: 'Found every AuthService.signIn caller.',
-        timeLabel: '10:43',
+        timeLabel: '10:41',
         durationLabel: '2m 10s',
+        toolCount: 4,
+      ),
+      V2SubagentLaunch(
+        id: 'sub2',
+        agentName: 'Test runner',
+        taskSummary: 'Refreshed the token and reran the auth tests.',
+        timeLabel: '10:43',
+        durationLabel: '1m 20s',
+        status: V2SubagentLaunchStatus.running,
+        toolCount: 2,
       ),
     ],
   );

@@ -55,7 +55,7 @@ void main() {
 
   test('settings previews carry content state, not loading shells', () {
     expect(previewResponseWaitData().seconds, isNotNull);
-    expect(previewRunTrajectoryData().steps, isNotEmpty);
+    expect(previewRunTrajectoryData().subagents, isNotEmpty);
     expect(previewProjectsData().projects, isNotEmpty);
     expect(previewNotificationsData().activity, isNotEmpty);
     expect(previewPresetsData().presets, isNotEmpty);

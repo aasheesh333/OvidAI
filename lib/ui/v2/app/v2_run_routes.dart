@@ -2,7 +2,6 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/cloud/cloud_agent_facade.dart';
 import '../../../core/conversation_share_service.dart';
@@ -45,7 +44,6 @@ class V2RunRoutes {
               onShareRun: session == null
                   ? null
                   : () => _shareRun(routeContext, session),
-              onOpenSource: (label) => _openSource(routeContext, label),
               onOpenSubagent: (id) => openSubagent(routeContext, id),
               onRetry: () => AppState.I.loadSessions(),
               // onOpenFile / onRerun / onOpenPreview stay unset: the minimal
@@ -91,7 +89,9 @@ class V2RunRoutes {
 
   /// Maps a real session onto the trajectory screen.
   ///
-  /// A missing session is an error; a session with no recorded steps is empty.
+  /// The screen shows the workers this session dispatched and nothing else,
+  /// so a session with no child sessions is empty no matter how much of its
+  /// own work the transcript records.
   @visibleForTesting
   static V2RunTrajectoryPageData trajectoryDataFor(
     ChatSession? session, {
@@ -106,23 +106,20 @@ class V2RunRoutes {
       );
     }
 
-    final steps = <V2RunStep>[
-      for (final message in session.messages) ?_stepFor(message),
-    ];
     final launches = _subagentLaunches(session, allSessions);
-    if (steps.isEmpty) {
+    if (launches.isEmpty) {
       return V2RunTrajectoryPageData(
         title: session.title,
         runLabel: '',
-        subagents: launches,
         status: V2RunTrajectoryStatus.empty,
       );
     }
 
     return V2RunTrajectoryPageData(
       title: session.title,
-      runLabel: steps.length == 1 ? '1 step' : '${steps.length} steps',
-      steps: steps,
+      // The header carries no count: the summary strip below it already
+      // reports the workers, their tools and the measured duration.
+      runLabel: '',
       subagents: launches,
       startedAt: session.createdAt,
       // A run that is still working has no end yet, so the summary strip says
@@ -233,20 +230,6 @@ class V2RunRoutes {
       if (context.mounted) _snack(context, 'Share link copied.');
     } catch (_) {
       if (context.mounted) _snack(context, 'We could not create a share link.');
-    }
-  }
-
-  static Future<void> _openSource(BuildContext context, String label) async {
-    final raw = label.trim();
-    if (raw.isEmpty) return;
-    final uri = Uri.tryParse(raw.contains('://') ? raw : 'https://$raw');
-    if (uri == null || uri.host.isEmpty) {
-      _snack(context, 'This source has no openable address.');
-      return;
-    }
-    final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
-    if (!opened && context.mounted) {
-      _snack(context, 'Could not open $raw.');
     }
   }
 
@@ -366,6 +349,9 @@ class V2RunRoutes {
           durationLabel: _durationFor(child),
           startedAt: child.createdAt,
           status: _launchStatus(child.agentState),
+          // The worker's own recorded tool calls, so the summary line counts
+          // the workers' activity rather than the main agent's.
+          toolCount: _toolCount(child),
           statusLabel:
               const {
                 'running',
@@ -463,128 +449,6 @@ class V2RunRoutes {
     );
   }
 
-  static V2RunStep? _stepFor(Message message) {
-    final id = message.privateSyncId;
-    final content = message.content.trim();
-    final startedAt = message.time;
-    switch (message.kind) {
-      case MsgKind.text:
-      case MsgKind.streaming:
-        if (content.isEmpty) return null;
-        final assistant = message.role == 'assistant';
-        return V2RunStep(
-          id: id,
-          title: assistant ? 'Assistant' : 'You',
-          detail: cleanTruncate(content, 400),
-          durationLabel: _elapsedLabel(message.elapsedMs),
-          kind: V2RunStepKind.message,
-          startedAt: startedAt,
-          status: message.kind == MsgKind.streaming
-              ? V2RunStepStatus.running
-              : V2RunStepStatus.completed,
-        );
-      case MsgKind.reasoning:
-        if (content.isEmpty) return null;
-        return V2RunStep(
-          id: id,
-          title: 'Thinking',
-          detail: cleanTruncate(content, 400),
-          durationLabel: _elapsedLabel(message.elapsedMs),
-          kind: V2RunStepKind.plan,
-          startedAt: startedAt,
-        );
-      case MsgKind.tool:
-        final name = (message.toolName ?? '').trim();
-        final title = (message.toolTitle ?? '').trim();
-        final summary = (message.toolSummary ?? '').trim();
-        final detail = message.toolDetail?.trim() ?? '';
-        final input = message.toolInput?.trim() ?? '';
-        final status = _toolStepStatus(message.toolState);
-        final result = detail.isNotEmpty
-            ? detail
-            : (input.isNotEmpty ? input : '');
-        return V2RunStep(
-          id: id,
-          title: title.isNotEmpty ? title : (name.isNotEmpty ? name : 'Tool'),
-          detail: summary.isNotEmpty ? summary : cleanTruncate(content, 400),
-          durationLabel: _elapsedLabel(message.elapsedMs),
-          kind: _toolKind(name),
-          fileName: _toolFile(message),
-          expandedDetail: result.isEmpty ? null : cleanTruncate(result, 2000),
-          startedAt: startedAt,
-          status: status,
-          errorMessage: status == V2RunStepStatus.failed
-              ? _toolError(message)
-              : null,
-          toolName: name.isEmpty ? null : name,
-        );
-      case MsgKind.turnTail:
-        if (content.isEmpty) return null;
-        return V2RunStep(
-          id: id,
-          title: 'Run update',
-          detail: cleanTruncate(content, 400),
-          durationLabel: '',
-          kind: V2RunStepKind.finish,
-          startedAt: startedAt,
-        );
-      case MsgKind.compact:
-        if (content.isEmpty) return null;
-        return V2RunStep(
-          id: id,
-          title: 'Compacted context',
-          detail: cleanTruncate(content, 400),
-          durationLabel: '',
-          kind: V2RunStepKind.plan,
-          startedAt: startedAt,
-        );
-      case MsgKind.imageGen:
-        return V2RunStep(
-          id: id,
-          title: 'Generated image',
-          detail: cleanTruncate(content, 400),
-          durationLabel: _elapsedLabel(message.elapsedMs),
-          kind: V2RunStepKind.preview,
-          startedAt: startedAt,
-        );
-      case MsgKind.htmlArtifact:
-        return V2RunStep(
-          id: id,
-          title: 'Created page',
-          detail: cleanTruncate(content, 400),
-          durationLabel: _elapsedLabel(message.elapsedMs),
-          kind: V2RunStepKind.write,
-          startedAt: startedAt,
-        );
-    }
-  }
-
-  /// The durable tool state, reduced to the three states the timeline shows.
-  static V2RunStepStatus _toolStepStatus(String state) =>
-      switch (state.trim().toLowerCase()) {
-        'running' ||
-        'streaming' ||
-        'in progress' ||
-        'working' => V2RunStepStatus.running,
-        'error' || 'failed' || 'failure' => V2RunStepStatus.failed,
-        // A stopped tool never reported a failure, so it is not marked as one.
-        'stopped' || 'cancelled' || 'canceled' => V2RunStepStatus.completed,
-        _ => V2RunStepStatus.completed,
-      };
-
-  /// The failure a tool step reported, preferring its full output.
-  static String? _toolError(Message message) {
-    for (final raw in [
-      message.toolDetail,
-      message.toolSummary,
-      message.content,
-    ]) {
-      final text = (raw ?? '').trim();
-      if (text.isNotEmpty) return cleanTruncate(text, 2000);
-    }
-    return null;
-  }
-
   /// The runtime's lifecycle state as the typed status the screen expects.
   ///
   /// `finished` deliberately maps to null: only the subagent's own summary
@@ -595,27 +459,6 @@ class V2RunRoutes {
     'stopped' => V2SubagentRunStatus.cancelled,
     _ => null,
   };
-
-  static V2RunStepKind _toolKind(String toolName) {
-    final name = toolName.toLowerCase();
-    if (name.contains('search') ||
-        name.contains('grep') ||
-        name.contains('glob') ||
-        name.contains('read') ||
-        name.contains('web') ||
-        name.contains('fetch')) {
-      return V2RunStepKind.search;
-    }
-    if (name.contains('preview') ||
-        name.contains('browser') ||
-        name.contains('screenshot')) {
-      return V2RunStepKind.preview;
-    }
-    if (name.contains('finish') || name.contains('complete')) {
-      return V2RunStepKind.finish;
-    }
-    return V2RunStepKind.write;
-  }
 
   /// The file a tool step wrote, when the tool card records one. Read-only
   /// tools carry a path too, so only mutating tools count as writes.
@@ -692,10 +535,6 @@ class V2RunRoutes {
     final name = (message.toolName ?? '').trim();
     return name.isEmpty ? 'Tool' : name;
   }
-
-  static String _elapsedLabel(int? ms) => ms == null || ms <= 0
-      ? ''
-      : formatCompactDuration(Duration(milliseconds: ms));
 
   static String _agentStateLabel(String? state) => switch (state) {
     'running' => 'Working',
