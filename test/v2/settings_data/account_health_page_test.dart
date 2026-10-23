@@ -70,7 +70,9 @@ V2AccountHealthPageData _data({
   String storageUsedLabel = '1.2 GB of 15 GB',
   double? storageFraction = 0.08,
   String deletionScheduledLabel = '',
+  bool deletionKnown = false,
   bool loading = false,
+  V2AccountHealthStatus status = V2AccountHealthStatus.ready,
   String? errorMessage,
   VoidCallback? onOpenPlans,
   VoidCallback? onOpenStorage,
@@ -85,7 +87,9 @@ V2AccountHealthPageData _data({
     storageUsedLabel: storageUsedLabel,
     storageFraction: storageFraction,
     deletionScheduledLabel: deletionScheduledLabel,
+    deletionKnown: deletionKnown,
     loading: loading,
+    status: status,
     errorMessage: errorMessage,
     onOpenPlans: onOpenPlans,
     onOpenStorage: onOpenStorage,
@@ -374,6 +378,88 @@ void main() {
 
     expect(find.byType(OSkeletonList), findsOneWidget);
     expect(find.text('Plan'), findsNothing);
+  });
+
+  testWidgets('an explicit loading status renders skeletons', (tester) async {
+    await tester.pumpWidget(
+      _app(
+        AccountHealthPage(data: _data(status: V2AccountHealthStatus.loading)),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byType(OSkeletonList), findsOneWidget);
+    expect(find.text('Plan'), findsNothing);
+  });
+
+  testWidgets('an explicit empty status renders the honest empty state', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        AccountHealthPage(data: _data(status: V2AccountHealthStatus.empty)),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(OEmptyState), findsOneWidget);
+    expect(find.text(V2AccountHealthPageData.emptyTitle), findsOneWidget);
+    expect(find.text(V2AccountHealthPageData.emptyMessage), findsOneWidget);
+    // No row may render a dash as if it were a real fact.
+    expect(find.text('Plan'), findsNothing);
+    expect(find.text('—'), findsNothing);
+  });
+
+  testWidgets('an explicit error status renders the error state', (
+    tester,
+  ) async {
+    var retried = false;
+    await tester.pumpWidget(
+      _app(
+        AccountHealthPage(
+          data: _data(
+            status: V2AccountHealthStatus.error,
+            errorMessage: 'Account health could not load.',
+            onRetry: () => retried = true,
+          ),
+        ),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Account health could not load.'), findsOneWidget);
+    await tester.tap(find.text('Try again'));
+    expect(retried, isTrue);
+  });
+
+  testWidgets('an explicit error without a message still says something', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        AccountHealthPage(data: _data(status: V2AccountHealthStatus.error)),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text(V2AccountHealthPageData.loadFailed), findsOneWidget);
+  });
+
+  testWidgets('a banned account is never reported as healthy', (tester) async {
+    await tester.pumpWidget(
+      _app(
+        AccountHealthPage(data: _data(accountStatus: V2AccountStatus.banned)),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Banned'), findsOneWidget);
+    expect(find.text('Healthy'), findsNothing);
   });
 
   testWidgets('semantics announce the status once and read label plus value', (

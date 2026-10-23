@@ -9,16 +9,23 @@ import 'settings_rows.dart';
 
 /// Where the account stands with the service.
 ///
-/// Only two states are reported by a real service: the account is in good
-/// standing, or a deletion request is pending. There is no suspension endpoint,
-/// so a suspended state is not modelled (and cannot be invented by the UI).
+/// The gateway's `/account/health` answers the ban flag and the deletion row,
+/// so both are modelled. A missing status is still unknown: it is never
+/// rendered as "Healthy".
 enum V2AccountStatus {
   /// In good standing.
   active,
 
   /// A deletion request is scheduled but can still be cancelled.
   deletionPending,
+
+  /// The account is banned. The ban reason is not shown on this screen, but
+  /// the status line must never call a banned account healthy.
+  banned,
 }
+
+/// The four states of the Account Health screen.
+enum V2AccountHealthStatus { loading, ready, empty, error }
 
 /// Injected state for the Account health screen.
 ///
@@ -37,7 +44,9 @@ class V2AccountHealthPageData {
     this.storageUsedLabel = '',
     this.storageFraction,
     this.deletionScheduledLabel = '',
+    this.deletionKnown = false,
     this.loading = false,
+    this.status = V2AccountHealthStatus.ready,
     this.errorMessage,
     this.onOpenPlans,
     this.onOpenStorage,
@@ -48,6 +57,13 @@ class V2AccountHealthPageData {
   /// The mark for a fact the app has not read. It is deliberately not `0`: a
   /// zero looks like real usage and hides a failed read.
   static const unknown = '—';
+
+  /// Empty-state copy lives here so the page and its tests share one string.
+  static const emptyTitle = 'Not signed in';
+  static const emptyMessage = 'Sign in.';
+
+  /// The fallback for an explicit error that carries no server message.
+  static const loadFailed = 'Could not load.';
 
   /// The current plan's display name (`Free`, `Go`, …), or empty when unknown.
   final String planLabel;
@@ -72,7 +88,16 @@ class V2AccountHealthPageData {
   /// The date the data goes, e.g. `20 Nov 2026`.
   final String deletionScheduledLabel;
 
+  /// True when the server answered the deletion question, even if the answer
+  /// was "none". Without this, a banned account would show a dash on the
+  /// deletion row although the server said there is no deletion.
+  final bool deletionKnown;
+
   final bool loading;
+
+  /// The explicit screen state. The legacy [loading]/[errorMessage] flags are
+  /// still honoured when this is [V2AccountHealthStatus.ready].
+  final V2AccountHealthStatus status;
   final String? errorMessage;
 
   /// Opens the plan list. Null when the host has no route: the row is static.
@@ -90,9 +115,19 @@ class V2AccountHealthPageData {
 
   bool get canCancelDeletion => deletionPending && onCancelDeletion != null;
 
+  /// The state the page renders. An explicit status wins; the legacy flags
+  /// keep older callers (and the preview data) working unchanged.
+  V2AccountHealthStatus get effectiveStatus {
+    if (status != V2AccountHealthStatus.ready) return status;
+    if (loading) return V2AccountHealthStatus.loading;
+    if (errorMessage != null) return V2AccountHealthStatus.error;
+    return V2AccountHealthStatus.ready;
+  }
+
   /// The one status line, derived from the facts above. It is never hardcoded:
   /// a missing status or a fact that needs attention changes it.
   String get statusLabel {
+    if (accountStatus == V2AccountStatus.banned) return 'Banned';
     if (deletionPending) return 'Attention needed · Deletion scheduled';
     if (accountStatus == null) return 'Attention needed · Status unknown';
     if ((storageFraction ?? 0) >= 0.9) {
@@ -123,7 +158,9 @@ class V2AccountHealthPageData {
       final date = deletionScheduledLabel.trim();
       return date.isEmpty ? 'Scheduled' : 'Scheduled · $date';
     }
-    if (accountStatus == V2AccountStatus.active) return 'None';
+    if (deletionKnown || accountStatus == V2AccountStatus.active) {
+      return 'None';
+    }
     return unknown;
   }
 }
@@ -142,11 +179,30 @@ class AccountHealthPage extends StatelessWidget {
   }
 
   Widget _body(BuildContext context) {
-    if (data.loading) return const OSkeletonList(rows: 4);
-    if (data.errorMessage != null) {
-      return OErrorState(message: data.errorMessage!, onRetry: data.onRetry);
+    switch (data.effectiveStatus) {
+      case V2AccountHealthStatus.loading:
+        return const OSkeletonList(rows: 4);
+      case V2AccountHealthStatus.error:
+        return OErrorState(
+          message: data.errorMessage ?? V2AccountHealthPageData.loadFailed,
+          onRetry: data.onRetry,
+        );
+      case V2AccountHealthStatus.empty:
+        return _emptyState();
+      case V2AccountHealthStatus.ready:
+        return _content(context);
     }
+  }
 
+  Widget _emptyState() {
+    return const OEmptyState(
+      icon: Icons.account_circle_outlined,
+      title: V2AccountHealthPageData.emptyTitle,
+      message: V2AccountHealthPageData.emptyMessage,
+    );
+  }
+
+  Widget _content(BuildContext context) {
     return SingleChildScrollView(
       padding: const EdgeInsets.only(top: OSpace.l, bottom: OSpace.xxl),
       child: Column(

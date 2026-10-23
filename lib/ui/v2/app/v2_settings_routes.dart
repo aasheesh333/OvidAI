@@ -14,6 +14,7 @@ import '../../../core/auth_providers.dart';
 import '../../../core/connection_service.dart';
 import '../../../core/distribution.dart';
 import '../../../core/background_notifications.dart';
+import '../../../core/cloud/account_health.dart';
 import '../../../core/cloud/account_settings_client.dart';
 import '../../../core/cloud/artifact_vault.dart';
 import '../../../core/cloud/cloud_rest.dart';
@@ -937,70 +938,83 @@ class V2SettingsRoutes {
     );
   }
 
-  /// The account's real standing: the deletion receipt the account service
-  /// returned for this session. Nothing here is guessed — with no receipt the
-  /// status stays null and the page says so.
+  /// Maps the gateway's `/account/health` answer onto the screen's four
+  /// facts. A null section (or a null field inside one) stays unknown and
+  /// renders the page's dash; it is never coerced to zero. The status is
+  /// passed separately so loading, empty and error do not need fake data.
   static health.V2AccountHealthPageData _health(
     BuildContext context,
     V2SettingsActions actions, {
+    AccountHealth? accountHealth,
+    health.V2AccountHealthStatus status = health.V2AccountHealthStatus.ready,
+    String? errorMessage,
     VoidCallback? onCancelDeletion,
-    int? storageUsedBytes,
+    VoidCallback? onRetry,
   }) {
-    final firebase = FirebaseService.I;
-    final receipt = firebase.lastDeletionReceipt;
-    final pending = receipt?.isPending == true;
-    final deadline = receipt?.deleteAfter;
-    // `/usage` is the only server-authoritative plan and daily counter. The
-    // cached tier is a display-only fallback until the server answers.
-    final usage = actions.usage.usage;
-    final tier = usage?.tier.trim().isNotEmpty == true
-        ? usage!.tier.trim()
-        : AppState.I.ovidCloudTier;
-    final limits = V2PlanLimits.forIdOrFree(tier);
-    final today = usage?.today;
-    final todayTokens = today == null
-        ? null
-        : today.inputTokens + today.outputTokens;
-    // The account service answers on admission. Until that answer arrives (and
-    // while no failure is known) the page is loading; a real failure is shown
-    // with Retry instead of a screen full of dashes.
-    final accountError = firebase.accountError;
-    final awaitingReceipt =
-        firebase.isSignedIn &&
-        firebase.accountService.enabled &&
-        receipt == null &&
-        accountError == null;
+    final plan = accountHealth?.plan;
+    final storage = accountHealth?.storage;
+    final usage = accountHealth?.usage;
+    final standing = accountHealth?.standing;
+    final deletion = standing?.deletion;
+
+    final planId = plan?.id ?? plan?.tier;
+    final limits = planId == null ? null : V2PlanLimits.forId(planId);
+    // Only a plan the table knows gets a display name. An unknown tier must
+    // not fall back to "Free" and claim a plan the server did not name.
+    final planName = limits == null
+        ? (plan?.name ?? '')
+        : ovidPlanName(planId!);
+
+    final todayTokens = usage?.today?.usedTokens;
+    final usedBytes = storage?.usedBytes;
+    final quotaBytes = storage?.quotaBytes;
+
+    final banned = standing?.banned;
+    final pending = deletion?.pending;
+    final health.V2AccountStatus? accountStatus;
+    if (banned == true) {
+      accountStatus = health.V2AccountStatus.banned;
+    } else if (pending == true) {
+      // A pending deletion is a fact even when the ban flag is unreadable;
+      // surfacing it is more honest than a generic "Status unknown".
+      accountStatus = health.V2AccountStatus.deletionPending;
+    } else if (banned == null) {
+      accountStatus = null;
+    } else if (deletion == null) {
+      accountStatus = health.V2AccountStatus.active;
+    } else if (pending == null) {
+      accountStatus = null;
+    } else {
+      accountStatus = health.V2AccountStatus.active;
+    }
+
+    final deadline = deletion?.deleteAfter;
     return health.V2AccountHealthPageData(
-      planLabel:
-          usage?.displayPlanName ??
-          (tier.trim().isEmpty ? '' : ovidPlanName(tier)),
-      accountStatus: receipt == null
-          ? null
-          : pending
-          ? health.V2AccountStatus.deletionPending
-          : health.V2AccountStatus.active,
+      status: status,
+      planLabel: planName,
+      accountStatus: accountStatus,
       todayUsageLabel: todayTokens == null
           ? ''
           : '${compactTokens(todayTokens)} tokens',
-      todayUsageFraction: todayTokens == null || limits.dailyTokenCap == 0
+      todayUsageFraction:
+          todayTokens == null ||
+              limits == null ||
+              (limits.dailyTokenCap ?? 0) <= 0
           ? null
-          : (todayTokens / limits.dailyTokenCap).clamp(0.0, 1.0),
-      // Measured by the loader from the artifact inventory plus this device's
-      // transcripts; null until that read finishes or when it fails. The quota
-      // is the same tier the plan row names, so the two rows cannot disagree.
-      storageUsedLabel: storageUsedBytes == null || limits.storageGb <= 0
+          : (todayTokens / limits.dailyTokenCap!).clamp(0.0, 1.0).toDouble(),
+      storageUsedLabel: usedBytes == null || quotaBytes == null
           ? ''
-          : '${_bytes(storageUsedBytes)} of ${limits.storageGb} GB',
-      storageFraction: storageUsedBytes == null || limits.storageGb <= 0
+          : '${_bytes(usedBytes)} of ${_bytes(quotaBytes)}',
+      storageFraction:
+          usedBytes == null || quotaBytes == null || quotaBytes <= 0
           ? null
-          : (storageUsedBytes / (limits.storageGb * 1024 * 1024 * 1024))
-                .clamp(0.0, 1.0),
-      deletionScheduledLabel: pending && deadline != null
+          : (usedBytes / quotaBytes).clamp(0.0, 1.0).toDouble(),
+      deletionScheduledLabel: pending == true && deadline != null
           ? formatLocalDateTime(deadline)
           : '',
-      loading: awaitingReceipt,
-      errorMessage: receipt == null ? accountError : null,
-      onRetry: () => unawaited(firebase.retryAccountLogin()),
+      deletionKnown: standing != null,
+      errorMessage: errorMessage,
+      onRetry: onRetry,
       // The plan list and the storage screen are real routes; each row opens
       // the screen that owns the number it shows.
       onOpenPlans: () => unawaited(open(context, 'plan_billing', actions)),
@@ -1818,9 +1832,10 @@ class _NotificationsLoaderState extends State<_NotificationsLoader>
   }
 }
 
-/// Keeps the Account health screen on the live account state: the deletion
-/// receipt is a `FirebaseService` property, so a cancel updates the page
-/// instead of leaving a button that appears to do nothing.
+/// Loads the one honest account-health aggregate from the gateway and keeps
+/// the page on it. The four states are explicit: loading while the request is
+/// in flight, empty when there is no signed-in account, error when the server
+/// refuses or the answer is unreadable, content when it answers.
 class _AccountHealthLoader extends StatefulWidget {
   const _AccountHealthLoader({required this.actions});
 
@@ -1831,64 +1846,90 @@ class _AccountHealthLoader extends StatefulWidget {
 }
 
 class _AccountHealthLoaderState extends State<_AccountHealthLoader> {
-  /// Used storage in bytes, or null until the read finishes (or if it fails).
-  int? _storageUsedBytes;
+  AccountHealth? _health;
+  health.V2AccountHealthStatus _status = health.V2AccountHealthStatus.loading;
+  String? _error;
+  bool? _signedIn;
 
   @override
   void initState() {
     super.initState();
+    _signedIn = FirebaseService.I.isSignedIn;
     FirebaseService.I.addListener(_onChange);
-    // The plan and today's counters arrive from `/usage` after the page is
-    // built; without this the rows would stay at their first (unknown) value.
-    widget.actions.usage.addListener(_onChange);
-    unawaited(_loadStorage());
+    unawaited(_loadHealth());
   }
 
   @override
   void dispose() {
     FirebaseService.I.removeListener(_onChange);
-    widget.actions.usage.removeListener(_onChange);
     super.dispose();
   }
 
   void _onChange() {
+    final signedIn = FirebaseService.I.isSignedIn;
+    if (signedIn != _signedIn) {
+      _signedIn = signedIn;
+      unawaited(_loadHealth());
+      return;
+    }
     if (mounted) setState(() {});
   }
 
-  /// Measures the same storage the Storage screen reports: the account's
-  /// artifact inventory plus this device's transcripts. The on-device cache is
-  /// excluded, as it is not part of the cloud quota. A failed inventory read
-  /// leaves the value unknown instead of inventing a zero.
-  Future<void> _loadStorage() async {
-    final sessions = V2SettingsRoutes._localTranscriptBytes();
-    final artifacts = await _artifactBytes();
-    if (!mounted) return;
-    setState(() {
-      _storageUsedBytes = artifacts == null ? null : artifacts + sessions;
-    });
-  }
-
-  Future<int?> _artifactBytes() async {
-    final svc = FirebaseService.I;
-    final uid = svc.uid;
-    if (!svc.isSignedIn || uid == null) return 0;
+  Future<void> _loadHealth() async {
+    if (!FirebaseService.I.isSignedIn) {
+      if (!mounted) return;
+      setState(() {
+        _health = null;
+        _status = health.V2AccountHealthStatus.empty;
+        _error = null;
+      });
+      return;
+    }
+    if (mounted) {
+      setState(() {
+        _status = health.V2AccountHealthStatus.loading;
+        _error = null;
+      });
+    }
     try {
-      final page = await ArtifactVaultClient(
-        accountId: () => 'firebase:$uid',
-      ).list(limit: 100);
-      var total = 0;
-      for (final item in page.items) {
-        total += item.sizeBytes;
-      }
-      return total;
+      final answer = await AccountHealthClient().fetch();
+      if (!mounted) return;
+      setState(() {
+        _health = answer;
+        // A 200 with no readable section is a contract failure, not an
+        // account with zero of everything.
+        _status = answer.isEmpty
+            ? health.V2AccountHealthStatus.error
+            : health.V2AccountHealthStatus.ready;
+        _error = answer.isEmpty
+            ? health.V2AccountHealthPageData.loadFailed
+            : null;
+      });
+    } on CloudApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _health = null;
+        _status = e.status == 401
+            ? health.V2AccountHealthStatus.empty
+            : health.V2AccountHealthStatus.error;
+        _error = e.status == 401 ? null : e.message;
+      });
     } catch (_) {
-      return null;
+      if (!mounted) return;
+      setState(() {
+        _health = null;
+        _status = health.V2AccountHealthStatus.error;
+        _error = health.V2AccountHealthPageData.loadFailed;
+      });
     }
   }
 
   Future<void> _cancelDeletion() async {
     try {
       await widget.actions.restoreAccount();
+      // The deletion row is the server's; re-read it rather than assuming the
+      // cancel changed this screen's copy.
+      await _loadHealth();
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1903,8 +1944,11 @@ class _AccountHealthLoaderState extends State<_AccountHealthLoader> {
       data: V2SettingsRoutes._health(
         context,
         widget.actions,
+        accountHealth: _health,
+        status: _status,
+        errorMessage: _error,
         onCancelDeletion: _cancelDeletion,
-        storageUsedBytes: _storageUsedBytes,
+        onRetry: () => unawaited(_loadHealth()),
       ),
     );
   }
