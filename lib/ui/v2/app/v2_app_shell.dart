@@ -254,7 +254,11 @@ class _V2AppShellState extends State<V2AppShell> {
       onSessionActions: (row) => _showSessionActions(context, row.id),
       onSessionLongPress: (row) => _showSessionActions(context, row.id),
       messageSearch: _messageSearch,
-      onMessageTap: _selectSession,
+      // A search hit names the SERVER session. A chat created on this device
+      // keeps its local id after its first send, so map the UUID back before
+      // selecting; server-native chats already use their server id.
+      onMessageTap: (serverId) =>
+          _selectSession(CloudSessionStore.I.resolveLocalSessionId(serverId)),
       onSchedule: () => _withTab(
         V2NavTab.chat,
         () => V2WorkRoutes.openSchedules(context, _settings),
