@@ -11,6 +11,7 @@ import '../../../core/collaboration/production.dart';
 import '../../../core/cloud/cloud_agent_facade.dart';
 import '../../../core/cloud/cloud_rest.dart';
 import '../../../core/cloud/cloud_session_store.dart';
+import '../../../core/cloud/message_search.dart';
 import '../../../core/cloud/models.dart';
 import '../../../core/cloud/plan_tier.dart';
 import '../../../core/cloud/projects.dart';
@@ -24,6 +25,7 @@ import '../../../core/format.dart';
 import '../../../core/native_share.dart';
 import '../../../core/ovid_cloud_service.dart';
 import '../../../core/session_artifacts.dart';
+import '../../../core/session_history_store.dart';
 import '../../../core/cloud/cloud_errors.dart';
 import '../../../core/state.dart';
 import '../../../core/voice_reply_service.dart';
@@ -92,6 +94,11 @@ class _V2AppShellState extends State<V2AppShell> {
   late final V2SettingsActions _settings;
   late final Listenable _listenable;
 
+  /// The drawer's server message search, with the device index as its offline
+  /// fallback. Owned here (not by the sidebar) because the drawer and the rail
+  /// are two mounts of the same surface and must share one settled query.
+  late final MessageSearchController _messageSearch;
+
   /// The build context of the home route inside [_navKey]. Route pushes go
   /// through this context so the bottom bar stays mounted above every
   /// destination.
@@ -102,6 +109,9 @@ class _V2AppShellState extends State<V2AppShell> {
     super.initState();
     _usage = CloudUsageStore.acquire(AppState.I);
     _settings = V2SettingsActions(_usage);
+    _messageSearch = MessageSearchController(
+      localSearch: _searchMessagesOnDevice,
+    );
     _listenable = Listenable.merge([
       AppState.I,
       CloudAgentFacade.I,
@@ -145,6 +155,7 @@ class _V2AppShellState extends State<V2AppShell> {
     // `dispose` here would leave a disposed store in the per-AppState cache.
     _settings.dispose();
     _usage.release();
+    _messageSearch.dispose();
     super.dispose();
   }
 
@@ -242,6 +253,8 @@ class _V2AppShellState extends State<V2AppShell> {
       onSessionTap: (row) => _selectSession(row.id),
       onSessionActions: (row) => _showSessionActions(context, row.id),
       onSessionLongPress: (row) => _showSessionActions(context, row.id),
+      messageSearch: _messageSearch,
+      onMessageTap: _selectSession,
       onSchedule: () => _withTab(
         V2NavTab.chat,
         () => V2WorkRoutes.openSchedules(context, _settings),
@@ -774,8 +787,8 @@ class _V2AppShellState extends State<V2AppShell> {
 
     // A remembered manual pick the plan cannot reach falls back to Auto, which
     // is the model that will actually run.
-    final selectedId = current != 'auto' &&
-            rows.any((row) => row.id == currentId)
+    final selectedId =
+        current != 'auto' && rows.any((row) => row.id == currentId)
         ? currentId
         : 'auto';
 
@@ -886,6 +899,29 @@ class _V2AppShellState extends State<V2AppShell> {
     CloudAgentFacade.I.activateSession(id);
     unawaited(_loadTranscript(id));
     _scaffoldKey.currentState?.closeDrawer();
+  }
+
+  /// The offline fallback for message search: the device's own index (SQLite
+  /// FTS5 when it is available, else the bounded in-memory scan). It has no
+  /// server message ids or ranking, so those render as unknown rather than as
+  /// a fabricated zero, and the drawer labels the results as local.
+  Future<List<MessageSearchHit>> _searchMessagesOnDevice(
+    String query, {
+    int limit = 20,
+  }) async {
+    final hits = await AppState.I.searchSessionContent(query, limit: limit);
+    return <MessageSearchHit>[
+      for (final hit in hits)
+        MessageSearchHit(
+          sessionId: hit.sessionId,
+          role: hit.role,
+          snippet: parseSnippet(
+            hit.snippet,
+            open: SessionHistoryRepository.highlightStart,
+            close: SessionHistoryRepository.highlightEnd,
+          ),
+        ),
+    ];
   }
 
   /// Chats whose first history page this shell has already asked for. The WS
@@ -1076,7 +1112,8 @@ class _V2AppShellState extends State<V2AppShell> {
   Future<bool> _reportMessage(String messageId) async {
     final sessionId = AppState.I.activeSessionId;
     if (sessionId == null) return false;
-    final rows = CloudAgentFacade.I.transcriptFor(sessionId) ??
+    final rows =
+        CloudAgentFacade.I.transcriptFor(sessionId) ??
         AppState.I.activeSession?.messages ??
         const <Message>[];
     Message? target;
@@ -2205,10 +2242,7 @@ class _MenuIdentity extends StatelessWidget {
                       const SizedBox(height: OSpace.xs),
                       Align(
                         alignment: Alignment.centerLeft,
-                        child: OPill(
-                          label: planLabel,
-                          tone: OPillTone.accent,
-                        ),
+                        child: OPill(label: planLabel, tone: OPillTone.accent),
                       ),
                     ],
                   ],

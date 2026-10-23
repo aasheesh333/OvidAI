@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 
+import '../../../core/cloud/message_search.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_screen.dart';
@@ -150,6 +151,8 @@ class Sidebar extends StatefulWidget {
     this.onArtifacts,
     this.onSettings,
     this.onRetry,
+    this.messageSearch,
+    this.onMessageTap,
   });
 
   final V2SidebarData data;
@@ -194,6 +197,15 @@ class Sidebar extends StatefulWidget {
   final VoidCallback? onArtifacts;
   final VoidCallback? onSettings;
   final VoidCallback? onRetry;
+
+  /// Server message search, layered under the instant title filter. When null
+  /// the drawer searches only the index it was handed (the pre-search
+  /// behaviour); the production shell always passes one.
+  final MessageSearchController? messageSearch;
+
+  /// Opens a server message hit's chat. Falls back to [onSessionTap] when the
+  /// hit's session is in the drawer index.
+  final ValueChanged<String>? onMessageTap;
 
   @override
   State<Sidebar> createState() => _SidebarState();
@@ -260,8 +272,12 @@ class _SidebarState extends State<Sidebar> {
                             key: const Key('v2-sidebar-search'),
                             controller: _search,
                             hint: 'Search',
-                            onChanged: (value) =>
-                                setState(() => _query = value.trim()),
+                            onChanged: (value) {
+                              setState(() => _query = value.trim());
+                              // Titles filter instantly above; the server
+                              // search debounces inside the controller.
+                              _w.messageSearch?.query(value);
+                            },
                             trailing: _query.isEmpty
                                 ? null
                                 : OIconButton(
@@ -299,6 +315,9 @@ class _SidebarState extends State<Sidebar> {
     _search.clear();
     FocusScope.of(context).unfocus();
     setState(() => _query = '');
+    // Clearing is idle, not "no results": the controller drops any in-flight
+    // answer for the old term.
+    _w.messageSearch?.query('');
   }
 
   Widget _buildBody(BuildContext context) {
@@ -312,7 +331,14 @@ class _SidebarState extends State<Sidebar> {
         onRetry: _w.onRetry,
       );
     }
-    if (_query.isNotEmpty) return _searchResults();
+    if (_query.isNotEmpty) {
+      final search = _w.messageSearch;
+      if (search == null) return _searchResults(null);
+      return ListenableBuilder(
+        listenable: search,
+        builder: (context, _) => _searchResults(search.state),
+      );
+    }
     if (_w.data.isEmpty) {
       // One line. The New session button above is the only action this zone
       // needs, so the empty state does not repeat it.
@@ -402,6 +428,13 @@ class _SidebarState extends State<Sidebar> {
         onTap: _w.onProjectTap,
         onMemory: _w.onProjectMemory,
       ),
+      _MessageNoteEntry e => _messageNote(e.text, showDivider: showDivider),
+      _MessageErrorEntry e => _messageError(e, showDivider: showDivider),
+      _MessageHitEntry e => _MessageHitRow(
+        hit: e.hit,
+        showDivider: showDivider,
+        onTap: e.onTap,
+      ),
     };
     // Keep the entrance stagger for the first screenful only.
     if (index >= 8) return row;
@@ -426,8 +459,9 @@ class _SidebarState extends State<Sidebar> {
 
   /// Inline search: every chat and project in the drawer index, filtered by
   /// title, the project a chat belongs to, or the message text when the caller
-  /// supplied it. No second screen — the drawer is where the user already is.
-  Widget _searchResults() {
+  /// supplied it. The gateway's ranked message page sits beneath those rows.
+  /// No second screen — the drawer is where the user already is.
+  Widget _searchResults(MessageSearchState? messages) {
     final query = _query.toLowerCase();
     final sessions = <V2SidebarSession>[
       for (final session in _sessions)
@@ -438,7 +472,19 @@ class _SidebarState extends State<Sidebar> {
         if (project.name.toLowerCase().contains(query)) project,
     ];
 
-    if (sessions.isEmpty && projects.isEmpty) {
+    final status = messages?.status ?? MessageSearchStatus.idle;
+    final hasLocalRows = sessions.isNotEmpty || projects.isNotEmpty;
+    // Idle is a blank box: no section at all. An empty server page with no
+    // local title match falls through to the settled empty state below, so a
+    // "no matches" drawer does not grow a second line saying the same thing.
+    // When local rows do match, or the results came from the device, the
+    // section is shown so it can carry its count, its note or its emptiness.
+    final showMessageSurface =
+        messages != null &&
+        status != MessageSearchStatus.idle &&
+        (messages.local || status != MessageSearchStatus.empty || hasLocalRows);
+
+    if (!hasLocalRows && !showMessageSurface) {
       return OEmptyState(
         compact: true,
         icon: Icons.search_off_rounded,
@@ -454,6 +500,8 @@ class _SidebarState extends State<Sidebar> {
 
     // Same order as the unfiltered drawer — projects, then sessions — and a
     // count on each section so the result size is visible before scrolling.
+    // Messages come last: a title hit is the direct answer, a message is the
+    // wider net.
     final entries = <_SidebarEntry>[
       if (projects.isNotEmpty)
         _SectionEntry(
@@ -475,8 +523,138 @@ class _SidebarState extends State<Sidebar> {
           ),
         ),
       for (final session in sessions) _SessionEntry(session),
+      if (showMessageSurface) ..._messageEntries(messages),
     ];
     return OFadeSlide(child: _sidebarList(entries));
+  }
+
+  /// The four settled states of the message search, plus the offline note.
+  List<_SidebarEntry> _messageEntries(MessageSearchState messages) {
+    final entries = <_SidebarEntry>[];
+    switch (messages.status) {
+      case MessageSearchStatus.idle:
+        break;
+      case MessageSearchStatus.loading:
+        entries
+          ..add(const _SectionEntry('Messages'))
+          ..add(const _MessageNoteEntry('Searching messages…'));
+        break;
+      case MessageSearchStatus.error:
+        entries
+          ..add(const _SectionEntry('Messages'))
+          ..add(
+            _MessageErrorEntry(
+              message: messages.error ?? 'Messages did not load.',
+              onRetry: () => _w.messageSearch?.retry(),
+            ),
+          );
+        break;
+      case MessageSearchStatus.empty:
+        entries.add(const _SectionEntry('Messages'));
+        if (messages.local) {
+          entries.add(const _MessageNoteEntry(_localResultsNote));
+        }
+        entries.add(const _MessageNoteEntry('No messages match.'));
+        break;
+      case MessageSearchStatus.content:
+        entries.add(
+          _SectionEntry(
+            'Messages',
+            trailing: _messageCountPill(messages.total),
+          ),
+        );
+        if (messages.local) {
+          entries.add(const _MessageNoteEntry(_localResultsNote));
+        }
+        for (final hit in messages.hits) {
+          entries.add(_MessageHitEntry(hit, onTap: () => _openMessageHit(hit)));
+        }
+        break;
+    }
+    return entries;
+  }
+
+  /// Unknown counts render `—`, never a fabricated zero: an on-device page has
+  /// no server total at all.
+  static Widget _messageCountPill(int? total) {
+    return OPill(
+      key: const ValueKey<String>('v2-sidebar-search-messages'),
+      label: total == null ? '—' : '$total',
+      tone: OPillTone.neutral,
+      semanticLabel: total == null
+          ? 'Message count unknown'
+          : (total == 1 ? '1 message' : '$total messages'),
+    );
+  }
+
+  /// A server hit names its chat by id. Prefer the shell's callback (it also
+  /// loads the transcript); fall back to the drawer row when there is one.
+  void _openMessageHit(MessageSearchHit hit) {
+    final id = hit.sessionId;
+    if (id == null) return;
+    final callback = _w.onMessageTap;
+    if (callback != null) {
+      callback(id);
+      return;
+    }
+    for (final session in _sessions) {
+      if (session.id == id) {
+        _w.onSessionTap?.call(session);
+        return;
+      }
+    }
+  }
+
+  /// A one-line note inside the Messages section: loading, empty or the
+  /// offline explanation. Never a second empty state.
+  Widget _messageNote(String text, {required bool showDivider}) {
+    final c = OColors.of(context);
+    return Container(
+      decoration: showDivider
+          ? BoxDecoration(
+              border: Border(bottom: BorderSide(color: c.hairline)),
+            )
+          : null,
+      padding: const EdgeInsets.symmetric(
+        horizontal: OSpace.s,
+        vertical: OSpace.s,
+      ),
+      child: Text(
+        text,
+        key: ValueKey<String>('v2-search-note-$text'),
+        style: OType.caption.copyWith(color: c.textMuted),
+      ),
+    );
+  }
+
+  /// The error state, with the one action that can resolve it.
+  Widget _messageError(_MessageErrorEntry entry, {required bool showDivider}) {
+    final c = OColors.of(context);
+    return Container(
+      decoration: showDivider
+          ? BoxDecoration(
+              border: Border(bottom: BorderSide(color: c.hairline)),
+            )
+          : null,
+      padding: const EdgeInsets.fromLTRB(
+        OSpace.s,
+        OSpace.xs,
+        OSpace.s,
+        OSpace.s,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            entry.message,
+            key: const ValueKey<String>('v2-search-error'),
+            style: OType.caption.copyWith(color: c.textMuted),
+          ),
+          TextButton(onPressed: entry.onRetry, child: const Text('Retry')),
+        ],
+      ),
+    );
   }
 
   static Widget _countPill({
@@ -585,6 +763,98 @@ final class _ProjectEntry extends _SidebarEntry {
   const _ProjectEntry(this.project);
 
   final V2SidebarProject project;
+}
+
+/// A plain line inside the Messages section (loading / empty / offline note).
+final class _MessageNoteEntry extends _SidebarEntry {
+  const _MessageNoteEntry(this.text);
+
+  final String text;
+}
+
+/// The Messages error state and the action that retries it.
+final class _MessageErrorEntry extends _SidebarEntry {
+  const _MessageErrorEntry({required this.message, required this.onRetry});
+
+  final String message;
+  final VoidCallback? onRetry;
+}
+
+/// One ranked message hit from the gateway (or the device index).
+final class _MessageHitEntry extends _SidebarEntry {
+  const _MessageHitEntry(this.hit, {required this.onTap});
+
+  final MessageSearchHit hit;
+  final VoidCallback onTap;
+}
+
+/// The offline explanation. It is the one line that makes a device-only
+/// result honest: the same query may return more once the gateway is back.
+const String _localResultsNote =
+    'Offline — showing matches saved on this device.';
+
+/// A message hit: who said it and the excerpt, with the matched runs bold.
+/// The snippet is already plain segments, so message markup is text here.
+class _MessageHitRow extends StatelessWidget {
+  const _MessageHitRow({
+    required this.hit,
+    required this.showDivider,
+    required this.onTap,
+  });
+
+  final MessageSearchHit hit;
+  final bool showDivider;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final role = messageRoleLabel(hit.role);
+    final plain = hit.snippetText.isEmpty ? '—' : hit.snippetText;
+    final base = OType.caption.copyWith(color: c.textMuted);
+    return Container(
+      decoration: showDivider
+          ? BoxDecoration(
+              border: Border(bottom: BorderSide(color: c.hairline)),
+            )
+          : null,
+      child: OPressable(
+        key: ValueKey<String>(
+          'v2-search-message-${hit.sessionId}-${hit.messageId ?? 'local'}',
+        ),
+        onTap: onTap,
+        semanticLabel: '$role message: $plain',
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: OSpace.s,
+            vertical: OSpace.s,
+          ),
+          child: Text.rich(
+            TextSpan(
+              children: <InlineSpan>[
+                TextSpan(text: '$role · ', style: base),
+                if (hit.snippet.isEmpty)
+                  TextSpan(text: '—', style: base)
+                else
+                  for (final segment in hit.snippet)
+                    TextSpan(
+                      text: segment.text,
+                      style: segment.highlight
+                          ? base.copyWith(
+                              color: c.text,
+                              fontWeight: FontWeight.w700,
+                            )
+                          : base,
+                    ),
+              ],
+            ),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _SessionRow extends StatelessWidget {
