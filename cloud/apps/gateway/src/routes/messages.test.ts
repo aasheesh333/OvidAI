@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { accountSettings, attachments, byokKeysRepo, messages, newId, runs, type Db } from "@ovid/db";
+import { accountSettings, attachments, byokKeysRepo, messages, newId, runs, runUsage, type Db } from "@ovid/db";
 import { AGENT_RUN_JOB_NAME } from "@ovid/queue";
 import {
   messageDtoSchema,
@@ -64,6 +64,8 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
       mint?: InternalMintProvisioner;
       /** P10 Task 2: bounded mint deadline (default 10000). */
       mintTimeoutMs?: number;
+      /** Fixed clock for the token-cap windows and their reset header. */
+      clock?: () => Date;
     } = {},
   ): TestApp {
     const { queues, adds } = stubQueues({ failAdd: behavior.failAdd });
@@ -81,6 +83,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
         ? { mintTimeoutMs: behavior.mintTimeoutMs }
         : {}),
       ...(behavior.presigner !== undefined ? { presigner: behavior.presigner } : {}),
+      ...(behavior.clock !== undefined ? { clock: behavior.clock } : {}),
     });
     const handle = { app, adds, mint };
     built.push(handle);
@@ -1001,5 +1004,126 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
     const res = await sendMessage(handle, uid, sid, { content: "no project" });
     expect(res.statusCode).toBe(202);
     expect(handle.adds[0]!.data.projectRefs).toBeUndefined();
+  });
+
+  // --- Token caps -----------------------------------------------------------
+  //
+  // Free is 50M tokens a day and 1.5B a month (paid tiers scale by their
+  // auto multiplier). The counter is the `run_usage` ledger the worker already
+  // writes. A send is refused only when the window is ALREADY spent — the
+  // gateway cannot know a future run's size, so it stops at the ceiling, not
+  // at an estimate.
+
+  const CAP_NOW = new Date("2026-10-23T15:04:05.000Z");
+
+  async function seedUsage(
+    uid: string,
+    sessionId: string,
+    inputTokens: number,
+    outputTokens: number,
+    createdAt: Date,
+  ): Promise<void> {
+    await runUsage.record(db, {
+      userId: uid,
+      sessionId,
+      runId: newId(),
+      model: "deepseek-v4.1-flash",
+      inputTokens,
+      outputTokens,
+      createdAt,
+    });
+  }
+
+  it("refuses a send at the Free daily token ceiling: 402 daily_limit_reached + resets-at, no mint, no writes, no job", async () => {
+    const handle = makeApp({ clock: () => CAP_NOW });
+    const uid = testUid("msg-tokenday");
+    const sid = await createSession(handle, uid);
+    await seedUsage(uid, sid, 49_000_000, 1_000_000, new Date("2026-10-23T10:00:00.000Z"));
+
+    const res = await sendMessage(handle, uid, sid, { content: "one more" });
+
+    expect(res.statusCode).toBe(402);
+    expect(res.json().error.code).toBe("daily_limit_reached");
+    expect(res.json().error.message).toContain("daily");
+    expect(res.json().error.message).toContain("50,000,000");
+    // The client's whole 402 UX is the epoch-ms x-ovid-resets-at countdown.
+    expect(res.headers["x-ovid-resets-at"]).toBe(
+      String(Date.UTC(2026, 9, 24, 0, 0, 0)),
+    );
+
+    // Before mint and before every write: no key provisioning, no rows, no job.
+    expect(handle.mint.calls).toEqual([]);
+    expect(handle.adds).toHaveLength(0);
+    expect(await tableCounts(sid)).toEqual({ messages: 0, runs: 0 });
+  });
+
+  it("refuses at the Free monthly ceiling when today is quiet, naming the month reset", async () => {
+    const handle = makeApp({ clock: () => CAP_NOW });
+    const uid = testUid("msg-tokenmonth");
+    const sid = await createSession(handle, uid);
+    // Spread over the month so the daily window is well under its cap.
+    await seedUsage(uid, sid, 700_000_000, 0, new Date("2026-10-02T10:00:00.000Z"));
+    await seedUsage(uid, sid, 800_000_000, 0, new Date("2026-10-12T10:00:00.000Z"));
+
+    const res = await sendMessage(handle, uid, sid, { content: "one more" });
+
+    expect(res.statusCode).toBe(402);
+    expect(res.json().error.code).toBe("daily_limit_reached");
+    expect(res.json().error.message).toContain("monthly");
+    expect(res.json().error.message).toContain("1,500,000,000");
+    expect(res.headers["x-ovid-resets-at"]).toBe(
+      String(Date.UTC(2026, 10, 1, 0, 0, 0)),
+    );
+    expect(handle.mint.calls).toEqual([]);
+    expect(handle.adds).toHaveLength(0);
+    expect(await tableCounts(sid)).toEqual({ messages: 0, runs: 0 });
+  });
+
+  it("allows the send with headroom under the cap", async () => {
+    const handle = makeApp({ clock: () => CAP_NOW });
+    const uid = testUid("msg-tokenok");
+    const sid = await createSession(handle, uid);
+    await seedUsage(uid, sid, 49_999_999, 0, new Date("2026-10-23T10:00:00.000Z"));
+
+    const res = await sendMessage(handle, uid, sid, { content: "still fine" });
+
+    expect(res.statusCode).toBe(202);
+    expect(handle.adds).toHaveLength(1);
+    expect(handle.mint.calls).toEqual([{ uid }]);
+  });
+
+  it("gives a paid tier its multiplier: Go may pass Free's 50M daily ceiling", async () => {
+    const handle = makeApp({ clock: () => CAP_NOW });
+    const uid = testUid("msg-tokengo");
+    const sid = await createSession(handle, uid);
+    await db.$client.unsafe("UPDATE users SET tier = 'go' WHERE uid = $1", [uid]);
+    await seedUsage(uid, sid, 60_000_000, 0, new Date("2026-10-23T10:00:00.000Z"));
+
+    const res = await sendMessage(handle, uid, sid, { content: "go allows this" });
+
+    expect(res.statusCode).toBe(202); // Go = 75M/day, not Free's 50M
+    expect(handle.adds).toHaveLength(1);
+  });
+
+  it("BYOK sends are not held to the Ovid token allowance", async () => {
+    // The cap measures what Ovid's own key spends. A BYOK send costs Ovid
+    // nothing, so an exhausted plan allowance must not block it (the same
+    // rule the mint-relayed 402 already follows).
+    const handle = makeApp({ clock: () => CAP_NOW });
+    const uid = testUid("msg-tokenbyok");
+    const sid = await createSession(handle, uid);
+    await seedUsage(uid, sid, 60_000_000, 0, new Date("2026-10-23T10:00:00.000Z"));
+    const key = await byokKeysRepo.create(db, {
+      userId: uid, providerId: "openai", endpoint: "https://api.openai.com/v1", label: null,
+      wrappedDek: Buffer.from("d").toString("base64"), iv: Buffer.from("i").toString("base64"),
+      ciphertext: Buffer.from("c").toString("base64"), tag: Buffer.from("t").toString("base64"),
+    });
+    await accountSettings.patch(db, uid, { byokDefault: { keyId: key.id, model: "gpt-4.1-mini" } });
+
+    const res = await sendMessage(handle, uid, sid, { content: "my own key" });
+
+    expect(res.statusCode).toBe(202);
+    expect(handle.mint.calls).toEqual([]);
+    expect(handle.adds[0]!.data).toMatchObject({ byokKeyId: key.id });
   });
 });

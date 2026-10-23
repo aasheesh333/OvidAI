@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   PLANS,
   PLAN_TIERS,
+  countedTokens,
   manualModelsAllowed,
   modelAllowedForTier,
   planFor,
   storageBytes,
   tierRank,
+  tokenCapsFor,
 } from "./plans.js";
 
 /**
@@ -36,6 +38,69 @@ describe("PLANS", () => {
     expect(PLAN_TIERS.map((t) => PLANS[t].customConnectors)).toEqual([0, 5, 20, 20]);
     expect(PLANS.free.uploads).toEqual({ count: 50, windowHours: 24 });
     expect(PLANS.go.uploads).toEqual({ count: 80, windowHours: 3 });
+  });
+});
+
+describe("token caps", () => {
+  it("gives Free the spec's 50M a day and 1.5B a month", () => {
+    expect(PLANS.free.tokens).toEqual({
+      perDay: 50_000_000,
+      perMonth: 1_500_000_000,
+    });
+  });
+
+  it("scales every paid tier by its auto multiplier over the Free baseline", () => {
+    // The product's paid allowance is "1.5× / 5× / 20× the free allowance",
+    // and `autoMultiplier` is the one place that ratio already lives. The
+    // token caps must move with it: a plan that may spend 5× the money must
+    // be allowed to move 5× the tokens.
+    for (const tier of PLAN_TIERS) {
+      const plan = PLANS[tier];
+      expect(plan.tokens.perDay).toBe(
+        Math.round(PLANS.free.tokens.perDay * plan.autoMultiplier),
+      );
+      expect(plan.tokens.perMonth).toBe(
+        Math.round(PLANS.free.tokens.perMonth * plan.autoMultiplier),
+      );
+    }
+    expect(PLAN_TIERS.map((t) => PLANS[t].tokens.perDay)).toEqual([
+      50_000_000,
+      75_000_000,
+      250_000_000,
+      1_000_000_000,
+    ]);
+    expect(PLAN_TIERS.map((t) => PLANS[t].tokens.perMonth)).toEqual([
+      1_500_000_000,
+      2_250_000_000,
+      7_500_000_000,
+      30_000_000_000,
+    ]);
+  });
+
+  it("resolves caps through the same legacy-tier mapping as the plan", () => {
+    expect(tokenCapsFor("7x")).toEqual(PLANS.plus.tokens);
+    expect(tokenCapsFor("starter")).toEqual(PLANS.go.tokens);
+    expect(tokenCapsFor("mystery")).toEqual(PLANS.free.tokens);
+  });
+});
+
+describe("countedTokens", () => {
+  it("counts input + output and leaves cache out of the cap", () => {
+    // `run_usage` reports cache separately because it is priced separately;
+    // adding it would count the same prompt twice on a cache hit.
+    expect(
+      countedTokens({
+        inputTokens: 1_200,
+        outputTokens: 300,
+        cacheReadTokens: 900,
+        cacheWriteTokens: 50,
+      }),
+    ).toBe(1_500);
+  });
+
+  it("never returns a negative or non-finite count", () => {
+    expect(countedTokens({ inputTokens: -5, outputTokens: 0 })).toBe(0);
+    expect(countedTokens({ inputTokens: Number.NaN, outputTokens: 10 })).toBe(10);
   });
 });
 

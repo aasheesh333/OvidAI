@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { accountDeletions, artifactVault, runUsage, users } from "@ovid/db";
-import { planFor, storageBytes } from "@ovid/shared";
+import { countedTokens, planFor, storageBytes } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
 import { badRequest, queryValue } from "./http.js";
 
@@ -25,6 +25,13 @@ import { badRequest, queryValue } from "./http.js";
  * "you have nothing left" when the server simply cannot see the number.
  * The recorded tokens (`used`) ARE real, so the screen can still show what
  * this account has consumed without pretending to know the remainder.
+ *
+ * Token CAPS are different: they are the plan table's own ceilings enforced
+ * from `run_usage` (`tokenCaps.ts`), so `tokensUsed`, `tokenCap` and
+ * `tokensRemaining` are real arithmetic. The window is the same one the
+ * caller sees (`today` / `month`); the send route enforces the identical rule
+ * on the same UTC calendar boundaries, so the remainder shown here is the one
+ * the next send is measured against.
  *
  * Only the caller's own rows are read: every query is scoped by the
  * authenticated principal's uid, and a `uid` in the query string is ignored.
@@ -104,6 +111,13 @@ export function registerAccountHealthRoutes(app: FastifyInstance, deps: GatewayD
     const plan = planFor(user.tier);
     const quotaBytes = storageBytes(user.tier);
 
+    // Token caps: the plan's ceiling against the tokens recorded in the same
+    // window. `countedTokens` is input + output only — cache is reported
+    // separately in `used` and never double-counted. The send route enforces
+    // the identical rule (`tokenCaps.ts`), so this remainder is real.
+    const todayTokens = countedTokens(today);
+    const monthTokens = countedTokens(month);
+
     reply.header("Cache-Control", "no-store");
     return {
       plan: {
@@ -137,12 +151,21 @@ export function registerAccountHealthRoutes(app: FastifyInstance, deps: GatewayD
           used: today,
           /** Mint/LiteLLM state; the gateway cannot see it. */
           remainingUsd: null,
+          /** Input + output tokens recorded in this window. */
+          tokensUsed: todayTokens,
+          /** The plan's daily ceiling (Free 50M, scaled by `autoMultiplier`). */
+          tokenCap: plan.tokens.perDay,
+          /** Clamped: an exhausted window is "none left", never negative. */
+          tokensRemaining: Math.max(0, plan.tokens.perDay - todayTokens),
         },
         month: {
           since: monthSince.toISOString(),
           until: now.toISOString(),
           used: month,
           remainingUsd: null,
+          tokensUsed: monthTokens,
+          tokenCap: plan.tokens.perMonth,
+          tokensRemaining: Math.max(0, plan.tokens.perMonth - monthTokens),
         },
       },
       standing: {

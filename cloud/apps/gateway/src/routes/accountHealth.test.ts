@@ -151,6 +151,14 @@ describe("GET /cloud/v1/account/health", () => {
       cacheWriteTokens: 0,
     });
     expect(body.usage.month.used.inputTokens).toBe(8000);
+    // Token caps are the plan's, and the remaining number is the one the
+    // send route enforces — real arithmetic, not null.
+    expect(body.usage.today.tokensUsed).toBe(1200);
+    expect(body.usage.today.tokenCap).toBe(1_000_000_000); // Pro = 20× Free
+    expect(body.usage.today.tokensRemaining).toBe(1_000_000_000 - 1200);
+    expect(body.usage.month.tokensUsed).toBe(8900);
+    expect(body.usage.month.tokenCap).toBe(30_000_000_000);
+    expect(body.usage.month.tokensRemaining).toBe(30_000_000_000 - 8900);
     // The remaining allowance is mint/LiteLLM state; the gateway cannot read
     // it, so it is null — not 0.
     expect(body.usage.today.remainingUsd).toBeNull();
@@ -183,6 +191,42 @@ describe("GET /cloud/v1/account/health", () => {
       cacheWriteTokens: 0,
     });
     expect(body.storage.usedBytes).toBe(0);
+  });
+
+  it("reports the Free token caps and counts input + output only", async () => {
+    const { body } = await read({
+      tier: "free",
+      today: {
+        input_tokens: 30_000_000,
+        output_tokens: 1_000_000,
+        cache_read_tokens: 200_000_000,
+        cache_write_tokens: 5_000_000,
+      },
+      month: { input_tokens: 1_400_000_000, output_tokens: 50_000_000 },
+    });
+
+    expect(body.usage.today.tokensUsed).toBe(31_000_000);
+    expect(body.usage.today.tokenCap).toBe(50_000_000);
+    expect(body.usage.today.tokensRemaining).toBe(19_000_000);
+    // Cache tokens are reported separately in `used` and never counted twice.
+    expect(body.usage.today.used.cacheReadTokens).toBe(200_000_000);
+    expect(body.usage.month.tokensUsed).toBe(1_450_000_000);
+    expect(body.usage.month.tokenCap).toBe(1_500_000_000);
+    expect(body.usage.month.tokensRemaining).toBe(50_000_000);
+  });
+
+  it("clamps an exhausted token window to zero remaining, never negative", async () => {
+    const { body } = await read({
+      tier: "free",
+      today: { input_tokens: 60_000_000, output_tokens: 0 },
+    });
+    expect(body.usage.today.tokensRemaining).toBe(0);
+  });
+
+  it("resolves the token cap for a legacy stored tier", async () => {
+    const { body } = await read({ tier: "7x" });
+    expect(body.usage.today.tokenCap).toBe(250_000_000);
+    expect(body.usage.month.tokenCap).toBe(7_500_000_000);
   });
 
   it("a banned account with a pending deletion says so", async () => {

@@ -43,6 +43,35 @@ export interface PlanDefinition {
   projectFiles: number;
   /** Upload allowance, as a count inside a rolling window. */
   uploads: { count: number; windowHours: number };
+  /**
+   * Token allowance the gateway enforces at send time.
+   *
+   * The product sells the paid tiers as "1.5× / 5× / 20× the free
+   * allowance", so these are the Free baseline scaled by `autoMultiplier` —
+   * a plan allowed to spend five times the money is allowed to move five
+   * times the tokens. The unit is input + output tokens recorded in
+   * `run_usage`; cache reads/writes are reported separately and never
+   * double-counted (see `countedTokens`).
+   */
+  tokens: { perDay: number; perMonth: number };
+}
+
+/** The Free token baseline the paid caps are a multiple of. */
+export const FREE_TOKENS_PER_DAY = 50_000_000;
+export const FREE_TOKENS_PER_MONTH = 1_500_000_000;
+
+/**
+ * The token caps for a multiplier over Free.
+ *
+ * Derived rather than copied: the paid tiers' token allowance is defined as
+ * a multiple of Free (1.5× / 5× / 20×), so deriving it from the same
+ * `autoMultiplier` that prices the allowance keeps the two from drifting.
+ */
+function scaledTokens(multiplier: number): { perDay: number; perMonth: number } {
+  return Object.freeze({
+    perDay: Math.round(FREE_TOKENS_PER_DAY * multiplier),
+    perMonth: Math.round(FREE_TOKENS_PER_MONTH * multiplier),
+  });
 }
 
 export const PLANS: Readonly<Record<PlanTier, PlanDefinition>> = Object.freeze({
@@ -57,6 +86,7 @@ export const PLANS: Readonly<Record<PlanTier, PlanDefinition>> = Object.freeze({
     customConnectors: 0,
     projectFiles: 80,
     uploads: { count: 50, windowHours: 24 },
+    tokens: scaledTokens(1),
   }),
   go: Object.freeze({
     id: "go",
@@ -69,6 +99,7 @@ export const PLANS: Readonly<Record<PlanTier, PlanDefinition>> = Object.freeze({
     customConnectors: 5,
     projectFiles: 100,
     uploads: { count: 80, windowHours: 3 },
+    tokens: scaledTokens(1.5),
   }),
   plus: Object.freeze({
     id: "plus",
@@ -81,6 +112,7 @@ export const PLANS: Readonly<Record<PlanTier, PlanDefinition>> = Object.freeze({
     customConnectors: 20,
     projectFiles: 150,
     uploads: { count: 80, windowHours: 3 },
+    tokens: scaledTokens(5),
   }),
   pro: Object.freeze({
     id: "pro",
@@ -93,6 +125,7 @@ export const PLANS: Readonly<Record<PlanTier, PlanDefinition>> = Object.freeze({
     customConnectors: 20,
     projectFiles: 250,
     uploads: { count: 80, windowHours: 3 },
+    tokens: scaledTokens(20),
   }),
 });
 
@@ -136,6 +169,43 @@ export function planFor(tier: string | null | undefined): PlanDefinition {
 /** True when this tier may pin a model instead of letting the router choose. */
 export function manualModelsAllowed(tier: string | null | undefined): boolean {
   return planFor(tier).manualModels;
+}
+
+/**
+ * The token caps the gateway enforces for a tier.
+ *
+ * Resolved through `planFor`, so a legacy spelling (`7x`) and its canonical
+ * tier (`plus`) get the same caps — a paying account must never be held to
+ * Free's ceiling because of how its tier was stored.
+ */
+export function tokenCapsFor(
+  tier: string | null | undefined,
+): { perDay: number; perMonth: number } {
+  return planFor(tier).tokens;
+}
+
+/**
+ * Tokens that count against a plan's cap: input + output.
+ *
+ * Cache reads and writes are deliberately excluded. The `run_usage` ledger
+ * reports them separately because they are priced separately, and a cached
+ * prompt is already represented in `inputTokens` at the provider — adding
+ * the cache counters would count the same prompt twice.
+ *
+ * Anything negative or non-finite is clamped to zero: a provider reporting
+ * garbage must not hand back allowance.
+ */
+export function countedTokens(sums: {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+}): number {
+  let total = 0;
+  for (const value of [sums.inputTokens, sums.outputTokens]) {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) total += value;
+  }
+  return total;
 }
 
 /**

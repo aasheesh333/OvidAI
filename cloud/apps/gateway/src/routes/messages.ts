@@ -7,6 +7,7 @@ import {
   messages,
   projectsRepo,
   runs,
+  runUsage,
   sessionState,
   sessions,
   users,
@@ -32,6 +33,11 @@ import {
 } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
 import { DEFAULT_MINT_TIMEOUT_MS, MintTimeoutError } from "../keys.js";
+import {
+  evaluateTokenCaps,
+  utcDayStart,
+  utcMonthStart,
+} from "../tokenCaps.js";
 import {
   badRequest,
   etagFor,
@@ -468,6 +474,53 @@ async function currentModel(deps: GatewayDeps, sessionId: string): Promise<strin
   return pin === null || pin.trim() === "" ? "auto" : pin;
 }
 
+/** 50000000 → "50,000,000". Deterministic (no locale-dependent grouping). */
+function grouped(n: number): string {
+  return String(Math.trunc(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+/**
+ * The plan's token ceiling — the product's 50M/day + 1.5B/month (paid tiers
+ * scaled by their multiplier), counted from the `run_usage` ledger the worker
+ * already writes. A send is refused only when a window is ALREADY spent: the
+ * gateway cannot know how many tokens the next run will use, so it stops at
+ * the ceiling rather than estimating.
+ *
+ * The refusal reuses the ONE allowance vocabulary the clients already map:
+ * 402 `daily_limit_reached` plus the epoch-ms `x-ovid-resets-at` countdown.
+ * The mint already relays its monthly cap under this same code, so naming the
+ * monthly window with it is consistent, not a third refusal shape — and the
+ * web client's `modelRefusalMessage` treats every other 402 as a model gate.
+ *
+ * Returns null when the send may proceed.
+ */
+async function tokenCapRefusal(
+  deps: GatewayDeps,
+  reply: FastifyReply,
+  uid: string,
+  tier: string | null | undefined,
+  now: Date,
+): Promise<FastifyReply | null> {
+  const [today, month] = await Promise.all([
+    runUsage.totals(deps.db, { userId: uid, since: utcDayStart(now), until: now }),
+    runUsage.totals(deps.db, { userId: uid, since: utcMonthStart(now), until: now }),
+  ]);
+  const verdict = evaluateTokenCaps({ tier, now, today, month });
+  if (verdict === null) return null;
+
+  const window = verdict.window === "day" ? "daily" : "monthly";
+  const response = reply.code(402);
+  response.header("x-ovid-resets-at", String(verdict.resetsAt.getTime()));
+  return response.send({
+    error: {
+      code: "daily_limit_reached",
+      message: `You have used your plan's ${window} token allowance (${grouped(
+        verdict.cap,
+      )} tokens). It resets at ${verdict.resetsAt.toISOString()}.`,
+    },
+  });
+}
+
 export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): void {
   app.post("/sessions/:id/messages", async (request, reply) => {
     const { id: sessionId } = request.params as { id: string };
@@ -682,6 +735,20 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
       return sendError(reply, 409, "key_not_minted", "Your selected API key is unavailable. Update it in Settings.");
     }
     if (byokDefault === null) {
+      // 4a. The plan's token ceiling, BEFORE mint and before any write. It
+      //     counts only Ovid-billed sends: a BYOK send spends the user's own
+      //     key, so the Ovid allowance does not apply to it (same rule as the
+      //     mint-relayed 402 below). Refusing here means no key is minted and
+      //     no message/run/job is left behind.
+      const tokenRefusal = await tokenCapRefusal(
+        deps,
+        reply,
+        uid,
+        user.tier,
+        deps.clock?.() ?? new Date(),
+      );
+      if (tokenRefusal !== null) return tokenRefusal;
+
       const mintFailure = await provisionKey(deps, request, reply, uid, sessionId);
       if (mintFailure !== null) return mintFailure;
     }
