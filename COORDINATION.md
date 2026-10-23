@@ -96,6 +96,7 @@ Add a line here when you need something in the other session's area.
 | From | To | What |
 |---|---|---|
 | web/cloud | Flutter | Decide the subagent contract (see below) before either side merges. |
+| web/cloud | Flutter | **Studio git execution.** The gateway route layer is done (`cloud/apps/gateway/src/routes/studio.ts`): repo list, branch list, clone, switch-branch and sync-latest. Clone/switch/sync call the `StudioGitTransport` seam (`cloud/apps/gateway/src/studioGit.ts`) and are refused with `503 studio_git_unavailable` until a transport is wired — no fake success. The deployed worker has no git surface: `studioGit.ts` exists only on `feat/ovid-si-rebuild`, and only as a queue consumer (`studio_git`), which this branch has no producer for. Least-work handoff: expose three routes on the worker's internal file service (same `x-ovid-internal-token` + `x-ovid-user-id` auth, port 8091) wrapping the existing transport-free `createStudioGit` service — `POST /internal/sessions/:sid/studio-git/clone {repo,branch?,dest?}` → `{repoDir,branch}`, `POST .../studio-git/sync {}` → the sync result, `POST .../studio-git/switch-branch {branch}` → the switch result — then wire `deps.studioGit` in the gateway composition root. The service already resolves the token per user from the curated `github` MCP row; the gateway never sends one, and nothing is written to `.git/config`. The session→repo binding is gateway-owned (`studio_repos`, migration `0024`), so this works with either transport (HTTP or your existing queue). |
 
 ---
 

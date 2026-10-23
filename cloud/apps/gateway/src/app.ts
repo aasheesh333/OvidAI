@@ -21,6 +21,8 @@ import { registerCredentialRoutes } from "./routes/credentials.js";
 import type { AttachmentPresigner } from "./routes/attachments.js";
 import { registerByokRoutes } from "./routes/byok.js";
 import type { ByokRouteOverrides } from "./routes/byok.js";
+import type { GithubRouteOverrides } from "./studioGithub.js";
+import type { StudioGitTransport } from "./studioGit.js";
 import { registerDevicesRoutes } from "./routes/devices.js";
 import { registerUsageHistoryRoutes } from "./routes/usageHistory.js";
 import { registerEventRoutes } from "./routes/events.js";
@@ -45,6 +47,7 @@ import { registerReportsRoutes } from "./routes/reports.js";
 import type { ReportsConfig } from "./routes/reports.js";
 import { registerRunRoutes } from "./routes/runs.js";
 import { registerScheduleRoutes } from "./routes/schedules.js";
+import { registerStudioRoutes } from "./routes/studio.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerSystemResponseRoutes } from "./routes/systemResponses.js";
 import { registerSharesRoutes } from "./shares/routes.js";
@@ -226,6 +229,22 @@ export interface GatewayDeps {
    */
   byok?: ByokRouteOverrides;
   /**
+   * Studio repo picker: GitHub REST seam (API base + fetch). The composition
+   * root never sets it — production talks to `https://api.github.com`; route
+   * tests inject a stub so no network is touched. OPTIONAL for the same
+   * composition-compat reason.
+   */
+  github?: GithubRouteOverrides;
+  /**
+   * Studio git: the worker's clone/sync/switch service, as a transport seam.
+   * The worker owns the session workspace and the credential helper, so the
+   * gateway can never run git itself. OPTIONAL: when absent the git routes
+   * answer a loud 503 `studio_git_unavailable` and `GET .../git` reports
+   * `available: false`, so a client renders no dead control. The composition
+   * root wires it once the worker exposes the transport (see COORDINATION.md).
+   */
+  studioGit?: StudioGitTransport;
+  /**
    * P9 Task 16: LEGACY public share routes at the gateway ROOT (POST/GET
    * /shares, /shares/:token, /s/*, /.well-known/assetlinks.json) — Caddy
    * proxies those exact paths here. Absent → the routes are not registered
@@ -382,6 +401,11 @@ export function buildGateway(
 
       // Wave 3: the run_usage token ledger (caller-scoped).
       registerUsageHistoryRoutes(scope, deps);
+
+      // Studio: list repos/branches, clone, switch branch, sync latest. The
+      // git half answers 503 studio_git_unavailable until the worker exposes
+      // its transport — an honest refusal, never a fake success.
+      registerStudioRoutes(scope, deps);
 
       // P9 Task 11: BYOK escrow CRUD + the SSRF-guarded provider probe.
       registerByokRoutes(scope, {
