@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../../core/cloud/data_control_client.dart';
 import '../../design/o_components.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
@@ -9,6 +10,7 @@ import 'confirm_typed_sheet.dart';
 import 'data_control_export.dart'
     if (dart.library.io) 'data_control_export_io.dart';
 import 'export_picker_sheet.dart';
+import 'server_data_control.dart';
 import 'settings_rows.dart';
 import 'storage_breakdown.dart' show formatStorageBytes;
 
@@ -46,6 +48,13 @@ class V2ExportSession {
 /// Called with the chat id and its new selected state.
 typedef V2ExportSessionToggle = void Function(String id, bool selected);
 
+/// `POST /data/delete-all`. Returns only what the server confirmed.
+typedef V2ServerDeleteAll =
+    Future<DataDeletionCounts> Function(String confirmation);
+
+/// `POST /memory/reset`. Returns the file count the server reported.
+typedef V2ServerResetMemory = Future<int> Function(String confirmation);
+
 /// Injected state for the Data control screen.
 ///
 /// The export, import, cache and delete rows are backed by [service] (real on
@@ -71,6 +80,12 @@ class V2DataControlPageData {
     this.onRetry,
     this.onClearCache,
     this.onClearCacheAndReport,
+
+    // The server-backed delete. When [onServerDeleteAll] is supplied the
+    // delete row deletes the account's cloud data (the gateway's
+    // `POST /data/delete-all`) instead of this device's copy. The device's
+    // own copy keeps its separate, clearly-labelled "Clear cache" row.
+    this.onServerDeleteAll,
 
     // Retained for hosts that still pass them. Permissions, storage and memory
     // have their own pages; only the crash-report consent is rendered here,
@@ -102,11 +117,19 @@ class V2DataControlPageData {
   final bool loading;
   final String? errorMessage;
 
-  /// Registered email or phone the user types to delete device data.
+  /// The registered email the server compares the typed confirmation against.
+  ///
+  /// Email only: the gateway stores no phone number, so a typed phone could
+  /// never be verified. An empty value disables the server-backed actions
+  /// rather than falling back to a word the server would refuse.
   final String accountContact;
 
   /// The real work behind the rows. Defaults to the platform service.
   final V2DataControlService? service;
+
+  /// `POST /data/delete-all` with the typed email. Returns only what the
+  /// server confirmed; a throw means nothing may be claimed.
+  final V2ServerDeleteAll? onServerDeleteAll;
 
   /// Legacy export hook, used only where [service] is unavailable (web).
   final VoidCallback? onExport;
@@ -195,6 +218,10 @@ class _DataControlPageState extends State<DataControlPage> {
   V2ExportOutcome? _exportOutcome;
   V2ImportOutcome? _importOutcome;
   V2DeleteOutcome? _deleteOutcome;
+  // The server's answer, held separately from the device reset's outcome: the
+  // two flows make different claims and must not share a status card.
+  DataDeletionCounts? _serverDeleteCounts;
+  String? _serverDeleteError;
   int? _cacheBytes;
   String? _cacheError;
   String? _cacheMessage;
@@ -213,7 +240,14 @@ class _DataControlPageState extends State<DataControlPage> {
   bool get _canImport =>
       _service.available || widget.data.onChooseImport != null;
 
-  bool get _canDelete => _service.available || widget.data.onDeleteData != null;
+  bool get _canDelete =>
+      _service.available ||
+      widget.data.onDeleteData != null ||
+      widget.data.onServerDeleteAll != null;
+
+  /// The delete row deletes the account's cloud data when the host can reach
+  /// the gateway; otherwise it falls back to the device-only reset.
+  bool get _serverDelete => widget.data.onServerDeleteAll != null;
 
   bool get _canClear =>
       _service.available ||
@@ -405,7 +439,10 @@ class _DataControlPageState extends State<DataControlPage> {
       key: const ValueKey<String>('delete-data-row'),
       icon: Icons.delete_forever_outlined,
       title: 'Delete data',
-      subtitle: 'This device',
+      // The row's scope is what the action actually removes: the account's
+      // chats and files when the gateway is reachable, this device's copy on
+      // a host with no server seam.
+      subtitle: _serverDelete ? 'Chats and files' : 'This device',
       danger: true,
       showChevron: false,
       enabled: !_busy,
@@ -417,7 +454,9 @@ class _DataControlPageState extends State<DataControlPage> {
       container: true,
       button: true,
       enabled: !_busy,
-      label: 'Delete data, this device',
+      label: _serverDelete
+          ? 'Delete data, chats and files'
+          : 'Delete data, this device',
       hint: 'Destructive, cannot be undone.',
       onTap: _busy ? null : _delete,
       child: ExcludeSemantics(child: row),
@@ -537,8 +576,9 @@ class _DataControlPageState extends State<DataControlPage> {
   }
 
   Widget? _deleteStatus(BuildContext context) {
+    if (_serverDelete) return _serverDeleteStatus(context);
     if (_phase == _Phase.deleting) {
-      return _ProgressCard(title: 'Deleting device data', progress: _progress);
+      return _ProgressCard(title: 'Deleting device', progress: _progress);
     }
     final outcome = _deleteOutcome;
     if (outcome == null) return null;
@@ -568,6 +608,46 @@ class _DataControlPageState extends State<DataControlPage> {
         variant: OButtonVariant.ghost,
         onPressed: _busy ? null : _delete,
       ),
+    );
+  }
+
+  /// The server-confirmed delete. Only a returned [DataDeletionCounts] is a
+  /// success; a refusal or a dropped connection is one sentence and a retry.
+  Widget? _serverDeleteStatus(BuildContext context) {
+    if (_phase == _Phase.deleting) {
+      return _ProgressCard(title: 'Deleting data', progress: _progress);
+    }
+    final c = OColors.of(context);
+    final error = _serverDeleteError;
+    if (error != null) {
+      return _ResultCard(
+        icon: Icons.error_outline_rounded,
+        tone: c.danger,
+        title: 'Delete failed',
+        meta: error,
+        action: OButton(
+          label: 'Try again',
+          variant: OButtonVariant.ghost,
+          onPressed: _busy ? null : _delete,
+        ),
+      );
+    }
+    final counts = _serverDeleteCounts;
+    if (counts == null) return null;
+    if (counts.isEmpty) {
+      // A second call is a success with zeroes; saying "deleted" here would
+      // claim work the server did not do.
+      return const _ResultCard(
+        icon: Icons.info_outline_rounded,
+        title: 'Nothing deleted',
+        meta: 'Your account had no chats or files.',
+      );
+    }
+    return _ResultCard(
+      icon: Icons.check_circle_outline_rounded,
+      tone: c.success,
+      title: 'Data deleted',
+      meta: serverDeleteSummary(counts),
     );
   }
 
@@ -847,6 +927,10 @@ class _DataControlPageState extends State<DataControlPage> {
 
   Future<void> _delete() async {
     if (_busy) return;
+    if (_serverDelete) {
+      await _deleteServerData();
+      return;
+    }
     final confirmed = await showConfirmTypedSheet(
       context,
       data: V2ConfirmTypedSheetData(
@@ -882,6 +966,59 @@ class _DataControlPageState extends State<DataControlPage> {
       _phase = _Phase.idle;
       _progress = null;
       _deleteOutcome = outcome;
+    });
+    unawaited(_loadCache());
+  }
+
+  /// The email the server will compare. Empty means there is nothing to type
+  /// that the server could verify; the screen says so instead of offering the
+  /// sheet's `DELETE` fallback or a phone.
+  String get _confirmationEmail => widget.data.accountContact.trim();
+
+  /// `POST /data/delete-all`, behind the destructive warning and a typed
+  /// email. The server's counts are the only success signal.
+  Future<void> _deleteServerData() async {
+    final request = widget.data.onServerDeleteAll;
+    if (request == null) return;
+    final email = _confirmationEmail;
+    setState(() {
+      _serverDeleteCounts = null;
+      _serverDeleteError = null;
+    });
+    if (email.isEmpty) {
+      setState(
+        () => _serverDeleteError = dataControlFailureMessage(
+          status: 409,
+          code: 'confirmation_unavailable',
+        ),
+      );
+      return;
+    }
+    final confirmed = await showConfirmTypedSheet(
+      context,
+      data: serverDeleteConfirmation(email),
+    );
+    if (!mounted || !confirmed) return;
+    setState(() {
+      _phase = _Phase.deleting;
+      _progress = const V2TransferProgress(label: 'Deleting your data…');
+    });
+    DataDeletionCounts? counts;
+    String? failure;
+    try {
+      counts = await request(email);
+    } on DataControlFailure catch (error) {
+      failure = error.message;
+    } catch (_) {
+      // Never render the thrown object: a provider dump is not a sentence.
+      failure = dataControlFailureMessage(status: 0, code: 'unknown');
+    }
+    if (!mounted) return;
+    setState(() {
+      _phase = _Phase.idle;
+      _progress = null;
+      _serverDeleteCounts = counts;
+      _serverDeleteError = failure;
     });
     unawaited(_loadCache());
   }

@@ -725,8 +725,10 @@ class V2SettingsRoutes {
     final spec = _planSpec(AppState.I.ovidCloudTier);
     final quotaBytes = spec.storageGb * 1024 * 1024 * 1024;
     final firebase = FirebaseService.I;
-    // The typed confirmation must name the real identifier on the account.
-    final contact = (firebase.email ?? firebase.phoneNumber ?? '').trim();
+    // The gateway compares the typed value with the account's registered
+    // EMAIL. It stores no phone, so a phone is never offered as a
+    // confirmation target here.
+    final contact = (firebase.email ?? '').trim();
     // A null id set means "every chat"; the picker's ticks narrow it. Only
     // filter when something was actually unticked, so an unsynced local id
     // can never silently drop the rest of the account's chats.
@@ -760,7 +762,14 @@ class V2SettingsRoutes {
       onCrashReportsChanged: (value) =>
           unawaited(actions.setCrashReports(value)),
       onStorage: () => open(context, 'storage', actions),
-      onDeleteData: () => actions.deleteAllData(context),
+      // The destructive row calls the gateway directly; a refused or dropped
+      // call is a typed failure the page renders as one sentence. The reset
+      // row in the hub keeps its own action for the same route.
+      onServerDeleteAll: actions.deleteAllCloudData,
+      // The legacy hook is the DEVICE reset, not the cloud delete: a host
+      // that renders this page without the server seam keeps the old,
+      // honestly-labelled behaviour.
+      onDeleteData: () => actions.deleteDeviceData(context),
       onResetMemory: () => actions.resetMemory(context),
     );
   }

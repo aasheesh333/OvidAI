@@ -13,6 +13,7 @@ import '../../../core/background_notifications.dart';
 import '../../../core/cloud/account_settings_client.dart';
 import '../../../core/cloud/cloud_backup.dart';
 import '../../../core/cloud/cloud_session_store.dart';
+import '../../../core/cloud/data_control_client.dart';
 import '../../../core/cloud_usage_store.dart';
 import '../../../core/commands.dart';
 import '../../../core/firebase_service.dart';
@@ -26,6 +27,8 @@ import '../../../core/settings_backup_service.dart';
 import '../../../core/state.dart';
 import '../../design/o_tokens.dart';
 import '../chat/composer_voice.dart';
+import '../settings/confirm_typed_sheet.dart';
+import '../settings/server_data_control.dart';
 import '../settings_extra/notifications_page.dart';
 
 /// Live actions used by the settings destinations. Kept out of the screens so
@@ -402,19 +405,76 @@ class V2SettingsActions {
     }
   }
 
+  /// Deletes every chat and file the account owns.
+  ///
+  /// The gateway's `POST /data/delete-all` is the only success signal. The
+  /// typed email and the destructive warning come first, and nothing is
+  /// claimed until the server's counts arrive. The device's own copy is a
+  /// separate action ("Clear cache"); this row never merges the two.
   Future<void> deleteAllData(BuildContext context) async {
+    final email = _confirmationEmail;
+    if (email.isEmpty) {
+      _snack(
+        context,
+        dataControlFailureMessage(
+          status: 409,
+          code: 'confirmation_unavailable',
+        ),
+      );
+      return;
+    }
+    final confirmed = await showConfirmTypedSheet(
+      context,
+      data: serverDeleteConfirmation(email),
+    );
+    if (!confirmed || !context.mounted) return;
+    try {
+      final counts = await deleteAllCloudData(email);
+      if (!context.mounted) return;
+      _snack(
+        context,
+        counts.isEmpty
+            ? 'Nothing deleted.'
+            : 'Deleted ${serverDeleteSummary(counts)}.',
+      );
+    } on DataControlFailure catch (error) {
+      if (context.mounted) _snack(context, error.message);
+    } catch (_) {
+      if (context.mounted) {
+        _snack(context, dataControlFailureMessage(status: 0, code: 'unknown'));
+      }
+    }
+  }
+
+  /// The device-only reset, for a host with no gateway seam (web/preview).
+  ///
+  /// This is the OLD delete behaviour and it is deliberately a separate
+  /// action: it clears this device's chats, drafts, cache and keys, and it
+  /// never claims anything about the account's cloud data.
+  Future<void> deleteDeviceData(BuildContext context) async {
     final ok = await _confirm(
       context,
-      title: 'Delete all data?',
+      title: 'Delete device data?',
       body:
-          'Chats, files, memory and drafts are removed from this device and '
-          'the cloud. This cannot be undone.',
-      confirm: 'Delete everything',
+          'Chats, drafts, cache and saved keys are removed from this device. '
+          'This cannot be undone.',
+      confirm: 'Delete data',
       danger: true,
     );
     if (!ok) return;
     await AppState.I.deleteAllData();
-    if (context.mounted) _snack(context, 'All data deleted.');
+    if (context.mounted) _snack(context, 'Device data deleted.');
+  }
+
+  /// The registered email the gateway compares the typed value with. Phone is
+  /// not a confirmation target: the server stores none to check against.
+  String get _confirmationEmail => (FirebaseService.I.email ?? '').trim();
+
+  /// The gateway call alone. The local copy is cleared by the separate
+  /// "Clear cache" action, so a server delete cannot silently wipe this
+  /// device's chats as well.
+  Future<DataDeletionCounts> deleteAllCloudData(String confirmation) {
+    return DataControlClient.I.deleteAll(confirmation: confirmation);
   }
 
   /// Deletes the root chats whose last activity is older than [olderThan].
@@ -464,30 +524,37 @@ class V2SettingsActions {
     );
   }
 
+  /// Forgets every memory file the account owns: chat, project and the
+  /// shared (global) file.
+  ///
+  /// This is the gateway's `POST /memory/reset`, not the old per-chat loop:
+  /// that loop left global and project memory behind while the dialog said
+  /// they were gone. The server's file count is the only success signal.
   Future<void> resetMemory(BuildContext context) async {
-    final ok = await _confirm(
-      context,
-      title: 'Reset memory?',
-      body: 'Ovid forgets global, project and chat memory. Chats stay.',
-      confirm: 'Reset memory',
-      danger: true,
-    );
-    if (!ok) return;
-    final sessionId = AppState.I.activeSessionId;
-    if (sessionId == null) {
-      if (context.mounted) _snack(context, 'Open a chat first.');
+    final email = _confirmationEmail;
+    if (email.isEmpty) {
+      _snack(
+        context,
+        dataControlFailureMessage(
+          status: 409,
+          code: 'confirmation_unavailable',
+        ),
+      );
       return;
     }
+    final confirmed = await showConfirmTypedSheet(
+      context,
+      data: serverResetConfirmation(email),
+    );
+    if (!confirmed || !context.mounted) return;
     try {
-      final client = AccountSettingsClient.I;
-      final listing = await client.memoryFiles(sessionId);
-      for (final file in listing.files) {
-        await client.deleteMemory(sessionId, file.name);
-      }
-      if (context.mounted) _snack(context, 'Memory reset for this chat.');
+      final files = await DataControlClient.I.resetMemory(confirmation: email);
+      if (context.mounted) _snack(context, serverResetSummary(files));
+    } on DataControlFailure catch (error) {
+      if (context.mounted) _snack(context, error.message);
     } catch (_) {
       if (context.mounted) {
-        _snack(context, 'Could not reset memory. Try again.');
+        _snack(context, dataControlFailureMessage(status: 0, code: 'unknown'));
       }
     }
   }
