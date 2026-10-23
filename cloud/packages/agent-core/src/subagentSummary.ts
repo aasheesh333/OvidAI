@@ -16,6 +16,7 @@
 // estimate for English/JSON text and is stable across processes.
 
 export const SUBAGENT_SUMMARY_KEYS = [
+  "subagent_id",
   "status",
   "files_modified",
   "artifacts_created",
@@ -29,6 +30,11 @@ export type SubagentSummaryKey = (typeof SUBAGENT_SUMMARY_KEYS)[number];
 export type SubagentSummaryStatus = "completed" | "failed" | "cancelled" | "timeout";
 
 export interface SubagentSummary {
+  /**
+   * The child's session id, so the Main Agent can address its full log with
+   * `@subagent_id` (spec §2.A.2). Null only when the caller has no id.
+   */
+  subagent_id: string | null;
   status: SubagentSummaryStatus;
   files_modified: string[];
   artifacts_created: string[];
@@ -65,8 +71,8 @@ export const SUBAGENT_TRUNCATION_MARKER = "…[truncated]";
  * rather than embedded verbatim. The runtime status always survives.
  */
 export const SUBAGENT_NON_CONTRACT_ERROR =
-  "subagent output rejected: the final answer is not the required five-key " +
-  "JSON summary (status, files_modified, artifacts_created, key_findings, " +
+  "subagent output rejected: the final answer is not the required six-key " +
+  "JSON summary (subagent_id, status, files_modified, artifacts_created, key_findings, " +
   "error_if_any).";
 
 const SUMMARY_STATUSES: ReadonlySet<string> = new Set<SubagentSummaryStatus>([
@@ -84,6 +90,7 @@ export function estimateTokens(text: string): number {
 /** Serialize with a stable key order (the contract's exact five keys). */
 export function serializeSubagentSummary(summary: SubagentSummary): string {
   return JSON.stringify({
+    subagent_id: summary.subagent_id,
     status: summary.status,
     files_modified: [...summary.files_modified],
     artifacts_created: [...summary.artifacts_created],
@@ -127,6 +134,10 @@ export function validateSubagentSummary(value: unknown): SubagentSummaryValidati
         (extra.length > 0 ? `; unexpected: ${extra.join(", ")}` : ""),
     };
   }
+  const subagentId = record["subagent_id"];
+  if (subagentId !== null && typeof subagentId !== "string") {
+    return { ok: false, error: "subagent_id must be a string or null" };
+  }
   if (typeof record["status"] !== "string" || !SUMMARY_STATUSES.has(record["status"])) {
     return {
       ok: false,
@@ -149,6 +160,7 @@ export function validateSubagentSummary(value: unknown): SubagentSummaryValidati
   return {
     ok: true,
     summary: {
+      subagent_id: subagentId as string | null,
       status: record["status"] as SubagentSummaryStatus,
       files_modified: [...(record["files_modified"] as string[])],
       artifacts_created: [...(record["artifacts_created"] as string[])],
@@ -173,6 +185,7 @@ export function parseSubagentSummary(text: string): SubagentSummaryValidation {
 
 function cloneSummary(summary: SubagentSummary): SubagentSummary {
   return {
+    subagent_id: summary.subagent_id,
     status: summary.status,
     files_modified: [...summary.files_modified],
     artifacts_created: [...summary.artifacts_created],
@@ -399,6 +412,8 @@ export function buildSubagentSummary(input: {
   filesModified?: readonly string[];
   artifactsCreated?: readonly string[];
   keyFindings?: readonly string[];
+  /** The child's session id (spec §2.A.2). */
+  subagentId?: string | null;
   /**
    * What the child streamed before it stopped. Only consulted when the child
    * did NOT complete and produced no contract JSON — the parent has no other
@@ -412,6 +427,7 @@ export function buildSubagentSummary(input: {
       : SUBAGENT_FAILURE_TOKEN_BUDGET;
   const text = (input.text ?? "").trim();
   let base: SubagentSummary = {
+    subagent_id: input.subagentId ?? null,
     status: input.status,
     files_modified: [...(input.filesModified ?? [])],
     artifacts_created: [...(input.artifactsCreated ?? [])],
@@ -423,6 +439,7 @@ export function buildSubagentSummary(input: {
     const parsed = text.startsWith("{") ? parseSubagentSummary(text) : { ok: false as const, error: "" };
     if (parsed.ok) {
       base = {
+        subagent_id: input.subagentId ?? parsed.summary.subagent_id,
         status: input.status,
         files_modified: parsed.summary.files_modified,
         artifacts_created: parsed.summary.artifacts_created,

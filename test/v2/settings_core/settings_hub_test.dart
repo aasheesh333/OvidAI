@@ -1076,29 +1076,19 @@ void main() {
   }
 }
 
-// The owner's card order: Account -> Personalization -> Connectors -> Models
-// -> Data control -> Advanced. Models must sit ABOVE Data control, and
-// Connectors gets its own card instead of hiding inside Models.
+// The spec's card order: five cards, with Connectors as ROW 1 of Models.
 void _cardOrderContract() {
-  test('the hub data exposes the spec card order', () {
+  test('the hub exposes five cards in the spec order', () {
     final data = V2SettingsHubData(
       account: const V2SettingsSection(title: 'Account'),
       chat: const V2SettingsSection(title: 'Personalization'),
-      connectors: const V2SettingsSection(title: 'Connectors'),
       models: const V2SettingsSection(title: 'Models'),
       dataControl: const V2SettingsSection(title: 'Data control'),
       advanced: const V2SettingsSection(title: 'Advanced'),
     );
     expect(
       data.sections.map((s) => s.title).toList(),
-      [
-        'Account',
-        'Personalization',
-        'Connectors',
-        'Models',
-        'Data control',
-        'Advanced',
-      ],
+      ['Account', 'Personalization', 'Models', 'Data control', 'Advanced'],
     );
   });
 }

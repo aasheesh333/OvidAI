@@ -182,7 +182,7 @@ describe("createSubagentTools — registration", () => {
 });
 
 describe("dispatch_agent", () => {
-  it("returns the strict five-key JSON summary and rejects non-contract text", async () => {
+  it("returns the strict six-key JSON summary and rejects non-contract text", async () => {
     const { tools: list, dispatched } = tools({
       dispatch: async () =>
         handle({ status: "completed", result: "RFC 4180 quoting required" }),
@@ -202,13 +202,14 @@ describe("dispatch_agent", () => {
       "files_modified",
       "key_findings",
       "status",
+      "subagent_id",
     ]);
     // Non-contract prose is never echoed up as a finding.
     expect(JSON.parse(result.content)).toMatchObject({
       status: "completed",
       key_findings: [],
     });
-    expect(JSON.parse(result.content).error_if_any).toContain("five-key");
+    expect(JSON.parse(result.content).error_if_any).toContain("six-key");
     expect(result.content).not.toContain("RFC 4180");
     expect(dispatched[0]).toEqual({
       prompt: "audit the CSV parser",
@@ -220,6 +221,7 @@ describe("dispatch_agent", () => {
 
   it("adopts a child's contract JSON result", async () => {
     const contract = JSON.stringify({
+      subagent_id: "child-1",
       status: "completed",
       files_modified: ["src/csv.ts"],
       artifacts_created: [],
@@ -512,7 +514,7 @@ describe("read_subagent_log", () => {
     expect(result.content).toContain("…[truncated]");
   });
 
-  it("leaves the dispatch result a strict five-key JSON summary", async () => {
+  it("leaves the dispatch result a strict six-key JSON summary", async () => {
     const { tools: list } = tools({
       children: [child()],
       logText: "a\nb",
@@ -533,6 +535,7 @@ describe("read_subagent_log", () => {
       "files_modified",
       "key_findings",
       "status",
+      "subagent_id",
     ]);
   });
 });

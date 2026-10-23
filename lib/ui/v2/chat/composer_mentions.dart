@@ -4,8 +4,12 @@ import '../../design/o_tokens.dart';
 
 // TODO(l10n): move user-facing copy to ARB keys in the localization pass.
 
-/// The two kinds of context a composer can reference with `@`.
-enum V2MentionKind { session, project }
+/// The three kinds of context a composer can reference with `@`.
+///
+/// Spec §2.B.4: the picker lists **all User Sessions, Projects, and Active
+/// Subagents**. A subagent row addresses the child's log (`@subagent:<id>`),
+/// which is how the Main Agent inspects one worker without reading them all.
+enum V2MentionKind { session, project, subagent }
 
 /// One row in the `@` suggestion list.
 ///
@@ -26,19 +30,33 @@ class V2MentionCandidate {
     this.subtitle = 'Project',
   }) : kind = V2MentionKind.project;
 
+  /// A running (or recently finished) subagent of THIS session.
+  const V2MentionCandidate.subagent({
+    required this.id,
+    required this.title,
+    this.subtitle = 'Subagent',
+  }) : kind = V2MentionKind.subagent;
+
   final V2MentionKind kind;
   final String id;
   final String title;
   final String subtitle;
 
   bool get isProject => kind == V2MentionKind.project;
+  bool get isSubagent => kind == V2MentionKind.subagent;
 
-  IconData get icon =>
-      isProject ? Icons.folder_outlined : Icons.chat_bubble_outline_rounded;
+  IconData get icon => switch (kind) {
+    V2MentionKind.project => Icons.folder_outlined,
+    V2MentionKind.subagent => Icons.hub_outlined,
+    V2MentionKind.session => Icons.chat_bubble_outline_rounded,
+  };
 
-  String get token => isProject
-      ? '@project:$id '
-      : '@[${V2MentionTokens.sanitizeTitle(title)}] ';
+  String get token => switch (kind) {
+    V2MentionKind.project => '@project:$id ',
+    V2MentionKind.subagent => '@subagent:$id ',
+    V2MentionKind.session =>
+      '@[${V2MentionTokens.sanitizeTitle(title)}] ',
+  };
 }
 
 /// Token parsing and formatting shared by the menu and the send path.
@@ -52,6 +70,7 @@ abstract final class V2MentionTokens {
   static final RegExp sessionTag = RegExp(r'@\[([^\]\n]{1,120})\]');
   static final RegExp sessionIdTag = RegExp(r'@session:([A-Za-z0-9_\-]{1,80})');
   static final RegExp projectIdTag = RegExp(r'@project:([A-Za-z0-9_\-]{1,80})');
+  static final RegExp subagentIdTag = RegExp(r'@subagent:([A-Za-z0-9_\-]{1,80})');
 
   /// Whether [text] still contains the session tag inserted for [title].
   static bool containsSessionTitle(String text, String title) {
@@ -161,15 +180,24 @@ class V2StaticMentionSource implements V2MentionSource {
   V2StaticMentionSource({
     List<V2MentionCandidate> sessions = const [],
     List<V2MentionCandidate> projects = const [],
+    List<V2MentionCandidate> subagents = const [],
   }) : _sessions = List.unmodifiable(sessions),
-       _projects = List.unmodifiable(projects);
+       _projects = List.unmodifiable(projects),
+       _subagents = List.unmodifiable(subagents);
 
   final List<V2MentionCandidate> _sessions;
   final List<V2MentionCandidate> _projects;
+  final List<V2MentionCandidate> _subagents;
 
   @override
   List<V2MentionCandidate> search(String query, {int limit = 5}) =>
-      rankV2Mentions(_sessions, _projects, query, limit: limit);
+      rankV2Mentions(
+        _sessions,
+        _projects,
+        query,
+        limit: limit,
+        subagents: _subagents,
+      );
 
   @override
   String? sessionIdForTitle(String title) {
@@ -196,6 +224,7 @@ List<V2MentionCandidate> rankV2Mentions(
   List<V2MentionCandidate> projects,
   String query, {
   int limit = 5,
+  List<V2MentionCandidate> subagents = const [],
 }) {
   final cap = limit < 1 ? 1 : limit;
   final raw = query.trim();
@@ -205,11 +234,19 @@ List<V2MentionCandidate> rankV2Mentions(
     final projectQuery = raw.substring('project:'.length).trim().toLowerCase();
     return _matches(projects, projectQuery, cap);
   }
+  // `@subagent:` searches only this session's workers.
+  if (lower.startsWith('subagent:')) {
+    final subQuery = raw.substring('subagent:'.length).trim().toLowerCase();
+    return _matches(subagents, subQuery, cap);
+  }
   if (lower.isEmpty) {
     // Three newest chats, then projects, then the rest of the chats. This
     // keeps chats first while leaving project rows visible without scrolling.
     final out = <V2MentionCandidate>[
       ...sessions.take(3),
+      // Running workers are the most perishable context, so they surface
+      // right after the newest chats.
+      ...subagents.take(2),
       ...projects.take(cap - (sessions.length < 3 ? sessions.length : 3)),
       ...sessions.skip(3),
     ];
@@ -228,6 +265,9 @@ List<V2MentionCandidate> rankV2Mentions(
   }
   for (final project in projects) {
     add(project);
+  }
+  for (final subagent in subagents) {
+    add(subagent);
   }
   scored.sort((a, b) {
     final byScore = a.score.compareTo(b.score);

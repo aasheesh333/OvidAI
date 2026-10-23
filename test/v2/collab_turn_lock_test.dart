@@ -10,6 +10,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/collaboration/models.dart';
 import 'package:ovid_ai/core/collaboration/reducer.dart';
 import 'package:ovid_ai/ui/v2/app/v2_collab_routes.dart';
+import 'package:ovid_ai/ui/v2/chat/composer_mentions.dart';
 
 CollaborationState _room({String local = 'p2'}) =>
     CollaborationState.bootstrap(
@@ -68,6 +69,8 @@ ModelStatusPayload _modelStatus({
     );
 
 void main() {
+  _mentionKindsContract();
+
   test('a peer streaming with an idle status still holds the turn', () {
     final state = _room();
     final applied = const CollaborationReducer().apply(
@@ -119,5 +122,41 @@ void main() {
     );
 
     expect(V2CollabRoutes.liveDataFor(applied).isMyTurn, isTrue);
+  });
+}
+
+// Spec §2.B.4: the @ picker lists sessions, projects AND active subagents.
+void _mentionKindsContract() {
+  test('a subagent candidate is addressable with @subagent:<id>', () {
+    const row = V2MentionCandidate.subagent(id: 'child-9', title: 'auth fix');
+    expect(row.isSubagent, isTrue);
+    expect(row.token, '@subagent:child-9 ');
+    expect(V2MentionTokens.subagentIdTag.firstMatch(row.token)?.group(1), 'child-9');
+  });
+
+  test('the picker surfaces subagents alongside sessions and projects', () {
+    final rows = rankV2Mentions(
+      const [V2MentionCandidate.session(id: 's1', title: 'Chat one', subtitle: '')],
+      const [V2MentionCandidate.project(id: 'p1', title: 'Project one')],
+      '',
+      limit: 5,
+      subagents: const [
+        V2MentionCandidate.subagent(id: 'c1', title: 'Worker one'),
+      ],
+    );
+    expect(rows.map((r) => r.kind), contains(V2MentionKind.subagent));
+  });
+
+  test('typing @subagent: filters to workers only', () {
+    final rows = rankV2Mentions(
+      const [V2MentionCandidate.session(id: 's1', title: 'subagent work', subtitle: '')],
+      const [],
+      'subagent:worker',
+      subagents: const [
+        V2MentionCandidate.subagent(id: 'c1', title: 'Worker one'),
+        V2MentionCandidate.subagent(id: 'c2', title: 'Other'),
+      ],
+    );
+    expect(rows.map((r) => r.id), ['c1']);
   });
 }

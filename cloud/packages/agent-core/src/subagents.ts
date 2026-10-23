@@ -1175,6 +1175,7 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
         // ── strict ≤300-token JSON result (SI spec §9) ────────────────────
         const terminalStatus: SubagentSummaryStatus = finalStatus;
         const summary = buildSubagentSummary({
+          subagentId: child.sessionId,
           status: terminalStatus,
           text: childHandle.rawResult(),
           partialOutput: partial.text,
@@ -1261,7 +1262,11 @@ export function subagentResultJson(handle: ChildHandle): string {
   const current = handle.status();
   const status: SubagentSummaryStatus = current === "running" ? "failed" : current;
   return serializeSubagentSummary(
-    buildSubagentSummary({ status, text: handle.result() }),
+    buildSubagentSummary({
+      subagentId: handle.sessionId,
+      status,
+      text: handle.result(),
+    }),
   );
 }
 

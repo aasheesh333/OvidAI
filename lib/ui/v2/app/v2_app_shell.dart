@@ -1777,6 +1777,12 @@ class _V2AppShellState extends State<V2AppShell> {
                   'Profile, email and region',
                 ),
                 _settingsRow(
+                  'credentials',
+                  'Credentials',
+                  Icons.key_rounded,
+                  'Sign-in methods and tokens',
+                ),
+                _settingsRow(
                   'plan_billing',
                   'Plan & billing',
                   Icons.credit_card_rounded,
@@ -1788,12 +1794,6 @@ class _V2AppShellState extends State<V2AppShell> {
                   'Usage',
                   Icons.data_usage_rounded,
                   'Tokens, requests and storage',
-                ),
-                _settingsRow(
-                  'credentials',
-                  'Credentials',
-                  Icons.key_rounded,
-                  'Sign-in methods and tokens',
                 ),
               ],
             ),
@@ -1826,9 +1826,10 @@ class _V2AppShellState extends State<V2AppShell> {
                 ),
               ],
             ),
-            // The owner wants Connectors as its own card, above Models.
-            connectors: V2SettingsSection(
-              title: 'Connectors',
+            // Spec CARD 3 "Models": Connectors is ROW 1 of this card, then
+            // Agent presets, then the response wait limit. Five cards total.
+            models: V2SettingsSection(
+              title: 'Models',
               items: [
                 _settingsRow(
                   'connectors',
@@ -1836,11 +1837,6 @@ class _V2AppShellState extends State<V2AppShell> {
                   Icons.extension_rounded,
                   'External apps',
                 ),
-              ],
-            ),
-            models: V2SettingsSection(
-              title: 'Models',
-              items: [
                 _settingsRow(
                   'presets',
                   'Agent presets',

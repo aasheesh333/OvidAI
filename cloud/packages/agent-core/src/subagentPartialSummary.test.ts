@@ -107,6 +107,7 @@ describe("buildSubagentSummary — failure carries the partial work", () => {
 
   it("a failed child that DID emit the contract JSON keeps its own findings", () => {
     const contract = JSON.stringify({
+      subagent_id: "child-9",
       status: "failed",
       files_modified: ["src/a.ts"],
       artifacts_created: [],
@@ -139,6 +140,7 @@ describe("buildSubagentSummary — failure carries the partial work", () => {
 
   it("a completed contract summary is unchanged by the failure path", () => {
     const contract = JSON.stringify({
+      subagent_id: "child-9",
       status: "completed",
       files_modified: [],
       artifacts_created: [],
@@ -449,5 +451,34 @@ describe("supervisor — capture survives transports without deltas", () => {
     const text = handle.result() ?? "";
     const occurrences = text.split("unique-phrase").length - 1;
     expect(occurrences).toBe(1);
+  });
+});
+
+// Spec §2.A.2: the handoff JSON carries `subagent_id` so the Main Agent can
+// address the child's log with @subagent_id.
+describe("subagent_id in the handoff", () => {
+  it("is the child session id, present in the serialized summary", () => {
+    const summary = buildSubagentSummary({
+      status: "completed",
+      text: null,
+      subagentId: "child-42",
+    });
+    expect(summary.subagent_id).toBe("child-42");
+    expect(JSON.parse(serializeSubagentSummary(summary)).subagent_id).toBe("child-42");
+  });
+
+  it("survives on a failed child too, so its log can be read", () => {
+    const summary = buildSubagentSummary({
+      status: "failed",
+      error: "boom",
+      partialOutput: "did some work",
+      subagentId: "child-7",
+    });
+    expect(summary.subagent_id).toBe("child-7");
+  });
+
+  it("is null when the caller has no id, never a guess", () => {
+    const summary = buildSubagentSummary({ status: "completed" });
+    expect(summary.subagent_id).toBeNull();
   });
 });

@@ -29,8 +29,14 @@ function ctx(): ToolContext {
   };
 }
 
+/** A stable child id per finding, so subagent_id is a real value. */
+function sessionIdFor(finding: string): string {
+  return `child-${finding}`;
+}
+
 function summaryJson(finding: string): string {
   return JSON.stringify({
+    subagent_id: sessionIdFor(finding),
     status: "completed",
     files_modified: [],
     artifacts_created: [],

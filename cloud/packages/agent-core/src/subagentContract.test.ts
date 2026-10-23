@@ -6,7 +6,7 @@
 //    frees its slot so the chat can delegate again;
 //  • no nested subagents (roster + runtime, with depth/lineage backstops);
 //  • an append-only full log at `<logDir>/subagent_{id}.log`;
-//  • a strict five-key JSON result held to 300 tokens, truncated
+//  • a strict six-key JSON result held to 300 tokens, truncated
 //    deterministically with a marker; non-contract text is rejected;
 //  • an 8-hour (configurable) cap that stops the run, reports `timeout` and
 //    kills the child's sandbox resources on every settle path.
@@ -684,8 +684,9 @@ describe("tailSubagentLogText (in-memory helper for a sandbox reader)", () => {
 // ── 4. strict JSON + hard 300-token budget ─────────────────────────────────
 
 describe("subagent result contract (strict JSON, ≤300 tokens)", () => {
-  it("validates EXACTLY the five keys", () => {
+  it("validates EXACTLY the six keys", () => {
     const good = {
+      subagent_id: "child-1",
       status: "completed",
       files_modified: ["a.ts"],
       artifacts_created: [],
@@ -738,6 +739,7 @@ describe("subagent result contract (strict JSON, ≤300 tokens)", () => {
     const summary = buildSubagentSummary({
       status: "completed",
       text: JSON.stringify({
+        subagent_id: "child-1",
         status: "completed",
         files_modified: ["a.ts"],
         artifacts_created: [],
@@ -863,6 +865,7 @@ describe("subagent runtime cap (SI spec §9: 8 h)", () => {
           });
         }
         fake.setLastText(job.sessionId, JSON.stringify({
+          subagent_id: "child-1",
           status: "completed",
           files_modified: ["b.ts"],
           artifacts_created: [],
@@ -958,6 +961,7 @@ describe("subagent runtime cap (SI spec §9: 8 h)", () => {
           content: "job job-9 started: python -m http.server",
         });
         fake.setLastText(job.sessionId, JSON.stringify({
+          subagent_id: "child-1",
           status: "completed",
           files_modified: [],
           artifacts_created: [],

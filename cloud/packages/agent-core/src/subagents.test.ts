@@ -304,9 +304,10 @@ function summaryOf(handle: ChildHandle) {
   return parsed.summary;
 }
 
-/** A valid five-key child answer (the only shape the parent accepts). */
+/** A valid six-key child answer (the only shape the parent accepts). */
 function contractText(keyFindings: string[]): string {
   return JSON.stringify({
+    subagent_id: "child-1",
     status: "completed",
     files_modified: [],
     artifacts_created: [],
