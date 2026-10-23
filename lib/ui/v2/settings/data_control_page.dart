@@ -442,7 +442,7 @@ class _DataControlPageState extends State<DataControlPage> {
       // The row's scope is what the action actually removes: the account's
       // chats and files when the gateway is reachable, this device's copy on
       // a host with no server seam.
-      subtitle: _serverDelete ? 'Chats and files' : 'This device',
+      subtitle: _serverDelete ? 'Account' : 'This device',
       danger: true,
       showChevron: false,
       enabled: !_busy,
@@ -615,7 +615,7 @@ class _DataControlPageState extends State<DataControlPage> {
   /// success; a refusal or a dropped connection is one sentence and a retry.
   Widget? _serverDeleteStatus(BuildContext context) {
     if (_phase == _Phase.deleting) {
-      return _ProgressCard(title: 'Deleting data', progress: _progress);
+      return _ProgressCard(title: 'Deleting', progress: _progress);
     }
     final c = OColors.of(context);
     final error = _serverDeleteError;
@@ -639,14 +639,14 @@ class _DataControlPageState extends State<DataControlPage> {
       // claim work the server did not do.
       return const _ResultCard(
         icon: Icons.info_outline_rounded,
-        title: 'Nothing deleted',
+        title: 'Nothing',
         meta: 'Your account had no chats or files.',
       );
     }
     return _ResultCard(
       icon: Icons.check_circle_outline_rounded,
       tone: c.success,
-      title: 'Data deleted',
+      title: 'Deleted',
       meta: serverDeleteSummary(counts),
     );
   }

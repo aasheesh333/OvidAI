@@ -141,7 +141,7 @@ void main() {
 
     // The row names the cloud scope it now has, and is marked destructive.
     expect(find.text('Delete data'), findsOneWidget);
-    expect(find.text('Chats and files'), findsOneWidget);
+    expect(find.text('Account'), findsOneWidget);
     expect(find.text('This device'), findsNothing);
 
     await tester.tap(find.text('Delete data'));
@@ -163,7 +163,7 @@ void main() {
     await _confirmWithEmail(tester, 'me@example.com');
 
     expect(sent, <String>['me@example.com']);
-    expect(find.text('Data deleted'), findsOneWidget);
+    expect(find.text('Deleted'), findsOneWidget);
     // The counts are the server's: 3 chats, 2+1+4 files.
     expect(find.text('3 chats · 7 files'), findsOneWidget);
   });
@@ -191,7 +191,7 @@ void main() {
     await tester.pumpAndSettle();
     await _confirmWithEmail(tester, 'me@example.com');
 
-    expect(find.text('Data deleted'), findsOneWidget);
+    expect(find.text('Deleted'), findsOneWidget);
     expect(
       device.deviceDeletes,
       0,
@@ -214,13 +214,13 @@ void main() {
     await _confirmWithEmail(tester, 'me@example.com');
 
     expect(find.byKey(const ValueKey('data-control-progress')), findsOneWidget);
-    expect(find.text('Data deleted'), findsNothing);
+    expect(find.text('Deleted'), findsNothing);
     expect(find.textContaining('chats'), findsNothing);
 
     gate.complete(const DataDeletionCounts(sessions: 1));
     await tester.pumpAndSettle();
 
-    expect(find.text('Data deleted'), findsOneWidget);
+    expect(find.text('Deleted'), findsOneWidget);
     expect(find.text('1 chat · 0 files'), findsOneWidget);
   });
 
@@ -258,7 +258,7 @@ void main() {
       ),
       findsOneWidget,
     );
-    expect(find.text('Data deleted'), findsNothing);
+    expect(find.text('Deleted'), findsNothing);
     expect(find.textContaining('storage_delete_failed'), findsNothing);
 
     await tester.tap(find.text('Try again'));
@@ -349,8 +349,8 @@ void main() {
     await tester.pumpAndSettle();
     await _confirmWithEmail(tester, 'me@example.com');
 
-    expect(find.text('Nothing deleted'), findsOneWidget);
-    expect(find.text('Data deleted'), findsNothing);
+    expect(find.text('Nothing'), findsOneWidget);
+    expect(find.text('Deleted'), findsNothing);
   });
 
   // The reset action keeps the hub's existing "Reset memory" row; its
