@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import 'package:purchases_flutter/purchases_flutter.dart';
 
 import 'diag.dart';
+import 'distribution.dart';
 import 'firebase_service.dart';
 import 'ovid_cloud_service.dart';
 import 'play_billing.dart';
@@ -122,8 +123,20 @@ class RevenueCatConfig {
 /// * an explicit opt-in (`--dart-define=OVID_REVENUECAT_TEST_STORE=true`), and
 /// * a non-release build. A release build must never take the demo path: one
 ///   define would otherwise hand out a free plan.
-bool demoGrantAllowed({required bool releaseMode, required bool testStore}) =>
-    testStore && !releaseMode;
+/// Whether this build may unlock a plan without a server-confirmed purchase.
+///
+/// A debug or profile build may always demo: no store is involved, and the
+/// grant cannot leave the developer's device.
+///
+/// A **release** build may demo only when the build opted in with
+/// `--dart-define=OVID_BILLING_DEMO=true` *and* it is not a Play artifact.
+/// That combination is what makes an internal sideload testable while a store
+/// upload stays incapable of giving a plan away.
+bool demoGrantAllowed({required bool releaseMode, required bool testStore}) {
+  if (!testStore) return false;
+  if (!releaseMode) return true;
+  return Distribution.billingDemo;
+}
 
 /// Resolves the RevenueCat configuration for a build.
 ///
@@ -225,6 +238,11 @@ BillingRoute resolveBillingRoute({
   // A Test Store build is a debug/profile simulation: it never charges, so it
   // is safe even though it cannot be server-confirmed.
   if (revenueCat.usingTestStore) return BillingRoute.demo;
+  // Play monetization is not approved yet. An internal build that opted in
+  // with OVID_BILLING_DEMO=true runs the labelled demo instead of a disabled
+  // CTA, so every paid surface can be exercised. `Distribution.billingDemo`
+  // is false in a Play artifact, so a store upload can never grant a plan.
+  if (Distribution.billingDemo) return BillingRoute.demo;
   if (playLoaded && playAvailable) return BillingRoute.play;
   // Play is unavailable or has not answered. With no RevenueCat key the Play
   // path is still the only candidate: `buy` awaits the load and reports an
@@ -460,7 +478,8 @@ class RevenueCatBilling with WidgetsBindingObserver {
   String get apiKey => _config.apiKey;
 
   /// True when a purchase can be attempted: a real SDK key or the local demo.
-  bool get available => apiKey.isNotEmpty || _demoOnly;
+  bool get available =>
+      apiKey.isNotEmpty || _demoOnly || Distribution.billingDemo;
 
   /// True when this build may take real money through RevenueCat.
   bool get chargeable => available && !usingTestStore;
@@ -560,8 +579,16 @@ class RevenueCatBilling with WidgetsBindingObserver {
     }
     final demoAllowed = demoGrantAllowed(
       releaseMode: _releaseMode,
-      testStore: usingTestStore,
+      testStore: usingTestStore || Distribution.billingDemo,
     );
+    // An opted-in internal build grants locally: there is no store to call and
+    // nothing to charge. This is the same labelled demo the Test Store path
+    // uses, so the UI marks the plan the same way.
+    if (Distribution.billingDemo) {
+      lastPurchaseWasDemo = true;
+      lastPurchaseError = null;
+      return UpgradeOutcome(UpgradeResult.ok, tier: tier);
+    }
     if (_demoOnly) {
       // Debug/profile Test Store build with no key: nothing can be queried,
       // so the documented demo path runs and the UI labels it "Test mode".

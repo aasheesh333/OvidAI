@@ -12,6 +12,7 @@ import '../../../core/app_info.dart';
 import '../../../core/auth_identity.dart';
 import '../../../core/auth_providers.dart';
 import '../../../core/connection_service.dart';
+import '../../../core/distribution.dart';
 import '../../../core/background_notifications.dart';
 import '../../../core/cloud/account_settings_client.dart';
 import '../../../core/cloud/artifact_vault.dart';
@@ -398,6 +399,9 @@ class V2SettingsRoutes {
               play.loaded &&
               RevenueCatBilling.I.available
           ? kRevenueCatUnconfirmedReason
+          : null,
+      demoNote: Distribution.billingDemo
+          ? 'Demo: plans unlock without a charge.'
           : null,
       onCurrencyChanged: onCurrencyChanged,
       onPeriodChanged: onPeriodChanged,

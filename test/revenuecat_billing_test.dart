@@ -17,6 +17,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/ovid_cloud_service.dart';
 import 'package:ovid_ai/core/play_billing.dart';
+import 'package:ovid_ai/core/distribution.dart';
 import 'package:ovid_ai/core/revenuecat_billing.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -190,6 +191,56 @@ void main() {
       expect(config.available, isFalse);
       expect(config.testStore, isFalse);
       expect(config.error, contains('OVID_REVENUECAT_GOOGLE_KEY'));
+    });
+
+    group('billing demo (Play monetization not approved yet)', () {
+      tearDown(() => Distribution.billingDemoOverrideForTest = null);
+
+      test('a Play artifact can never grant a plan for free', () {
+        // The define alone is not enough: the Play channel wins.
+        Distribution.billingDemoOverrideForTest = false;
+        expect(
+          demoGrantAllowed(releaseMode: true, testStore: true),
+          isFalse,
+          reason: 'a store build must never demo-grant',
+        );
+      });
+
+      test('an opted-in sideload release build may grant, and says so', () {
+        Distribution.billingDemoOverrideForTest = true;
+        expect(
+          demoGrantAllowed(releaseMode: true, testStore: true),
+          isTrue,
+          reason: 'an internal test build needs a working paywall',
+        );
+        // The plan name carries the marker so a demo plan never reads as a
+        // real subscription.
+        expect(ovidPlanName('7x'), contains('(demo)'));
+      });
+
+      test('the demo route outranks an unavailable store', () {
+        Distribution.billingDemoOverrideForTest = true;
+        final billing = _billing(
+          _FakePlatform(offeredPackages: const []),
+          config: const RevenueCatConfig(apiKey: '', testStore: false),
+          releaseMode: true,
+        );
+        final route = resolveBillingRoute(
+          playLoaded: true,
+          playAvailable: false,
+          revenueCat: billing,
+        );
+        expect(
+          route,
+          BillingRoute.demo,
+          reason: 'a disabled CTA would make the paywall untestable',
+        );
+      });
+
+      test('without the opt-in the plan name carries no marker', () {
+        Distribution.billingDemoOverrideForTest = false;
+        expect(ovidPlanName('7x'), isNot(contains('(demo)')));
+      });
     });
 
     test('the Test Store needs the explicit non-release opt-in', () {

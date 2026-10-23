@@ -19,6 +19,26 @@ class Distribution {
 
   static const bool _playDefine = bool.fromEnvironment('OVID_PLAY_BUILD');
 
+  /// Billing demo: `--dart-define=OVID_BILLING_DEMO=true`.
+  ///
+  /// Play monetization is not approved yet, so an internal test build has no
+  /// working store. This flag lets plan selection work locally — no charge, no
+  /// store call — so the paywall and every paid surface can be exercised.
+  ///
+  /// It is deliberately **refused in a Play artifact**: a build that can be
+  /// uploaded to the store must never grant a plan for free. The combination
+  /// is the guard, not the flag alone.
+  static const bool _billingDemoDefine = bool.fromEnvironment(
+    'OVID_BILLING_DEMO',
+  );
+
+  /// Test seam: force the demo on/off without a build define.
+  static bool? billingDemoOverrideForTest;
+
+  /// True when this build may grant a plan without a purchase.
+  static bool get billingDemo =>
+      billingDemoOverrideForTest ?? (_billingDemoDefine && !play);
+
   /// Test seam: force the Play (true) or sideload (false) behaviour.
   static bool? playOverrideForTest;
 

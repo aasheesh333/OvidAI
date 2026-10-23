@@ -576,7 +576,7 @@ void main() {
     await _pumpGate(tester, auth: _FakeAuth(), testStore: true);
     await _tap(tester, find.text('Continue with Google'));
     expect(
-      find.text('Test mode: purchases are simulated and never charge you.'),
+      find.text('Demo: plans unlock without a charge.'),
       findsOneWidget,
     );
   });
@@ -589,7 +589,7 @@ void main() {
     await _pumpGate(tester, auth: _FakeAuth(), testStore: false);
     await _tap(tester, find.text('Continue with Google'));
     expect(
-      find.text('Test mode: purchases are simulated and never charge you.'),
+      find.text('Demo: plans unlock without a charge.'),
       findsNothing,
     );
   });

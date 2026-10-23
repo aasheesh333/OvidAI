@@ -23,6 +23,42 @@ enum V2BillingPeriod { monthly, yearly }
 /// allowance is the Free USD allowance × the server's plan multiplier), so
 /// their caps are 0 here and the UI states "No token cap".
 @immutable
+/// One line stating that this build does not charge for a plan.
+///
+/// Rendered only when the host passes a note, so a real store build shows
+/// nothing. It is not an error: the plan really does unlock.
+class _DemoNote extends StatelessWidget {
+  const _DemoNote({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Container(
+      key: const ValueKey('plan-demo-note'),
+      padding: const EdgeInsets.symmetric(
+        horizontal: OSpace.m,
+        vertical: OSpace.s,
+      ),
+      decoration: BoxDecoration(
+        color: c.surface,
+        borderRadius: BorderRadius.circular(ORadius.m),
+        border: Border.all(color: c.hairline),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.science_outlined, size: 16, color: c.textMuted),
+          const SizedBox(width: OSpace.s),
+          Expanded(
+            child: Text(text, style: OType.bodySm.copyWith(color: c.textMuted)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class V2PlanLimits {
   const V2PlanLimits({
     required this.id,
@@ -542,6 +578,7 @@ class V2PlanBillingData {
     this.onHistoryTap,
     this.onRetry,
     this.checkoutBlockedReason,
+    this.demoNote,
     this.errorMessage =
         'We could not load plans. Check your connection and try again.',
   });
@@ -574,6 +611,10 @@ class V2PlanBillingData {
   /// when the card has a product and a price (a RevenueCat build with no
   /// server confirmation route). Null means checkout is not globally blocked.
   final String? checkoutBlockedReason;
+
+  /// One line stating that this build unlocks plans without charging. Set by
+  /// a demo build; null everywhere else, so a real store build shows nothing.
+  final String? demoNote;
 
   final String errorMessage;
 }
@@ -672,6 +713,10 @@ class PlanBillingPage extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          if (data.demoNote != null) ...[
+            _DemoNote(text: data.demoNote!),
+            const SizedBox(height: OSpace.m),
+          ],
           Wrap(
             spacing: OSpace.m,
             runSpacing: OSpace.s,

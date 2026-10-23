@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import 'diag.dart';
+import 'distribution.dart';
 import 'cloud_app_check.dart';
 import 'firebase_service.dart';
 import 'image_studio.dart';
@@ -1291,13 +1292,22 @@ bool isKnownOvidTier(String tier) =>
     ovidPlanMultipliers.containsKey(tier);
 
 /// Display name for [tier]: the live server table first, then the fallback.
-String ovidPlanName(String tier) =>
-    OvidPlanCatalog.byTier(tier)?.name ??
-    OvidPlanCatalog.fallback
-        .where((p) => p.tier == tier || p.id == tier)
-        .firstOrNull
-        ?.name ??
-    'Free';
+/// The plan's display name, with a demo marker when this build grants plans
+/// locally instead of selling them.
+///
+/// The marker lives here rather than on each screen: a demo build must not be
+/// able to show "Ovid Plus" on one surface and "Ovid Plus (demo)" on another,
+/// because the first reads as a real subscription.
+String ovidPlanName(String tier) {
+  final name =
+      OvidPlanCatalog.byTier(tier)?.name ??
+      OvidPlanCatalog.fallback
+          .where((p) => p.tier == tier || p.id == tier)
+          .firstOrNull
+          ?.name ??
+      'Free';
+  return Distribution.billingDemo ? '$name (demo)' : name;
+}
 
 /// `×23` — integer multipliers without decimals.
 String ovidMultiplierLabel(num mult) =>

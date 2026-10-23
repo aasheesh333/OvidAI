@@ -6,6 +6,7 @@ import '../../../core/auth_identity.dart';
 import '../../../core/auth_phone_flow.dart';
 import '../../../core/auth_providers.dart';
 import '../../../core/diag.dart';
+import '../../../core/distribution.dart';
 import '../../../core/firebase_service.dart';
 import '../../../core/play_billing.dart';
 import '../../../core/revenuecat_billing.dart';
@@ -751,8 +752,11 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
         period: _paywallPeriod,
         purchasing: _purchasing,
         error: _paywallError,
-        testModeNote: _testStore
-            ? 'Test mode: purchases are simulated and never charge you.'
+        // Say plainly when a plan will not be charged for. A demo build has
+        // no store at all, so the note must appear there too — otherwise the
+        // paywall looks like a real purchase flow.
+        testModeNote: _testStore || Distribution.billingDemo
+            ? 'Demo: plans unlock without a charge.'
             : null,
         // RevenueCat present but no server route can confirm its charge:
         // disable the paid CTA with the real reason instead of taking money.
