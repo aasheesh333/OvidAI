@@ -93,6 +93,7 @@ class V2StudioWorkspacePage extends StatefulWidget {
     this.onPickRepo,
     this.onRetry,
     this.onCopyFile,
+    this.onViewRuns,
   });
 
   final V2StudioWorkspaceData data;
@@ -107,6 +108,11 @@ class V2StudioWorkspacePage extends StatefulWidget {
   final VoidCallback? onPickRepo;
   final VoidCallback? onRetry;
   final VoidCallback? onCopyFile;
+
+  /// Opens the session's read-only agent run log. This is the ONLY execution
+  /// view Studio offers: there is no shell and no PTY for the user (spec
+  /// Screen 2).
+  final VoidCallback? onViewRuns;
 
   @override
   State<V2StudioWorkspacePage> createState() => _V2StudioWorkspacePageState();
@@ -212,6 +218,7 @@ class _V2StudioWorkspacePageState extends State<V2StudioWorkspacePage> {
                 syncCount: data.syncCount,
                 onBranchTap: widget.onBranchTap,
                 onSync: widget.onSync,
+                onViewRuns: widget.onViewRuns,
               ),
             ]
           : const <Widget>[],
@@ -327,12 +334,14 @@ class _HeaderActions extends StatelessWidget {
     required this.syncCount,
     this.onBranchTap,
     this.onSync,
+    this.onViewRuns,
   });
 
   final String branch;
   final int syncCount;
   final VoidCallback? onBranchTap;
   final VoidCallback? onSync;
+  final VoidCallback? onViewRuns;
 
   @override
   Widget build(BuildContext context) {
@@ -360,6 +369,15 @@ class _HeaderActions extends StatelessWidget {
             ),
           ),
         ),
+        // Read-only agent run log. No shell, no PTY — spec Screen 2.
+        if (onViewRuns != null)
+          OIconButton(
+            key: const Key('studio-runs'),
+            icon: Icons.receipt_long_outlined,
+            semanticLabel: 'Agent run log',
+            tooltip: 'Run log',
+            onPressed: onViewRuns,
+          ),
         OIconButton(
           key: const Key('studio-sync'),
           icon: Icons.sync_rounded,

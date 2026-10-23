@@ -13,6 +13,7 @@ import '../studio/branch_picker_sheet.dart';
 import '../studio/changes_page.dart';
 import '../studio/live_preview_page.dart';
 import '../studio/studio_workspace_page.dart';
+import 'v2_run_routes.dart';
 import 'v2_work_routes.dart';
 
 /// Routes for the Studio workspace extras.
@@ -494,6 +495,11 @@ class _StudioWorkspaceHostState extends State<_StudioWorkspaceHost> {
           onPickRepo: () => unawaited(_pickRepo()),
           onRetry: () => unawaited(_load()),
           onCopyFile: () => unawaited(_copyFile()),
+          // Read-only: the session's real run log (steps, tools, tokens).
+          // Studio never exposes a shell or PTY to the user.
+          onViewRuns: widget.sessionId == null
+              ? null
+              : () => V2RunRoutes.openTrajectory(context, widget.sessionId!),
         );
       },
     );
