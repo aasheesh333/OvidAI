@@ -1,12 +1,19 @@
 import { pyNumStr, pyRound6 } from "@ovid/money";
+import { PLANS, PLAN_TIERS, type PlanTier } from "@ovid/shared";
 
 /**
  * Faithful TS port of server/mint/ovid_plans.py — the plan + allowance math
- * shared by mint and the LiteLLM pools hook. ovid_plans.py is the
- * BYTE-LEVEL AUTHORITY: the STAYING Python hook (litellm_hook/ovid_pools.py)
- * reads exactly the Redis db2 values this module's serializers produce, so
- * every field name, number rendering and JSON key set mirrors the Python
- * source line by line.
+ * shared by mint and the LiteLLM pools hook. The SHAPE is ovid_plans.py's:
+ * the STAYING Python hook (litellm_hook/ovid_pools.py) reads exactly the
+ * Redis db2 values this module's serializers produce, so every field name,
+ * number rendering and JSON key set mirrors the Python source line by line.
+ *
+ * The NUMBERS are not. `seedPlans` reads `@ovid/shared`'s plan table, which
+ * is the product's single source of truth; the Python seeds were a third
+ * copy and had drifted (3×/23×/43× at $5/$25/$60 against the product's
+ * 1.5×/5×/20× at $5/$18/$99). A seed only ever applies on first boot — after
+ * that Postgres is the authority — but a fresh install must not start by
+ * selling something the rest of the stack does not describe.
  *
  * SNAKE_CASE WIRE FIELDS (documented exception to the camelCase wire rule):
  * the structures below — PlanData, Settings, Pools, PoolsOverride — keep
@@ -196,14 +203,50 @@ export function pyJsonStringify(
 // seeds, parse, serialize, validate
 // ---------------------------------------------------------------------------
 
-/** First-run plans. Multipliers put the paid allowances near the earlier totals at a 0.15 base. */
+/**
+ * The plan fields the shared table does not carry.
+ *
+ * `aliases` exist so a tier string written by an older deployment still
+ * resolves: `storedTier` used to write `aliases[0]`, so real `users.tier`
+ * rows hold `3x` / `7x` / `15x`, and the first seed used `starter` / `pro` /
+ * `max` as ids. `findPlan` matches an id OR an alias, so keeping both here
+ * means no stored row changes meaning.
+ *
+ * `autoOss` is the paid-tier flag that lets auto route across the open
+ * models; the cheapest paid tier stays on the frontier router, as it did
+ * before the ids were aligned.
+ */
+const PLAN_EXTRA: Readonly<Record<PlanTier, { aliases: string[]; autoOss: boolean }>> =
+  Object.freeze({
+    free: { aliases: [], autoOss: false },
+    go: { aliases: ["starter", "3x"], autoOss: false },
+    plus: { aliases: ["7x"], autoOss: true },
+    pro: { aliases: ["max", "15x"], autoOss: true },
+  });
+
+/**
+ * First-run plans, from `@ovid/shared`'s table.
+ *
+ * Order is the table's (cheapest first) and every number — name, price,
+ * multiplier — is read, never repeated, so the mint cannot seed a plan the
+ * product does not sell.
+ */
 export function seedPlans(paidWindowHours: number = 24): PlanData[] {
-  return [
-    { id: "free", name: "Free", price_usd: 0, enabled: true, aliases: [], window_hours: 24, mult: 1, slow_mode: false, auto_oss: false },
-    { id: "starter", name: "Starter", price_usd: 5, enabled: true, aliases: ["3x"], window_hours: paidWindowHours, mult: 3, slow_mode: false, auto_oss: false },
-    { id: "pro", name: "Pro", price_usd: 25, enabled: true, aliases: ["7x"], window_hours: paidWindowHours, mult: 23, slow_mode: false, auto_oss: true },
-    { id: "max", name: "Max", price_usd: 60, enabled: true, aliases: ["15x"], window_hours: paidWindowHours, mult: 43, slow_mode: false, auto_oss: true },
-  ];
+  return PLAN_TIERS.map((tier) => {
+    const plan = PLANS[tier];
+    const extra = PLAN_EXTRA[tier];
+    return {
+      id: plan.id,
+      name: plan.name,
+      price_usd: plan.priceUsd,
+      enabled: true,
+      aliases: [...extra.aliases],
+      window_hours: tier === "free" ? 24 : paidWindowHours,
+      mult: plan.autoMultiplier,
+      slow_mode: false,
+      auto_oss: extra.autoOss,
+    };
+  });
 }
 
 /**
@@ -396,9 +439,17 @@ export function findPlan(s: Settings, tier: string | null | undefined): PlanData
   return free ?? seedPlans()[0];
 }
 
-/** Value written to user:{uid}:tier. The first alias keeps billing (which knows 3x/7x/15x) compatible. */
+/**
+ * Value written to user:{uid}:tier — the plan id.
+ *
+ * This used to return `aliases[0]` ("3x"/"7x"/"15x"), which the gateway's
+ * `planFor()` did not know: a paying account resolved as Free there, so its
+ * manual-model requests were refused with a 402. The id is the one string
+ * both sides read. The old aliases stay resolvable in `findPlan` (and in
+ * `planFor`) for rows written before this change.
+ */
 export function storedTier(p: PlanData): string {
-  return p.aliases.length > 0 ? p.aliases[0] : p.id;
+  return p.id;
 }
 
 export function windowStr(hours: number): string {

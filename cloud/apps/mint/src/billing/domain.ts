@@ -1,5 +1,5 @@
 import type { EntitlementFields } from "@ovid/db";
-import { TIER_RANK } from "./products.js";
+import { tierRank } from "@ovid/shared";
 
 /**
  * Pure evaluation of a Play `SubscriptionPurchaseV2` into an entitlement.
@@ -120,7 +120,7 @@ export function evaluate(
 
   // Highest tier first, then the latest expiry (an upgrade line wins).
   items.sort((a, b) => {
-    const rankDiff = (TIER_RANK[products[a.product]!] ?? 0) - (TIER_RANK[products[b.product]!] ?? 0);
+    const rankDiff = tierRank(products[a.product]) - tierRank(products[b.product]);
     if (rankDiff !== 0) {
       return -rankDiff;
     }

@@ -36,6 +36,7 @@ import { registerMcpServerRoutes } from "./routes/mcpServers.js";
 import { registerMessageRoutes } from "./routes/messages.js";
 import { registerPreferenceRoutes } from "./routes/preferences.js";
 import { registerModelRoutes } from "./routes/models.js";
+import { registerPlanRoutes } from "./routes/plans.js";
 import { registerAccountSettingsRoutes } from "./routes/accountSettings.js";
 import { registerMemoryRoutes } from "./routes/memory.js";
 import { registerPluginRoutes } from "./routes/plugins.js";
@@ -347,6 +348,9 @@ export function buildGateway(
       // The model catalog + the account's tier, so a client can offer a real
       // model picker instead of a static "Auto" pill.
       registerModelRoutes(scope, deps);
+      // The plan table, so the plan screen describes what the server bills
+      // instead of keeping its own copy.
+      registerPlanRoutes(scope, deps);
       // Wave 4: account settings (push, BYOK routing), custom presets, memory files.
       registerAccountSettingsRoutes(scope, deps);
       registerMemoryRoutes(scope, deps);

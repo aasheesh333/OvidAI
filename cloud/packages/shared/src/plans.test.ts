@@ -6,6 +6,7 @@ import {
   modelAllowedForTier,
   planFor,
   storageBytes,
+  tierRank,
 } from "./plans.js";
 
 /**
@@ -74,6 +75,17 @@ describe("planFor", () => {
     expect(planFor("max").manualModels).toBe(true);
   });
 
+  it("maps the billing aliases the mint stored onto their tiers", () => {
+    // The mint wrote `aliases[0]` into users.tier, so a paying account reads
+    // back as "3x" / "7x" / "15x". Resolving those as Free is not a cosmetic
+    // bug: it locks manual models for a Plus/Pro customer (messages.ts 402).
+    expect(planFor("3x").id).toBe("go");
+    expect(planFor("7x").id).toBe("plus");
+    expect(planFor("15x").id).toBe("pro");
+    expect(manualModelsAllowed("7x")).toBe(true);
+    expect(manualModelsAllowed("15x")).toBe(true);
+  });
+
   it("an unknown or missing tier is Free, never a paid plan", () => {
     for (const tier of [null, undefined, "", "mystery-tier", "enterprise"]) {
       expect(planFor(tier).id).toBe("free");
@@ -83,5 +95,27 @@ describe("planFor", () => {
   it("storageBytes matches the gigabytes in the table", () => {
     expect(storageBytes("pro")).toBe(75 * 1024 ** 3);
     expect(storageBytes("nonsense")).toBe(3 * 1024 ** 3);
+  });
+});
+
+describe("tierRank", () => {
+  it("ranks the canonical ids cheapest first", () => {
+    expect(PLAN_TIERS.map(tierRank)).toEqual([0, 1, 2, 3]);
+  });
+
+  it("ranks a legacy spelling the same as the tier it means", () => {
+    // Billing compares ranks to pick a winning line item. A legacy string
+    // ranked 0 would lose to a free row and reset a paying account.
+    expect(tierRank("3x")).toBe(tierRank("go"));
+    expect(tierRank("7x")).toBe(tierRank("plus"));
+    expect(tierRank("15x")).toBe(tierRank("pro"));
+    expect(tierRank("starter")).toBe(tierRank("go"));
+    expect(tierRank("max")).toBe(tierRank("pro"));
+  });
+
+  it("ranks an unknown or missing tier as Free", () => {
+    for (const tier of [null, undefined, "", "mystery", "enterprise"]) {
+      expect(tierRank(tier)).toBe(0);
+    }
   });
 });

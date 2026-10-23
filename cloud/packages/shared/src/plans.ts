@@ -104,10 +104,18 @@ export const PLANS: Readonly<Record<PlanTier, PlanDefinition>> = Object.freeze({
  * an older deployment, and reading it as "free" would silently take away a
  * paying user's allowance. `pro` and `max` are both paid tiers with manual
  * models, so mapping them to the paid side is the safe direction.
+ *
+ * `3x` / `7x` / `15x` are the aliases the mint actually stored: `storedTier`
+ * returned `aliases[0]`, and those three were the first alias of every paid
+ * plan. They are the values real `users.tier` rows hold, so resolving them is
+ * what makes a paying account read as paying.
  */
 const LEGACY_TIERS: Readonly<Record<string, PlanTier>> = Object.freeze({
   starter: "go",
   max: "pro",
+  "3x": "go",
+  "7x": "plus",
+  "15x": "pro",
 });
 
 /**
@@ -148,4 +156,16 @@ export function modelAllowedForTier(
 /** Storage quota in bytes, for the storage screen's percentage. */
 export function storageBytes(tier: string | null | undefined): number {
   return planFor(tier).storageGb * 1024 ** 3;
+}
+
+/**
+ * Position of a tier in the table, cheapest first (Free is 0).
+ *
+ * Billing uses this to decide which of two purchases wins and which plan an
+ * account keeps, so a legacy spelling MUST rank the same as the tier it
+ * means — `7x` and `plus` are both 2. An unknown tier ranks as Free, which
+ * is the safe direction: it can never outrank a plan someone paid for.
+ */
+export function tierRank(tier: string | null | undefined): number {
+  return PLAN_TIERS.indexOf(planFor(tier).id);
 }

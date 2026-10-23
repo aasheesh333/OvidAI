@@ -8,16 +8,44 @@ import { createHash } from "node:crypto";
  * be overridden without a code change through OVID_PLAY_PRODUCTS.
  */
 
-export const TIERS = ["free", "3x", "7x", "15x"] as const;
+/**
+ * The canonical plan ids, cheapest first — `@ovid/shared`'s table order.
+ *
+ * `storedTier` writes one of these into `users.tier`, so this list is what a
+ * purchase and the gateway agree on.
+ */
+export const TIERS = ["free", "go", "plus", "pro"] as const;
 
-export const TIER_RANK: Record<string, number> = Object.fromEntries(
-  TIERS.map((tier, rank) => [tier, rank]),
-);
+/**
+ * Every tier string a Play product may map to, canonical ids first.
+ *
+ * The legacy spellings stay accepted for two reasons: an install configured
+ * through `OVID_PLAY_PRODUCTS` may still name one, and rows written by an
+ * earlier deployment hold `3x` / `7x` / `15x` (or the first seed's ids).
+ * Rejecting them would either refuse to boot or reset a paying account.
+ */
+export const PRODUCT_TIERS = [
+  "free",
+  "go",
+  "plus",
+  "pro",
+  "3x",
+  "7x",
+  "15x",
+  "starter",
+  "max",
+] as const;
 
+/**
+ * Tier → rank lives in `@ovid/shared` (`tierRank`), next to the plan table,
+ * because three copies of it had already drifted: billing picked a winning
+ * line item with it, `@ovid/db` picked a winning purchase, and the mint
+ * normalised a stored tier with it. One function, one order.
+ */
 export const DEFAULT_PRODUCTS: Record<string, string> = {
-  ovid_plus_monthly: "3x",
-  ovid_pro_monthly: "7x",
-  ovid_max_monthly: "15x",
+  ovid_plus_monthly: "go",
+  ovid_pro_monthly: "plus",
+  ovid_max_monthly: "pro",
 };
 
 /*
@@ -46,7 +74,11 @@ export function loadProducts(env: { OVID_PLAY_PRODUCTS?: string }): Record<strin
     throw new Error("OVID_PLAY_PRODUCTS must be a non-empty JSON object");
   }
   for (const [product, tier] of Object.entries(parsed as Record<string, unknown>)) {
-    if (typeof tier !== "string" || !(TIERS as readonly string[]).includes(tier) || tier === "free") {
+    if (
+      typeof tier !== "string" ||
+      !(PRODUCT_TIERS as readonly string[]).includes(tier) ||
+      tier === "free"
+    ) {
       throw new Error(`invalid product mapping ${JSON.stringify(product)} -> ${JSON.stringify(tier)}`);
     }
   }

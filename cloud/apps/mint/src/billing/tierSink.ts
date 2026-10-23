@@ -1,6 +1,6 @@
 import { billingUsers, type Db } from "@ovid/db";
 import type { Redis } from "ioredis";
-import { TIER_RANK } from "./products.js";
+import { planFor } from "@ovid/shared";
 
 /**
  * Tier sink — the README's `set_user_tier` path.
@@ -38,9 +38,13 @@ export type TierSink = (
   expiresAt: number | null,
 ) => Promise<void>;
 
-/** Normalize to the known tiers: an unknown tier is free by ABSENCE. */
+/**
+ * Normalize to a plan id: an unknown tier is Free by absence, and a legacy
+ * spelling (`3x` / `7x` / `15x`) is written back as the id it means, so the
+ * stored string is always one the gateway resolves.
+ */
 function normalizeTier(tier: string): string {
-  return Object.prototype.hasOwnProperty.call(TIER_RANK, tier) ? tier : "free";
+  return planFor(tier).id;
 }
 
 export function createTierSink(deps: TierSinkDeps): TierSink {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { PLANS, PLAN_TIERS, type PlanTier } from "@ovid/shared";
 import {
   AUTO_MODEL,
   DB2,
@@ -38,9 +39,9 @@ import {
 
 const SEED_PLANS_JSON =
   '[{"aliases":[],"auto_oss":false,"enabled":true,"id":"free","mult":1.0,"name":"Free","price_usd":0.0,"slow_mode":false,"window_hours":24},' +
-  '{"aliases":["3x"],"auto_oss":false,"enabled":true,"id":"starter","mult":3.0,"name":"Starter","price_usd":5.0,"slow_mode":false,"window_hours":24},' +
-  '{"aliases":["7x"],"auto_oss":true,"enabled":true,"id":"pro","mult":23.0,"name":"Pro","price_usd":25.0,"slow_mode":false,"window_hours":24},' +
-  '{"aliases":["15x"],"auto_oss":true,"enabled":true,"id":"max","mult":43.0,"name":"Max","price_usd":60.0,"slow_mode":false,"window_hours":24}]';
+  '{"aliases":["starter","3x"],"auto_oss":false,"enabled":true,"id":"go","mult":1.5,"name":"Ovid Go","price_usd":5.0,"slow_mode":false,"window_hours":24},' +
+  '{"aliases":["7x"],"auto_oss":true,"enabled":true,"id":"plus","mult":5.0,"name":"Ovid Plus","price_usd":18.0,"slow_mode":false,"window_hours":24},' +
+  '{"aliases":["max","15x"],"auto_oss":true,"enabled":true,"id":"pro","mult":20.0,"name":"Ovid Pro","price_usd":99.0,"slow_mode":false,"window_hours":24}]';
 
 const SEED_MEMBERS_JSON =
   '[{"model":"glm-5.3-flash","weight":1.0},{"model":"deepseek-v4.1-flash","weight":1.0},{"model":"minimax-m3","weight":1.0}]';
@@ -51,10 +52,11 @@ function seedSettings(base = "0.15"): Settings {
 }
 
 describe("seedPlans", () => {
-  it("matches the exact ovid_plans.seed_plans values (24h default)", () => {
+  it("is the shared plan table: free/go/plus/pro at the product's prices and multipliers", () => {
     expect(
       seedPlans().map((p) => ({
         id: p.id,
+        name: p.name,
         mult: p.mult,
         price_usd: p.price_usd,
         auto_oss: p.auto_oss,
@@ -63,26 +65,40 @@ describe("seedPlans", () => {
         window_hours: p.window_hours,
       })),
     ).toEqual([
-      { id: "free", mult: 1, price_usd: 0, auto_oss: false, slow_mode: false, aliases: [], window_hours: 24 },
-      { id: "starter", mult: 3, price_usd: 5, auto_oss: false, slow_mode: false, aliases: ["3x"], window_hours: 24 },
-      { id: "pro", mult: 23, price_usd: 25, auto_oss: true, slow_mode: false, aliases: ["7x"], window_hours: 24 },
-      { id: "max", mult: 43, price_usd: 60, auto_oss: true, slow_mode: false, aliases: ["15x"], window_hours: 24 },
+      { id: "free", name: "Free", mult: 1, price_usd: 0, auto_oss: false, slow_mode: false, aliases: [], window_hours: 24 },
+      { id: "go", name: "Ovid Go", mult: 1.5, price_usd: 5, auto_oss: false, slow_mode: false, aliases: ["starter", "3x"], window_hours: 24 },
+      { id: "plus", name: "Ovid Plus", mult: 5, price_usd: 18, auto_oss: true, slow_mode: false, aliases: ["7x"], window_hours: 24 },
+      { id: "pro", name: "Ovid Pro", mult: 20, price_usd: 99, auto_oss: true, slow_mode: false, aliases: ["max", "15x"], window_hours: 24 },
     ]);
     expect(seedPlans().every((p) => p.enabled)).toBe(true);
   });
 
+  it("takes its numbers from @ovid/shared, so the two tables cannot drift", () => {
+    for (const p of seedPlans()) {
+      const shared = PLANS[p.id as PlanTier];
+      expect(shared).toBeDefined();
+      expect([p.name, p.price_usd, p.mult]).toEqual([shared.name, shared.priceUsd, shared.autoMultiplier]);
+    }
+    expect(seedPlans().map((p) => p.id)).toEqual([...PLAN_TIERS]);
+  });
+
   it("paidWindowHours only moves the paid plans (free stays 24h)", () => {
     const windows = Object.fromEntries(seedPlans(720).map((p) => [p.id, p.window_hours]));
-    expect(windows).toEqual({ free: 24, starter: 720, pro: 720, max: 720 });
+    expect(windows).toEqual({ free: 24, go: 720, plus: 720, pro: 720 });
   });
 });
 
 describe("findPlan (test_limits test_tier_aliases)", () => {
   it.each([
-    ["3x", "starter"],
-    ["7x", "pro"],
-    ["15x", "max"],
-    ["starter", "starter"],
+    // The billing aliases the mint used to store, and the ids it seeded.
+    ["3x", "go"],
+    ["7x", "plus"],
+    ["15x", "pro"],
+    ["starter", "go"],
+    ["max", "pro"],
+    // The canonical ids.
+    ["go", "go"],
+    ["plus", "plus"],
     ["pro", "pro"],
     ["bogus", "free"],
     [null, "free"],
@@ -93,27 +109,31 @@ describe("findPlan (test_limits test_tier_aliases)", () => {
   });
 
   it("strips whitespace around the stored tier", () => {
-    expect(findPlan(seedSettings(), " 7x ").id).toBe("pro");
+    expect(findPlan(seedSettings(), " 7x ").id).toBe("plus");
   });
 
   it("a disabled plan keeps applying to users already on it (disable = stop selling)", () => {
     const s = seedSettings();
-    const pro = s.plans.find((p) => p.id === "pro")!;
-    pro.enabled = false;
-    expect(findPlan(s, "7x")).toBe(pro);
+    const plus = s.plans.find((p) => p.id === "plus")!;
+    plus.enabled = false;
+    expect(findPlan(s, "7x")).toBe(plus);
     expect(findPlan(s, "7x").enabled).toBe(false);
   });
 });
 
 describe("storedTier", () => {
-  it("is the first alias (billing compatibility) else the id", () => {
-    expect(storedTier(findPlan(seedSettings(), "pro"))).toBe("7x");
+  it("is the plan id — the one string the gateway and the mint both resolve", () => {
+    expect(storedTier(findPlan(seedSettings(), "7x"))).toBe("plus");
+    expect(storedTier(findPlan(seedSettings(), "15x"))).toBe("pro");
     expect(storedTier(findPlan(seedSettings(), "free"))).toBe("free");
+    // A legacy alias must not survive into a fresh write: resolving it and
+    // storing it back verbatim is how a paid account read as Free.
+    expect(storedTier(findPlan(seedSettings(), "3x"))).toBe("go");
     const custom: PlanData = {
       id: "team", name: "Team", price_usd: 99, enabled: true, aliases: ["30x", "teamx"],
       window_hours: 24, mult: 50, slow_mode: true, auto_oss: true,
     };
-    expect(storedTier(custom)).toBe("30x");
+    expect(storedTier(custom)).toBe("team");
   });
 });
 
@@ -133,7 +153,7 @@ describe("windowStr", () => {
 
 describe("userPools / keyBudget", () => {
   it("every plan is free allowance × mult (test_every_plan_is_free_allowance_times_mult)", () => {
-    for (const [tier, mult] of [["free", 1], ["3x", 3], ["7x", 23], ["15x", 43]] as const) {
+    for (const [tier, mult] of [["free", 1], ["go", 1.5], ["plus", 5], ["pro", 20]] as const) {
       const s = seedSettings("0.15");
       const pools = userPools(s, findPlan(s, tier), 0.15);
       expect(pools.all).toBeCloseTo(0.15 * mult, 12);
@@ -142,50 +162,50 @@ describe("userPools / keyBudget", () => {
     }
   });
 
-  it("userPools(0.15 base, pro mult 23, 24h).all === 3.45 (Python round(x, 6))", () => {
+  it("userPools(0.15 base, plus mult 5, 24h).all === 0.75 (Python round(x, 6))", () => {
     const s = seedSettings("0.15");
     expect(userPools(s, findPlan(s, "7x"), 0.15)).toEqual({
-      plan_id: "pro", window_hours: 24, all: 3.45, slow_mode: false, auto_oss: true,
+      plan_id: "plus", window_hours: 24, all: 0.75, slow_mode: false, auto_oss: true,
     });
   });
 
   it("window length scales the allowance (720h → ×30)", () => {
     const s = seedSettings("0.15");
-    const pro = { ...findPlan(s, "pro"), window_hours: 720 };
-    expect(userPools(s, pro, 0.15).all).toBe(103.5); // 0.15*23*30
+    const plus = { ...findPlan(s, "plus"), window_hours: 720 };
+    expect(userPools(s, plus, 0.15).all).toBe(22.5); // 0.15*5*30
   });
 
   it("override mult 2 wins over the plan mult; nulls are ignored", () => {
     const s = seedSettings("0.15");
-    const pro = findPlan(s, "pro");
-    expect(userPools(s, pro, 0.15, { mult: 2 }).all).toBe(0.3);
-    expect(userPools(s, pro, 0.15, { mult: null }).all).toBe(3.45);
+    const plus = findPlan(s, "plus");
+    expect(userPools(s, plus, 0.15, { mult: 2 }).all).toBe(0.3);
+    expect(userPools(s, plus, 0.15, { mult: null }).all).toBe(0.75);
   });
 
   it("full override (test_custom_plan_override): mult/window/flags", () => {
     const s = seedSettings("0.15");
-    const pools = userPools(s, findPlan(s, "pro"), 0.15, {
+    const pools = userPools(s, findPlan(s, "plus"), 0.15, {
       mult: 10, window_hours: 48, slow_mode: true, auto_oss: false,
     });
     expect(pools.all).toBe(3); // 0.15*10*2
     expect(pools.window_hours).toBe(48);
     expect(pools.slow_mode).toBe(true);
     expect(pools.auto_oss).toBe(false);
-    expect(pools.plan_id).toBe("pro"); // from the plan, not the override
+    expect(pools.plan_id).toBe("plus"); // from the plan, not the override
   });
 
   it("override with mult 0 zeroes the allowance (hook test_custom_user_overrides)", () => {
     const s = seedSettings("0.15");
-    const pools = userPools(s, findPlan(s, "pro"), 0.15, { mult: 0 });
+    const pools = userPools(s, findPlan(s, "plus"), 0.15, { mult: 0 });
     expect(pools.all).toBe(0);
     expect(decide(pools, 0)).toEqual({ action: "reject", code: "daily_limit_reached" });
   });
 
   it("keyBudget: slow-mode ceiling is hard_ceiling_mult × allowance (×3)", () => {
     const s = seedSettings("0.15");
-    const slow = { ...userPools(s, findPlan(s, "pro"), 0.15), slow_mode: true };
-    expect(keyBudget(slow, s)).toBe(10.35); // 3.45 * 3
-    expect(keyBudget(userPools(s, findPlan(s, "pro"), 0.15), s)).toBe(3.45);
+    const slow = { ...userPools(s, findPlan(s, "plus"), 0.15), slow_mode: true };
+    expect(keyBudget(slow, s)).toBe(2.25); // 0.75 * 3
+    expect(keyBudget(userPools(s, findPlan(s, "plus"), 0.15), s)).toBe(0.75);
   });
 });
 
@@ -407,9 +427,9 @@ describe("parseSettings", () => {
     expect(s.hard_ceiling_mult).toBe(3);
     expect(s.plans.map((p) => [p.id, p.mult, p.price_usd, p.auto_oss, p.slow_mode])).toEqual([
       ["free", 1, 0, false, false],
-      ["starter", 3, 5, false, false],
-      ["pro", 23, 25, true, false],
-      ["max", 43, 60, true, false],
+      ["go", 1.5, 5, false, false],
+      ["plus", 5, 18, true, false],
+      ["pro", 20, 99, true, false],
     ]);
   });
 

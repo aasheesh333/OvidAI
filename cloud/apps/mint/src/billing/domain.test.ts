@@ -8,7 +8,6 @@ import {
 } from "./domain.js";
 import {
   DEFAULT_PRODUCTS,
-  TIER_RANK,
   TIERS,
   accountHash,
   loadProducts,
@@ -84,13 +83,12 @@ function codeOf(fn: () => unknown): string {
 }
 
 describe("products (port of products.py)", () => {
-  it("TIERS/TIER_RANK/DEFAULT_PRODUCTS are the Python constants", () => {
-    expect([...TIERS]).toEqual(["free", "3x", "7x", "15x"]);
-    expect(TIER_RANK).toEqual({ free: 0, "3x": 1, "7x": 2, "15x": 3 });
+  it("TIERS are the canonical plan ids, cheapest first", () => {
+    expect([...TIERS]).toEqual(["free", "go", "plus", "pro"]);
     expect(DEFAULT_PRODUCTS).toEqual({
-      ovid_plus_monthly: "3x",
-      ovid_pro_monthly: "7x",
-      ovid_max_monthly: "15x",
+      ovid_plus_monthly: "go",
+      ovid_pro_monthly: "plus",
+      ovid_max_monthly: "pro",
     });
   });
 
@@ -104,6 +102,8 @@ describe("products (port of products.py)", () => {
 
   it("loadProducts: default, override, and invalid JSON/mappings throw", () => {
     expect(loadProducts({})).toEqual(DEFAULT_PRODUCTS);
+    expect(loadProducts({ OVID_PLAY_PRODUCTS: '{"a": "go"}' })).toEqual({ a: "go" });
+    // A deployment configured before the ids were aligned must keep booting.
     expect(loadProducts({ OVID_PLAY_PRODUCTS: '{"a": "7x"}' })).toEqual({ a: "7x" });
     for (const raw of ['{"a": "free"}', '{"a": "99x"}', "[]", "{}", "not-json"]) {
       expect(() => loadProducts({ OVID_PLAY_PRODUCTS: raw })).toThrow();

@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
+import { tierRank as sharedTierRank } from "@ovid/shared";
 import type { Db } from "./client.js";
 import { newId } from "./repos.js";
 import {
@@ -242,11 +243,10 @@ export class PurchaseConflictError extends Error {
 /** Terminal local states a later Play read must never undo (store.py STICKY). */
 const STICKY_STATUSES = new Set(["revoked", "replaced"]);
 
-// Mirrors server/billing/products.py TIER_RANK = {tier: rank}. The canonical
-// copy lives in Task 10's products.ts; duplicated here because @ovid/db must
-// stay app-independent. Unknown tiers rank as free (rank 0), as in Python.
-const TIER_RANK: Record<string, number> = { free: 0, "3x": 1, "7x": 2, "15x": 3 };
-const tierRank = (tier: string): number => TIER_RANK[tier] ?? 0;
+// Tier ordering is @ovid/shared's `tierRank`, next to the plan table: billing
+// ranks with the same function, so the two can never disagree about whether
+// a legacy `7x` row outranks `plus`. Unknown tiers rank as Free (0).
+const tierRank = (tier: string): number => sharedTierRank(tier);
 
 export const billingPurchases = {
   async get(db: Db, token: string): Promise<PurchaseRow | null> {
