@@ -25,19 +25,38 @@ class Distribution {
   /// working store. This flag lets plan selection work locally — no charge, no
   /// store call — so the paywall and every paid surface can be exercised.
   ///
-  /// It is deliberately **refused in a Play artifact**: a build that can be
-  /// uploaded to the store must never grant a plan for free. The combination
-  /// is the guard, not the flag alone.
+  /// It is refused whenever [production] is true. That is the guard, not the
+  /// Play channel: an internal test track is also a Play artifact, so gating
+  /// on `play` would have made the demo impossible to test on the very track
+  /// it exists for.
   static const bool _billingDemoDefine = bool.fromEnvironment(
     'OVID_BILLING_DEMO',
   );
+
+  /// Production release: `--dart-define=OVID_PRODUCTION=true`.
+  ///
+  /// Set only by the `production_release` workflow path. It is the one flag
+  /// that means "this artifact can reach real users", so every demo or
+  /// simulation capability keys off it.
+  static const bool _productionDefine = bool.fromEnvironment(
+    'OVID_PRODUCTION',
+  );
+
+  /// Test seam: force production behaviour.
+  static bool? productionOverrideForTest;
+
+  /// True when this artifact is a production release.
+  static bool get production => productionOverrideForTest ?? _productionDefine;
 
   /// Test seam: force the demo on/off without a build define.
   static bool? billingDemoOverrideForTest;
 
   /// True when this build may grant a plan without a purchase.
+  ///
+  /// A production artifact can never do this, whatever else is passed.
   static bool get billingDemo =>
-      billingDemoOverrideForTest ?? (_billingDemoDefine && !play);
+      billingDemoOverrideForTest ??
+      (_billingDemoDefine && !_productionDefine);
 
   /// Test seam: force the Play (true) or sideload (false) behaviour.
   static bool? playOverrideForTest;

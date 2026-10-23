@@ -194,15 +194,28 @@ void main() {
     });
 
     group('billing demo (Play monetization not approved yet)', () {
-      tearDown(() => Distribution.billingDemoOverrideForTest = null);
+      tearDown(() {
+        Distribution.billingDemoOverrideForTest = null;
+        Distribution.productionOverrideForTest = null;
+      });
 
-      test('a Play artifact can never grant a plan for free', () {
-        // The define alone is not enough: the Play channel wins.
-        Distribution.billingDemoOverrideForTest = false;
+      test('a production artifact can never grant a plan for free', () {
+        Distribution.productionOverrideForTest = true;
         expect(
           demoGrantAllowed(releaseMode: true, testStore: true),
           isFalse,
-          reason: 'a store build must never demo-grant',
+          reason: 'a build that can reach real users must never demo-grant',
+        );
+      });
+
+      test('an internal Play track may demo (it is not production)', () {
+        // The internal track is also a Play artifact. Gating the demo on the
+        // Play channel would have made it untestable exactly where it is used.
+        Distribution.productionOverrideForTest = false;
+        Distribution.billingDemoOverrideForTest = true;
+        expect(
+          demoGrantAllowed(releaseMode: true, testStore: true),
+          isTrue,
         );
       });
 

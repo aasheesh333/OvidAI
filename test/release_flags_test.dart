@@ -13,6 +13,25 @@ import 'package:ovid_ai/core/account_service.dart';
 void main() {
   const releaseCheck = bool.fromEnvironment('OVID_RELEASE_FLAGS_CHECK');
 
+  test('a production release refuses the billing demo', () {
+    // Defense in depth over Distribution.billingDemo: a production artifact
+    // must not even carry the define, so a reviewer sees a failed build rather
+    // than a silently ignored flag.
+    final workflow = File('.github/workflows/build.yml').readAsStringSync();
+    expect(
+      workflow,
+      contains('OVID_BILLING_DEMO must be empty for a production release'),
+    );
+    // And production sets the define the runtime guard reads.
+    expect(workflow, contains('--dart-define=OVID_PRODUCTION=true'));
+    // The demo define is forwarded to both release commands.
+    expect(
+      RegExp(r'demo_define="--dart-define=OVID_BILLING_DEMO=true"')
+          .hasMatch(workflow),
+      isTrue,
+    );
+  });
+
   test('every release build command passes OVID_ACCOUNT_ENABLED', () {
     final workflow = File('.github/workflows/build.yml').readAsLinesSync();
     final releaseCommands = workflow

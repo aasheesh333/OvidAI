@@ -83,6 +83,10 @@ jobs:
       # service is live on the VPS; until then release builds ship the web /
       # email deletion request instead. Both release commands must pass it.
       OVID_ACCOUNT_ENABLED: ${{ vars.OVID_ACCOUNT_ENABLED || 'false' }}
+      # Billing demo for an internal test build while Play monetization is not
+      # approved. Leave the repository variable empty for any build that can
+      # reach real users; the production guard refuses it outright.
+      OVID_BILLING_DEMO: ${{ vars.OVID_BILLING_DEMO || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -197,6 +201,13 @@ jobs:
             false) echo "::warning::OVID_ACCOUNT_ENABLED=false: release ships the web/email account-deletion request, not in-app deletion." ;;
             *) echo "OVID_ACCOUNT_ENABLED must be true or false (got '$OVID_ACCOUNT_ENABLED')" >&2; exit 1 ;;
           esac
+          # A production artifact must never grant a plan for free. The runtime
+          # guard already refuses it, but a build that carries the define is a
+          # mistake worth failing loudly rather than silently ignoring.
+          if [ "${{ inputs.production_release }}" = "true" ] && [ -n "$OVID_BILLING_DEMO" ]; then
+            echo "OVID_BILLING_DEMO must be empty for a production release (got '$OVID_BILLING_DEMO')" >&2
+            exit 1
+          fi
           flutter test test/release_flags_test.dart \
             --dart-define=OVID_RELEASE_FLAGS_CHECK=true \
             --dart-define=OVID_ACCOUNT_ENABLED="$OVID_ACCOUNT_ENABLED"
@@ -208,9 +219,14 @@ jobs:
           # overlay, Control gated) applies to production_release builds; the
           # APK gets it too.
           play_define=""
-          if [ "${{ inputs.production_release }}" = "true" ]; then play_define="--dart-define=OVID_PLAY_BUILD=true"; fi
-          flutter build apk --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }} --dart-define=OVID_ACCOUNT_ENABLED="$OVID_ACCOUNT_ENABLED" $play_define
-          flutter build appbundle --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }} --dart-define=OVID_ACCOUNT_ENABLED="$OVID_ACCOUNT_ENABLED" $play_define
+          if [ "${{ inputs.production_release }}" = "true" ]; then play_define="--dart-define=OVID_PLAY_BUILD=true --dart-define=OVID_PRODUCTION=true"; fi
+          # Billing demo: an internal test build has no approved store, so plan
+          # selection runs locally. Refused for production by the guard above
+          # and by the runtime check in Distribution.billingDemo.
+          demo_define=""
+          if [ -n "$OVID_BILLING_DEMO" ]; then demo_define="--dart-define=OVID_BILLING_DEMO=true"; fi
+          flutter build apk --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }} --dart-define=OVID_ACCOUNT_ENABLED="$OVID_ACCOUNT_ENABLED" $play_define $demo_define
+          flutter build appbundle --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }} --dart-define=OVID_ACCOUNT_ENABLED="$OVID_ACCOUNT_ENABLED" $play_define $demo_define
 
       # Both profiles target API 36 (the sideload target 28 existed only for
       # the removed on-device sandbox). Manual production_release adds the
