@@ -3,7 +3,11 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
+
+import 'diag.dart';
+import 'secure_store.dart';
 
 class GitHubDeviceAuthorization {
   final String deviceCode;
@@ -41,7 +45,29 @@ class GitHubAuthException implements Exception {
 /// long-term owner; this client is only the interactive sign-in surface.
 class GitHubService extends ChangeNotifier {
   GitHubService._();
+
+  /// A fresh instance with its own storage — tests only. The production
+  /// singleton is [I].
+  @visibleForTesting
+  factory GitHubService.forTest() = GitHubService._;
+
   static final GitHubService I = GitHubService._();
+
+  /// SecureStore key holding the access token. Keystore-backed (see
+  /// [ovidSecureStorage]); never written to SharedPreferences or a file.
+  ///
+  /// It is deliberately the SAME key the Settings → Credentials page writes
+  /// for its `github` row (`V2SecureCredentialKeyStore.prefix + 'github'`),
+  /// so a PAT pasted there is the token Studio uses, and the row's saved
+  /// state is the real state. A test pins the two together.
+  static const String storageKey = 'ovid_credential_key_github';
+
+  FlutterSecureStorage? _storage;
+  FlutterSecureStorage get _secure => _storage ??= ovidSecureStorage();
+
+  /// Test seam: swap the secure storage (the default is Keystore-backed).
+  @visibleForTesting
+  set storageForTest(FlutterSecureStorage value) => _storage = value;
 
   // OAuth App "Ovid" — owned by aasheesh333
   static const clientId = 'Ov23lixZxZhJznvr1fcd';
@@ -77,14 +103,68 @@ class GitHubService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// No-op state reset (boot stage compatibility).
+  /// Boot stage: restore a token saved by an earlier process.
+  ///
+  /// Studio used to lose its GitHub session on every launch because the token
+  /// lived in memory only. It now survives, so opening Studio does not start
+  /// with a sign-in prompt.
   Future<void> initialize({http.Client? client}) async {
     _isInitializing = false;
+    if (_token == null) {
+      try {
+        await restore(client: client);
+      } catch (e) {
+        Diag.swallow('github.restore', e);
+      }
+    }
     notifyListeners();
   }
 
-  /// No-op: there is no persisted credential to restore. Opening Studio is
-  /// still an explicit retry point, so the profile (if any) is refreshed.
+  /// Reads the stored token into memory. True when one was found.
+  ///
+  /// A read failure is not a sign-out: the token stays on disk and the user
+  /// can retry from Studio.
+  Future<bool> restore({http.Client? client}) async {
+    String? stored;
+    try {
+      stored = await _secure.read(key: storageKey);
+    } catch (e) {
+      Diag.swallow('github.read_token', e);
+      return false;
+    }
+    final token = stored?.trim() ?? '';
+    if (token.isEmpty) return false;
+    _token = token;
+    notifyListeners();
+    // The profile is cosmetic; a failed fetch must not drop the token.
+    try {
+      _user = await _fetchUser(token, client);
+      notifyListeners();
+    } catch (e) {
+      Diag.swallow('github.restore_profile', e);
+    }
+    return true;
+  }
+
+  /// Persists [token] and makes it current. A blank token clears instead.
+  Future<void> saveToken(String token) async {
+    final value = token.trim();
+    if (value.isEmpty) {
+      await signOut();
+      return;
+    }
+    _token = value;
+    notifyListeners();
+    try {
+      await _secure.write(key: storageKey, value: value);
+    } catch (e) {
+      // The session still works in memory; it just will not survive a restart.
+      Diag.swallow('github.write_token', e);
+    }
+  }
+
+  /// Opening Studio is an explicit retry point: refresh the profile of an
+  /// already-restored session.
   Future<void> retryRestoreFromUi() async {
     if (!isLoggedIn) return;
     _isInitializing = true;
@@ -99,13 +179,21 @@ class GitHubService extends ChangeNotifier {
     }
   }
 
-  /// Sign out — clear the in-memory token + profile.
+  /// Sign out — clear the in-memory token + profile AND the stored token.
+  ///
+  /// An explicit sign-out is the user saying "forget this", so the keystore
+  /// entry goes too; a later launch must not silently sign them back in.
   Future<void> signOut() async {
     _authGeneration++;
     _isInitializing = false;
     _token = null;
     _user = null;
     notifyListeners();
+    try {
+      await _secure.delete(key: storageKey);
+    } catch (e) {
+      Diag.swallow('github.delete_token', e);
+    }
   }
 
   /// -------------------------------------------------------------------------
@@ -272,9 +360,9 @@ class GitHubService extends ChangeNotifier {
         if (accessToken is String && accessToken.isNotEmpty) {
           final user = await _fetchUser(accessToken, c);
           ensureCurrent();
-          // Memory only — never persisted client-side.
-          _token = accessToken;
           _user = user;
+          // Persisted so a restart keeps the Studio session (Keystore-backed).
+          await saveToken(accessToken);
           notifyListeners();
           return accessToken;
         }
@@ -342,6 +430,18 @@ class GitHubService extends ChangeNotifier {
   }
 
   Future<Map<String, dynamic>> _fetchUser(
+    String token,
+    http.Client? client,
+  ) async {
+    final c = client ?? http.Client();
+    try {
+      return await _fetchUserWith(token, c);
+    } finally {
+      if (client == null) c.close();
+    }
+  }
+
+  Future<Map<String, dynamic>> _fetchUserWith(
     String token,
     http.Client client,
   ) async {
