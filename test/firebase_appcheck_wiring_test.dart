@@ -66,6 +66,7 @@ void main() {
       return 'provider-attestation';
     };
     String? mintAppCheck;
+    String? modelAccessAppCheck;
     final client = MockClient((request) async {
       if (request.url.path == '/mint') {
         mintAppCheck = request.headers['X-Firebase-AppCheck'];
@@ -73,6 +74,10 @@ void main() {
           '{"key":"sk-user","tier":"free","base_url":"https://cloud.test/v1"}',
           200,
         );
+      }
+      if (request.url.path == '/cloud/v1/models') {
+        modelAccessAppCheck = request.headers['X-Firebase-AppCheck'];
+        return http.Response('{"tier":"free","manualModelsAllowed":false}', 200);
       }
       if (request.url.path.endsWith('/models')) {
         return http.Response('{"data":[{"id":"auto"}]}', 200);
@@ -83,8 +88,11 @@ void main() {
     final outcome = await OvidCloudService.I.bindOvidCloud(client: client);
 
     expect(outcome.ok, isTrue);
-    expect(providerCalls, 1);
+    // Every Firebase-authenticated call carries the attestation. (The catalog
+    // read on the scoped key is a separate, key-authenticated call.)
+    expect(providerCalls, greaterThanOrEqualTo(1));
     expect(mintAppCheck, 'provider-attestation');
+    expect(modelAccessAppCheck, 'provider-attestation');
     client.close();
   });
 

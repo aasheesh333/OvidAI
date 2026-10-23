@@ -13,7 +13,13 @@ enum CloudIssueKind {
   /// server demanded it). Action: retry.
   unverified,
 
-  /// The plan allowance is used up (HTTP 402). Action: open Plans.
+  /// The plan allowance is used up (HTTP 402 `daily_limit_reached`). Action:
+  /// open Plans.
+  ///
+  /// 402 is not the allowance on its own: the gateway also answers 402 for a
+  /// plan refusal (`manual_model_not_allowed`, `pro_required`). Those belong
+  /// to the screen that made the call — a banner saying the allowance is spent
+  /// would be a different, false statement.
   quota,
 
   /// The Firebase session is missing/expired (HTTP 401 after the forced
@@ -52,7 +58,9 @@ class CloudIssue {
     final CloudIssueKind? kind;
     if (e.status == 401 || e.code == 'unauthenticated') {
       kind = CloudIssueKind.signedOut;
-    } else if (e.status == 402) {
+    } else if (e.status == 402 && e.code == 'daily_limit_reached') {
+      // Only the allowance verdict. A 402 that names a plan feature is the
+      // calling screen's to explain, never "your allowance is spent".
       kind = CloudIssueKind.quota;
     } else if (e.code == 'app_check_unavailable' ||
         (e.status == 403 && e.code.startsWith('app_check'))) {

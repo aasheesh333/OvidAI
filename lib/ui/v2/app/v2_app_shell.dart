@@ -12,6 +12,7 @@ import '../../../core/cloud/cloud_agent_facade.dart';
 import '../../../core/cloud/cloud_rest.dart';
 import '../../../core/cloud/cloud_session_store.dart';
 import '../../../core/cloud/models.dart';
+import '../../../core/cloud/plan_tier.dart';
 import '../../../core/cloud/projects.dart';
 import '../../../core/cloud_usage_store.dart';
 import '../../../core/composer_drafts.dart';
@@ -543,11 +544,14 @@ class _V2AppShellState extends State<V2AppShell> {
   }
 
   /// Free and Go are Auto-only; the model chip says so and the picker refuses
-  /// a manual pick. The same gate the picker applies, read from one place.
-  bool get _planAutoOnly {
-    final tier = AppState.I.ovidCloudTier;
-    return tier == 'free' || tier == '3x';
-  }
+  /// a manual pick. The gateway's own `manualModelsAllowed` wins when it sent
+  /// one (it is computed from the same plan table the send route enforces);
+  /// only a gateway that predates the field falls back to resolving the tier
+  /// here, canonical ids and legacy spellings alike.
+  bool get _planAutoOnly => !ovidManualModelsAllowed(
+    serverValue: AppState.I.ovidCloudManualModelsAllowed,
+    tier: AppState.I.ovidCloudTier,
+  );
 
   /// The inline error a chat shows above its composer.
   ///
@@ -1757,11 +1761,11 @@ class _V2AppShellState extends State<V2AppShell> {
       ? cloudErrorSentence(error)
       : 'Could not load this project’s memory. Try again.';
 
-  int _storageGb(String tier) => switch (tier) {
-    '3x' => 5,
-    '7x' => 15,
-    '15x' => 75,
-    _ => 3,
+  int _storageGb(String tier) => switch (ovidPlanIdFor(tier)) {
+    OvidPlanId.go => 5,
+    OvidPlanId.plus => 15,
+    OvidPlanId.pro => 75,
+    OvidPlanId.free => 3,
   };
 
   Future<void> _openSettings() async {
@@ -1981,8 +1985,9 @@ class _V2AppShellState extends State<V2AppShell> {
   }
 
   String _planLabel(String tier) {
-    if (tier == 'free') return 'Free plan';
-    return ovidPlanName(tier);
+    final stored = ovidStoredTier(tier);
+    if (stored == 'free') return 'Free plan';
+    return ovidPlanName(stored);
   }
 
   String _timeLabel(DateTime at) {

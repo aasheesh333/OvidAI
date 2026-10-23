@@ -485,6 +485,53 @@ void main() {
     expect(selected, 'auto');
   });
 
+  testWidgets('the server answer beats a stale Auto-only plan label', (
+    tester,
+  ) async {
+    final picks = <String>[];
+    await tester.pumpWidget(
+      _app(
+        _sheet(
+          data: const V2ModelPickerData(
+            models: _manualModels,
+            planLabel: 'Free plan',
+            manualModelsAllowed: true,
+          ),
+          onSelect: picks.add,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Plus plan'), findsNothing);
+
+    await tester.tap(find.text('Ovid Mini 1.0'));
+    expect(picks, ['mini']);
+  });
+
+  testWidgets('the server refusal beats a paid plan label', (tester) async {
+    String? selected;
+    await tester.pumpWidget(
+      _app(
+        _sheet(
+          data: const V2ModelPickerData(
+            models: _manualModels,
+            planLabel: 'Plus',
+            manualModelsAllowed: false,
+          ),
+          onSelect: (id) => selected = id,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Plus plan'), findsNWidgets(2));
+
+    await tester.tap(find.text('Ovid Mini 1.0'));
+    await tester.pump();
+    expect(selected, isNull);
+  });
+
   testWidgets('Auto is available on every plan', (tester) async {
     for (final plan in ['Free plan', 'Go', 'Plus', 'Pro', 'Starter']) {
       final picks = <String>[];

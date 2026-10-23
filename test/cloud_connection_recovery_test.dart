@@ -30,6 +30,26 @@ http.Response catalog() => http.Response(
   200,
 );
 
+/// `GET /cloud/v1/models`: the gateway's own manual-model answer.
+///
+/// It is a separate call from the catalog (Firebase-authenticated, not the
+/// scoped key), so these mocks route it explicitly instead of folding it into
+/// the catalog sequence they count.
+bool isModelAccess(http.BaseRequest request) =>
+    request.url.path == '/cloud/v1/models';
+
+http.Response modelAccess({bool manual = false, String tier = 'free'}) =>
+    http.Response(
+      jsonEncode({
+        'auto': 'auto',
+        'models': ['auto', 'manual-model'],
+        'tier': tier,
+        'manualModelsAllowed': manual,
+        'known': true,
+      }),
+      200,
+    );
+
 Future<void> openPicker(WidgetTester tester) async {
   await tester.tap(find.byIcon(Icons.unfold_more).first);
   await tester.pumpAndSettle();
@@ -66,6 +86,11 @@ void main() {
               return ++mints == 1
                   ? http.Response('secret-token internal error', 503)
                   : reply.future;
+            }
+            if (isModelAccess(request)) {
+              // Firebase-authenticated, not the scoped key.
+              expect(request.headers['Authorization'], 'Bearer account-a');
+              return modelAccess();
             }
             expect(request.headers['Authorization'], 'Bearer scoped-key');
             return catalog();
@@ -133,6 +158,7 @@ void main() {
             if (request.url.path == '/mint') {
               return ++mints == 1 ? http.Response('down', 503) : mint();
             }
+            if (isModelAccess(request)) return modelAccess();
             return catalog();
           });
       await tester.pumpWidget(
@@ -194,6 +220,7 @@ void main() {
                 mints++;
                 return mint();
               }
+              if (isModelAccess(request)) return modelAccess();
               return ++models == 1 ? response : pending.future;
             });
         await tester.runAsync(() => OvidCloudService.I.ensureConnected());
@@ -263,6 +290,7 @@ void main() {
           final reply = Completer<http.Response>();
           final client = MockClient((request) async {
             if (request.url.path == '/mint') return mint();
+            if (isModelAccess(request)) return modelAccess();
             entered.complete();
             return reply.future;
           });
@@ -387,6 +415,7 @@ void main() {
           }
           return mint();
         }
+        if (isModelAccess(request)) return modelAccess();
         return catalog();
       });
       final old = OvidCloudService.I.ensureConnected(client: client);
@@ -417,6 +446,7 @@ void main() {
           mintBodies.add(request.body);
           return ++mints == 1 ? mint() : mint('rotated-key');
         }
+        if (isModelAccess(request)) return modelAccess();
         return ++models == 1 ? http.Response('private reason', 401) : catalog();
       });
       // A freshly minted key that the catalog rejects is rotated once in
@@ -449,6 +479,7 @@ void main() {
         if (request.url.path == '/mint') {
           return ++mints == 1 ? mint() : mint('rotated-key');
         }
+        if (isModelAccess(request)) return modelAccess();
         return switch (++models) {
           1 => http.Response('down', 500),
           2 => http.Response('{"error":{"code":"catalog_unavailable"}}', 503),
@@ -485,6 +516,7 @@ void main() {
         return switch (request.url.path) {
           '/mint' => mint(),
           '/upgrade' => http.Response('down', 503),
+          '/cloud/v1/models' => modelAccess(),
           _ => catalog(),
         };
       });
@@ -495,7 +527,12 @@ void main() {
         CloudConnectionStatus.ready,
       );
       await OvidCloudService.I.ensureConnected(client: client);
-      expect(paths, ['/mint', '/v1/models', '/upgrade']);
+      expect(paths, [
+        '/mint',
+        '/v1/models',
+        '/cloud/v1/models',
+        '/upgrade',
+      ]);
       client.close();
     },
   );
@@ -505,13 +542,22 @@ void main() {
     final client = MockClient((request) async {
       paths.add(request.url.path);
       expect(request.url.host, isNot('replacement.test'));
-      return request.url.path == '/mint' ? mint() : catalog();
+      if (request.url.path == '/mint') return mint();
+      if (isModelAccess(request)) return modelAccess();
+      return catalog();
     });
     await OvidCloudService.I.ensureConnected(client: client);
     AppState.I.providerById('ovid-cloud')!.baseUrl =
         'https://replacement.test/v1';
     await OvidCloudService.I.ensureConnected(client: client);
-    expect(paths, ['/mint', '/v1/models', '/mint', '/v1/models']);
+    expect(paths, [
+      '/mint',
+      '/v1/models',
+      '/cloud/v1/models',
+      '/mint',
+      '/v1/models',
+      '/cloud/v1/models',
+    ]);
     client.close();
   });
 
@@ -526,6 +572,7 @@ void main() {
           mints++;
           return mint();
         }
+        if (isModelAccess(request)) return modelAccess();
         modelsEntered.complete();
         return reply.future;
       });

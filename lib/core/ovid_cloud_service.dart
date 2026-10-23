@@ -11,6 +11,8 @@ import 'package:http/http.dart' as http;
 import 'diag.dart';
 import 'distribution.dart';
 import 'cloud_app_check.dart';
+import 'cloud/cloud_config.dart';
+import 'cloud/model_access.dart';
 import 'firebase_service.dart';
 import 'image_studio.dart';
 import 'state.dart';
@@ -395,6 +397,7 @@ class OvidCloudService extends ChangeNotifier {
       return;
     }
     state.setOvidCloudTier('free');
+    state.setOvidCloudManualModelsAllowed(null);
     final provider = state.providerById(AppState.ovidCloudProviderId);
     if (provider != null && provider.apiKey.isNotEmpty) {
       unawaited(
@@ -799,6 +802,14 @@ class OvidCloudService extends ChangeNotifier {
     _allowanceChanged();
     await _refreshModels(scope, client);
     scope.check();
+    // The gateway's own manual-model answer, only once the catalog answered.
+    // A failed connect has nothing to gate, and a second request during an
+    // outage is a retry the user did not ask for; the local plan table
+    // covers the picker in the meantime.
+    if (connectionFor(scope.state).status == CloudConnectionStatus.ready) {
+      await fetchModelAccess(client: client);
+      scope.check();
+    }
     // Default the app to Auto mode on Ovid Cloud if nothing else is selected.
     if (state.lastSelectedModel.isEmpty ||
         state.lastSelectedProviderId == null) {
@@ -940,6 +951,43 @@ class OvidCloudService extends ChangeNotifier {
       failed(
         'Could not load Ovid Cloud models. Check your connection and retry.',
       );
+    }
+  }
+
+  /// `GET /cloud/v1/models`: the gateway's own manual-model eligibility.
+  ///
+  /// The route computes `manualModelsAllowed` from the same plan table the
+  /// send route enforces, so the picker never has to re-derive the rule. This
+  /// is best effort by design: a missing field (an older gateway) or a failed
+  /// read leaves the answer null, and the UI falls back to the local table.
+  Future<CloudModelAccess?> fetchModelAccess({http.Client? client}) async {
+    final revision = _mutationRevision;
+    final scope = _CloudRequestScope(
+      this,
+      AppState.I,
+      isLatest: () => revision == _mutationRevision,
+    );
+    final c = client ?? _newClient();
+    try {
+      final headers = await _headers(scope);
+      final res = await c
+          .get(Uri.parse('${CloudConfig.restBase}/models'), headers: headers)
+          .timeout(const Duration(seconds: 15));
+      scope.check();
+      if (res.statusCode != 200) return null;
+      final decoded = jsonDecode(res.body);
+      if (decoded is! Map<String, dynamic>) return null;
+      final access = CloudModelAccess.fromJson(decoded);
+      // The flight is still the current one: only then is this answer about
+      // the account and key on screen.
+      scope.check();
+      scope.state.setOvidCloudManualModelsAllowed(access.manualModelsAllowed);
+      return access;
+    } catch (e) {
+      Diag.swallow('ovid_cloud.model_access', e);
+      return null;
+    } finally {
+      if (client == null) c.close();
     }
   }
 
@@ -1206,6 +1254,12 @@ class OvidCloudService extends ChangeNotifier {
     _allowanceChanged();
     await _refreshModels(scope, c);
     scope.check();
+    // The tier just changed, so the previous answer is stale; ask again when
+    // the catalog is healthy.
+    if (connectionFor(scope.state).status == CloudConnectionStatus.ready) {
+      await fetchModelAccess(client: c);
+      scope.check();
+    }
   }
 
   static UpgradeResult _failureResult(Object e) =>

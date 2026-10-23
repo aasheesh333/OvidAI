@@ -16,7 +16,7 @@ void main() {
       expect(CloudIssue.classify(_e(401, 'unauthenticated'))!.kind,
           CloudIssueKind.signedOut);
     });
-    test('402 is quota', () {
+    test('402 daily_limit_reached is quota', () {
       final at = DateTime.utc(2026, 10, 20);
       final issue = CloudIssue.classify(CloudApiException(
           status: 402,
@@ -25,6 +25,17 @@ void main() {
           resetsAt: at))!;
       expect(issue.kind, CloudIssueKind.quota);
       expect(issue.resetsAt, at);
+    });
+    test('a 402 plan refusal is not the allowance', () {
+      // 402 serves both a plan refusal and a spent allowance. Only the second
+      // is the shell banner's business; the first is the chat row's sentence.
+      for (final code in [
+        'manual_model_not_allowed',
+        'pro_required',
+        'tier_required',
+      ]) {
+        expect(CloudIssue.classify(_e(402, code)), isNull, reason: code);
+      }
     });
     test('transport failures and gateway 5xx are unreachable', () {
       for (final e in [
@@ -79,7 +90,9 @@ void main() {
     });
 
     test('dismiss clears', () {
-      final issues = CloudIssues()..reportFailure(_e(402, 'x'));
+      final issues = CloudIssues()
+        ..reportFailure(_e(402, 'daily_limit_reached'));
+      expect(issues.value, isNotNull);
       issues.dismiss();
       expect(issues.value, isNull);
     });

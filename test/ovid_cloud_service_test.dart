@@ -247,6 +247,68 @@ void main() {
     }
   });
 
+  group('GET /cloud/v1/models reports manual-model eligibility', () {
+    test('a modern gateway stores its own answer', () async {
+      final app = AppState.I;
+      // A stale local guess must be replaced by the server's.
+      app.setOvidCloudManualModelsAllowed(true);
+      final client = MockClient((request) async {
+        expect(request.url.path, '/cloud/v1/models');
+        return http.Response(
+          jsonEncode({
+            'auto': 'auto',
+            'models': ['auto', 'ovid-pro'],
+            'tier': 'go',
+            'manualModelsAllowed': false,
+            'known': true,
+          }),
+          200,
+        );
+      });
+
+      final access = await OvidCloudService.I.fetchModelAccess(client: client);
+      expect(access?.manualModelsAllowed, isFalse);
+      expect(access?.tier, 'go');
+      expect(app.ovidCloudManualModelsAllowed, isFalse);
+      client.close();
+    });
+
+    test(
+      'an older gateway leaves it unknown so the plan table decides',
+      () async {
+        final app = AppState.I;
+        final client = MockClient(
+          (_) async => http.Response(
+            jsonEncode({
+              'auto': 'auto',
+              'models': ['auto'],
+              'tier': 'starter',
+              'known': true,
+            }),
+            200,
+          ),
+        );
+
+        final access = await OvidCloudService.I.fetchModelAccess(
+          client: client,
+        );
+        expect(access?.manualModelsAllowed, isNull);
+        expect(app.ovidCloudManualModelsAllowed, isNull);
+        client.close();
+      },
+    );
+
+    test('a failed read never overwrites the last answer', () async {
+      final app = AppState.I;
+      app.setOvidCloudManualModelsAllowed(true);
+      final client = MockClient((_) async => http.Response('unavailable', 503));
+
+      expect(await OvidCloudService.I.fetchModelAccess(client: client), isNull);
+      expect(app.ovidCloudManualModelsAllowed, isTrue);
+      client.close();
+    });
+  });
+
   test('upgrade requires explicit server success and matching tier', () async {
     for (final body in [
       <String, dynamic>{},

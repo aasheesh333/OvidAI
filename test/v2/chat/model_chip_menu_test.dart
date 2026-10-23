@@ -241,14 +241,37 @@ void main() {
     });
   }
 
-  testWidgets('a Go tier label overrides an allowed flag', (tester) async {
-    String? selected;
+  testWidgets('an allowed flag wins over a stale Auto-only tier label', (
+    tester,
+  ) async {
+    // The gateway said yes. A cached "Go" label belongs to an older answer
+    // and must not lock rows the server just unlocked.
+    final picks = <String>[];
     await _pumpMenu(
       tester,
       data: V2ModelChipMenuData(
         lockedModels: _data.lockedModels,
         tierLabel: 'Go',
         manualModelsAllowed: true,
+      ),
+      onSelect: picks.add,
+    );
+
+    expect(find.text('Plus plan'), findsNothing);
+
+    await tester.tap(find.text('Ovid Flash 2.5'));
+    await tester.pump();
+    expect(picks, ['flash']);
+  });
+
+  testWidgets('a refused flag wins over a paid tier label', (tester) async {
+    String? selected;
+    await _pumpMenu(
+      tester,
+      data: V2ModelChipMenuData(
+        lockedModels: _data.lockedModels,
+        tierLabel: 'Plus',
+        manualModelsAllowed: false,
       ),
       onSelect: (id) => selected = id,
     );

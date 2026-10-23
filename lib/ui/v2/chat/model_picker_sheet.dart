@@ -67,7 +67,7 @@ class V2ModelPickerData {
     this.freePlanNote,
     this.standardLabel = 'Standard models',
     this.advancedLabel = 'Advanced reasoning',
-    this.manualModelsAllowed = true,
+    this.manualModelsAllowed,
     this.upgradeHint =
         'Upgrade to Plus or Pro to pick a model manually. '
         'Auto is included on every plan.',
@@ -95,10 +95,14 @@ class V2ModelPickerData {
   final String standardLabel;
   final String advancedLabel;
 
-  /// Whether the current plan may pick a model manually. Free and Go are
-  /// Auto-only; Plus and Pro allow every model. When false, manual rows stay
-  /// visible but are greyed out and cannot be selected.
-  final bool manualModelsAllowed;
+  /// Whether the current plan may pick a model manually, as the caller
+  /// resolved it (the gateway's `manualModelsAllowed`, or the plan table when
+  /// the gateway is older). When false, manual rows stay visible but are
+  /// greyed out and cannot be selected.
+  ///
+  /// Null means the caller has no answer, and [planLabel] decides — a
+  /// safety net for previews and galleries, never the production path.
+  final bool? manualModelsAllowed;
 
   /// Spoken explanation attached to every locked row. Screen readers hear the
   /// label first ("locked, Plus plan") and then this hint.
@@ -121,12 +125,18 @@ class V2ModelPickerData {
     return true;
   }
 
-  /// True when the plan can only use Auto, regardless of per-row flags. The
-  /// explicit [manualModelsAllowed] gate wins, and an Auto-only plan label is
-  /// also treated as such so a caller that forgets the flag cannot leak manual
+  /// True when the plan can only use Auto, regardless of per-row flags.
+  ///
+  /// The caller's [manualModelsAllowed] is authoritative when it has one: it
+  /// is the gateway's own answer (or the plan table behind it), so it must
+  /// beat a stale [planLabel] — a cached "Free" label must not lock a Plus
+  /// account whose server just said yes. Only an absent answer falls back to
+  /// reading the label, so a caller that forgets the flag cannot leak manual
   /// models. `Starter` is the catalog's legacy name for the Go tier.
   bool get autoOnly =>
-      !manualModelsAllowed ||
+      manualModelsAllowed == null ? _labelSaysAutoOnly : !manualModelsAllowed!;
+
+  bool get _labelSaysAutoOnly =>
       planLabel == 'Free' ||
       planLabel == 'Free plan' ||
       planLabel == 'Go' ||

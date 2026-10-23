@@ -12,6 +12,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'cloud/cloud_agent_facade.dart';
 import 'cloud/cloud_session_store.dart';
+import 'cloud/plan_tier.dart';
 import 'cloud/studio_remote_client.dart';
 import 'firebase_service.dart';
 import 'cloud_app_check.dart';
@@ -4770,19 +4771,32 @@ class AppState extends ChangeNotifier {
   static const ovidCloudProviderId = 'ovid-cloud';
 
   /// The user's current Ovid Cloud plan tier, as reported by the mint endpoint.
-  /// One of 'free', '3x', '7x', '15x'. Drives the usage-screen display rule:
-  /// free tier is Zen-style (no usage shown), paid tiers show plan usage.
-  /// Persisted so the UI knows the tier before the next mint refresh.
+  /// One of 'free', '3x', '7x', '15x' — the legacy vocabulary every screen,
+  /// product map and storage table in the app is keyed on. Canonical ids from
+  /// a newer server (`go`, `plus`, `pro`) are normalised into it on the way in.
+  /// Drives the usage-screen display rule: free tier is Zen-style (no usage
+  /// shown), paid tiers show plan usage. Persisted so the UI knows the tier
+  /// before the next mint refresh.
   String ovidCloudTier = 'free';
   static const _kOvidTier = 'ovid_cloud_tier_v1';
+
+  /// `manualModelsAllowed` from `GET /cloud/v1/models`, or null when the
+  /// gateway predates the field / has not answered yet.
+  ///
+  /// This is the server's own answer, computed from the same plan table the
+  /// send route enforces, so the model picker prefers it over resolving
+  /// [ovidCloudTier] locally. Cleared when the tier changes: the old answer
+  /// belonged to the old plan.
+  bool? ovidCloudManualModelsAllowed;
 
   /// Whether the Ovid Cloud plan is a paid tier (usage visible) vs free (Zen).
   bool get ovidCloudIsPaid => ovidCloudTier != 'free';
 
   void setOvidCloudTier(String tier) {
-    final t = const {'free', '3x', '7x', '15x'}.contains(tier) ? tier : 'free';
+    final t = ovidStoredTier(tier);
     if (t == ovidCloudTier) return;
     ovidCloudTier = t;
+    ovidCloudManualModelsAllowed = null;
     SharedPreferences.getInstance()
         .then((p) => p.setString(_kOvidTier, t))
         .catchError((Object e) {
@@ -4792,13 +4806,19 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Records the gateway's manual-model answer. Null means "not reported"
+  /// (an older gateway), which lets the local plan table decide.
+  void setOvidCloudManualModelsAllowed(bool? allowed) {
+    if (allowed == ovidCloudManualModelsAllowed) return;
+    ovidCloudManualModelsAllowed = allowed;
+    notifyListeners();
+  }
+
   Future<void> _loadOvidCloudTier() async {
     try {
       final p = await SharedPreferences.getInstance();
       final t = p.getString(_kOvidTier);
-      if (t != null && const {'free', '3x', '7x', '15x'}.contains(t)) {
-        ovidCloudTier = t;
-      }
+      if (t != null) ovidCloudTier = ovidStoredTier(t);
     } catch (e) {
       Diag.swallow('state._loadOvidCloudTier', e);
     }

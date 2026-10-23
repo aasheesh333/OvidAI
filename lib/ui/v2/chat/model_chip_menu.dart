@@ -42,7 +42,7 @@ class V2ModelChipMenuData {
     this.manageLabel = 'Manage models',
     this.compareLabel = 'Compare plans',
     this.comparePriceLabel = 'From \$18/mo',
-    this.manualModelsAllowed = false,
+    this.manualModelsAllowed,
     this.lockedPlanLabel = _lockedPlanLabel,
   });
 
@@ -58,10 +58,12 @@ class V2ModelChipMenuData {
   final String compareLabel;
   final String comparePriceLabel;
 
-  /// Whether the current plan may pick a manual model. Free and Go are
-  /// Auto-only; Plus and Pro allow every model. Defaults to false because
-  /// [lockedModels] only carries rows the caller expects to gate.
-  final bool manualModelsAllowed;
+  /// Whether the current plan may pick a manual model, as the caller resolved
+  /// it (the gateway's `manualModelsAllowed`, or the plan table behind it).
+  ///
+  /// Null means the caller has no answer and [tierLabel] decides — the safety
+  /// net for previews, not the production path.
+  final bool? manualModelsAllowed;
 
   /// Plan a manual model requires, used by the locked-row tag and its spoken
   /// label. Free and Go both need Plus.
@@ -74,12 +76,17 @@ class V2ModelChipMenuData {
     return !lockedModels.any((model) => model.id == selectedId);
   }
 
-  /// True when the plan can only use Auto. The explicit
-  /// [manualModelsAllowed] gate wins, and an Auto-only tier label is also
-  /// treated as such so a caller that forgets the flag cannot leak manual
-  /// models. `Starter` is the catalog's legacy name for the Go tier.
+  /// True when the plan can only use Auto.
+  ///
+  /// The caller's [manualModelsAllowed] is authoritative when it has one: it
+  /// is the gateway's own answer, so a stale [tierLabel] must not lock a plan
+  /// the server just unlocked (nor unlock one it locked). Only an absent
+  /// answer falls back to the label, so a caller that forgets the flag cannot
+  /// leak manual models. `Starter` is the catalog's legacy name for Go.
   bool get autoOnly =>
-      !manualModelsAllowed ||
+      manualModelsAllowed == null ? _labelSaysAutoOnly : !manualModelsAllowed!;
+
+  bool get _labelSaysAutoOnly =>
       tierLabel == 'Free' ||
       tierLabel == 'Free plan' ||
       tierLabel == 'Go' ||

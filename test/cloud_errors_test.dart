@@ -11,6 +11,7 @@ import 'package:ovid_ai/core/cloud/cloud_rest.dart';
 void main() {
   const codes = <String>[
     'daily_limit_reached',
+    'manual_model_not_allowed',
     'rate_limited',
     'unauthenticated',
     'timeout',
@@ -56,6 +57,27 @@ void main() {
     expect(cloudErrorCopy('key_not_minted').action, CloudErrorAction.retry,
         reason: 'the key is minted server-side; Settings cannot fix it');
     expect(cloudErrorCopy('run_lost').action, CloudErrorAction.retry);
+  });
+
+  test('the 402 plan refusal is one plain sentence, never provider text', () {
+    final copy = cloudErrorCopy(
+      'manual_model_not_allowed',
+      message: 'litellm.APIError: plan check failed upstream',
+    );
+    expect(copy.text, 'Your plan uses Auto only. Switch the model to Auto.');
+    expect(copy.action, CloudErrorAction.pickModel);
+    expect(copy.text, isNot(contains('litellm')));
+    expect(copy.text, isNot(contains('upstream')));
+  });
+
+  test('the allowance 402 stays an allowance message, not a pick-Auto one', () {
+    final copy = cloudErrorCopy(
+      'daily_limit_reached',
+      message: 'Daily Ovid allowance reached',
+    );
+    expect(copy.text, contains('plan allowance'));
+    expect(copy.text, isNot(contains('Auto')));
+    expect(copy.action, CloudErrorAction.openPlans);
   });
 
   test('the allowance reset reads as a clock time plus a span, not raw '
