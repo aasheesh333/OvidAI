@@ -72,6 +72,7 @@ export const CHILD_DENIED_TOOLS: ReadonlySet<string> = new Set([
   "request_permission",
   "request_working_folder",
   "dispatch_agent",
+  "dispatch_agents",
   "workflow",
   "ralph",
   "schedule_create",

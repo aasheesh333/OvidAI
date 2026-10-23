@@ -280,6 +280,7 @@ describe("computeToolRoster — subagent projection", () => {
         "request_permission",
         "request_working_folder",
         "dispatch_agent",
+        "dispatch_agents",
         "workflow",
         "ralph",
         "schedule_create",
@@ -293,6 +294,8 @@ describe("computeToolRoster — subagent projection", () => {
   it("isSubagent drops dispatch_agent but keeps the management tools", () => {
     const names = rosterNames(ctx({ isSubagent: true }));
     expect(names.has("dispatch_agent")).toBe(false);
+    // The batch form is the same capability and must be denied too.
+    expect(names.has("dispatch_agents")).toBe(false);
     expect(names.has("workflow")).toBe(false);
     expect(names.has("ralph")).toBe(false);
     expect(names.has("ask_user_question")).toBe(false);

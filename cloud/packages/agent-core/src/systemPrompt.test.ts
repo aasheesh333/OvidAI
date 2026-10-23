@@ -379,3 +379,22 @@ describe("product awareness", () => {
     }
   });
 });
+
+describe("delegation guidance", () => {
+  it("tells the agent to prefer the parallel batch tool and names the concurrency cap", () => {
+    const parts = buildSystemPrompt({
+      mode: "auto",
+      planMode: false,
+      isSubagent: false,
+      persona: "",
+      workspaceFolder: "/workspace",
+      workspaceTreeSummary: "",
+      skillsCatalog: [],
+      memoryContext: "",
+      todos: [],
+      goal: null,
+    });
+    expect(parts.stable).toContain("dispatch_agents");
+    expect(parts.stable).toContain("50");
+  });
+});

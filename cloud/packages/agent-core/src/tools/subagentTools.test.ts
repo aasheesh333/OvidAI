@@ -156,6 +156,7 @@ describe("createSubagentTools — registration", () => {
     const list = tools({}).tools;
     expect(list.map((t) => t.spec.name)).toEqual([
       "dispatch_agent",
+      "dispatch_agents",
       "send_message",
       "interrupt_agent",
       "list_agents",

@@ -30,6 +30,7 @@
 import type { EventSink } from "../ports.js";
 import {
   DEFAULT_SUBAGENT_MAX_RUNTIME_MS,
+  MAX_SUBAGENTS_PER_ROOT,
   READ_SUBAGENT_LOG_TOOL_NAME,
   renderChildLine,
   subagentResultJson,
@@ -417,5 +418,140 @@ export function createSubagentTools(deps: {
     },
   };
 
-  return [dispatchAgent, sendMessage, interruptAgent, listAgents, readSubagentLog, report];
+  /**
+   * Parallel delegation. The loop runs ONE tool call at a time, so N separate
+   * `dispatch_agent` calls in a turn are serialised; with an 8-hour child
+   * budget a 20-child plan would take days. This one call starts its children
+   * together, so the main agent can actually do most of its work through
+   * subagents.
+   *
+   * Failures are per task: a refused or failed child becomes that task's
+   * `error` entry instead of failing the whole batch.
+   */
+  const dispatchAgents: Tool = {
+    spec: {
+      name: "dispatch_agents",
+      description:
+        "Delegate SEVERAL independent tasks at once. The children run in " +
+        "parallel and this call returns when all of them finish. Use it " +
+        "whenever you have two or more tasks that do not depend on each " +
+        "other — it is the fast path for delegating most of the work. Each " +
+        "child needs its full context in its own prompt. Returns one entry " +
+        "per task, in the order you sent them.",
+      parameters: {
+        type: "object",
+        properties: {
+          tasks: {
+            type: "array",
+            description:
+              `Up to ${MAX_SUBAGENTS_PER_ROOT} independent tasks. The total ` +
+              "must not exceed the number of free subagent slots.",
+            items: {
+              type: "object",
+              properties: {
+                prompt: {
+                  type: "string",
+                  description: "Detailed task description for this subagent",
+                },
+                tools: {
+                  type: "array",
+                  items: { type: "string" },
+                  description:
+                    "Restrict this child to these tools. Sensitive tools are " +
+                    "denied unless named here explicitly.",
+                },
+                disallowedTools: {
+                  type: "array",
+                  items: { type: "string" },
+                  description: "Remove these tools from this child's roster.",
+                },
+                agentType: {
+                  type: "string",
+                  description:
+                    'Optional subagent definition/type (default: "general-purpose").',
+                },
+              },
+              required: ["prompt"],
+            },
+          },
+        },
+        required: ["tasks"],
+      },
+    },
+    timeoutMs: DISPATCH_AGENT_TIMEOUT_MS,
+    async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+      const raw = args.tasks;
+      if (!Array.isArray(raw) || raw.length === 0) {
+        return {
+          content:
+            "tasks is required: send an array of {prompt, tools?, disallowedTools?, agentType?}",
+          isError: true,
+        };
+      }
+      if (raw.length > MAX_SUBAGENTS_PER_ROOT) {
+        return {
+          content:
+            `Too many tasks (${raw.length}). At most ${MAX_SUBAGENTS_PER_ROOT} ` +
+            "subagents can run at once — split this into waves.",
+          isError: true,
+        };
+      }
+
+      // Validate up front so a malformed entry is a tool error, not a
+      // half-started batch.
+      const tasks: Array<{ prompt: string; args: Record<string, unknown> }> = [];
+      for (let i = 0; i < raw.length; i += 1) {
+        const entry = raw[i];
+        if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+          return { content: `tasks[${i}] must be an object`, isError: true };
+        }
+        const record = entry as Record<string, unknown>;
+        const prompt = argString(record, "prompt");
+        if (prompt === "") {
+          return { content: `tasks[${i}].prompt is required`, isError: true };
+        }
+        tasks.push({ prompt, args: record });
+      }
+
+      // Start them all, then await together: the supervisor's own 50-slot
+      // ceiling is the concurrency bound, so nothing here can oversubscribe.
+      const settled = await Promise.all(
+        tasks.map(async (task, index) => {
+          const tools = argStrings(task.args, "tools");
+          const disallowedTools = argStrings(task.args, "disallowedTools");
+          const agentType = argString(task.args, "agentType");
+          try {
+            const handle = await deps.supervisor.dispatch(ctx, {
+              prompt: task.prompt,
+              ...(tools !== undefined ? { tools } : {}),
+              ...(disallowedTools !== undefined ? { disallowedTools } : {}),
+              ...(agentType !== "" ? { agentType } : {}),
+            });
+            return {
+              index,
+              prompt: task.prompt,
+              sessionId: handle.sessionId,
+              summary: JSON.parse(subagentResultJson(handle)) as unknown,
+            };
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            const code = err instanceof SubagentRefusalError ? `${err.code}: ` : "";
+            return { index, prompt: task.prompt, error: `${code}${message}` };
+          }
+        }),
+      );
+
+      return { content: JSON.stringify(settled, null, 2) };
+    },
+  };
+
+  return [
+    dispatchAgent,
+    dispatchAgents,
+    sendMessage,
+    interruptAgent,
+    listAgents,
+    readSubagentLog,
+    report,
+  ];
 }
