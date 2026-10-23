@@ -176,6 +176,13 @@
       "when": 1792834000000,
       "tag": "0024_studio_repos",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1792900000000,
+      "tag": "0025_plan_table_align",
+      "breakpoints": true
     }
   ]
 }

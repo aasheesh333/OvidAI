@@ -290,8 +290,8 @@ export type AttachmentRow = typeof attachments.$inferSelect;
 
 // One row per sellable plan (plans-as-data; the mint app is the only writer,
 // the Redis db2 projection is derived from these rows). `priceUsd`/`mult` are
-// exact decimal strings ("5", "23"); aliases include the tier the hook stores
-// (e.g. pro → ["7x"]).
+// exact decimal strings ("18", "5"); aliases include the tier strings the hook
+// and users.tier already hold (go → ["starter", "3x"], pro → ["max", "15x"]).
 export const plans = pgTable("plans", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
