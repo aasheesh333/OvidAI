@@ -423,6 +423,11 @@ class Message {
   bool thinking; // mutable — live state
   int? elapsedMs; // assistant: how long this response took
 
+  /// The server-recorded reasoning for this assistant message. Null when the
+  /// gateway sent none; never an empty string, so the transcript can render
+  /// "nothing" without a blank thinking row.
+  String? reasoning;
+
   /// Files attached to this user message (chatbox + button). Rendered as
   /// chips under the bubble; the agent reads them from the workspace.
   List<MessageAttachment> attachments;
@@ -461,6 +466,7 @@ class Message {
     this.lang,
     this.thinking = false,
     this.elapsedMs,
+    this.reasoning,
     this.toolName,
     this.toolTitle,
     this.toolSummary,
@@ -529,6 +535,10 @@ class Message {
     lang: j['lang'] as String?,
     thinking: j['thinking'] as bool? ?? false,
     elapsedMs: (j['elapsedMs'] as num?)?.toInt(),
+    reasoning: j['reasoning'] is String &&
+            (j['reasoning'] as String).trim().isNotEmpty
+        ? (j['reasoning'] as String).trim()
+        : null,
     toolName: j['toolName'] as String?,
     toolTitle: j['toolTitle'] as String?,
     toolSummary: j['toolSummary'] as String?,
@@ -559,6 +569,7 @@ class Message {
     if (lang != null) 'lang': lang,
     if (thinking) 'thinking': thinking,
     if (elapsedMs != null) 'elapsedMs': elapsedMs,
+    if (reasoning != null) 'reasoning': reasoning,
     if (toolName != null) 'toolName': toolName,
     if (toolTitle != null) 'toolTitle': toolTitle,
     if (toolSummary != null) 'toolSummary': toolSummary,
@@ -3546,7 +3557,9 @@ class AppState extends ChangeNotifier {
   static const _kMemoryEnabled = 'ovid_memory_enabled';
   bool memoryEnabled = true;
 
-  /// Show reasoning/thinking cards in chat (off = hide the chips entirely).
+  /// Show reasoning/thinking cards in chat. Off folds a stored thought row
+  /// closed; on opens it with the transcript. The row itself stays, so the
+  /// reasoning is always one tap away.
   static const _kShowReasoning = 'ovid_show_reasoning';
   bool showReasoning = true;
 
@@ -3834,6 +3847,9 @@ class AppState extends ChangeNotifier {
   Future<void> setShowReasoning(bool v) async {
     showReasoning = v;
     notifyListeners();
+    // The preference is account-level: the server records it so another
+    // device (and the worker) reads the same choice.
+    CloudAgentFacade.syncPreferencesIfInstalled();
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kShowReasoning, v);

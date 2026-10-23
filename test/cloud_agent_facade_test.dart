@@ -108,6 +108,28 @@ class FakeCloudRest extends CloudRestClient {
     );
   }
 
+  /// The last preferences PATCH, exactly as it went on the wire.
+  ({bool? memoryEnabled, bool? shareSessionMemory, bool? showReasoning})?
+      preferencesPatch;
+
+  @override
+  Future<CloudUserPreferences> patchPreferences({
+    bool? memoryEnabled,
+    bool? shareSessionMemory,
+    bool? showReasoning,
+  }) async {
+    preferencesPatch = (
+      memoryEnabled: memoryEnabled,
+      shareSessionMemory: shareSessionMemory,
+      showReasoning: showReasoning,
+    );
+    return CloudUserPreferences(
+      memoryEnabled: memoryEnabled ?? true,
+      shareSessionMemory: shareSessionMemory ?? false,
+      showReasoning: showReasoning ?? true,
+    );
+  }
+
   @override
   Future<AttachmentUpload> createAttachment(
     String sessionId, {
@@ -292,6 +314,47 @@ Future<_Harness> _build({
 void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues(const <String, Object>{});
+  });
+
+  group('preferences', () {
+    setUp(() {
+      AppState.resetTestInstance();
+      AppState.createForTest();
+    });
+
+    tearDown(AppState.resetTestInstance);
+
+    test('syncPreferences sends the reasoning preference too', () async {
+      final h = await _build();
+      AppState.I
+        ..memoryEnabled = true
+        ..shareSessionMemory = true
+        ..showReasoning = false;
+
+      await h.facade.syncPreferences();
+
+      expect(h.rest.preferencesPatch?.memoryEnabled, isTrue);
+      expect(h.rest.preferencesPatch?.shareSessionMemory, isTrue);
+      expect(h.rest.preferencesPatch?.showReasoning, isFalse);
+
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
+    test('the Settings toggle reaches the preferences PATCH', () async {
+      final h = await _build();
+      CloudAgentFacade.installForTest(h.facade);
+      addTearDown(CloudAgentFacade.resetForTest);
+      addTearDown(h.facade.dispose);
+      addTearDown(h.ws.disconnect);
+
+      expect(AppState.I.showReasoning, isTrue);
+      await AppState.I.setShowReasoning(false);
+      await pumpEventQueue();
+
+      expect(AppState.I.showReasoning, isFalse);
+      expect(h.rest.preferencesPatch?.showReasoning, isFalse);
+    });
   });
 
   group('runTask', () {

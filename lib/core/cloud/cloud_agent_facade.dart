@@ -3038,6 +3038,7 @@ class CloudAgentFacade extends ChangeNotifier
       await _rest.patchPreferences(
         memoryEnabled: app.memoryEnabled,
         shareSessionMemory: app.effectiveShareSessionMemory,
+        showReasoning: app.showReasoning,
       );
     } catch (e, s) {
       Diag.swallow('cloud.syncPreferences', e, s);

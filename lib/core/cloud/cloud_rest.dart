@@ -598,11 +598,13 @@ class CloudRestClient {
   Future<CloudUserPreferences> patchPreferences({
     bool? memoryEnabled,
     bool? shareSessionMemory,
+    bool? showReasoning,
   }) async =>
       CloudUserPreferences.fromJson(await patchJson('/preferences',
           body: <String, Object>{
             'memoryEnabled': ?memoryEnabled,
             'shareSessionMemory': ?shareSessionMemory,
+            'showReasoning': ?showReasoning,
           }));
 
   /// GET /sessions/:id/messages. Always answers a [MessagePage] (Wave 1b:

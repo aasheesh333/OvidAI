@@ -184,6 +184,7 @@ class MessageDto {
     required this.content,
     required this.createdAt,
     this.attachments = const <MessageAttachmentDto>[],
+    this.reasoning,
   });
 
   factory MessageDto.fromJson(Map<String, dynamic> j) => MessageDto(
@@ -196,6 +197,7 @@ class MessageDto {
           for (final a in (j['attachments'] as List? ?? const <dynamic>[]))
             if (a is Map<String, dynamic>) MessageAttachmentDto.fromJson(a),
         ],
+        reasoning: _optionalText(j['reasoning']),
       );
 
   final String id;
@@ -206,6 +208,20 @@ class MessageDto {
 
   /// Wave 1b (CH-006): files sent with this user message (metadata only).
   final List<MessageAttachmentDto> attachments;
+
+  /// The model's thinking for this assistant message, when the gateway
+  /// recorded it. Absent from older gateways, null when there was none, and
+  /// never an empty string: a blank block must not become an empty row.
+  final String? reasoning;
+}
+
+/// A nullable wire string: trimmed, with blank and wrongly-typed values
+/// treated as "not sent". Kept here so the message parser stays tolerant of
+/// a gateway that predates a field.
+String? _optionalText(Object? raw) {
+  if (raw is! String) return null;
+  final text = raw.trim();
+  return text.isEmpty ? null : text;
 }
 
 /// Wave 1b: one file sent with a message (`MessageAttachmentDto`, rest.ts).
@@ -407,17 +423,21 @@ class CloudTurnOptions {
 }
 
 /// `GET/PATCH /cloud/v1/preferences` (Wave 1a, SE-005 / owner rule R1): the
-/// per-user memory switches the worker enforces on every run.
+/// per-user switches the worker enforces on every run.
 class CloudUserPreferences {
   const CloudUserPreferences({
     required this.memoryEnabled,
     required this.shareSessionMemory,
+    this.showReasoning = true,
   });
 
   factory CloudUserPreferences.fromJson(Map<String, dynamic> j) =>
       CloudUserPreferences(
         memoryEnabled: j['memoryEnabled'] as bool? ?? true,
         shareSessionMemory: j['shareSessionMemory'] as bool? ?? false,
+        // A gateway that predates the field has no preference to report;
+        // the product default (on) is what the app should show.
+        showReasoning: j['showReasoning'] as bool? ?? true,
       );
 
   /// Saved personal memory (memory_* tools) is available to the agent.
@@ -427,6 +447,10 @@ class CloudUserPreferences {
   /// default — a chat's context never leaks into another chat unless the
   /// user @-tags it or turns this on.
   final bool shareSessionMemory;
+
+  /// Whether a stored answer's reasoning row starts expanded. On by default,
+  /// matching the server's default.
+  final bool showReasoning;
 }
 
 /// `RunCancelResponse` (rest.ts, P8 Task 1) — the 202 answer of POST

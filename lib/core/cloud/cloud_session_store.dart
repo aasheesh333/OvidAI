@@ -833,6 +833,8 @@ class CloudSessionStore extends ChangeNotifier {
         // replay dedupe (Task 4's userMessageId equals it).
         privateSyncId: dto.id,
         time: dto.createdAt,
+        // The stored thought the transcript renders above this answer.
+        reasoning: dto.reasoning,
         // CH-006: the files sent with this prompt render as chips.
         attachments: <MessageAttachment>[
           for (final a in dto.attachments)

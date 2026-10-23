@@ -194,18 +194,51 @@ void main() {
     final mock = MockClient((request) async {
       calls.add(request);
       return http.Response(
-          jsonEncode({'memoryEnabled': false, 'shareSessionMemory': false}),
+          jsonEncode({
+            'memoryEnabled': false,
+            'shareSessionMemory': false,
+            'showReasoning': false,
+          }),
           200);
     });
     final rest = _client(mock);
     final got = await rest.getPreferences();
     expect(got.memoryEnabled, isFalse);
-    await rest.patchPreferences(memoryEnabled: false, shareSessionMemory: false);
+    expect(got.showReasoning, isFalse);
+    await rest.patchPreferences(
+      memoryEnabled: false,
+      shareSessionMemory: false,
+      showReasoning: false,
+    );
     expect(calls[0].method, 'GET');
     expect(calls[0].url.toString(), '$_restBase/preferences');
     expect(calls[1].method, 'PATCH');
-    expect(jsonDecode(calls[1].body),
-        {'memoryEnabled': false, 'shareSessionMemory': false});
+    expect(jsonDecode(calls[1].body), {
+      'memoryEnabled': false,
+      'shareSessionMemory': false,
+      'showReasoning': false,
+    });
+  });
+
+  test('showReasoning defaults to on and is omitted when not patched', () async {
+    final calls = <http.Request>[];
+    final mock = MockClient((request) async {
+      calls.add(request);
+      return http.Response(
+          jsonEncode({'memoryEnabled': true, 'shareSessionMemory': false}),
+          200);
+    });
+    final rest = _client(mock);
+
+    // An older gateway has no `showReasoning` key at all: the app's default
+    // is on, which is the server's own default too.
+    final got = await rest.getPreferences();
+    expect(got.showReasoning, isTrue);
+
+    // Only the switches the caller names are sent: a PATCH without the new
+    // field must not start sending it to a gateway that rejects unknown keys.
+    await rest.patchPreferences(memoryEnabled: true);
+    expect(jsonDecode(calls[1].body), {'memoryEnabled': true});
   });
 
   test('409 error envelope maps to CloudApiException(409, key_not_minted)',
@@ -320,6 +353,40 @@ void main() {
     expect(page.items.single.sessionId, 's1');
     expect(page.items.single.createdAt, DateTime.utc(2026, 10, 16, 10));
     expect(page.nextCursor, 'm9');
+  });
+
+  test('MessageDto.reasoning is optional, trimmed and never empty', () {
+    Map<String, dynamic> json(Object? reasoning) =>
+        _messageJson('m1')..['reasoning'] = reasoning;
+
+    expect(MessageDto.fromJson(json('  a private thought  ')).reasoning,
+        'a private thought');
+    // Absent, null and blank all mean "no reasoning": the transcript must not
+    // render an empty thinking row for any of them.
+    expect(MessageDto.fromJson(_messageJson('m1')).reasoning, isNull);
+    expect(MessageDto.fromJson(json(null)).reasoning, isNull);
+    expect(MessageDto.fromJson(json('')).reasoning, isNull);
+    expect(MessageDto.fromJson(json('   ')).reasoning, isNull);
+    // Tolerant to an off-contract type instead of failing the whole page.
+    expect(MessageDto.fromJson(json(42)).reasoning, isNull);
+  });
+
+  test('pageMessages carries reasoning on a stored assistant row', () async {
+    final mock = MockClient((request) async => http.Response(
+          jsonEncode({
+            'items': [
+              _messageJson('m9')
+                ..['role'] = 'assistant'
+                ..['content'] = 'the answer'
+                ..['reasoning'] = 'the thought',
+            ],
+            'nextCursor': null,
+          }),
+          200,
+        ));
+    final page = await _client(mock).pageMessages('s1');
+    expect(page.items.single.content, 'the answer');
+    expect(page.items.single.reasoning, 'the thought');
   });
 
   test('patchSession PATCHes {"mode":"studio"}', () async {
