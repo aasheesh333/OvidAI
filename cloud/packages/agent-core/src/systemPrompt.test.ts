@@ -335,3 +335,21 @@ describe("D5 — device/control scrub", () => {
     }
   });
 });
+
+describe("studio awareness", () => {
+  it("tells the agent where cloned repos live", () => {
+    const parts = buildSystemPrompt({
+      mode: "studio",
+      planMode: false,
+      isSubagent: false,
+      persona: "",
+      workspaceFolder: "/workspace",
+      workspaceTreeSummary: "",
+      skillsCatalog: [],
+      memoryContext: "",
+      todos: [],
+      goal: null,
+    });
+    expect(parts.stable).toContain("/studio");
+  });
+});

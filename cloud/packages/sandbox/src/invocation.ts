@@ -1,6 +1,7 @@
 import type { SandboxConfig } from "./config.js";
 
 /** Jail-side mount point every workspace is bound at. */
+export const JAIL_STUDIO = "/studio";
 export const JAIL_WORKSPACE = "/workspace";
 
 /** Jail-side mount point every per-sandbox home is bound at. */
@@ -19,6 +20,12 @@ export interface JailSpec {
   homeDir: string;
   /** Host path of the per-sandbox private /etc stub directory. */
   etcDir: string;
+  /**
+   * Host path of the user's Studio root (their cloned repos), bound at
+   * `/studio` read-write. Optional: a legacy per-user attach omits it, and
+   * the jail then has no `/studio` at all.
+   */
+  studioDir?: string;
   /** Jail path to start in; default "/workspace". */
   cwd?: string;
   /** Merged over {@link BASE_JAIL_ENV}; keys sorted for golden determinism. */
@@ -83,6 +90,11 @@ export function buildBwrapArgs(
   // Writable surfaces: the workspace and the per-sandbox home.
   args.push("--bind", spec.workspaceDir, JAIL_WORKSPACE);
   args.push("--bind", spec.homeDir, JAIL_HOME);
+  // Studio repos are user-scoped, not chat-scoped: a chat session still needs
+  // to read and edit the repo it was opened from.
+  if (spec.studioDir !== undefined && spec.studioDir !== "") {
+    args.push("--bind", spec.studioDir, JAIL_STUDIO);
+  }
 
   // Namespaces. setuid needs bwrap to create the userns itself; rootmap joins
   // one the launcher already made.

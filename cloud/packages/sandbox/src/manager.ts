@@ -51,6 +51,12 @@ export interface SandboxHandle {
   readonly workspaceDir: string;
   /** HOST path: {workspacesRoot}/{uid}/.home (jail: /root). */
   readonly homeDir: string;
+  /**
+   * HOST path of the user's Studio root, bound at `/studio` (jail). Present
+   * only on per-session handles: the repos are user-scoped, so every chat of
+   * that user sees the same `/studio`, while `/workspace` stays per-chat.
+   */
+  readonly studioDir?: string;
   readonly jailWorkspaceDir: string;
   exec(req: ExecRequest): Promise<ExecResult>;
   /** Task 9: interactive PTY session under a pty-{id} leaf of this env. */
@@ -591,7 +597,12 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       throw new Error("sandbox env is missing its jail context after attach");
     }
     const workspaceDir = await sessionWorkspaceDir(userId, sessionId);
-    const ctx: JailContext = { ...parentCtx, workspaceDir };
+    // Studio repos live in the legacy per-user workspace; bind that at
+    // /studio so the agent can work on the repo this chat was opened from.
+    const studioDir = join(config.workspacesRoot, String(base.uid), "workspace");
+    await mkdir(studioDir, { recursive: true });
+    await chown(studioDir, base.uid, base.uid);
+    const ctx: JailContext = { ...parentCtx, workspaceDir, studioDir };
 
     const ptys = new Map<string, PtySession>();
     let jobRegistry: JobRegistry | undefined;
@@ -602,6 +613,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       uid: base.uid,
       workspaceDir,
       homeDir: base.homeDir,
+      studioDir,
       jailWorkspaceDir: JAIL_WORKSPACE,
       exec: (req: ExecRequest) => execOnce(ctx, req),
       createPty: async (req: PtyRequest, handlers: PtyHandlers) => {

@@ -624,3 +624,26 @@ describe.skipIf(!isRoot)("attachSession — per-session workspace isolation", ()
     expect(existsSync(fx.cgroups.envPath(200001))).toBe(false);
   });
 });
+
+describe.skipIf(!isRoot)("attachSession — Studio repos stay reachable", () => {
+  it("binds the user's studio root at /studio so a chat session can work on a cloned repo", async () => {
+    const fx = await freshFixture();
+    const h = await fx.manager.attachSession("u1", "sess-a");
+    fx.launcher.nextScript = { stdout: ["ok\n"], exitCode: 0 };
+    await h.exec({ command: "ls /studio" });
+
+    const studioRoot = join(fx.wsRoot, "200001", "workspace");
+    expect(existsSync(studioRoot)).toBe(true);
+    const [rec] = fx.launcher.spawns;
+    expect(rec.bwrapArgv.join(" ")).toContain(`${studioRoot} /studio`);
+  });
+
+  it("the legacy per-user attach binds no /studio mount", async () => {
+    const fx = await freshFixture();
+    const h = await fx.manager.attach("u1");
+    fx.launcher.nextScript = { stdout: ["ok\n"], exitCode: 0 };
+    await h.exec({ command: "ls" });
+    const [rec] = fx.launcher.spawns;
+    expect(rec.bwrapArgv.join(" ")).not.toContain("/studio");
+  });
+});

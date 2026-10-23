@@ -212,7 +212,8 @@ function workspaceBlock(workspaceFolder: string): string {
     : folder;
   return `All file work uses the current workspace described below.
 Current workspace: ${current}
-Use this existing workspace for file and shell tools; do not clone again to begin working.`;
+Use this existing workspace for file and shell tools; do not clone again to begin working.
+STUDIO: if /studio exists it holds the user's already-cloned repositories (read-write). Work on a repo in place there; never re-clone it into the workspace.`;
 }
 
 // ── volatile block (Dart _volatileContextBlock port, tree added first) ──────

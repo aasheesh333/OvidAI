@@ -19,6 +19,8 @@ export interface JailContext {
   workspaceDir: string;
   homeDir: string;
   etcDir: string;
+  /** HOST path bound at `/studio` (the user's cloned repos). Absent → no mount. */
+  studioDir?: string;
 }
 
 /** Exactly one of `command` (parsed by bash -c) or `argv` (exec'd directly). */

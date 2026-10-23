@@ -102,6 +102,7 @@ export function makeJailContext(deps: {
   workspaceDir: string;
   homeDir: string;
   etcDir: string;
+  studioDir?: string;
 }): JailContext {
   return {
     config: deps.config,
@@ -112,6 +113,7 @@ export function makeJailContext(deps: {
     workspaceDir: deps.workspaceDir,
     homeDir: deps.homeDir,
     etcDir: deps.etcDir,
+    ...(deps.studioDir !== undefined ? { studioDir: deps.studioDir } : {}),
   };
 }
 
@@ -157,6 +159,7 @@ export async function execOnce(ctx: JailContext, req: ExecRequest): Promise<Exec
     workspaceDir: ctx.workspaceDir,
     homeDir: ctx.homeDir,
     etcDir: ctx.etcDir,
+    ...(ctx.studioDir !== undefined ? { studioDir: ctx.studioDir } : {}),
     cwd: req.cwd,
     env: req.env,
     argv: payload,
