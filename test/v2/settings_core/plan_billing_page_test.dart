@@ -219,7 +219,7 @@ void main() {
     }
     expect(_inTable('3 GB'), findsOneWidget);
     expect(_inTable('75 GB'), findsOneWidget);
-    expect(_inTable('3×'), findsOneWidget);
+    expect(_inTable('1.5×'), findsOneWidget);
     expect(_inTable('No token cap'), findsNWidgets(3));
   });
 

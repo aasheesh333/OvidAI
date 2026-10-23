@@ -89,7 +89,7 @@ def test_allowance_consumed_at_any_model_then_daily_limit(hook):
     assert float(r.get("pool:u:spend")) == pytest.approx(1.0)
 
 
-@pytest.mark.parametrize("tier,mult", [("3x", 3), ("7x", 23), ("15x", 43)])
+@pytest.mark.parametrize("tier,mult", [("3x", 1.5), ("7x", 5), ("15x", 20)])
 def test_paid_plans_scale_the_free_allowance(hook, tier, mult):
     h, r, _ = hook
     r.set("user:p:tier", tier)
@@ -103,7 +103,9 @@ def test_slow_mode_plan_never_blocks_and_flags_mint(hook):
     h, r, _ = hook
     set_plan(r, "starter", slow_mode=True)
     r.set("user:s:tier", "starter")
-    success(h, "s", "glm-5.3-flash", 2.9)
+    # This fixture's free daily base is 1.0, so Go's allowance is 1.0 x 1.5 =
+    # 1.5 for a 24 h window: stay under it, then cross it.
+    success(h, "s", "glm-5.3-flash", 1.4)
     assert not r.sismember(plans.SLOW_PENDING, "s")
     success(h, "s", "glm-5.3-flash", 0.2)
     assert r.sismember(plans.SLOW_PENDING, "s")

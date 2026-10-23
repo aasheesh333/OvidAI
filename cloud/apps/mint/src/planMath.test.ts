@@ -38,9 +38,9 @@ import {
 
 const SEED_PLANS_JSON =
   '[{"aliases":[],"auto_oss":false,"enabled":true,"id":"free","mult":1.0,"name":"Free","price_usd":0.0,"slow_mode":false,"window_hours":24},' +
-  '{"aliases":["3x"],"auto_oss":false,"enabled":true,"id":"starter","mult":3.0,"name":"Go","price_usd":5.0,"slow_mode":false,"window_hours":24},' +
-  '{"aliases":["7x"],"auto_oss":true,"enabled":true,"id":"pro","mult":23.0,"name":"Plus","price_usd":18.0,"slow_mode":false,"window_hours":24},' +
-  '{"aliases":["15x"],"auto_oss":true,"enabled":true,"id":"max","mult":43.0,"name":"Pro","price_usd":99.0,"slow_mode":false,"window_hours":24}]';
+  '{"aliases":["3x"],"auto_oss":false,"enabled":true,"id":"starter","mult":1.5,"name":"Go","price_usd":5.0,"slow_mode":false,"window_hours":24},' +
+  '{"aliases":["7x"],"auto_oss":true,"enabled":true,"id":"pro","mult":5.0,"name":"Plus","price_usd":18.0,"slow_mode":false,"window_hours":24},' +
+  '{"aliases":["15x"],"auto_oss":true,"enabled":true,"id":"max","mult":20.0,"name":"Pro","price_usd":99.0,"slow_mode":false,"window_hours":24}]';
 
 const SEED_MEMBERS_JSON =
   '[{"model":"glm-5.3-flash","weight":1.0},{"model":"deepseek-v4.1-flash","weight":1.0},{"model":"minimax-m3","weight":1.0}]';
@@ -64,9 +64,9 @@ describe("seedPlans", () => {
       })),
     ).toEqual([
       { id: "free", mult: 1, price_usd: 0, auto_oss: false, slow_mode: false, aliases: [], window_hours: 24 },
-      { id: "starter", mult: 3, price_usd: 5, auto_oss: false, slow_mode: false, aliases: ["3x"], window_hours: 24 },
-      { id: "pro", mult: 23, price_usd: 18, auto_oss: true, slow_mode: false, aliases: ["7x"], window_hours: 24 },
-      { id: "max", mult: 43, price_usd: 99, auto_oss: true, slow_mode: false, aliases: ["15x"], window_hours: 24 },
+      { id: "starter", mult: 1.5, price_usd: 5, auto_oss: false, slow_mode: false, aliases: ["3x"], window_hours: 24 },
+      { id: "pro", mult: 5, price_usd: 18, auto_oss: true, slow_mode: false, aliases: ["7x"], window_hours: 24 },
+      { id: "max", mult: 20, price_usd: 99, auto_oss: true, slow_mode: false, aliases: ["15x"], window_hours: 24 },
     ]);
     expect(seedPlans().every((p) => p.enabled)).toBe(true);
   });
@@ -133,7 +133,7 @@ describe("windowStr", () => {
 
 describe("userPools / keyBudget", () => {
   it("every plan is free allowance × mult (test_every_plan_is_free_allowance_times_mult)", () => {
-    for (const [tier, mult] of [["free", 1], ["3x", 3], ["7x", 23], ["15x", 43]] as const) {
+    for (const [tier, mult] of [["free", 1], ["3x", 1.5], ["7x", 5], ["15x", 20]] as const) {
       const s = seedSettings("0.15");
       const pools = userPools(s, findPlan(s, tier), 0.15);
       expect(pools.all).toBeCloseTo(0.15 * mult, 12);
@@ -142,24 +142,24 @@ describe("userPools / keyBudget", () => {
     }
   });
 
-  it("userPools(0.15 base, pro mult 23, 24h).all === 3.45 (Python round(x, 6))", () => {
+  it("userPools(0.15 base, pro mult 5, 24h).all === 0.75 (Python round(x, 6))", () => {
     const s = seedSettings("0.15");
     expect(userPools(s, findPlan(s, "7x"), 0.15)).toEqual({
-      plan_id: "pro", window_hours: 24, all: 3.45, slow_mode: false, auto_oss: true,
+      plan_id: "pro", window_hours: 24, all: 0.75, slow_mode: false, auto_oss: true,
     });
   });
 
   it("window length scales the allowance (720h → ×30)", () => {
     const s = seedSettings("0.15");
     const pro = { ...findPlan(s, "pro"), window_hours: 720 };
-    expect(userPools(s, pro, 0.15).all).toBe(103.5); // 0.15*23*30
+    expect(userPools(s, pro, 0.15).all).toBe(22.5); // 0.15*5*30
   });
 
   it("override mult 2 wins over the plan mult; nulls are ignored", () => {
     const s = seedSettings("0.15");
     const pro = findPlan(s, "pro");
     expect(userPools(s, pro, 0.15, { mult: 2 }).all).toBe(0.3);
-    expect(userPools(s, pro, 0.15, { mult: null }).all).toBe(3.45);
+    expect(userPools(s, pro, 0.15, { mult: null }).all).toBe(0.75);
   });
 
   it("full override (test_custom_plan_override): mult/window/flags", () => {
@@ -184,8 +184,8 @@ describe("userPools / keyBudget", () => {
   it("keyBudget: slow-mode ceiling is hard_ceiling_mult × allowance (×3)", () => {
     const s = seedSettings("0.15");
     const slow = { ...userPools(s, findPlan(s, "pro"), 0.15), slow_mode: true };
-    expect(keyBudget(slow, s)).toBe(10.35); // 3.45 * 3
-    expect(keyBudget(userPools(s, findPlan(s, "pro"), 0.15), s)).toBe(3.45);
+    expect(keyBudget(slow, s)).toBe(2.25); // 0.75 * 3
+    expect(keyBudget(userPools(s, findPlan(s, "pro"), 0.15), s)).toBe(0.75);
   });
 });
 
@@ -407,9 +407,9 @@ describe("parseSettings", () => {
     expect(s.hard_ceiling_mult).toBe(3);
     expect(s.plans.map((p) => [p.id, p.mult, p.price_usd, p.auto_oss, p.slow_mode])).toEqual([
       ["free", 1, 0, false, false],
-      ["starter", 3, 5, false, false],
-      ["pro", 23, 18, true, false],
-      ["max", 43, 99, true, false],
+      ["starter", 1.5, 5, false, false],
+      ["pro", 5, 18, true, false],
+      ["max", 20, 99, true, false],
     ]);
   });
 

@@ -72,8 +72,8 @@ void main() {
     // Scroll the whole list; every server plan fact appears on the way
     // (SH-006): names, multipliers and indicative prices.
     for (final marker in [
-      'Free', '×1', 'Go', '×3', 'US\$5 / month', 'Plus', '×23',
-      'US\$18 / month', 'Pro', '×43', 'US\$99 / month',
+      'Free', '×1', 'Go', '×1.5', 'US\$5 / month', 'Plus', '×5',
+      'US\$18 / month', 'Pro', '×20', 'US\$99 / month',
     ]) {
       await tester.scrollUntilVisible(find.text(marker).first, 140);
       await tester.pump();

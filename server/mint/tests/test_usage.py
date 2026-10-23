@@ -122,7 +122,7 @@ def test_single_allowance_pool(client):
 def test_exhausted_plan_without_slow_mode(client):
     c, mint, fake, _ = client
     toks = user_with_keys(mint, fake, "p", tier="pro")
-    fake.add_log(toks["android"], "prov/glm-5.3-flash", spend=0.15 * 23 + 0.1)
+    fake.add_log(toks["android"], "prov/glm-5.3-flash", spend=0.15 * 5 + 0.1)
     body = get_usage(c, "p")
     assert body["remaining_fraction"] == 0 and body["pools"][0]["slow_mode"] is False
     assert not mint.in_slow_mode("p")
@@ -181,7 +181,7 @@ def test_per_model_remaining_by_price(client):
     prices = standard_models(fake)
     user_with_keys(mint, fake, "p", tier="pro")
     m = by_id(get_usage(c, "p"))
-    allowance = 0.15 * 23
+    allowance = 0.15 * 5
     cost = {k: i * 2000 + o * 600 for k, (i, o) in prices.items()}
     for k in prices:
         assert m[k]["remaining_messages"] == int(allowance / cost[k] + 1e-9), k
@@ -204,7 +204,7 @@ def test_auto_estimate_follows_plan_routing(client):
     pro_auto = by_id(body)["auto"]
     oss = ["deepseek-v4.1-flash", "glm-5.3-flash", "minimax-m3"]
     assert pro_auto["members"] == oss
-    assert pro_auto["remaining_messages"] == int(0.15 * 23 / max(cost[x] for x in oss) + 1e-9)
+    assert pro_auto["remaining_messages"] == int(0.15 * 5 / max(cost[x] for x in oss) + 1e-9)
     assert "auto-oss" not in json.dumps(body)
 
 
@@ -213,7 +213,7 @@ def test_image_model_remaining_images(client):
     standard_models(fake)
     user_with_keys(mint, fake, "p", tier="max")
     img = by_id(get_usage(c, "p"))["ovid-image"]
-    assert img["kind"] == "image" and img["remaining_images"] == int(0.15 * 43 / 0.04 + 1e-9)
+    assert img["kind"] == "image" and img["remaining_images"] == int(0.15 * 20 / 0.04 + 1e-9)
     assert "remaining_messages" not in img
 
 

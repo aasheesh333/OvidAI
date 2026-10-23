@@ -30,8 +30,8 @@ def test_new_install_seeds_24h_plans(client):
     assert mint.rds.hget(mint.LIMITS_HASH, "plans") is not None
     assert s["free_daily_usd"] == 0.15
     assert [(p["id"], p["mult"], p["price_usd"], p["auto_oss"], p["slow_mode"]) for p in s["plans"]] == [
-        ("free", 1, 0, False, False), ("starter", 3, 5, False, False),
-        ("pro", 23, 18, True, False), ("max", 43, 99, True, False)]
+        ("free", 1, 0, False, False), ("starter", 1.5, 5, False, False),
+        ("pro", 5, 18, True, False), ("max", 20, 99, True, False)]
     assert all(p["window_hours"] == 24 for p in s["plans"])
     assert [m["model"] for m in s["auto_oss_members"]] == ["glm-5.3-flash", "deepseek-v4.1-flash", "minimax-m3"]
     assert (s["slow_rpm"], s["slow_parallel"]) == (20, 2)
@@ -76,7 +76,7 @@ def test_tier_aliases(env, stored, plan):
     assert mint.effective_tier("u") == plan
 
 
-@pytest.mark.parametrize("tier,mult", [("free", 1), ("3x", 3), ("7x", 23), ("15x", 43), ("pro", 23)])
+@pytest.mark.parametrize("tier,mult", [("free", 1), ("3x", 1.5), ("7x", 5), ("15x", 20), ("pro", 5)])
 def test_every_plan_is_free_allowance_times_mult(env, tier, mult):
     mint, _, _ = env
     mint.rds.set(mint.BASE_BUDGET_KEY, "0.15")
@@ -91,8 +91,8 @@ def test_slow_mode_plan_key_ceiling(env):
     s = mint.get_settings()
     s["plans"] = [dict(p, slow_mode=True) if p["id"] == "pro" else p for p in s["plans"]]
     mint.store_settings(s)
-    assert mint.tier_budget("u", "pro")[0] == pytest.approx(0.15 * 23 * 3)
-    assert mint.tier_budget("u", "max")[0] == pytest.approx(0.15 * 43)
+    assert mint.tier_budget("u", "pro")[0] == pytest.approx(0.15 * 5 * 3)
+    assert mint.tier_budget("u", "max")[0] == pytest.approx(0.15 * 20)
 
 
 def test_window_length_scales_allowance(env):
@@ -101,7 +101,7 @@ def test_window_length_scales_allowance(env):
     s["plans"] = [dict(p, window_hours=720) if p["id"] == "pro" else p for p in s["plans"]]
     mint.store_settings(s)
     mint.rds.set("user:p:tier", "pro")
-    assert mint.pools_for("p")["all"] == pytest.approx(0.15 * 23 * 30)
+    assert mint.pools_for("p")["all"] == pytest.approx(0.15 * 5 * 30)
     assert mint.tier_budget("p", "pro")[1] == "30d"
 
 
@@ -109,9 +109,9 @@ def test_custom_free_limit_scales_every_plan(env):
     mint, _, _ = env
     mint.rds.set("user:s:dailyUsd", "1")
     mint.rds.set("user:s:tier", "starter")
-    assert mint.pools_for("s")["all"] == pytest.approx(3)
+    assert mint.pools_for("s")["all"] == pytest.approx(1.5)
     mint.rds.set("user:s:tier", "pro")
-    assert mint.pools_for("s")["all"] == pytest.approx(23)
+    assert mint.pools_for("s")["all"] == pytest.approx(5)
 
 
 def test_custom_plan_override(env):
@@ -265,4 +265,4 @@ def test_upgrade_reapplies_both_keys(client, monkeypatch):
     r = c.post("/upgrade", headers={"Authorization": "Bearer up", **AUTH}, json={"tier": "max"})
     assert r.status_code == 200 and r.json()["tier"] == "15x"
     for tok in toks.values():
-        assert fake.keys[tok]["max_budget"] == pytest.approx(0.15 * 43)
+        assert fake.keys[tok]["max_budget"] == pytest.approx(0.15 * 20)

@@ -21,7 +21,7 @@ is unclear, email **support@ovidsi.com**.
 - Your prompts, files and relevant chat context are sent to the model providers
   that generate the answer, and to the infrastructure providers listed below.
 - You can delete a chat, export your data, turn off crash reports, and delete
-  your account in the app. Account deletion has a **24-hour grace period**;
+  your account in the app or on the web. Account deletion has a **24-hour grace period**;
   after that it cannot be undone.
 - Ovid Si is for adults (**18+**). It is not directed at children.
 
@@ -310,8 +310,8 @@ someone else has access to your account.
 You can:
 
 - **See and export your data.** Open Settings to export your chats and data.
-- **Correct your account details.** Update them in the app or contact us.
-- **Delete a chat or file.** Use the delete action in the app.
+- **Correct your account details.** Update them in the app, on the web, or contact us.
+- **Delete a chat or file.** Use the delete action in the app or on the web.
 - **Delete your account.** Use Settings or the web page described in section 12.
 - **Turn crash reports and usage analytics on or off.** Go to Settings ->
   Data control -> Crash reports. They are off by default.
@@ -336,7 +336,7 @@ cannot verify a request, we will explain why.
 
 ## 12. Deleting your account and your data
 
-You can delete your Ovid account in the app:
+You can delete your Ovid account in the app or on the web:
 
 1. Open **Settings -> Account -> Delete account**.
 2. Confirm the deletion. Your account is scheduled for deletion, not erased

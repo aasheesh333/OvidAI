@@ -73,17 +73,22 @@ PAID_MODELS_DISABLED = "paid_models_disabled"
 
 
 def seed_plans(paid_window_hours: int = 24) -> list[dict]:
-    """First-run plans. Multipliers put the paid allowances near the earlier
-    totals at a 0.15 base: pro ≈ 3.45/day, max ≈ 6.45/day."""
+    """First-run plans.
+
+    The multipliers are the product spec's Auto Mode ratios (§4): Free 1x,
+    Go 1.5x, Plus 5x, Pro 20x. The ``aliases`` are the stored tier values
+    billing has always written (3x/7x/15x) — they are what ``users.tier``
+    already holds for existing subscribers, so they must never be renamed.
+    """
     return [
         {"id": "free", "name": "Free", "price_usd": 0, "enabled": True, "aliases": [],
          "window_hours": 24, "mult": 1, "slow_mode": False, "auto_oss": False},
         {"id": "starter", "name": "Go", "price_usd": 5, "enabled": True, "aliases": ["3x"],
-         "window_hours": paid_window_hours, "mult": 3, "slow_mode": False, "auto_oss": False},
+         "window_hours": paid_window_hours, "mult": 1.5, "slow_mode": False, "auto_oss": False},
         {"id": "pro", "name": "Plus", "price_usd": 18, "enabled": True, "aliases": ["7x"],
-         "window_hours": paid_window_hours, "mult": 23, "slow_mode": False, "auto_oss": True},
+         "window_hours": paid_window_hours, "mult": 5, "slow_mode": False, "auto_oss": True},
         {"id": "max", "name": "Pro", "price_usd": 99, "enabled": True, "aliases": ["15x"],
-         "window_hours": paid_window_hours, "mult": 43, "slow_mode": False, "auto_oss": True},
+         "window_hours": paid_window_hours, "mult": 20, "slow_mode": False, "auto_oss": True},
     ]
 
 

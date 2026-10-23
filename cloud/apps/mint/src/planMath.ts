@@ -196,13 +196,18 @@ export function pyJsonStringify(
 // seeds, parse, serialize, validate
 // ---------------------------------------------------------------------------
 
-/** First-run plans. Multipliers put the paid allowances near the earlier totals at a 0.15 base. */
+/**
+ * First-run plans. The multipliers are the product spec's Auto Mode ratios
+ * (§4): Free 1x, Go 1.5x, Plus 5x, Pro 20x. The `aliases` are the stored
+ * tier values billing has always written (3x/7x/15x) and must NOT be renamed
+ * — they are what `users.tier` already holds for existing subscribers.
+ */
 export function seedPlans(paidWindowHours: number = 24): PlanData[] {
   return [
     { id: "free", name: "Free", price_usd: 0, enabled: true, aliases: [], window_hours: 24, mult: 1, slow_mode: false, auto_oss: false },
-    { id: "starter", name: "Go", price_usd: 5, enabled: true, aliases: ["3x"], window_hours: paidWindowHours, mult: 3, slow_mode: false, auto_oss: false },
-    { id: "pro", name: "Plus", price_usd: 18, enabled: true, aliases: ["7x"], window_hours: paidWindowHours, mult: 23, slow_mode: false, auto_oss: true },
-    { id: "max", name: "Pro", price_usd: 99, enabled: true, aliases: ["15x"], window_hours: paidWindowHours, mult: 43, slow_mode: false, auto_oss: true },
+    { id: "starter", name: "Go", price_usd: 5, enabled: true, aliases: ["3x"], window_hours: paidWindowHours, mult: 1.5, slow_mode: false, auto_oss: false },
+    { id: "pro", name: "Plus", price_usd: 18, enabled: true, aliases: ["7x"], window_hours: paidWindowHours, mult: 5, slow_mode: false, auto_oss: true },
+    { id: "max", name: "Pro", price_usd: 99, enabled: true, aliases: ["15x"], window_hours: paidWindowHours, mult: 20, slow_mode: false, auto_oss: true },
   ];
 }
 

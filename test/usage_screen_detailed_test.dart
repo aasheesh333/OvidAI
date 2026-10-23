@@ -56,7 +56,7 @@ Map<String, dynamic> _usage() => {
   ],
   'plans': [
     {'tier': 'free', 'id': 'free', 'name': 'Free', 'price_usd': 0, 'mult': 1},
-    {'tier': '7x', 'id': 'pro', 'name': 'Pro', 'price_usd': 25, 'mult': 23},
+    {'tier': '7x', 'id': 'pro', 'name': 'Pro', 'price_usd': 25, 'mult': 5},
   ],
 };
 
@@ -182,7 +182,7 @@ void main() {
   ) async {
     await pump(tester, historyStore());
     expect(find.text('Pro plan'), findsOneWidget);
-    expect(find.text('×23'), findsOneWidget, reason: 'not the raw "7X" tier');
+    expect(find.text('×5'), findsOneWidget, reason: 'not the raw "7X" tier');
     expect(find.text('62% remaining'), findsOneWidget);
     final reset = tester.widget<Text>(find.byKey(const ValueKey('usage-reset')));
     expect(reset.data, startsWith('Resets in 5 h'));

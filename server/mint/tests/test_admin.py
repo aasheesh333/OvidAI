@@ -66,10 +66,10 @@ def test_custom_free_limit_and_clear(client):
     r = c.post("/admin/user/update", headers=ADMIN, json={"uid": "u", "tier": "starter", "daily_usd": 2})
     assert r.status_code == 200, r.text
     assert r.json()["user"]["tier"] == "3x"
-    assert all(fake.keys[t]["max_budget"] == pytest.approx(6) for t in toks.values())
+    assert all(fake.keys[t]["max_budget"] == pytest.approx(3) for t in toks.values())
     r = c.post("/admin/user/update", headers=ADMIN, json={"uid": "u", "clear_daily_usd": True})
     assert r.json()["user"]["daily_usd_override"] is None
-    assert fake.keys[toks["web"]]["max_budget"] == pytest.approx(0.45)
+    assert fake.keys[toks["web"]]["max_budget"] == pytest.approx(0.225)
 
 
 def test_custom_plan_override_and_clear(client):
@@ -84,7 +84,7 @@ def test_custom_plan_override_and_clear(client):
     assert u["pools_usd"]["all"] == pytest.approx(6.0)
     c.post("/admin/user/update", headers=ADMIN, json={"uid": "u", "clear_pools": True})
     assert mint.user_pool_override("u") is None
-    assert fake.keys[toks["android"]]["max_budget"] == pytest.approx(0.15 * 23)
+    assert fake.keys[toks["android"]]["max_budget"] == pytest.approx(0.15 * 5)
 
 
 @pytest.mark.parametrize("body", [
@@ -202,7 +202,7 @@ def test_lookup_by_email_shows_allowance_and_app_view(client):
     u = c.get("/admin/user", params={"q": "U@Example.com"}, headers=ADMIN).json()
     assert u["uid"] == "u" and u["plan"]["id"] == "pro" and u["tier"] == "7x"
     assert u["pool_state_usd"]["all"]["spent"] == pytest.approx(0.3)
-    assert u["pool_state_usd"]["all"]["remaining"] == pytest.approx(0.15 * 23 - 0.3)
+    assert u["pool_state_usd"]["all"]["remaining"] == pytest.approx(0.15 * 5 - 0.3)
     assert u["today"]["by_model"]["deepseek-v4.1-flash"]["via_auto"] == 1
     assert [p["class"] for p in u["app_view"]["pools"]] == ["all"]
     assert set(u["app_view"]) == set(app_body)

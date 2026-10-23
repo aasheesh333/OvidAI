@@ -114,9 +114,9 @@ void main() {
     expect(find.text('Auto only'), findsNWidgets(2));
     expect(find.text('Auto + manual'), findsNWidgets(2));
     expect(find.text('1×'), findsOneWidget);
-    expect(find.text('3×'), findsOneWidget);
-    expect(find.text('23×'), findsOneWidget);
-    expect(find.text('43×'), findsOneWidget);
+    expect(find.text('1.5×'), findsOneWidget);
+    expect(find.text('5×'), findsOneWidget);
+    expect(find.text('20×'), findsOneWidget);
 
     expect(find.text('None'), findsOneWidget);
     expect(find.text('5'), findsOneWidget);

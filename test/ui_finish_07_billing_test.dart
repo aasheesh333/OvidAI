@@ -122,11 +122,11 @@ void main() {
         expect(find.text('37% remaining'), findsOneWidget);
         expect(tester.takeException(), isNull);
         for (final entry in [
-          // The server seed table (SH-006): Go ×3, Plus ×23, Pro ×43.
+          // The server seed table (SH-006): Go ×1.5, Plus ×5, Pro ×20.
           ('free', 'Free', '×1'),
-          ('3x', 'Go', '×3'),
-          ('7x', 'Plus', '×23'),
-          ('15x', 'Pro', '×43'),
+          ('3x', 'Go', '×1.5'),
+          ('7x', 'Plus', '×5'),
+          ('15x', 'Pro', '×20'),
         ]) {
           final card = find.byKey(ValueKey('plan-${entry.$1}'));
           await _reveal(tester, card);

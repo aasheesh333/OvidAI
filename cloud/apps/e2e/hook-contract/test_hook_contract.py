@@ -73,10 +73,10 @@ PLANS = [
     {"id": "free", "name": "Free", "price_usd": 0, "enabled": True, "aliases": [],
      "window_hours": WINDOW_HOURS, "mult": 1, "slow_mode": False, "auto_oss": False},
     {"id": "starter", "name": "Starter", "price_usd": 5, "enabled": True,
-     "aliases": ["3x"], "window_hours": WINDOW_HOURS, "mult": 3,
+     "aliases": ["3x"], "window_hours": WINDOW_HOURS, "mult": 1.5,
      "slow_mode": True, "auto_oss": False},
     {"id": "pro", "name": "Pro", "price_usd": 25, "enabled": True,
-     "aliases": ["7x"], "window_hours": WINDOW_HOURS, "mult": 23,
+     "aliases": ["7x"], "window_hours": WINDOW_HOURS, "mult": 5,
      "slow_mode": False, "auto_oss": True},
 ]
 

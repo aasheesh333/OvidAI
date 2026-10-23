@@ -209,10 +209,10 @@ void main() {
     });
     expect(usage.remainingFraction, 0.23);
     expect(usage.budgetWindow, 'server-defined');
-    // Offline fallback = the server seed table (SH-006): x3 / x23 / x43.
-    expect(usage.multiplier, 43);
-    expect(ovidPlanMultiplier('3x'), 3);
-    expect(ovidPlanMultiplier('7x'), 23);
+    // Offline fallback = the server seed table (SH-006): x1.5 / x5 / x20.
+    expect(usage.multiplier, 20);
+    expect(ovidPlanMultiplier('3x'), 1.5);
+    expect(ovidPlanMultiplier('7x'), 5);
   });
 
   test('model usage preserves independent server fractions and unknowns', () {

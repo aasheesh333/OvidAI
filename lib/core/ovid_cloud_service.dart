@@ -1270,15 +1270,15 @@ class _CloudRequestScope {
 ///
 /// OFFLINE FALLBACK ONLY, keyed by the stored tier the server reports in
 /// `/usage.tier` (the plan's first alias). It mirrors the server's seed plan
-/// table (cloud/apps/mint/src/planMath.ts `seedPlans`: Starter ×3, Pro ×23,
-/// Max ×43); the live table — owner-editable in /admin — always wins via
+/// table (cloud/apps/mint/src/planMath.ts `seedPlans`: Go ×1.5, Plus ×5,
+/// Pro ×20); the live table — owner-editable in /admin — always wins via
 /// [OvidPlanCatalog] (SH-006). The client never shows a dollar value of
 /// usage, only plan prices (subscription metadata) and remaining fractions.
-const Map<String, int> ovidPlanMultipliers = {
+const Map<String, num> ovidPlanMultipliers = {
   'free': 1,
-  '3x': 3,
-  '7x': 23,
-  '15x': 43,
+  '3x': 1.5,
+  '7x': 5,
+  '15x': 20,
 };
 
 /// Multiplier for [tier] over the Free base limit: the live server table
@@ -1309,7 +1309,7 @@ String ovidPlanName(String tier) {
   return Distribution.billingDemo ? '$name (demo)' : name;
 }
 
-/// `×23` — integer multipliers without decimals.
+/// `×5` — whole multipliers bare, fractional ones with their decimal.
 String ovidMultiplierLabel(num mult) =>
     '×${mult == mult.roundToDouble() ? mult.toInt() : mult}';
 
@@ -1399,9 +1399,9 @@ class OvidPlanCatalog {
 
   static const fallback = <OvidPlan>[
     OvidPlan(tier: 'free', id: 'free', name: 'Free', priceUsd: 0, mult: 1),
-    OvidPlan(tier: '3x', id: 'starter', name: 'Go', priceUsd: 5, mult: 3),
-    OvidPlan(tier: '7x', id: 'pro', name: 'Plus', priceUsd: 18, mult: 23),
-    OvidPlan(tier: '15x', id: 'max', name: 'Pro', priceUsd: 99, mult: 43),
+    OvidPlan(tier: '3x', id: 'starter', name: 'Go', priceUsd: 5, mult: 1.5),
+    OvidPlan(tier: '7x', id: 'pro', name: 'Plus', priceUsd: 18, mult: 5),
+    OvidPlan(tier: '15x', id: 'max', name: 'Pro', priceUsd: 99, mult: 20),
   ];
 
   static List<OvidPlan>? _server;

@@ -15,9 +15,9 @@ describe("planCards", () => {
     const cards = planCards(seedPlans(), DEFAULT_PRODUCTS);
     expect(cards.map((c) => [c.tier, c.id, c.name, c.price_usd, c.mult, c.window])).toEqual([
       ["free", "free", "Free", 0, 1, "24h"],
-      ["3x", "starter", "Go", 5, 3, "24h"],
-      ["7x", "pro", "Plus", 18, 23, "24h"],
-      ["15x", "max", "Pro", 99, 43, "24h"],
+      ["3x", "starter", "Go", 5, 1.5, "24h"],
+      ["7x", "pro", "Plus", 18, 5, "24h"],
+      ["15x", "max", "Pro", 99, 20, "24h"],
     ]);
     expect(cards.map((c) => c.product_id)).toEqual([
       null,
@@ -26,7 +26,7 @@ describe("planCards", () => {
       "ovid_max_monthly",
     ]);
     const pro = cards[2]!;
-    expect(pro.features).toContain("About 23x the Free allowance");
+    expect(pro.features).toContain("About 5x the Free allowance");
     expect(pro.features).toContain("Allowance resets every 24h");
     expect(pro.features).toContain("All Ovid Cloud chat models");
     expect(pro.features).toContain("Image generation from the same allowance");
@@ -65,7 +65,7 @@ describe("planCards", () => {
     const [free, starter, pro] = seedPlans();
     expect(planFeatures(free!, 1)[0]).toBe("The standard Free allowance");
     expect(planFeatures(starter!, 1)).toEqual([
-      "About 3x the Free allowance",
+      "About 1.5x the Free allowance",
       "Allowance resets every 24h",
       "All Ovid Cloud chat models",
       "Image generation from the same allowance",
