@@ -397,6 +397,39 @@ export const artifactVault = {
   },
 
   /**
+   * The account's storage ledger, in bytes — the same two sources the
+   * inventory lists, with the same ownership join and the same
+   * `kind='artifact' AND status='active'` filter (a soft-deleted artifact has
+   * freed its space). One row per account, never per session: this is the
+   * number the storage bar divides by the plan quota.
+   *
+   * It deliberately counts only the files the account OWNS (uploads and
+   * generated artifacts). Workspace archives and their manifest sidecars are
+   * internal R2 copies of a chat's working tree, not entries in the library,
+   * so counting them would make the bar disagree with the list beside it.
+   */
+  async usage(db: Db, userId: string): Promise<{ usedBytes: number }> {
+    const rows = (await db.$client`
+      SELECT (
+        (SELECT coalesce(sum(a.size), 0)
+           FROM attachments a
+           JOIN sessions s ON s.id = a.session_id AND s.user_id = a.user_id
+          WHERE a.user_id = ${userId})
+        +
+        (SELECT coalesce(sum(w.bytes), 0)
+           FROM workspace_objects w
+           JOIN sessions s ON s.id = w.session_id AND s.user_id = w.user_id
+          WHERE w.user_id = ${userId}
+            AND w.kind = 'artifact'
+            AND w.status = 'active')
+      ) AS used_bytes
+    `) as Array<{ used_bytes: number | string | null }>;
+    // postgres.js returns sum() of bigint/numeric as a string.
+    const used = Number(rows[0]?.used_bytes ?? 0);
+    return { usedBytes: Number.isFinite(used) && used > 0 ? Math.trunc(used) : 0 };
+  },
+
+  /**
    * Remove one artifact from the account.
    *
    * Returns the row that was removed (so the caller can delete its bytes and
