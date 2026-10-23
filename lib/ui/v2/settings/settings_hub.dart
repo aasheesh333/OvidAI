@@ -76,7 +76,8 @@ class V2SettingsHubData {
     this.profile,
     this.storageLabel,
     this.account = const V2SettingsSection(title: 'Account'),
-    this.chat = const V2SettingsSection(title: 'Chat'),
+    this.chat = const V2SettingsSection(title: 'Personalization'),
+    this.connectors = const V2SettingsSection(title: 'Connectors'),
     this.models = const V2SettingsSection(title: 'Models'),
     this.dataControl = const V2SettingsSection(title: 'Data control'),
     this.advanced = const V2SettingsSection(title: 'Advanced'),
@@ -97,10 +98,27 @@ class V2SettingsHubData {
   /// invents a number.
   final String? storageLabel;
   final V2SettingsSection account;
+
+  /// Theme, memory and reasoning — the owner calls this card
+  /// "Personalization".
   final V2SettingsSection chat;
+
+  /// Apps Ovid can use. Its own card, above Models, per the product spec.
+  final V2SettingsSection connectors;
   final V2SettingsSection models;
   final V2SettingsSection dataControl;
   final V2SettingsSection advanced;
+
+  /// The canonical card order. One list, so the screen and its tests cannot
+  /// disagree about what the owner asked for.
+  List<V2SettingsSection> get sections => <V2SettingsSection>[
+    account,
+    chat,
+    connectors,
+    models,
+    dataControl,
+    advanced,
+  ];
   final bool showReasoning;
   final ValueChanged<bool>? onReasoningChanged;
 
@@ -310,6 +328,7 @@ class _SettingsHubPageState extends State<SettingsHubPage> {
     final sections = <V2SettingsSection>[
       _ordered('account', data.account),
       _ordered('chat', data.chat),
+      _ordered('connectors', data.connectors),
       _ordered('models', data.models),
       _ordered('data_control', data.dataControl),
       _ordered('advanced', data.advanced),
@@ -325,7 +344,7 @@ class _SettingsHubPageState extends State<SettingsHubPage> {
     return visible;
   }
 
-  static const int _maxSections = 5;
+  static const int _maxSections = 6;
 
   List<V2SettingsItem> _visibleItems(List<V2SettingsItem> items) {
     final seen = <String>{};

@@ -227,6 +227,8 @@ void _tallSize(WidgetTester tester, {double width = 390}) {
 }
 
 void main() {
+  _cardOrderContract();
+
   testWidgets('one header, profile row and five sections in light', (
     tester,
   ) async {
@@ -1072,4 +1074,31 @@ void main() {
       });
     }
   }
+}
+
+// The owner's card order: Account -> Personalization -> Connectors -> Models
+// -> Data control -> Advanced. Models must sit ABOVE Data control, and
+// Connectors gets its own card instead of hiding inside Models.
+void _cardOrderContract() {
+  test('the hub data exposes the spec card order', () {
+    final data = V2SettingsHubData(
+      account: const V2SettingsSection(title: 'Account'),
+      chat: const V2SettingsSection(title: 'Personalization'),
+      connectors: const V2SettingsSection(title: 'Connectors'),
+      models: const V2SettingsSection(title: 'Models'),
+      dataControl: const V2SettingsSection(title: 'Data control'),
+      advanced: const V2SettingsSection(title: 'Advanced'),
+    );
+    expect(
+      data.sections.map((s) => s.title).toList(),
+      [
+        'Account',
+        'Personalization',
+        'Connectors',
+        'Models',
+        'Data control',
+        'Advanced',
+      ],
+    );
+  });
 }

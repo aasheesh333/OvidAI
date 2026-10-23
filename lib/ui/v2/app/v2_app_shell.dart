@@ -1798,7 +1798,7 @@ class _V2AppShellState extends State<V2AppShell> {
               ],
             ),
             chat: V2SettingsSection(
-              title: 'Chat',
+              title: 'Personalization',
               items: [
                 _settingsRow(
                   'appearance',
@@ -1826,15 +1826,21 @@ class _V2AppShellState extends State<V2AppShell> {
                 ),
               ],
             ),
-            models: V2SettingsSection(
-              title: 'Models',
+            // The owner wants Connectors as its own card, above Models.
+            connectors: V2SettingsSection(
+              title: 'Connectors',
               items: [
                 _settingsRow(
                   'connectors',
                   'Connectors',
                   Icons.extension_rounded,
-                  'Apps Ovid can use',
+                  'Apps and MCP servers Ovid can use',
                 ),
+              ],
+            ),
+            models: V2SettingsSection(
+              title: 'Models',
+              items: [
                 _settingsRow(
                   'presets',
                   'Agent presets',

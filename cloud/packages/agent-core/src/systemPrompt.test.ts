@@ -353,3 +353,29 @@ describe("studio awareness", () => {
     expect(parts.stable).toContain("/studio");
   });
 });
+
+describe("product awareness", () => {
+  it("names the app's own surfaces so the agent can point the user at them", () => {
+    const parts = buildSystemPrompt({
+      mode: "auto",
+      planMode: false,
+      isSubagent: false,
+      persona: "",
+      workspaceFolder: "/workspace",
+      workspaceTreeSummary: "",
+      skillsCatalog: [],
+      memoryContext: "",
+      todos: [],
+      goal: null,
+    });
+    for (const surface of [
+      "Studio",
+      "Browser",
+      "Artifacts",
+      "Schedules",
+      "Share",
+    ]) {
+      expect(parts.stable).toContain(surface);
+    }
+  });
+});
