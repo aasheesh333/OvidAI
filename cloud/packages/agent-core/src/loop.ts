@@ -63,6 +63,10 @@ import {
 } from "./roster.js";
 import { resolveRoute, type ResolvedRoute } from "./routing.js";
 import { drainQueuedRuns } from "./steering.js";
+import {
+  formatSubagentReports,
+  takePendingSubagentReports,
+} from "./subagents.js";
 import { buildSystemPrompt } from "./systemPrompt.js";
 import { spillToolOutput, toolOutputCapFor, withToolTimeout } from "./tools/spill.js";
 import { TerminalModelError, TransientModelError } from "./transport/errors.js";
@@ -988,6 +992,20 @@ export async function runAgentLoop(
       // system mark here — the cache-stable prefix (Task 3/7 invariant).
       const volatileRows: AgentMessage[] =
         volatile.trim() !== "" ? [{ role: "system", content: volatile, volatile: true }] : [];
+
+      // ── finished subagents ─────────────────────────────────────────────
+      // A detached child leaves its outcome in this session's state, never in
+      // the tool result. Fold it in here, once: the parent reads it on the
+      // request after the child settles, whether that is the next step of this
+      // run or the first step of a later one.
+      const childReports = await takePendingSubagentReports(deps.state, sessionId);
+      if (childReports.length > 0) {
+        volatileRows.push({
+          role: "system",
+          content: formatSubagentReports(childReports),
+          volatile: true,
+        });
+      }
 
       // ── 4. pre_request hook notes (leading system rows; observe-only) ──
       // Dart inserts each note at index 0, so the LAST systemMessage ends up

@@ -1,7 +1,7 @@
 import { pathToFileURL } from "node:url";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { Redis } from "ioredis";
-import { createDb, dbPoolOptionsFromEnv, byokKeysRepo, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, imagesRepo, mcpOauthFlows, runs as runsRepo, sharesRepo, users, workspaceObjects as workspaceObjectsRepo } from "@ovid/db";
+import { createDb, dbPoolOptionsFromEnv, byokKeysRepo, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, imagesRepo, mcpOauthFlows, messages as messagesRepo, runs as runsRepo, sharesRepo, users, workspaceObjects as workspaceObjectsRepo } from "@ovid/db";
 import {
   createCloudCleanup,
   createFirebaseAdmin,
@@ -18,6 +18,7 @@ import {
   loadBrowserEngineConfig,
 } from "@ovid/browser";
 import {
+  AGENT_RUN_JOB_NAME,
   createAgentRunsWorker,
   createHibernateWorker,
   createHydrateWorker,
@@ -891,6 +892,29 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     // pay for it.
     notifier,
     modelCatalog: modelCatalogReader,
+    /**
+     * A detached subagent finished after its parent's turn ended. The parent
+     * must still learn about it, so give it a turn: the report goes in as a
+     * `system` row (agent context, never a chat bubble), and the run's prompt
+     * is the same text. The loop only rewrites a TRAILING USER row, so a system
+     * row is left exactly as written and the model reads it as context.
+     */
+    wakeParent: async ({ sessionId, userId, text }) => {
+      const row = await messagesRepo.append(db, {
+        sessionId,
+        role: "system",
+        content: text,
+      });
+      const run = await runsRepo.create(db, {
+        sessionId,
+        promptMessageId: row.id,
+      });
+      await queues.agentRuns.add(
+        AGENT_RUN_JOB_NAME,
+        { runId: run.id, sessionId, userId, prompt: text },
+        { jobId: run.id },
+      );
+    },
     // W8: generate_image / edit_image (host-side; signed internal routes).
     images: imageTooling,
     // Wave 5 (R2): ONE browser per user, shared across sessions — the leases

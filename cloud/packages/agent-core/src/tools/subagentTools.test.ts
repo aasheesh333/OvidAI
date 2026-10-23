@@ -150,7 +150,7 @@ describe("createSubagentTools — registration", () => {
 });
 
 describe("dispatch_agent", () => {
-  it("returns the child's bare report text (no [id state · Ns] wrapper)", async () => {
+  it("returns a started line, never the child's report", async () => {
     const { tools: list, dispatched } = tools({
       dispatch: async () => handle({ result: "RFC 4180 quoting required" }),
     });
@@ -163,7 +163,11 @@ describe("dispatch_agent", () => {
       },
       ctx(),
     );
-    expect(result).toEqual({ content: "RFC 4180 quoting required" });
+    // Non-blocking contract: the tool cannot know the answer yet, so it must
+    // not pretend to. The report arrives later as a system note.
+    expect(result.content).toContain("child-1");
+    expect(result.content).toContain("started");
+    expect(result.content).not.toContain("RFC 4180 quoting required");
     expect(dispatched[0]).toEqual({
       prompt: "audit the CSV parser",
       tools: ["Read"],
@@ -172,12 +176,13 @@ describe("dispatch_agent", () => {
     });
   });
 
-  it("empty final text becomes the Dart 'finished without a final answer' line", async () => {
+  it("a child with no answer yet still reads as started, not finished", async () => {
     const { tools: list } = tools({
       dispatch: async () => handle({ result: null }),
     });
     const result = await byName(list, "dispatch_agent").execute({ prompt: "x" }, ctx());
-    expect(result.content).toBe("Subagent child-1 finished without a final answer.");
+    expect(result.content).toContain("started");
+    expect(result.content).not.toContain("finished without a final answer");
   });
 
   it("renders a supervisor refusal as a tool error, never a throw", async () => {

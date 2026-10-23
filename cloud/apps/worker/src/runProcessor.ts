@@ -317,6 +317,16 @@ export interface FullRunDeps {
   approvalTimeoutMs?: number;
   /** C1 cap (env OVID_RUN_QUEUE_WAIT_MS); default 10 min. */
   runQueueWaitMs?: number;
+  /**
+   * Start a turn on a parent session whose subagents finished after its run
+   * ended. Wired by main.ts (it owns the queue). Absent → the report waits for
+   * the parent's next user turn.
+   */
+  wakeParent?: (o: {
+    sessionId: string;
+    userId: string;
+    text: string;
+  }) => Promise<void>;
   sleep?: (ms: number) => Promise<void>;
   /**
    * P10 Task 2: per-chunk SSE idle deadline (ms) for BOTH provider
@@ -2036,6 +2046,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       memoryEnabled,
       githubConnected,
       presets: presetFor,
+      ...(deps.wakeParent !== undefined ? { wakeParent: deps.wakeParent } : {}),
     });
     const subagentTools = createSubagentTools({
       supervisor: subagentSupervisor,

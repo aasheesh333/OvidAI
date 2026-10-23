@@ -80,8 +80,12 @@ export function createSubagentTools(deps: {
       description:
         "Delegate a focused task to a child agent that runs in-process with " +
         "its own transcript and tools. It cannot see this chat's history: " +
-        "include all needed context. The call waits for the child to finish " +
-        "and returns its final report.",
+        "include all needed context. " +
+        "This returns IMMEDIATELY with the child's session id — it does NOT " +
+        "wait. Dispatch several in one turn to run them in parallel (up to 50 " +
+        "at once). Each child's outcome arrives later as a system note in " +
+        "this conversation; keep working, and read that note before " +
+        "summarising work you delegated.",
       parameters: {
         type: "object",
         properties: {
@@ -127,12 +131,15 @@ export function createSubagentTools(deps: {
           ...(disallowedTools !== undefined ? { disallowedTools } : {}),
           ...(agentType !== "" ? { agentType } : {}),
         });
-        const text = handle.result();
+        // Non-blocking by contract: the child is running and will report. The
+        // parent must not be told it has an answer yet — a summary written
+        // here would describe work that has not happened.
         return {
           content:
-            text !== null && text.trim() !== ""
-              ? text
-              : `Subagent ${handle.sessionId} finished without a final answer.`,
+            `Subagent ${handle.sessionId} started (${handle.agentType}). ` +
+            "It runs in the background and will report when it finishes. " +
+            "Dispatch more now if the work can be parallel, or continue with " +
+            "your own tools.",
         };
       } catch (err) {
         return {

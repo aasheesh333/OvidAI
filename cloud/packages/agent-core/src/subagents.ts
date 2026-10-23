@@ -30,7 +30,13 @@ import { messages, runs, sessionState, sessions, type Db } from "@ovid/db";
 
 import { nativeToolsFor } from "./claudeCodeTools.js";
 import type { AgentEngine } from "./engine.js";
-import type { EventSink, HookEngine, HookStopResult, SessionStateStore } from "./ports.js";
+import type {
+  EventSink,
+  HookEngine,
+  HookStopResult,
+  SessionAgentState,
+  SessionStateStore,
+} from "./ports.js";
 import { presetById, type AgentPreset } from "./presets.js";
 import { canonicalTools } from "./promptCache.js";
 import { CHILD_DENIED_TOOLS, computeToolRoster } from "./roster.js";
@@ -51,6 +57,146 @@ export const MAX_CONCURRENT_SUBAGENTS = 50;
 /** The JSONB key holding the durable parent link on a child's agent state. */
 export const SUBAGENT_PARENT_KEY = "subagentParentSessionId";
 
+/**
+ * The JSONB key holding outcomes the parent has not read yet.
+ *
+ * A detached child cannot return anything to the tool call that started it, so
+ * it leaves its outcome here; the parent's loop reads and clears the list at
+ * its next request and folds it into the volatile system block. Keeping it in
+ * state rather than in `messages` is deliberate: a subagent report is agent
+ * context, not a turn in the conversation, so it must never render as a chat
+ * bubble.
+ */
+export const PENDING_SUBAGENT_REPORTS_KEY = "pendingSubagentReports";
+
+/** How many unread reports a parent keeps before the oldest are dropped. */
+export const MAX_PENDING_SUBAGENT_REPORTS = 20;
+
+/** One child's outcome, as the parent will read it. */
+export interface SubagentReport {
+  childSessionId: string;
+  childRunId: string;
+  agentType: string;
+  status: Exclude<ChildStatus, "running">;
+  /** The child's final text, clipped to a bounded summary. */
+  summary: string;
+  /** The dispatch prompt, clipped — the parent's only reminder of the task. */
+  task: string;
+  at: number;
+}
+
+/**
+ * The parent-facing summary, bounded by outcome.
+ *
+ * A child that finished is summarised in ~300 tokens: the parent needs to know
+ * what was done, not how. A child that FAILED, was CANCELLED or hit an error
+ * gets ~1,000 tokens instead, because the parent's next decision depends on
+ * what went wrong — retry it, do it itself, or tell the user. The failure text
+ * carries the run's own error plus whatever partial answer the child reached.
+ *
+ * A raw execution log never reaches the parent at either budget: the full log
+ * stays in the child's workspace (`/workspace/.ovid/logs/subagent_{id}.log`)
+ * and the parent can read it deliberately.
+ */
+export const REPORT_SUMMARY_LIMIT = 1200;
+export const REPORT_FAILURE_LIMIT = 4000;
+
+/**
+ * Read and clear the parent's unread child reports.
+ *
+ * Clearing on read is what stops the same report being folded into every
+ * later request. The window between the clear and the model call is a few
+ * milliseconds; a run that dies inside it loses the note, and the child's work
+ * is still in the trajectory — the alternative (never clearing) would repeat
+ * fifty reports on every turn forever.
+ */
+export async function takePendingSubagentReports(
+  state: SessionStateStore,
+  sessionId: string,
+): Promise<SubagentReport[]> {
+  const raw = (await state.get(sessionId)) as unknown as Record<string, unknown>;
+  const list = raw[PENDING_SUBAGENT_REPORTS_KEY];
+  if (!Array.isArray(list) || list.length === 0) return [];
+  const reports = (list as SubagentReport[]).filter(
+    (r) => typeof r?.childSessionId === "string" && typeof r?.summary === "string",
+  );
+  await state.patch(sessionId, {
+    [PENDING_SUBAGENT_REPORTS_KEY]: [],
+  } as unknown as Partial<SessionAgentState>);
+  return reports;
+}
+
+/**
+ * The system block a parent reads before its next request.
+ *
+ * Written for a model, not a log: one line per child, the task it was given,
+ * its status and its bounded summary. An empty summary is stated as such
+ * rather than left blank, so "it finished and said nothing" is distinguishable
+ * from "it is still running".
+ */
+export function formatSubagentReports(reports: readonly SubagentReport[]): string {
+  const lines = reports.map((report) => {
+    const task = report.task.replace(/\s+/g, " ").trim();
+    const summary = report.summary.trim();
+    return (
+      `- ${report.childSessionId} (${report.agentType}) ${report.status}: ` +
+      `${summary === "" ? "finished without a final answer" : summary}` +
+      (task === "" ? "" : `\n  task: ${task}`)
+    );
+  });
+  return (
+    "Background subagents you dispatched have finished. Their results are " +
+    "below.\n" +
+    "Use them to answer the user. Do NOT dispatch these tasks again — the " +
+    "work is already done; repeating it wastes the user's allowance.\n" +
+    lines.join("\n")
+  );
+}
+
+export function clipReport(
+  text: string | null,
+  limit: number = REPORT_SUMMARY_LIMIT,
+): string {
+  if (text === null) return "";
+  const flat = text.trim();
+  if (flat.length <= limit) return flat;
+  return `${flat.slice(0, limit)}…`;
+}
+
+/** A child that did not simply finish earns the larger budget. */
+export function isFailureStatus(status: Exclude<ChildStatus, "running">): boolean {
+  return status === "failed" || status === "cancelled";
+}
+
+/**
+ * The summary for one settled child.
+ *
+ * Success: the final answer, at the 300-token budget.
+ *
+ * Failure/cancel: a short header (status + the run's own error), then the
+ * child's last text at the 1,000-token budget. The error goes FIRST because a
+ * long partial answer would otherwise push it out of the window — and the
+ * error is the part the parent must not miss.
+ */
+export function buildChildSummary(o: {
+  status: Exclude<ChildStatus, "running">;
+  answer: string | null;
+  error: string | null;
+}): string {
+  if (!isFailureStatus(o.status)) return clipReport(o.answer);
+
+  const head =
+    o.status === "cancelled"
+      ? "Stopped before finishing."
+      : o.error !== null && o.error.trim() !== ""
+        ? `Failed: ${o.error.trim()}`
+        : "Failed without an error message.";
+  const answer = clipReport(o.answer, REPORT_FAILURE_LIMIT);
+  return answer === ""
+    ? head
+    : `${head}\n\nLast output before it ended:\n${answer}`;
+}
+
 export type ChildStatus = "running" | "completed" | "failed" | "cancelled";
 
 export interface ChildHandle {
@@ -70,6 +216,15 @@ export interface ChildHandle {
   status(): ChildStatus;
   /** Final report text: the `report` tool when used, else the last answer. */
   result(): string | null;
+  /**
+   * Resolves when the child reaches a terminal status.
+   *
+   * `dispatch` returns while the child is still RUNNING, so this is the only
+   * way to know it is done. The parent agent does not await it — it learns the
+   * outcome from `subagent_completed` and the pending-report queue — but tests
+   * and callers that genuinely need the end state can.
+   */
+  readonly settled: Promise<ChildStatus>;
 }
 
 export interface DispatchArgs {
@@ -198,6 +353,15 @@ export interface SubagentStore {
   createRun(o: { sessionId: string; promptMessageId: string }): Promise<{ runId: string }>;
   claimRun(runId: string): Promise<boolean>;
   runStatus(runId: string, userId: string): Promise<RunStatus | null>;
+  /**
+   * The run's own failure text (`runs.last_error`), or null.
+   *
+   * This is the "why" a parent needs when a child fails — without it the
+   * failure report can only say that it failed.
+   */
+  runError(runId: string, userId: string): Promise<string | null>;
+  /** True when the session has a queued or running run right now. */
+  hasActiveRun(sessionId: string): Promise<boolean>;
   queuedRuns(
     sessionId: string,
   ): Promise<Array<{ runId: string; promptMessageId: string | null }>>;
@@ -206,6 +370,8 @@ export interface SubagentStore {
   /** Root → session chain, INCLUSIVE (Dart `lineageOf`), bounded 8 in cloud. */
   lineage(sessionId: string): Promise<string[]>;
   listChildren(parentSessionId: string, userId: string): Promise<string[]>;
+  /** Leave a settled child's outcome for the parent's next request. */
+  reportToParent(parentSessionId: string, report: SubagentReport): Promise<void>;
 }
 
 /**
@@ -254,6 +420,14 @@ export function createDbSubagentStore(db: Db): SubagentStore {
       const row = await runs.get(db, runId, userId);
       return row === null ? null : (row.status as RunStatus);
     },
+    async runError(runId, userId) {
+      const row = await runs.get(db, runId, userId);
+      const error = row?.lastError;
+      return typeof error === "string" && error.trim() !== "" ? error : null;
+    },
+    async hasActiveRun(sessionId) {
+      return (await runs.activeForSession(db, sessionId)) !== null;
+    },
     async queuedRuns(sessionId) {
       const rows = await runs.listQueuedForSession(db, sessionId);
       return rows.map((r) => ({ runId: r.id, promptMessageId: r.promptMessageId }));
@@ -280,6 +454,21 @@ export function createDbSubagentStore(db: Db): SubagentStore {
         current = parent;
       }
       return chain;
+    },
+    async reportToParent(parentSessionId, report) {
+      const state = (await sessionState.get(db, parentSessionId)) as unknown as Record<
+        string,
+        unknown
+      >;
+      const existing = Array.isArray(state[PENDING_SUBAGENT_REPORTS_KEY])
+        ? (state[PENDING_SUBAGENT_REPORTS_KEY] as SubagentReport[])
+        : [];
+      // Oldest dropped first: a parent that never reads its reports must not
+      // grow its state row without bound.
+      const next = [...existing, report].slice(-MAX_PENDING_SUBAGENT_REPORTS);
+      await sessionState.patch(db, parentSessionId, {
+        [PENDING_SUBAGENT_REPORTS_KEY]: next,
+      } as unknown as Parameters<typeof sessionState.patch>[2]);
     },
     async listChildren(parentSessionId, userId) {
       // Only used by a cold-resume caller; the live registry is in-memory.
@@ -311,6 +500,23 @@ export interface SubagentSupervisorDeps {
   /** Wave 4 (SE-007): built-ins + the user's custom presets (absent = built-ins). */
   presets?: (id: string | null) => AgentPreset | null;
   now?: () => number;
+  /**
+   * Give a parent whose run already ended a new turn to read its reports.
+   *
+   * With 85 % of the work delegated, "the parent finishes before its children"
+   * is the NORMAL case, not an edge one: it dispatches, runs out of things to
+   * do, and ends its turn. Without this the child's report would sit unread
+   * until the user happened to send another message.
+   *
+   * Absent → reports wait for the parent's next run (the previous behaviour).
+   * The implementation must not start a run when the parent already has one:
+   * that run will read the report itself at its next request.
+   */
+  wakeParent?: (o: {
+    sessionId: string;
+    userId: string;
+    text: string;
+  }) => Promise<void>;
 }
 
 class MutableChildHandle implements ChildHandle {
@@ -329,6 +535,10 @@ class MutableChildHandle implements ChildHandle {
   private interrupted = false;
   private readonly interruptFn: (reason: string) => Promise<boolean>;
   private readonly sendFn: (text: string) => Promise<void>;
+  private settleResolve: (status: ChildStatus) => void = () => {};
+  readonly settled: Promise<ChildStatus> = new Promise<ChildStatus>((resolve) => {
+    this.settleResolve = resolve;
+  });
 
   constructor(o: {
     sessionId: string;
@@ -373,6 +583,7 @@ class MutableChildHandle implements ChildHandle {
   // ── supervisor-internal ────────────────────────────────────────────────
   setStatus(status: ChildStatus): void {
     this.state = status;
+    if (status !== "running") this.settleResolve(status);
   }
 
   setReport(text: string): void {
@@ -429,6 +640,38 @@ const DEFAULT_STOP_REASON =
   "[system] Continue working on the task; do not repeat your last message verbatim.";
 
 export function createSubagentSupervisor(deps: SubagentSupervisorDeps): SubagentSupervisor {
+  /**
+   * One wake attempt at a time, per parent session.
+   *
+   * Children that finish together (three `sleep 20` tasks, say) settle within
+   * the same millisecond. Without this chain each of them would see "no active
+   * run", and each would start one — three wake runs for one batch of reports.
+   * Serialising makes the second attempt observe the run the first created and
+   * stand down.
+   */
+  const wakeChains = new Map<string, Promise<void>>();
+
+  async function wakeParentOnce(o: {
+    sessionId: string;
+    userId: string;
+    text: string;
+  }): Promise<void> {
+    const previous = wakeChains.get(o.sessionId) ?? Promise.resolve();
+    const next = previous
+      .then(async () => {
+        if (deps.wakeParent === undefined) return;
+        // Re-checked inside the chain: a sibling may have just started one.
+        if (await store.hasActiveRun(o.sessionId)) return;
+        await deps.wakeParent(o);
+      })
+      .catch(() => {
+        // A failed wake must not fail the child: the report is already durable
+        // in the parent's state and the parent's next run will read it.
+      });
+    wakeChains.set(o.sessionId, next);
+    await next;
+    if (wakeChains.get(o.sessionId) === next) wakeChains.delete(o.sessionId);
+  }
   const store = deps.store ?? createDbSubagentStore(deps.db);
   const now = deps.now ?? Date.now;
   const handles: MutableChildHandle[] = [];
@@ -592,99 +835,186 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
         agentType,
       });
 
-      // Parent cancel cascades (p2_subagent_races parity). The listener is
-      // removed when the child settles so a long-lived signal never leaks.
-      const onParentAbort = (): void => {
-        void deps.engine
-          .cancel(child.sessionId, "parent run cancelled")
-          .catch(() => {});
-      };
-      if (parent.signal.aborted) onParentAbort();
-      else parent.signal.addEventListener("abort", onParentAbort, { once: true });
+      // ── detached settle ────────────────────────────────────────────────
+      // `dispatch` returns NOW, with the child already running. The parent can
+      // issue its next dispatch immediately, which is the whole point: with an
+      // awaited dispatch a parent could never have two children alive, so the
+      // MAX_CONCURRENT_SUBAGENTS guard was unreachable decoration.
+      //
+      // The outcome reaches the parent through two channels, never through
+      // this tool call's return value:
+      //   • `subagent_completed` on the parent's sink (the live timeline), and
+      //   • a bounded report queued in the parent's agent state, which the
+      //     parent's loop folds into its next request.
+      // Both happen even if the parent's own run has already ended.
+      void (async (): Promise<void> => {
+        // Parent cancel cascades (p2_subagent_races parity). The listener is
+        // removed when the child settles so a long-lived signal never leaks.
+        const onParentAbort = (): void => {
+          void deps.engine
+            .cancel(child.sessionId, "parent run cancelled")
+            .catch(() => {});
+        };
+        if (parent.signal.aborted) onParentAbort();
+        else parent.signal.addEventListener("abort", onParentAbort, { once: true });
 
-      let runId = first.runId;
-      let currentPrompt = prompt;
-      let stopBlocks = 0;
-      let finalStatus: ChildStatus = "running";
+        let runId = first.runId;
+        let currentPrompt = prompt;
+        let stopBlocks = 0;
+        let finalStatus: ChildStatus = "running";
+        /** The run's own error, kept for the failure report. */
+        let runError: string | null = null;
 
-      try {
-        for (;;) {
-          if (parent.signal.aborted) {
-            finalStatus = "cancelled";
+        try {
+          for (;;) {
+            if (parent.signal.aborted) {
+              finalStatus = "cancelled";
+              break;
+            }
+            await deps.engine.run({
+              runId,
+              sessionId: child.sessionId,
+              userId: parent.userId,
+              prompt: currentPrompt,
+              mode: parent.mode,
+              isSubagent: true,
+              depth: depth + 1,
+              subagentBriefing: prompt,
+              roster,
+            });
+
+            const runStatus = await store.runStatus(runId, parent.userId);
+
+            // Read the child's latest answer on EVERY terminal path, including
+            // failure. A failed child has usually done part of the work, and
+            // that partial output is exactly what the parent needs to decide
+            // whether to retry, finish it itself, or tell the user. Reading it
+            // only on success threw it away.
+            const answer = await store.lastAssistantText(child.sessionId);
+            handle.setLastText(answer);
+
+            if (runStatus === "cancelled" || handle.isInterrupted()) {
+              finalStatus = "cancelled";
+              break;
+            }
+            if (runStatus === "failed") {
+              finalStatus = "failed";
+              // The reason the parent will read. A missing one is possible
+              // (older rows, an engine that terminalized without a message).
+              runError = await store.runError(runId, parent.userId).catch(() => null);
+              break;
+            }
+
+            // ── natural stop → [CC] SubagentStop gate (≤3 blocks) ─────────
+            const stop = await fireSubagentStop(
+              handle,
+              answer ?? "",
+              stopBlocks,
+            );
+            if (stop.veto && stopBlocks < MAX_SUBAGENT_STOP_BLOCKS) {
+              stopBlocks += 1;
+              currentPrompt =
+                stop.reason !== null && stop.reason.trim() !== ""
+                  ? stop.reason
+                  : DEFAULT_STOP_REASON;
+              const next = await startTurn(child.sessionId, currentPrompt);
+              runId = next.runId;
+              continue;
+            }
+
+            // ── follow-up that arrived AFTER the final drain ─────────────
+            const queued = await store.queuedRuns(child.sessionId);
+            const next = queued[0];
+            if (next !== undefined) {
+              await store.claimRun(next.runId);
+              currentPrompt =
+                next.promptMessageId !== null
+                  ? ((await store.promptText(next.promptMessageId)) ?? "")
+                  : "";
+              runId = next.runId;
+              continue;
+            }
+
+            finalStatus = "completed";
             break;
           }
-          await deps.engine.run({
-            runId,
-            sessionId: child.sessionId,
-            userId: parent.userId,
-            prompt: currentPrompt,
-            mode: parent.mode,
-            isSubagent: true,
-            depth: depth + 1,
-            subagentBriefing: prompt,
-            roster,
-          });
-
-          const runStatus = await store.runStatus(runId, parent.userId);
-          if (runStatus === "cancelled" || handle.isInterrupted()) {
-            finalStatus = "cancelled";
-            break;
-          }
-          if (runStatus === "failed") {
-            finalStatus = "failed";
-            break;
-          }
-
-          const answer = await store.lastAssistantText(child.sessionId);
-          handle.setLastText(answer);
-
-          // ── natural stop → [CC] SubagentStop gate (≤3 blocks) ─────────
-          const stop = await fireSubagentStop(
-            handle,
-            answer ?? "",
-            stopBlocks,
-          );
-          if (stop.veto && stopBlocks < MAX_SUBAGENT_STOP_BLOCKS) {
-            stopBlocks += 1;
-            currentPrompt =
-              stop.reason !== null && stop.reason.trim() !== ""
-                ? stop.reason
-                : DEFAULT_STOP_REASON;
-            const next = await startTurn(child.sessionId, currentPrompt);
-            runId = next.runId;
-            continue;
-          }
-
-          // ── follow-up that arrived AFTER the final drain ─────────────
-          const queued = await store.queuedRuns(child.sessionId);
-          const next = queued[0];
-          if (next !== undefined) {
-            await store.claimRun(next.runId);
-            currentPrompt =
-              next.promptMessageId !== null
-                ? ((await store.promptText(next.promptMessageId)) ?? "")
-                : "";
-            runId = next.runId;
-            continue;
-          }
-
-          finalStatus = "completed";
-          break;
+        } catch {
+          // Run-level failures are the engine's terminal states; an escape here
+          // is infrastructure — the child still settles as failed rather than
+          // leaving a handle stuck in "running" forever.
+          finalStatus = "failed";
+        } finally {
+          parent.signal.removeEventListener("abort", onParentAbort);
         }
-      } catch {
-        // Run-level failures are the engine's terminal states; an escape here
-        // is infrastructure — the handle still settles as failed rather than
-        // leaving the parent's dispatch hanging.
-        finalStatus = "failed";
-      } finally {
-        parent.signal.removeEventListener("abort", onParentAbort);
-        handle.setStatus(finalStatus);
-      }
 
-      await parentSink.emit("subagent_completed", {
-        childRunId: first.runId,
-        status: finalStatus,
-      });
+        // TypeScript proves the loop above cannot leave "running" behind, so
+        // the narrowing is a plain assignment rather than a defensive branch.
+        const settledStatus = finalStatus as Exclude<ChildStatus, "running">;
+        // Success gets ~300 tokens; a failure or a stop gets ~1,000 and leads
+        // with the reason, so the parent can decide what to do next.
+        const summary = buildChildSummary({
+          status: settledStatus,
+          answer: handle.result(),
+          error: runError,
+        });
+
+        await parentSink.emit("subagent_completed", {
+          childRunId: first.runId,
+          status: settledStatus,
+          childSessionId: child.sessionId,
+          agentType,
+          summary,
+        });
+
+        // The parent's loop reads this at its next request. A failure here is
+        // not the child's failure: the run already settled and the event went
+        // out, so it is logged and dropped rather than retried into a loop.
+        try {
+          await store.reportToParent(parent.sessionId, {
+            childSessionId: child.sessionId,
+            childRunId: first.runId,
+            agentType,
+            status: settledStatus,
+            summary,
+            task: clipReport(prompt),
+            at: now(),
+          });
+        } catch {
+          // Swallowed deliberately — see above.
+        }
+
+        // ── wake the parent if its turn is already over ───────────────────
+        // The parent's loop folds pending reports in at every model request,
+        // so a running parent needs nothing. A parent that has ended has no
+        // next request — and with most work delegated, that is the common
+        // case, not the rare one.
+        if (deps.wakeParent !== undefined) {
+          await wakeParentOnce({
+            sessionId: parent.sessionId,
+            userId: parent.userId,
+            // The report itself. The parent's loop injects everything pending
+            // into its next request, so a wake that starts a little late still
+            // carries every report in the batch, not just this child's.
+            text: formatSubagentReports([
+              {
+                childSessionId: child.sessionId,
+                childRunId: first.runId,
+                agentType,
+                status: settledStatus,
+                summary,
+                task: clipReport(prompt),
+                at: now(),
+              },
+            ]),
+          });
+        }
+
+        // LAST: `settled` means "done AND reported", so a caller that awaits
+        // it can read the report the parent will read. Setting the status
+        // earlier would resolve the promise before the report existed.
+        handle.setStatus(settledStatus);
+      })();
+
       return handle;
     },
 

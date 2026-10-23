@@ -25,12 +25,19 @@ import { CHILD_DENIED_TOOLS } from "./roster.js";
 import {
   createDbSubagentStore,
   createSubagentSupervisor,
+  buildChildSummary,
+  formatSubagentReports,
+  REPORT_FAILURE_LIMIT,
+  REPORT_SUMMARY_LIMIT,
+  takePendingSubagentReports,
   MAX_SUBAGENT_STOP_BLOCKS,
+  PENDING_SUBAGENT_REPORTS_KEY,
   projectChildRoster,
   storedSubagentTools,
   subagentPolicyAllows,
   subagentToolPolicy,
   type RunStatus,
+  type SubagentReport,
   type SubagentStore,
 } from "./subagents.js";
 import type { ToolContext, ToolSpec } from "./types.js";
@@ -58,6 +65,9 @@ function fakeStore(lineages: Record<string, string[]> = {}) {
   const sessionsById = new Map<string, FakeSession>();
   const runRows = new Map<string, FakeRun>();
   const lastText = new Map<string, string | null>();
+  const reports: Array<{ parentSessionId: string; report: SubagentReport }> = [];
+  const runErrors = new Map<string, string | null>();
+  let parentActive = false;
   let childCreates = 0;
 
   const store: SubagentStore = {
@@ -97,6 +107,12 @@ function fakeStore(lineages: Record<string, string[]> = {}) {
     async runStatus(runId) {
       return runRows.get(runId)?.status ?? null;
     },
+    async runError(runId) {
+      return runErrors.get(runId) ?? null;
+    },
+    async hasActiveRun() {
+      return parentActive;
+    },
     async queuedRuns(sessionId) {
       return [...runRows.values()]
         .filter((r) => r.sessionId === sessionId && r.status === "queued")
@@ -120,6 +136,9 @@ function fakeStore(lineages: Record<string, string[]> = {}) {
         .filter((s) => s.parent === parentSessionId)
         .map((s) => s.id);
     },
+    async reportToParent(parentSessionId, report) {
+      reports.push({ parentSessionId, report });
+    },
   };
 
   return {
@@ -129,6 +148,11 @@ function fakeStore(lineages: Record<string, string[]> = {}) {
     lastText,
     setLastText(sessionId: string, text: string | null): void {
       lastText.set(sessionId, text);
+    },
+    reports,
+    runErrors,
+    setParentActive(next: boolean): void {
+      parentActive = next;
     },
     get childCreates(): number {
       return childCreates;
@@ -282,6 +306,425 @@ function build(o: {
   return { fake, jobs, stopCalls, events, supervisor };
 }
 
+// ── waking a parent whose turn already ended ──────────────────────────────
+
+describe("wakeParent", () => {
+  function buildWithWake() {
+    const fake = fakeStore();
+    const { engine } = fakeEngine(fake, {
+      onRun: (job) => {
+        fake.setLastText(job.sessionId, "child done");
+      },
+    });
+    const { hooks } = fakeHooks();
+    const { sinkFactory } = fakeSinkFactory();
+    const wakes: Array<{ sessionId: string; userId: string; text: string }> = [];
+    const supervisor = createSubagentSupervisor({
+      engine,
+      db: {} as never,
+      state: createMemoryStateStore(),
+      hooks,
+      sinkFactory,
+      registry: createToolRegistry([]),
+      store: fake.store,
+      wakeParent: async (o) => {
+        wakes.push(o);
+      },
+    });
+    return { fake, supervisor, wakes };
+  }
+
+  it("wakes the parent when it has no run in flight", async () => {
+    const { fake, supervisor, wakes } = buildWithWake();
+    fake.setParentActive(false);
+
+    const handle = await supervisor.dispatch(parentCtx(), { prompt: "audit" });
+    await handle.settled;
+
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]!.sessionId).toBe("root");
+    expect(wakes[0]!.userId).toBe("u1");
+    expect(wakes[0]!.text).toContain("child done");
+    expect(wakes[0]!.text).toContain("Background subagents you dispatched");
+    expect(wakes[0]!.text).toContain("Do NOT dispatch these tasks again");
+  });
+
+  it("does not wake a parent that is still running — it reads the report itself", async () => {
+    const { fake, supervisor, wakes } = buildWithWake();
+    fake.setParentActive(true);
+
+    const handle = await supervisor.dispatch(parentCtx(), { prompt: "audit" });
+    await handle.settled;
+
+    expect(wakes).toHaveLength(0);
+    // The report is still durable, so nothing is lost.
+    expect(fake.reports).toHaveLength(1);
+  });
+
+  it("three children settling together start ONE wake, not three", async () => {
+    const fake = fakeStore();
+    const jobs: AgentRunJob[] = [];
+    const gates: Array<() => void> = [];
+    const engine: AgentEngine = {
+      async run(job): Promise<void> {
+        jobs.push(job);
+        await new Promise<void>((resolve) => gates.push(resolve));
+        fake.setLastText(job.sessionId, "done");
+        const row = fake.runRows.get(job.runId);
+        if (row !== undefined && row.status === "running") row.status = "completed";
+      },
+      async cancel(): Promise<boolean> {
+        return false;
+      },
+      activeRun() {
+        return null;
+      },
+    };
+    const { hooks } = fakeHooks();
+    const { sinkFactory } = fakeSinkFactory();
+    const wakes: string[] = [];
+    const supervisor = createSubagentSupervisor({
+      engine,
+      db: {} as never,
+      state: createMemoryStateStore(),
+      hooks,
+      sinkFactory,
+      registry: createToolRegistry([]),
+      store: fake.store,
+      wakeParent: async (o) => {
+        wakes.push(o.sessionId);
+        // The wake starts a run, which is what the next attempt must see.
+        fake.setParentActive(true);
+      },
+    });
+    fake.setParentActive(false);
+
+    const handles = [];
+    for (let i = 0; i < 3; i += 1) {
+      handles.push(await supervisor.dispatch(parentCtx(), { prompt: `task ${i}` }));
+    }
+    for (const release of gates) release();
+    await Promise.all(handles.map((h) => h.settled));
+
+    expect(wakes).toHaveLength(1);
+  });
+
+  it("a failing wake never fails the child", async () => {
+    const fake = fakeStore();
+    const { engine } = fakeEngine(fake);
+    const { hooks } = fakeHooks();
+    const { sinkFactory } = fakeSinkFactory();
+    const supervisor = createSubagentSupervisor({
+      engine,
+      db: {} as never,
+      state: createMemoryStateStore(),
+      hooks,
+      sinkFactory,
+      registry: createToolRegistry([]),
+      store: fake.store,
+      wakeParent: async () => {
+        throw new Error("queue down");
+      },
+    });
+
+    const handle = await supervisor.dispatch(parentCtx(), { prompt: "x" });
+    expect(await handle.settled).toBe("completed");
+    expect(fake.reports).toHaveLength(1);
+  });
+});
+
+// ── the summary budget depends on the outcome ─────────────────────────────
+
+describe("buildChildSummary", () => {
+  const long = (n: number): string => "word ".repeat(Math.ceil(n / 5)).slice(0, n);
+
+  it("a completed child gets the small budget", () => {
+    const summary = buildChildSummary({
+      status: "completed",
+      answer: long(5_000),
+      error: null,
+    });
+    expect(summary.length).toBeLessThanOrEqual(REPORT_SUMMARY_LIMIT + 1);
+    expect(summary.endsWith("…")).toBe(true);
+  });
+
+  it("a failed child gets the larger budget", () => {
+    const summary = buildChildSummary({
+      status: "failed",
+      answer: long(5_000),
+      error: "litellm 500",
+    });
+    // Bigger than a success summary, and still bounded.
+    expect(summary.length).toBeGreaterThan(REPORT_SUMMARY_LIMIT);
+    expect(summary.length).toBeLessThanOrEqual(REPORT_FAILURE_LIMIT + 120);
+  });
+
+  it("the reason leads, so a long partial answer cannot bury it", () => {
+    const summary = buildChildSummary({
+      status: "failed",
+      answer: long(3_000),
+      error: "context_length_exceeded",
+    });
+    expect(summary.startsWith("Failed: context_length_exceeded")).toBe(true);
+    expect(summary).toContain("Last output before it ended:");
+  });
+
+  it("a cancelled child says it was stopped, not that it failed", () => {
+    const summary = buildChildSummary({
+      status: "cancelled",
+      answer: "half done",
+      error: null,
+    });
+    expect(summary.startsWith("Stopped before finishing.")).toBe(true);
+    expect(summary).toContain("half done");
+  });
+
+  it("a failure with no message still says something useful", () => {
+    expect(
+      buildChildSummary({ status: "failed", answer: null, error: null }),
+    ).toBe("Failed without an error message.");
+  });
+
+  it("a failure with no output is just the reason", () => {
+    expect(
+      buildChildSummary({ status: "failed", answer: null, error: "oom" }),
+    ).toBe("Failed: oom");
+  });
+
+  it("a completed child with no answer stays empty (the formatter says so)", () => {
+    expect(
+      buildChildSummary({ status: "completed", answer: null, error: null }),
+    ).toBe("");
+  });
+});
+
+// ── the parent's inbox ─────────────────────────────────────────────────────
+
+describe("pending subagent reports", () => {
+  const report = (over: Partial<SubagentReport> = {}): SubagentReport => ({
+    childSessionId: "child-1",
+    childRunId: "run-1",
+    agentType: "general-purpose",
+    status: "completed",
+    summary: "did the thing",
+    task: "do the thing",
+    at: 1,
+    ...over,
+  });
+
+  it("reads the reports once and clears them", async () => {
+    const state = createMemoryStateStore();
+    await state.patch("root", {
+      [PENDING_SUBAGENT_REPORTS_KEY]: [report()],
+    } as never);
+
+    const first = await takePendingSubagentReports(state, "root");
+    expect(first).toHaveLength(1);
+    expect(first[0]!.summary).toBe("did the thing");
+
+    // Second read is empty: a report must not repeat on every request.
+    expect(await takePendingSubagentReports(state, "root")).toEqual([]);
+  });
+
+  it("an unread inbox is empty, not an error", async () => {
+    expect(await takePendingSubagentReports(createMemoryStateStore(), "root")).toEqual([]);
+  });
+
+  it("the system block names each child, its status and its task", () => {
+    const text = formatSubagentReports([
+      report(),
+      report({ childSessionId: "child-2", status: "failed", summary: "boom", task: "other" }),
+    ]);
+    expect(text).toContain("child-1");
+    expect(text).toContain("completed");
+    expect(text).toContain("did the thing");
+    expect(text).toContain("task: do the thing");
+    expect(text).toContain("child-2");
+    expect(text).toContain("failed");
+    expect(text).toContain("boom");
+  });
+
+  it("an empty summary says so instead of leaving a blank", () => {
+    const text = formatSubagentReports([report({ summary: "" })]);
+    expect(text).toContain("finished without a final answer");
+  });
+});
+
+// ── non-blocking dispatch (concurrency) ────────────────────────────────────
+
+describe("dispatch does not block", () => {
+  /**
+   * A gated engine: each child parks inside run() until the test releases it,
+   * which is the only way to observe two children alive at the same moment.
+   */
+  function gatedBuild() {
+    const fake = fakeStore();
+    const jobs: AgentRunJob[] = [];
+    const gates: Array<() => void> = [];
+    const started: Array<() => void> = [];
+    const startedP = (n: number): Promise<void> =>
+      new Promise((resolve) => {
+        if (jobs.length >= n) resolve();
+        else started.push(() => { if (jobs.length >= n) resolve(); });
+      });
+    const engine: AgentEngine = {
+      async run(job): Promise<void> {
+        jobs.push(job);
+        for (const fire of started.splice(0)) fire();
+        await new Promise<void>((resolve) => gates.push(resolve));
+        const row = fake.runRows.get(job.runId);
+        if (row !== undefined && row.status === "running") row.status = "completed";
+        fake.setLastText(job.sessionId, `answer for ${job.sessionId}`);
+      },
+      async cancel(): Promise<boolean> {
+        return false;
+      },
+      activeRun() {
+        return null;
+      },
+    };
+    const { hooks } = fakeHooks();
+    const { sinkFactory, events } = fakeSinkFactory();
+    const supervisor = createSubagentSupervisor({
+      engine,
+      db: {} as never,
+      state: createMemoryStateStore(),
+      hooks,
+      sinkFactory,
+      registry: createToolRegistry(AVAILABLE.map((s) => ({
+        spec: s,
+        timeoutMs: 1000,
+        async execute() {
+          return { content: "" };
+        },
+      }))),
+      store: fake.store,
+    });
+    return { fake, jobs, gates, supervisor, startedP, events };
+  }
+
+  it("three dispatches are all running at the same time", async () => {
+    const { supervisor, gates, startedP } = gatedBuild();
+    const a = await supervisor.dispatch(parentCtx(), { prompt: "one" });
+    const b = await supervisor.dispatch(parentCtx(), { prompt: "two" });
+    const c = await supervisor.dispatch(parentCtx(), { prompt: "three" });
+
+    // dispatch returned before any child finished — that is the contract.
+    expect(a.status()).toBe("running");
+    expect(b.status()).toBe("running");
+    expect(c.status()).toBe("running");
+
+    await startedP(3);
+    // All three are inside run() simultaneously, not queued behind each other.
+    expect(a.status()).toBe("running");
+    expect(b.status()).toBe("running");
+    expect(c.status()).toBe("running");
+
+    for (const release of gates) release();
+    expect(await Promise.all([a.settled, b.settled, c.settled])).toEqual([
+      "completed",
+      "completed",
+      "completed",
+    ]);
+  });
+
+  it("the 51st concurrent dispatch is refused, and a settled one frees a slot", async () => {
+    const { supervisor, gates } = gatedBuild();
+    const handles = [];
+    for (let i = 0; i < 50; i += 1) {
+      handles.push(await supervisor.dispatch(parentCtx(), { prompt: `task ${i}` }));
+    }
+    expect(handles).toHaveLength(50);
+
+    await expect(
+      supervisor.dispatch(parentCtx(), { prompt: "one too many" }),
+    ).rejects.toThrow(/ceiling/);
+
+    // Free exactly one slot and the next dispatch is accepted.
+    gates[0]!();
+    await handles[0]!.settled;
+    const next = await supervisor.dispatch(parentCtx(), { prompt: "after one" });
+    expect(next.status()).toBe("running");
+
+    for (const release of gates) release();
+  });
+});
+
+// ── the report the parent reads ────────────────────────────────────────────
+
+describe("a settled child leaves a report for its parent", () => {
+  it("records the bounded summary, the status and the task", async () => {
+    const { fake, supervisor } = build({
+      onRun: (job) => {
+        fake.setLastText(job.sessionId, "  the answer  ");
+      },
+    });
+    const handle = await supervisor.dispatch(parentCtx(), { prompt: "do it" });
+    await handle.settled;
+
+    expect(fake.reports).toHaveLength(1);
+    const report = fake.reports[0]!;
+    expect(report.parentSessionId).toBe("root");
+    expect(report.report.status).toBe("completed");
+    expect(report.report.summary).toBe("the answer");
+    expect(report.report.task).toBe("do it");
+    expect(report.report.childSessionId).toBe(handle.sessionId);
+  });
+
+  it("a failed child's report carries the run's error", async () => {
+    const fake = fakeStore();
+    const { engine } = fakeEngine(fake, {
+      onRun: (job) => {
+        fake.setLastText(job.sessionId, "partial work before the crash");
+      },
+    });
+    // Fail the child's run the way the engine would: terminal status + reason.
+    const failing: AgentEngine = {
+      async run(job) {
+        await engine.run(job);
+        const row = fake.runRows.get(job.runId);
+        if (row !== undefined) row.status = "failed";
+        fake.runErrors.set(job.runId, "provider returned 500");
+      },
+      cancel: engine.cancel,
+      activeRun: engine.activeRun,
+    };
+    const { hooks } = fakeHooks();
+    const { sinkFactory } = fakeSinkFactory();
+    const supervisor = createSubagentSupervisor({
+      engine: failing,
+      db: {} as never,
+      state: createMemoryStateStore(),
+      hooks,
+      sinkFactory,
+      registry: createToolRegistry([]),
+      store: fake.store,
+    });
+
+    const handle = await supervisor.dispatch(parentCtx(), { prompt: "risky" });
+    expect(await handle.settled).toBe("failed");
+
+    const report = fake.reports[0]!.report;
+    expect(report.status).toBe("failed");
+    expect(report.summary).toContain("provider returned 500");
+    expect(report.summary).toContain("partial work before the crash");
+  });
+
+  it("a report is never the raw log — it is clipped", async () => {
+    const long = "x".repeat(5_000);
+    const { fake, supervisor } = build({
+      onRun: (job) => {
+        fake.setLastText(job.sessionId, long);
+      },
+    });
+    const handle = await supervisor.dispatch(parentCtx(), { prompt: "long" });
+    await handle.settled;
+    const summary = fake.reports[0]!.report.summary;
+    expect(summary.length).toBeLessThanOrEqual(1_201);
+    expect(summary.endsWith("…")).toBe(true);
+  });
+});
+
 // ── SubagentToolPolicy (subagent_tools.dart:25–136) ────────────────────────
 
 describe("subagentToolPolicy", () => {
@@ -359,6 +802,9 @@ describe("createSubagentSupervisor.dispatch", () => {
       prompt: "do the thing",
       tools: ["Read"],
     });
+    // Non-blocking contract: dispatch returns while the child runs.
+    expect(handle.status()).toBe("running");
+    await handle.settled;
 
     expect(fake.childCreates).toBe(1);
     expect(handle.sessionId).toBe("child-1");
@@ -484,6 +930,7 @@ describe("SubagentStop gate", () => {
     });
 
     const handle = await supervisor.dispatch(parentCtx(), { prompt: "initial" });
+    await handle.settled;
 
     expect(jobs).toHaveLength(1 + MAX_SUBAGENT_STOP_BLOCKS);
     expect(stopCalls).toHaveLength(1 + MAX_SUBAGENT_STOP_BLOCKS);
@@ -503,7 +950,8 @@ describe("SubagentStop gate", () => {
 
   it("exit 0 (no veto) settles after one run", async () => {
     const { jobs, stopCalls, supervisor } = build({ stops: [{ veto: false }] });
-    await supervisor.dispatch(parentCtx(), { prompt: "once" });
+    const handle = await supervisor.dispatch(parentCtx(), { prompt: "once" });
+    await handle.settled;
     expect(jobs).toHaveLength(1);
     expect(stopCalls).toHaveLength(1);
   });
@@ -531,6 +979,7 @@ describe("SubagentStop gate", () => {
       store: fake.store,
     });
     const handle = await supervisor.dispatch(parentCtx(), { prompt: "x" });
+    await handle.settled;
     expect(handle.status()).toBe("completed");
   });
 });
@@ -587,6 +1036,9 @@ describe("parent cancel cascades", () => {
     controller.abort();
     const handle = await pending;
     expect(cancelCalls).toBeGreaterThan(0);
+    // The cascade is asynchronous now: the child's loop observes the abort and
+    // settles as cancelled, so the handle's own promise is the signal.
+    expect(await handle.settled).toBe("cancelled");
     expect(handle.status()).toBe("cancelled");
   });
 });
@@ -624,6 +1076,7 @@ describe("follow-up turns", () => {
       store: fake.store,
     });
     const handle = await supervisor.dispatch(parentCtx(), { prompt: "initial" });
+    await handle.settled;
     expect(jobs.map((j) => j.prompt)).toEqual(["initial", "during-stop"]);
     expect(handle.result()).toBe("answer:during-stop");
   });
