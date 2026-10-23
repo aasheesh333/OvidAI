@@ -13,6 +13,7 @@ export * from "./privateMemory.js";
 export * from "./projectRepos.js";
 export * from "./projectFiles.js";
 export * from "./browserCredentialsRepos.js";
+export * from "./dataControlRepos.js";
 // Table objects share names with the repo namespaces above (sessions, messages,
 // runs), so the schema is exported under its own namespace instead of `export *`.
 export * as schema from "./schema.js";
