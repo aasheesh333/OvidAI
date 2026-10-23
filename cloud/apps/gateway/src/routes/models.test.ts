@@ -69,6 +69,37 @@ describe("GET /cloud/v1/models", () => {
     expect(body.tier).toBe("plus");
   });
 
+  it("says whether the tier may pick a manual model", async () => {
+    // The rule lives in plans.ts; the client must not re-derive it from `tier`
+    // with its own copy of the table (which is how the web and Flutter clients
+    // drifted apart).
+    const cases: Array<[string, boolean]> = [
+      ["free", false],
+      ["go", false],
+      ["plus", true],
+      ["pro", true],
+    ];
+    for (const [tier, allowed] of cases) {
+      const { body } = await read(async () => ["m"], tier);
+      expect(body.manualModelsAllowed, `tier ${tier}`).toBe(allowed);
+    }
+  });
+
+  it("resolves legacy tier spellings the same way planFor does", async () => {
+    // These are the values real `users.tier` rows hold. `3x` is the old Go
+    // alias and is auto-only; the paid aliases must not lose manual models.
+    const cases: Array<[string, boolean]> = [
+      ["3x", false],
+      ["7x", true],
+      ["15x", true],
+      ["max", true],
+    ];
+    for (const [tier, allowed] of cases) {
+      const { body } = await read(async () => ["m"], tier);
+      expect(body.manualModelsAllowed, `tier ${tier}`).toBe(allowed);
+    }
+  });
+
   it("an unreadable catalog is 'unknown', not 'no models'", async () => {
     const { status, body } = await read(async () => {
       throw new Error("redis down");
