@@ -63,7 +63,8 @@ export const PLAN_ENTITLEMENTS: Readonly<Record<PlanTier, PlanEntitlements>> = O
 export type PlanGateErrorCode =
   | "manual_model_not_allowed"
   | "connector_limit_reached"
-  | "storage_quota_exceeded";
+  | "storage_quota_exceeded"
+  | "upload_limit_reached";
 
 /** Common base so route handlers can map every plan refusal in one place. */
 export class PlanGateError extends Error {

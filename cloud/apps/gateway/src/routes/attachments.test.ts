@@ -351,6 +351,13 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway attachment routes (real postgres)",
       });
     }
     expect(await attachments.getForSession(db, sid)).toHaveLength(80);
+    // The seeded files are older than the Free plan's 24 h upload window, so
+    // THIS test keeps measuring the project cap; the window has its own suite
+    // (uploadWindow.test.ts + the daily-cap case below).
+    await db.$client.unsafe(
+      `UPDATE attachments SET created_at = now() - interval '2 days' WHERE session_id = $1`,
+      [sid],
+    );
 
     const refused = await postAttachment(app, uid, sid, { name: "81.bin", size: 1 });
     expect(refused.statusCode).toBe(409);
@@ -373,6 +380,58 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway attachment routes (real postgres)",
     const standalone = await createSession(app, uid);
     const standaloneRes = await postAttachment(app, uid, standalone, { name: "free.bin", size: 1 });
     expect(standaloneRes.statusCode).toBe(201);
+  });
+
+  it("free plan: the 51st upload inside 24 h is refused BEFORE presign", async () => {
+    const { app, presigner } = makeApp();
+    const uid = testUid("att-daily-cap");
+    const sid = await createSession(app, uid);
+    await pinFreeCap(uid);
+
+    for (let i = 0; i < 50; i++) {
+      await attachments.create(db, {
+        id: newId(),
+        sessionId: sid,
+        userId: uid,
+        name: `d${i}.bin`,
+        size: 1,
+        r2Key: `seed/${uid}/d/${i}/${newId()}`,
+      });
+    }
+
+    const refused = await postAttachment(app, uid, sid, { name: "51.bin", size: 1 });
+    expect(refused.statusCode).toBe(429);
+    expect(refused.json()).toEqual({
+      error: { code: "upload_limit_reached", message: expect.any(String) as string },
+    });
+    // Refused before signing and before any row.
+    expect(presigner.calls).toEqual([]);
+    expect(await attachments.getForSession(db, sid)).toHaveLength(50);
+  });
+
+  it("a file older than the window stops counting against it", async () => {
+    const { app } = makeApp();
+    const uid = testUid("att-window-age");
+    const sid = await createSession(app, uid);
+    await pinFreeCap(uid);
+
+    for (let i = 0; i < 50; i++) {
+      await attachments.create(db, {
+        id: newId(),
+        sessionId: sid,
+        userId: uid,
+        name: `a${i}.bin`,
+        size: 1,
+        r2Key: `seed/${uid}/a/${i}/${newId()}`,
+      });
+    }
+    await db.$client.unsafe(
+      `UPDATE attachments SET created_at = now() - interval '25 hours' WHERE session_id = $1`,
+      [sid],
+    );
+
+    const accepted = await postAttachment(app, uid, sid, { name: "next.bin", size: 1 });
+    expect(accepted.statusCode).toBe(201);
   });
 
   it("attachment routes answer 401 unauthenticated with the shared envelope", async () => {

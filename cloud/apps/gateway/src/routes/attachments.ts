@@ -6,6 +6,8 @@ import {
   type AttachmentUploadResponse,
 } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
+import { sqlText } from "../sql.js";
+import { assertUploadWindow, UploadWindowExceededError } from "../uploadWindow.js";
 import { isUuid, notFound, sendError, zodBadRequest } from "./http.js";
 
 // Attachment routes (P8 Task 3) — mounted inside the authenticated /cloud/v1
@@ -123,6 +125,31 @@ export function registerAttachmentRoutes(app: FastifyInstance, deps: GatewayDeps
         }
         throw err;
       }
+    }
+
+    // 3c. The plan's FILE WINDOW (Free 50/24 h, paid 80/3 h). Counted from
+    //     this account's own attachment rows, so it cannot drift from what
+    //     was actually uploaded. Checked BEFORE presigning and before any
+    //     row: a refused upload costs neither a URL nor a row.
+    try {
+      await assertUploadWindow({
+        tier: await users.getTier(deps.db, uid),
+        now: new Date(),
+        countSince: async (since) => {
+          // Raw SQL, the same shape reports.ts uses for its own window cap:
+          // the attachments rows ARE the record of what was uploaded.
+          const rows = (await deps.db.execute(
+            `SELECT count(*)::int AS n FROM attachments
+             WHERE user_id = ${sqlText(uid)} AND created_at > ${sqlText(since.toISOString())}`,
+          )) as unknown as Array<{ n?: unknown }>;
+          return Number(rows[0]?.n ?? 0);
+        },
+      });
+    } catch (err) {
+      if (err instanceof UploadWindowExceededError) {
+        return sendError(reply, err.status, err.code, err.message);
+      }
+      throw err;
     }
 
     // 4. Presign. The presigner is the injectable seam; when absent the route
