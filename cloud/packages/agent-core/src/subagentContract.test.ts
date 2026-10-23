@@ -1,8 +1,9 @@
 // SI spec §9 / plan Task 8.10 — the subagent CONTRACT.
 //
 // These tests pin the externally-visible promises of the cloud runtime:
-//  • 50 subagents TOTAL per root over the session's life (not 50 concurrent),
-//    the 51st refused with a typed error, counted durably across restarts;
+//  • 50 subagents CONCURRENT per root (not a lifetime total), the 51st
+//    refused with a typed error while all 50 are running, and a settled child
+//    frees its slot so the chat can delegate again;
 //  • no nested subagents (roster + runtime, with depth/lineage backstops);
 //  • an append-only full log at `<logDir>/subagent_{id}.log`;
 //  • a strict five-key JSON result held to 300 tokens, truncated
@@ -286,9 +287,9 @@ function completingEngine(
   };
 }
 
-// ── 1. 50 TOTAL per root, 51st refused with a typed error ──────────────────
+// ── 1. 50 CONCURRENT per root, 51st refused with a typed error ─────────────
 
-describe("subagent ceiling (SI spec §9: 50 per root)", () => {
+describe("subagent ceiling (SI spec §9: 50 concurrent per root)", () => {
   it("allows 50 concurrent children and rejects the 51st with SubagentLimitError", async () => {
     const fake = fakeStore();
     let started = 0;
@@ -342,49 +343,41 @@ describe("subagent ceiling (SI spec §9: 50 per root)", () => {
     const handles = await Promise.all(dispatches);
     expect(handles.every((h) => h.status() === "completed")).toBe(true);
 
-    // The ceiling is a LIFETIME TOTAL per root, not a concurrency cap: after
-    // all 50 children completed (their slots are NOT freed), the 51st
-    // dispatch is still refused.
-    await expect(
-      supervisor.dispatch(parentCtx(), { prompt: "after" }),
-    ).rejects.toBeInstanceOf(SubagentLimitError);
-    expect(fake.childCreates).toBe(MAX_SUBAGENTS_PER_ROOT);
+    // The ceiling is CONCURRENCY: once the 50 finished their slots are free,
+    // so the chat can delegate again.
+    const after = await supervisor.dispatch(parentCtx(), { prompt: "after" });
+    expect(after.status()).toBe("completed");
+    expect(fake.childCreates).toBe(MAX_SUBAGENTS_PER_ROOT + 1);
+    expect(supervisor.activeCount("root")).toBe(0);
   });
 
-  it("refuses the 51st SEQUENTIAL dispatch (total, not concurrent)", async () => {
+  it("allows far more than 50 SEQUENTIAL dispatches over the chat's life", async () => {
     const fake = fakeStore();
     const { supervisor } = build({ fake, engine: completingEngine(fake) });
 
-    for (let i = 0; i < MAX_SUBAGENTS_PER_ROOT; i += 1) {
+    // 60 completed children: more than the ceiling, one at a time.
+    for (let i = 0; i < MAX_SUBAGENTS_PER_ROOT + 10; i += 1) {
       const handle = await supervisor.dispatch(parentCtx(), { prompt: `task ${i}` });
       expect(handle.status()).toBe("completed");
     }
-    expect(fake.childCreates).toBe(MAX_SUBAGENTS_PER_ROOT);
-
-    await expect(
-      supervisor.dispatch(parentCtx(), { prompt: "task 51" }),
-    ).rejects.toMatchObject({
-      code: "subagent_limit_exceeded",
-      rootSessionId: "root",
-      limit: MAX_SUBAGENTS_PER_ROOT,
-    });
-    expect(fake.childCreates).toBe(MAX_SUBAGENTS_PER_ROOT);
+    expect(fake.childCreates).toBe(MAX_SUBAGENTS_PER_ROOT + 10);
+    expect(supervisor.activeCount("root")).toBe(0);
   });
 
-  it("counts durably: a restarted supervisor still sees the same total", async () => {
+  it("a restarted supervisor starts with an empty active set", async () => {
     const fake = fakeStore();
     const first = build({ fake, engine: completingEngine(fake) });
     for (let i = 0; i < MAX_SUBAGENTS_PER_ROOT; i += 1) {
       await first.supervisor.dispatch(parentCtx(), { prompt: `task ${i}` });
     }
 
-    // A NEW supervisor has an empty in-memory cache; the persisted store
-    // count is what refuses the 51st dispatch.
+    // The previous process's children are not running any more, so they must
+    // not hold slots in the new one.
     const restarted = build({ fake, engine: completingEngine(fake) });
+    expect(restarted.supervisor.activeCount("root")).toBe(0);
     await expect(
       restarted.supervisor.dispatch(parentCtx(), { prompt: "after restart" }),
-    ).rejects.toBeInstanceOf(SubagentLimitError);
-    expect(fake.childCreates).toBe(MAX_SUBAGENTS_PER_ROOT);
+    ).resolves.toBeDefined();
   });
 
   it("counts per ROOT session: two roots each get their own ceiling", async () => {
@@ -889,14 +882,15 @@ describe("subagent runtime cap (SI spec §9: 8 h)", () => {
       },
     };
 
-    // maxSubagents: 2 leaves room for the post-timeout dispatch (the cap is a
-    // lifetime total, so the timed-out child never frees its slot).
+    // maxSubagents: 1 proves the SLOT IS FREED: while the stuck child runs,
+    // nothing else is admitted; once the deadline settles it, the next
+    // dispatch goes through.
     const { supervisor } = build({
       fake,
       engine,
       sandbox: sandbox.sandbox,
       maxRuntimeMs: 25,
-      maxSubagents: 2,
+      maxSubagents: 1,
       dir,
     });
 
@@ -929,17 +923,18 @@ describe("subagent runtime cap (SI spec §9: 8 h)", () => {
       expect.arrayContaining([expect.objectContaining({ type: "subagent_timeout" })]),
     );
 
-    // A fresh dispatch is admitted while the lifetime budget lasts…
+    // The timed-out child released its slot, so a fresh dispatch is admitted…
     const next = await supervisor.dispatch(parentCtx(), { prompt: "after timeout" });
     expect(next.status()).toBe("completed");
     expect(parseSubagentSummary(next.result() ?? "")).toMatchObject({
       ok: true,
       summary: { status: "completed", key_findings: ["second answer"] },
     });
-    // …and the lifetime cap still counts the timed-out child.
+    // …and it released its own slot too.
+    expect(supervisor.activeCount("root")).toBe(0);
     await expect(
       supervisor.dispatch(parentCtx(), { prompt: "third" }),
-    ).rejects.toBeInstanceOf(SubagentLimitError);
+    ).resolves.toBeDefined();
   });
 
   it("a successful child's background jobs are killed on settle", async () => {

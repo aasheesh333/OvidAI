@@ -26,10 +26,12 @@
 //    `[id state · Ns]` wrapper. The dispatch tool's timeout is aligned with
 //    the 8-hour child budget (tools/subagentTools.ts) so the parent call can
 //    never end while a legitimate child is still working.
-//  • The 50-subagent ceiling is a LIFETIME TOTAL per root session, not a
-//    count of active children: the durable store is the source of truth and
-//    an in-memory counter only short-circuits the read once the ceiling is
-//    known to be reached. Nothing frees a slot when a child finishes.
+//  • The 50-subagent ceiling is a count of ACTIVE children per root session.
+//    A root is processed by exactly one worker at a time and its children run
+//    in-process inside the parent's dispatch call, so the supervisor's own
+//    active set is the authoritative count. A settled child frees its slot
+//    immediately, so a chat can delegate far more than 50 tasks over its life
+//    as long as no more than 50 run at once.
 //  • A settled child owns no live sandbox resources: every settle path
 //    (success, timeout, cancel, error) kills the child's background jobs and
 //    in-flight exec calls before the dispatch returns.
@@ -143,6 +145,12 @@ export interface DispatchArgs {
 export interface SubagentSupervisor {
   dispatch(parent: ToolContext, args: DispatchArgs): Promise<ChildHandle>;
   childrenOf(sessionId: string): readonly ChildHandle[];
+  /**
+   * Children of [sessionId] running RIGHT NOW. This is the number the
+   * concurrency ceiling is measured against, so the UI and the batch tool can
+   * report how many slots are free without guessing.
+   */
+  activeCount(sessionId: string): number;
   /** The `report` tool's write path; false = unknown/foreign child session. */
   recordReport(sessionId: string, summary: string): boolean;
   /**
@@ -167,17 +175,16 @@ export class SubagentRefusalError extends Error {
   }
 }
 
-/** The subagent ceiling (SI spec §9): 50 TOTAL children per root session. */
+/** The subagent ceiling (SI spec §9): 50 CONCURRENT children per root session. */
 export class SubagentLimitError extends SubagentRefusalError {
   readonly rootSessionId: string;
   readonly limit: number;
 
   constructor(rootSessionId: string, limit: number) {
     super(
-      `dispatch_agent refused: the subagent ceiling (${limit} total per root ` +
-        "session) is reached. This cap counts every subagent ever created " +
-        "under this chat, not just the running ones — start a new chat for " +
-        "more delegation or do this task yourself. Do not retry in a loop.",
+      `dispatch_agent refused: ${limit} subagents are already running in this ` +
+        "chat, which is the ceiling. Wait for one to finish, then dispatch " +
+        "again — finished subagents free their slot. Do not retry in a loop.",
       "subagent_limit_exceeded",
     );
     this.name = "SubagentLimitError";
@@ -600,12 +607,11 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
   const maxRuntimeMs = deps.maxRuntimeMs ?? DEFAULT_SUBAGENT_MAX_RUNTIME_MS;
   const maxSubagents = deps.maxSubagents ?? MAX_SUBAGENTS_PER_ROOT;
   /**
-   * rootSessionId → a LIFETIME total of children created under it. This is an
-   * in-memory cache IN FRONT of the durable store count (`slotCounts`), never
-   * the source of truth: a worker restart loses the cache and re-reads the
-   * store, and a second dispatcher sharing the same store still sees the
-   * total. Nothing decrements it when a child settles — the cap is on TOTAL
-   * subagents per session, not on active ones.
+   * rootSessionId → the number of children CURRENTLY running under it.
+   *
+   * The cap is concurrency, so this is the authoritative count and it is
+   * decremented on every settle path. A worker restart loses only children
+   * that were already dead with their parent process.
    *
    * `slotLocks` serializes check-and-increment per root so parallel
    * dispatches cannot both observe 49 and race past the ceiling.
@@ -627,32 +633,28 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
     return run;
   }
 
-  /** Reserve one of the root's 50 lifetime slots; false = ceiling reached. */
-  function reserveSlot(rootSessionId: string, userId: string): Promise<boolean> {
+  /**
+   * Reserve one of the root's 50 CONCURRENT slots; false = all 50 are busy.
+   *
+   * No durable read: the ceiling is about children running right now, and a
+   * root's children only ever run inside this supervisor's process. A child
+   * from a previous process is not running, so it must not hold a slot.
+   */
+  function reserveSlot(rootSessionId: string, _userId: string): Promise<boolean> {
     return withRootLock(rootSessionId, async () => {
-      const cached = slotCounts.get(rootSessionId) ?? 0;
-      // Fast path: the cache already proves the ceiling is reached; skip the
-      // durable read (the common refusal path).
-      if (cached >= maxSubagents) return false;
-      // Slow path: the durable count is authoritative — it survives restarts
-      // and is shared by every dispatcher for this root.
-      const durable = await store.countChildrenUnderRoot(rootSessionId, userId);
-      const total = Math.max(cached, durable);
-      if (total >= maxSubagents) {
-        slotCounts.set(rootSessionId, total);
-        return false;
-      }
-      slotCounts.set(rootSessionId, total + 1);
+      const active = slotCounts.get(rootSessionId) ?? 0;
+      if (active >= maxSubagents) return false;
+      slotCounts.set(rootSessionId, active + 1);
       return true;
     });
   }
 
   /**
-   * Give a reservation back when NO child was created (an infrastructure
-   * failure before `store.createChild`). A created child keeps its slot even
-   * if the run then fails: the durable row exists, so the total is real.
+   * Free a slot. Runs on EVERY settle path — a completed, failed, timed-out or
+   * cancelled child stops counting, which is what makes "wait for one to
+   * finish, then dispatch again" true.
    */
-  function unreserveSlot(rootSessionId: string): Promise<void> {
+  function releaseSlot(rootSessionId: string): Promise<void> {
     return withRootLock(rootSessionId, async () => {
       const current = slotCounts.get(rootSessionId) ?? 0;
       if (current <= 1) slotCounts.delete(rootSessionId);
@@ -863,9 +865,8 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
         throw new SubagentRefusalError("parent run is cancelled");
       }
 
-      // Hard ceiling: 50 TOTAL subagents per root session (SI spec §9). The
-      // durable store count is authoritative; the in-memory cache only
-      // short-circuits the read. Never released on settle — see reserveSlot.
+      // Concurrency ceiling: at most 50 children RUNNING at once per root
+      // session (SI spec §9). A settled child frees its slot.
       if (!(await reserveSlot(rootSessionId, parent.userId))) {
         throw new SubagentLimitError(rootSessionId, maxSubagents);
       }
@@ -1166,12 +1167,19 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
           await killChildResources(childSessionId, parent.userId, true);
         }
         if (log !== null) await log.close();
-        if (!childCreated) await unreserveSlot(rootSessionId);
+        // The reservation is a CONCURRENT slot, so it is freed on every
+        // settle path — created or not. (An earlier design kept a created
+        // child's slot forever, which made the cap a lifetime total.)
+        await releaseSlot(rootSessionId);
       }
     },
 
     childrenOf(sessionId: string): readonly ChildHandle[] {
       return childrenOf(sessionId);
+    },
+
+    activeCount(sessionId: string): number {
+      return slotCounts.get(sessionId) ?? 0;
     },
 
     recordReport(sessionId: string, summary: string): boolean {

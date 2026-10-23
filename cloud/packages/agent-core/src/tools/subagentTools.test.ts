@@ -271,7 +271,7 @@ describe("dispatch_agent", () => {
     const result = await byName(list, "dispatch_agent").execute({ prompt: "x" }, ctx());
     expect(result.isError).toBe(true);
     expect(result.content).toContain("subagent_limit_exceeded:");
-    expect(result.content).toContain("subagent ceiling (50");
+    expect(result.content).toContain("50 subagents are already running");
   });
 
   it("requires a prompt", async () => {
