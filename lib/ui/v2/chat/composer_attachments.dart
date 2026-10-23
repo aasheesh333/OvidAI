@@ -314,6 +314,70 @@ class _AttachmentRow extends StatelessWidget {
 }
 
 /// Inline composer error with a live-region announcement.
+/// The Studio folder gate (spec Screen 2): a required, tappable row above the
+/// composer.
+///
+/// It is a real control, not a dead label — tapping it opens the repo picker.
+/// When the host cannot route to Studio the row still explains the block, so a
+/// disabled send button is never unexplained.
+class V2StudioFolderGate extends StatelessWidget {
+  const V2StudioFolderGate({
+    super.key,
+    required this.onTap,
+    this.hasHandler = true,
+  });
+
+  final VoidCallback? onTap;
+
+  /// False when the host has no Studio route: the row stays explanatory.
+  final bool hasHandler;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: OSpace.xs),
+      child: Semantics(
+        button: hasHandler,
+        container: true,
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            key: const ValueKey('composer-studio-folder'),
+            onTap: hasHandler ? onTap : null,
+            borderRadius: BorderRadius.circular(ORadius.pill),
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: OSpace.m,
+                vertical: OSpace.s,
+              ),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(ORadius.pill),
+                border: Border.all(color: c.hairline),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.folder_outlined, size: 16, color: c.textMuted),
+                  const SizedBox(width: OSpace.xs),
+                  Flexible(
+                    child: Text(
+                      'Select repo / folder to use Studio',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: OType.bodySm.copyWith(color: c.textMuted),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class V2ComposerNotice extends StatelessWidget {
   const V2ComposerNotice({
     super.key,

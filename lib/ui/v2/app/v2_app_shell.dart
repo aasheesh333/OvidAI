@@ -335,6 +335,10 @@ class _V2AppShellState extends State<V2AppShell> {
           onRetry: _retry,
           onPermissionTap: () => unawaited(_openPermissionSheet(routeContext)),
           permissionLabel: CloudAgentFacade.I.mode.label,
+          // Studio is gated on a bound repo here too (spec Screen 2).
+          studioFolder: _studioRepoFor(AppState.I.sessionById(sessionId)),
+          onSelectStudioFolder: () =>
+              unawaited(V2WorkRoutes.openStudio(routeContext, _settings)),
           voiceService: const V2PlatformVoiceService(),
           voiceLanguage: app.voiceLanguage,
           onVoicePlay: _playVoiceReply,
@@ -527,6 +531,11 @@ class _V2AppShellState extends State<V2AppShell> {
           : agent.subagentsOf(sessionId).length,
       limitResetLabel: _resetLabel(),
       permissionLabel: agent.mode.label,
+      // Studio mode is gated on a bound repo (spec Screen 2): the composer
+      // stays locked until this is non-empty.
+      studioFolder: _studioRepoFor(app.activeSession),
+      onSelectStudioFolder: () =>
+          unawaited(V2WorkRoutes.openStudio(_navContext, _settings)),
       composerHint: 'Ask Ovid anything',
       offlineTitle: "You're offline",
       offlineMessage: 'Your message is saved and sends when you reconnect.',

@@ -68,6 +68,8 @@ class V2ChatPageData {
     this.limitResetLabel = '',
     this.errorMessage = "Couldn't load this chat.",
     this.permissionLabel = 'General',
+    this.studioFolder,
+    this.onSelectStudioFolder,
     this.composerHint = 'Ask Ovid anything',
     this.offlineTitle = "You're offline",
     this.offlineMessage = 'Your message is saved and sends when you reconnect.',
@@ -99,6 +101,19 @@ class V2ChatPageData {
   final VoidCallback? onDismissSendError;
 
   final String permissionLabel;
+
+  /// The repo/branch bound to this chat, when Studio mode has one. Null means
+  /// Studio is selected but nothing is cloned yet.
+  final String? studioFolder;
+
+  /// Opens the repo picker. Present only when the host can route to Studio.
+  final VoidCallback? onSelectStudioFolder;
+
+  /// Spec Screen 2: a Studio message may not be sent until a folder is
+  /// selected — otherwise the agent starts in an empty workspace.
+  bool get studioFolderMissing =>
+      permissionLabel == 'Studio' &&
+      (studioFolder ?? '').trim().isEmpty;
   final String composerHint;
   final String offlineTitle;
   final String offlineMessage;
@@ -514,6 +529,7 @@ class _V2ChatPageState extends State<V2ChatPage> {
   bool get _canSend =>
       !_locked &&
       !_running &&
+      !widget.data.studioFolderMissing &&
       (widget.onSubmit != null || widget.onSend != null) &&
       (_controller.text.trim().isNotEmpty ||
           (widget.onSubmit != null && _attachments.isNotEmpty));
@@ -1087,6 +1103,11 @@ class _Composer extends StatelessWidget {
                   error: data.sendError!,
                   onAction: onSendErrorAction,
                   onDismiss: onDismissSendError,
+                ),
+              if (data.studioFolderMissing)
+                V2StudioFolderGate(
+                  onTap: data.onSelectStudioFolder,
+                  hasHandler: data.onSelectStudioFolder != null,
                 ),
               // One row: plus, permission, field, mic, send. Nothing else.
               V2ComposerRow(

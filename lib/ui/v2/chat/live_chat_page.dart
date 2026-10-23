@@ -311,6 +311,8 @@ class V2LiveChatPage extends StatefulWidget {
     this.onMic,
     this.onPermissionTap,
     this.permissionLabel = 'General',
+    this.studioFolder,
+    this.onSelectStudioFolder,
     this.onDraftChanged,
     this.onSendQueuedNow,
     this.onDismissQueued,
@@ -387,6 +389,17 @@ class V2LiveChatPage extends StatefulWidget {
 
   /// The mode in force for this chat (`General` by default).
   final String permissionLabel;
+
+  /// The repo/branch bound to this chat, when Studio mode has one.
+  final String? studioFolder;
+
+  /// Opens the repo picker from the composer's folder gate.
+  final VoidCallback? onSelectStudioFolder;
+
+  /// Spec Screen 2: Studio may not send until a folder is selected.
+  bool get studioFolderMissing =>
+      permissionLabel == 'Studio' &&
+      (studioFolder ?? '').trim().isEmpty;
 
   final ValueChanged<String>? onDraftChanged;
 
@@ -1286,6 +1299,13 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
                             onAction: widget.onSendErrorAction,
                             onDismiss: widget.onDismissSendError,
                           ),
+                        // Spec Screen 2: the Studio folder gate, above the
+                        // composer, so the disabled send is always explained.
+                        if (widget.studioFolderMissing)
+                          V2StudioFolderGate(
+                            onTap: widget.onSelectStudioFolder,
+                            hasHandler: widget.onSelectStudioFolder != null,
+                          ),
                         if (data.queuedCount > 0)
                           V2QueueDock(
                             count: data.queuedCount,
@@ -1298,7 +1318,9 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
                           controller: _controller,
                           onSubmitEnabled: widget.onSubmit != null,
                           sendEnabled:
-                              widget.onSubmit != null || widget.onSend != null,
+                              !widget.studioFolderMissing &&
+                              (widget.onSubmit != null ||
+                                  widget.onSend != null),
                           attachments: _attachments,
                           attachmentError: _attachmentError,
                           voiceError: _voice.error,
