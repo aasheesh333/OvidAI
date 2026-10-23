@@ -15,7 +15,7 @@ class _OkRest extends CloudRestClient {
 
   @override
   Future<SessionDto> patchSession(String id,
-          {String? title, String? mode}) async =>
+          {String? title, String? mode, bool? pinned}) async =>
       SessionDto(
         id: id,
         title: title,

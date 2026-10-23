@@ -83,7 +83,7 @@ class FakeChatRest extends CloudRestClient {
 
   @override
   Future<SessionDto> patchSession(String id,
-      {String? title, String? mode}) async {
+      {String? title, String? mode, bool? pinned}) async {
     patched.add((sessionId: id, title: title, mode: mode));
     if (patchError != null) throw patchError!;
     return SessionDto(

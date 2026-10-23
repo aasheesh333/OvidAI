@@ -489,11 +489,15 @@ class CloudRestClient {
   }
 
   /// PATCH /sessions/:id — only the fields provided are sent (the server
-  /// requires at least one and rejects unknown keys).
-  Future<SessionDto> patchSession(String id, {String? title, String? mode}) async {
+  /// requires at least one and rejects unknown keys). Pinning goes through the
+  /// server (`{pinned: bool}`) so it is visible on every platform and survives
+  /// a reinstall; the answer's `pinnedAt` is the source of truth.
+  Future<SessionDto> patchSession(String id,
+      {String? title, String? mode, bool? pinned}) async {
     return SessionDto.fromJson(await patchJson('/sessions/$id', body: <String, Object>{
       'title': ?title,
       'mode': ?mode,
+      'pinned': ?pinned,
     }));
   }
 

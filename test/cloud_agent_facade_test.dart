@@ -96,7 +96,7 @@ class FakeCloudRest extends CloudRestClient {
 
   @override
   Future<SessionDto> patchSession(String id,
-      {String? title, String? mode}) async {
+      {String? title, String? mode, bool? pinned}) async {
     patches.add((sessionId: id, mode: mode));
     if (patchError != null) throw patchError!;
     return SessionDto(

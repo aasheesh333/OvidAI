@@ -244,8 +244,8 @@ class ProjectsPortAdapter extends ProjectsPort {
   @override
   List<ProjectOption> get projects => _options;
 
-  /// Pins are backed by W9's account-scoped local store, so they survive a
-  /// restart and the chat header glyph reads the same state.
+  /// Pins are server-backed through [ChatPinsStore] (`PATCH /sessions/:id
+  /// {pinned}`), with the account-scoped local cache as an offline fallback.
   @override
   bool get supportsPin => true;
 

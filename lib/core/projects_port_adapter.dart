@@ -16,9 +16,9 @@ import 'diag.dart';
 ///   ships before the server keeps the feature hidden, so an older strict
 ///   `sendMessageBodySchema` never sees a `projectRefs` field it would 400.
 ///   `serverSupportsTurnProjectRefs` is an explicit test override only.
-/// * Pinning is still W9-local ([ChatPinsStore]) because W1 does not own a
-///   pin flag; `supportsPin` therefore stays false and the overflow menu
-///   writes the local store.
+/// * Pinning is server-backed: [ChatPinsStore] writes `PATCH /sessions/:id
+///   {pinned}` through [CloudSessionStore] and adopts `pinnedAt`; the local
+///   cache is only an offline fallback. `supportsPin` is therefore true.
 class ProjectsControllerPort extends ProjectsPort {
   ProjectsControllerPort({ProjectsController? controller})
       : _controller = controller ?? ProjectsController.I;
@@ -49,6 +49,9 @@ class ProjectsControllerPort extends ProjectsPort {
         fileCap: p.fileCap,
       ),
   ];
+
+  @override
+  bool get supportsPin => true;
 
   @override
   bool isPinned(String sessionId) => ChatPinsStore.I.isPinned(sessionId);

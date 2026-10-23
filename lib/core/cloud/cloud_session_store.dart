@@ -37,6 +37,7 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../chat_pins.dart';
 import '../connection_service.dart';
 import '../session_history_store.dart';
 import '../state.dart';
@@ -115,6 +116,9 @@ class CloudSessionStore extends ChangeNotifier {
         _connection = connection ?? ConnectionService.I,
         _ws = ws ?? WsMultiplexer.I {
     _ready = _load();
+    // Pins live on the server; this store owns the REST client and the
+    // local→server id map, so it installs the writer once.
+    ChatPinsStore.I.attachServer(_writePinToServer);
   }
 
   /// When true (production), a transient delivery failure (network,
@@ -228,6 +232,7 @@ class CloudSessionStore extends ChangeNotifier {
     _knownServerIds.addAll(idMap.values);
     _loaded = true;
     _ready = Future<void>.value();
+    ChatPinsStore.I.attachServer(_writePinToServer);
   }
 
   // -------------------------------------------------------------------------
@@ -355,6 +360,18 @@ class CloudSessionStore extends ChangeNotifier {
     final mapped = _idMap[id];
     if (mapped != null) return mapped;
     return _knownServerIds.contains(id) ? id : null;
+  }
+
+  /// The server write behind [ChatPinsStore.setPinned]. Resolves the UI id to
+  /// the wire UUID and PATCHes exactly `{pinned: bool}` (the gateway schema is
+  /// strict). Returns the authoritative `pinnedAt`. A chat with no server row
+  /// yet is reported as [PinNotOnServer] so the store keeps it local.
+  Future<DateTime?> _writePinToServer(String sessionId, bool pinned) async {
+    if (!_loaded) await _ready;
+    final serverId = knownServerIdFor(sessionId);
+    if (serverId == null) throw const PinNotOnServer();
+    final dto = await _rest.patchSession(serverId, pinned: pinned);
+    return dto.pinnedAt;
   }
 
   /// Creates the server session on first send; idempotent across calls,
@@ -525,6 +542,8 @@ class CloudSessionStore extends ChangeNotifier {
     _hasSynced = false;
     _lastSyncError = null;
     _cacheMemory.clear();
+    // The previous account's server pin answers must not answer for the next.
+    ChatPinsStore.I.clearServerPins();
     notifyListeners();
   }
 
@@ -591,21 +610,27 @@ class CloudSessionStore extends ChangeNotifier {
     return dto.id;
   }
 
-  ChatSession _sessionFromDto(SessionDto dto) => ChatSession(
-        id: dto.id,
-        title: (dto.title == null || dto.title!.isEmpty)
-            ? 'New chat'
-            : dto.title!,
-        // Cloud runs choose their model server-side; keep a sane local value
-        // for the kept UI (the provider picker is hidden on the thin client).
-        model: AppState.I.lastSelectedModel.isNotEmpty
-            ? AppState.I.lastSelectedModel
-            : 'Select a provider',
-        mode: dto.mode,
-        projectId: dto.projectId,
-        createdAt: dto.createdAt,
-        updatedAt: dto.updatedAt,
-      );
+  ChatSession _sessionFromDto(SessionDto dto) {
+    final session = ChatSession(
+      id: dto.id,
+      title: (dto.title == null || dto.title!.isEmpty)
+          ? 'New chat'
+          : dto.title!,
+      // Cloud runs choose their model server-side; keep a sane local value
+      // for the kept UI (the provider picker is hidden on the thin client).
+      model: AppState.I.lastSelectedModel.isNotEmpty
+          ? AppState.I.lastSelectedModel
+          : 'Select a provider',
+      mode: dto.mode,
+      projectId: dto.projectId,
+      createdAt: dto.createdAt,
+      updatedAt: dto.updatedAt,
+    );
+    if (dto.pinnedKnown) {
+      ChatPinsStore.I.applyServerPin(session.id, dto.pinnedAt);
+    }
+    return session;
+  }
 
   void _applyDto(ChatSession session, SessionDto dto) {
     final title = dto.title;
@@ -623,6 +648,10 @@ class CloudSessionStore extends ChangeNotifier {
     session.mode = dto.mode;
     session.projectId = dto.projectId;
     session.updatedAt = dto.updatedAt;
+    // The server's pin answer is authoritative, including `pinnedAt: null`.
+    if (dto.pinnedKnown) {
+      ChatPinsStore.I.applyServerPin(session.id, dto.pinnedAt);
+    }
   }
 
   // -------------------------------------------------------------------------

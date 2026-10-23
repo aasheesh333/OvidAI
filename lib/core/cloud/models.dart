@@ -32,16 +32,26 @@ class SessionDto {
     required this.createdAt,
     required this.updatedAt,
     this.projectId,
+    this.pinnedAt,
+    this.pinnedKnown = true,
   });
 
-  factory SessionDto.fromJson(Map<String, dynamic> j) => SessionDto(
-        id: j['id'] as String,
-        title: j['title'] as String?,
-        mode: j['mode'] as String,
-        projectId: j['projectId'] as String?,
-        createdAt: DateTime.parse(j['createdAt'] as String),
-        updatedAt: DateTime.parse(j['updatedAt'] as String),
-      );
+  factory SessionDto.fromJson(Map<String, dynamic> j) {
+    // The gateway ALWAYS sends `pinnedAt` (ISO string or null). An older
+    // gateway that omits the key is not saying "unpinned" — it is saying
+    // nothing, so the client keeps its offline pin cache for that row.
+    final known = j.containsKey('pinnedAt');
+    return SessionDto(
+      id: j['id'] as String,
+      title: j['title'] as String?,
+      mode: j['mode'] as String,
+      projectId: j['projectId'] as String?,
+      pinnedAt: known ? _parseInstant(j['pinnedAt']) : null,
+      pinnedKnown: known,
+      createdAt: DateTime.parse(j['createdAt'] as String),
+      updatedAt: DateTime.parse(j['updatedAt'] as String),
+    );
+  }
 
   final String id;
   final String? title;
@@ -49,8 +59,26 @@ class SessionDto {
 
   /// W1: the project this chat belongs to (null = ungrouped).
   final String? projectId;
+
+  /// Server pin instant, or null when the server says NOT pinned. This is
+  /// the cross-device source of truth for pinned state.
+  final DateTime? pinnedAt;
+
+  /// True when [pinnedAt] came from a gateway that sent the key. False for an
+  /// older gateway payload with no `pinnedAt` at all — [pinnedAt] is then
+  /// meaningless and must not clear the local fallback.
+  final bool pinnedKnown;
+
+  /// Pinned per the server (a null [pinnedAt] means explicitly not pinned).
+  bool get pinned => pinnedAt != null;
+
   final DateTime createdAt;
   final DateTime updatedAt;
+}
+
+DateTime? _parseInstant(Object? raw) {
+  if (raw is! String || raw.isEmpty) return null;
+  return DateTime.tryParse(raw);
 }
 
 /// W1 project row (`GET /projects`). Counts and the plan cap are computed by

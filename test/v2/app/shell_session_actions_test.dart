@@ -15,6 +15,7 @@ import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/app/v2_app_shell.dart';
 import 'package:ovid_ai/ui/v2/chat/composer_mentions.dart';
 import 'package:ovid_ai/ui/v2/sidebar/session_actions_sheet.dart';
+import 'package:ovid_ai/ui/v2/sidebar/sidebar.dart';
 
 /// The shell must drive the rebuilt actions sheet through its async
 /// `handlers:`. The legacy callbacks opened a second, shell-owned rename
@@ -182,5 +183,53 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('session-action-pin')));
     await tester.pumpAndSettle();
     expect(ChatPinsStore.I.isPinned(session.id), isTrue);
+  });
+
+  testWidgets('a server-pinned chat leads the sidebar', (tester) async {
+    // An OLD chat pinned on another device (server pinnedAt) must outrank a
+    // chat with newer activity. The shell reorders client-side; the server
+    // page/cursor is untouched.
+    final older = ChatSession(
+      id: 'srv-pinned',
+      title: 'Pinned on web',
+      model: 'auto',
+      createdAt: DateTime(2026, 10, 1),
+    );
+    final recent = ChatSession(
+      id: 'srv-recent',
+      title: 'Recent chat',
+      model: 'auto',
+      createdAt: DateTime.now(),
+    );
+    app.sessions.addAll(<ChatSession>[older, recent]);
+    app.activeSessionId = recent.id;
+    ChatPinsStore.I.applyServerPin(older.id, DateTime.utc(2026, 10, 18, 9));
+
+    tester.view.physicalSize = const Size(400, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      MaterialApp(theme: OTheme.light(), home: const V2AppShell()),
+    );
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.menu_rounded));
+    await tester.pumpAndSettle();
+
+    final sidebar = find.byType(Sidebar);
+    final pinned = find.descendant(
+      of: sidebar,
+      matching: find.text('Pinned on web'),
+    );
+    final unpinned = find.descendant(
+      of: sidebar,
+      matching: find.text('Recent chat'),
+    );
+    expect(pinned, findsOneWidget);
+    expect(unpinned, findsOneWidget);
+    expect(
+      tester.getTopLeft(pinned).dy,
+      lessThan(tester.getTopLeft(unpinned).dy),
+      reason: 'pinned sessions sort first client-side',
+    );
   });
 }

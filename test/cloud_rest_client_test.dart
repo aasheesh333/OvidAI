@@ -26,10 +26,14 @@ Map<String, dynamic> _sessionJson(
   String id, {
   String mode = 'safe',
   String? title,
+  String? pinnedAt,
 }) => {
       'id': id,
       'title': title,
       'mode': mode,
+      // The gateway always sends the key (null = not pinned). Tests that need
+      // an OLDER gateway remove it explicitly.
+      'pinnedAt': pinnedAt,
       'createdAt': '2026-10-16T10:00:00.000Z',
       'updatedAt': '2026-10-16T10:05:00.000Z',
     };
@@ -330,6 +334,68 @@ void main() {
     expect(captured.url.toString(), '$_restBase/sessions/s9');
     expect(jsonDecode(captured.body), {'mode': 'studio'});
     expect(session.mode, 'studio');
+  });
+
+  test(
+      'patchSession pinned sends EXACTLY {"pinned": true} — the gateway '
+      'schema is .strict(), so an extra key is a 400', () async {
+    late http.Request captured;
+    final mock = MockClient((request) async {
+      captured = request;
+      return http.Response(
+        jsonEncode(
+          _sessionJson('s9', pinnedAt: '2026-10-18T09:00:00.000Z'),
+        ),
+        200,
+      );
+    });
+    final rest = _client(mock);
+    final session = await rest.patchSession('s9', pinned: true);
+
+    expect(captured.method, 'PATCH');
+    expect(captured.url.toString(), '$_restBase/sessions/s9');
+    expect(jsonDecode(captured.body), {'pinned': true});
+    expect(session.pinned, isTrue);
+    expect(session.pinnedAt, DateTime.utc(2026, 10, 18, 9));
+  });
+
+  test('patchSession pinned false sends {"pinned": false} and clears the pin',
+      () async {
+    late http.Request captured;
+    final mock = MockClient((request) async {
+      captured = request;
+      return http.Response(jsonEncode(_sessionJson('s9')), 200);
+    });
+    final rest = _client(mock);
+    final session = await rest.patchSession('s9', pinned: false);
+
+    expect(jsonDecode(captured.body), {'pinned': false});
+    expect(session.pinned, isFalse);
+    expect(session.pinnedAt, isNull);
+  });
+
+  test('SessionDto parses pinnedAt as an ISO instant', () {
+    final dto = SessionDto.fromJson(
+      _sessionJson('s1', pinnedAt: '2026-10-18T09:00:00.000Z'),
+    );
+    expect(dto.pinned, isTrue);
+    expect(dto.pinnedAt, DateTime.utc(2026, 10, 18, 9));
+    expect(dto.pinnedKnown, isTrue);
+  });
+
+  test('SessionDto pinnedAt null means not pinned', () {
+    final dto = SessionDto.fromJson(_sessionJson('s1'));
+    expect(dto.pinnedAt, isNull);
+    expect(dto.pinned, isFalse);
+    expect(dto.pinnedKnown, isTrue);
+  });
+
+  test('SessionDto without a pinnedAt key is UNKNOWN, not unpinned', () {
+    final json = _sessionJson('s1')..remove('pinnedAt');
+    final dto = SessionDto.fromJson(json);
+    expect(dto.pinned, isFalse);
+    expect(dto.pinnedKnown, isFalse,
+        reason: 'an older gateway must not clear the local pin cache');
   });
 
   test('createSession posts and parses the 201 SessionDto', () async {

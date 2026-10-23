@@ -25,6 +25,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ovid_ai/core/chat_pins.dart';
 import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
 import 'package:ovid_ai/core/cloud/cloud_rest.dart';
 import 'package:ovid_ai/core/cloud/cloud_session_store.dart';
@@ -108,16 +109,24 @@ class FakeStoreRest extends CloudRestClient {
   final List<({String id, String? title})> titlePatches =
       <({String id, String? title})>[];
 
+  /// PATCH /sessions/:id {pinned} calls, in order. The pin write must reach
+  /// the SERVER — a local-only store is not enough.
+  final List<({String id, bool pinned})> pinPatches =
+      <({String id, bool pinned})>[];
+
   @override
-  Future<SessionDto> patchSession(String id, {String? title, String? mode}) async {
+  Future<SessionDto> patchSession(String id,
+      {String? title, String? mode, bool? pinned}) async {
     titlePatches.add((id: id, title: title));
-    return _dtoFor(id, title);
+    if (pinned != null) pinPatches.add((id: id, pinned: pinned));
+    return _dtoFor(id, title, pinned: pinned);
   }
 
-  static SessionDto _dtoFor(String id, String? title) => SessionDto(
+  static SessionDto _dtoFor(String id, String? title, {bool? pinned}) => SessionDto(
         id: id,
         title: title,
         mode: 'auto',
+        pinnedAt: pinned == true ? DateTime.utc(2026, 10, 18, 9) : null,
         createdAt: DateTime.utc(2026, 10, 17),
         updatedAt: DateTime.utc(2026, 10, 17),
       );
@@ -400,10 +409,11 @@ Future<_Harness> _buildStore({
   return _Harness(fakeRest, prefs, connection, ws, store, sockets);
 }
 
-SessionDto _dto(String id, String? title) => SessionDto(
+SessionDto _dto(String id, String? title, {DateTime? pinnedAt}) => SessionDto(
       id: id,
       title: title,
       mode: 'auto',
+      pinnedAt: pinnedAt,
       createdAt: DateTime.utc(2026, 10, 1),
       updatedAt: DateTime.utc(2026, 10, 17),
     );
@@ -432,10 +442,101 @@ void main() {
     SharedPreferences.setMockInitialValues(const <String, Object>{});
     AppState.resetTestInstance();
     AppState.createForTest();
+    ChatPinsStore.I.clearForTest();
   });
 
   tearDown(() async {
+    ChatPinsStore.I.clearForTest();
     AppState.resetTestInstance();
+  });
+
+  group('session pins', () {
+    test('refresh adopts the server pinnedAt for a mapped local chat', () async {
+      final h = await _buildStore(
+        idMap: <String, String>{'local-1': 'srv-1'},
+      );
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+      AppState.I.sessions.add(
+        ChatSession(id: 'local-1', title: 'One', model: 'm'),
+      );
+
+      final pinnedAt = DateTime.utc(2026, 10, 18, 9);
+      h.rest.sessionPages = <CloudPage<SessionDto>>[
+        CloudPage<SessionDto>(
+          items: <SessionDto>[_dto('srv-1', 'One', pinnedAt: pinnedAt)],
+          nextCursor: null,
+        ),
+      ];
+      await h.store.refreshSessions();
+
+      expect(ChatPinsStore.I.isPinned('local-1'), isTrue);
+      expect(ChatPinsStore.I.pinnedAtFor('local-1'), pinnedAt);
+    });
+
+    test('the server value wins over a stale local cache', () async {
+      final h = await _buildStore(
+        idMap: <String, String>{'local-1': 'srv-1'},
+      );
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+      AppState.I.sessions.add(
+        ChatSession(id: 'local-1', title: 'One', model: 'm'),
+      );
+
+      // A pin cached from a previous offline session...
+      ChatPinsStore.I.seedLocalPinForTest('local-1', true);
+      expect(ChatPinsStore.I.isPinned('local-1'), isTrue);
+
+      // ...must lose to an authoritative unpinned DTO.
+      h.rest.sessionPages = <CloudPage<SessionDto>>[
+        CloudPage<SessionDto>(
+          items: <SessionDto>[_dto('srv-1', 'One')],
+          nextCursor: null,
+        ),
+      ];
+      await h.store.refreshSessions();
+
+      expect(ChatPinsStore.I.isPinned('local-1'), isFalse,
+          reason: 'pinnedAt: null is the server saying "not pinned"');
+    });
+
+    test('pinning a server-backed chat PATCHes the server, not just prefs',
+        () async {
+      final h = await _buildStore(
+        idMap: <String, String>{'local-1': 'srv-1'},
+      );
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+      AppState.I.sessions.add(
+        ChatSession(id: 'local-1', title: 'One', model: 'm'),
+      );
+
+      await ChatPinsStore.I.setPinned('local-1', true);
+
+      expect(h.rest.pinPatches, <({String id, bool pinned})>[
+        (id: 'srv-1', pinned: true),
+      ]);
+      expect(ChatPinsStore.I.isPinned('local-1'), isTrue);
+      expect(ChatPinsStore.I.pinnedAtFor('local-1'),
+          DateTime.utc(2026, 10, 18, 9));
+    });
+
+    test('a chat that never reached the server keeps a local pin', () async {
+      final h = await _buildStore();
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+      AppState.I.sessions.add(
+        ChatSession(id: 'local-only', title: 'Draft', model: 'm'),
+      );
+
+      await ChatPinsStore.I.setPinned('local-only', true);
+
+      expect(h.rest.pinPatches, isEmpty,
+          reason: 'no server row exists yet — nothing to PATCH');
+      expect(ChatPinsStore.I.isPinned('local-only'), isTrue,
+          reason: 'the offline fallback keeps the pin usable');
+    });
   });
 
   group('ensureServerSession', () {
