@@ -115,7 +115,9 @@ export function createSubagentTools(deps: {
         "Delegate a focused task to a child agent that runs in-process with " +
         "its own transcript and tools. It cannot see this chat's history: " +
         "include all needed context. The call waits for the child to finish " +
-        "and returns its final report.",
+        "and returns its final report. If the child fails, stops or times " +
+        "out, the report still carries an unverified excerpt of its last " +
+        "output, so you can see how far it got.",
       parameters: {
         type: "object",
         properties: {
@@ -437,7 +439,8 @@ export function createSubagentTools(deps: {
         "whenever you have two or more tasks that do not depend on each " +
         "other — it is the fast path for delegating most of the work. Each " +
         "child needs its full context in its own prompt. Returns one entry " +
-        "per task, in the order you sent them.",
+        "per task, in the order you sent them; a child that failed still " +
+        "carries an unverified excerpt of its last output.",
       parameters: {
         type: "object",
         properties: {

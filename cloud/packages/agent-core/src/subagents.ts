@@ -581,6 +581,28 @@ function depthRefusal(): SubagentRefusalError {
   );
 }
 
+/**
+ * The tail of a child's streamed text, kept so a child that dies mid-run can
+ * still report what it did. Bounded: only the last [MAX_PARTIAL_CHARS] are
+ * retained, so a chatty child cannot grow the supervisor's memory.
+ */
+export interface PartialTextCapture {
+  text: string;
+}
+
+const MAX_PARTIAL_CHARS = 32_000;
+
+function createPartialCapture(): PartialTextCapture {
+  return { text: "" };
+}
+
+function appendPartial(capture: PartialTextCapture, chunk: string): void {
+  if (chunk === "") return;
+  const next = capture.text + chunk;
+  capture.text =
+    next.length <= MAX_PARTIAL_CHARS ? next : next.slice(next.length - MAX_PARTIAL_CHARS);
+}
+
 function firstLine(text: string, max: number): string {
   const line = text.split(/\r?\n/, 1)[0]?.trim() ?? "";
   return line.length <= max ? line : `${line.slice(0, max)}…`;
@@ -729,6 +751,7 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
     log: SubagentLog | null,
     resources: ChildResources,
     userId: string,
+    partial: PartialTextCapture,
   ): EventSink {
     const sandbox = deps.sandbox ?? null;
     const killNow = (kill: Promise<void>): void => {
@@ -736,6 +759,23 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
     };
     return {
       async emit(type, payload) {
+        // Keep the child's own words so a failure summary can carry them.
+        if (type === "message_delta") {
+          const text = payload["text"];
+          if (typeof text === "string") appendPartial(partial, text);
+        } else if (type === "message_completed") {
+          // A transport that sends deltas has already streamed this content, so
+          // appending it again would duplicate. A transport that sends none (or
+          // a later turn of a multi-turn child) still needs it captured.
+          const content = payload["content"];
+          if (
+            typeof content === "string" &&
+            content !== "" &&
+            !partial.text.endsWith(content)
+          ) {
+            appendPartial(partial, content);
+          }
+        }
         if (type === "tool_started") {
           const runId = payload["runId"];
           const callId = payload["callId"];
@@ -951,7 +991,13 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
 
         // Track the child's sandbox resources even when the log writer is
         // unavailable: a settle must kill them either way.
-        const sinkForRun = childSink(log, resourcesOf(child.sessionId), parent.userId);
+        const partial = createPartialCapture();
+        const sinkForRun = childSink(
+          log,
+          resourcesOf(child.sessionId),
+          parent.userId,
+          partial,
+        );
 
         handle = new MutableChildHandle({
           sessionId: child.sessionId,
@@ -1131,6 +1177,7 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
         const summary = buildSubagentSummary({
           status: terminalStatus,
           text: childHandle.rawResult(),
+          partialOutput: partial.text,
           error:
             finalStatus === "timeout"
               ? `Subagent exceeded the maximum runtime of ${maxRuntimeMs} ms and was stopped.`

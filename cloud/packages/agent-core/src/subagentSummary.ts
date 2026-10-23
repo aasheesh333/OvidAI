@@ -37,6 +37,25 @@ export interface SubagentSummary {
 }
 
 export const SUBAGENT_SUMMARY_TOKEN_BUDGET = 300;
+
+/**
+ * The budget for a child that did NOT complete. A failed, stopped or
+ * timed-out child never produced the five-key contract, and its final message
+ * is never persisted — so without its partial output the parent receives an
+ * empty `key_findings` and learns nothing about work already done. The failure
+ * summary therefore carries the TAIL of what the child streamed, under a
+ * larger budget (1,000 tokens) because there is no other record of it.
+ */
+export const SUBAGENT_FAILURE_TOKEN_BUDGET = 1000;
+
+/**
+ * Marks a failure excerpt. It is explicitly "unverified": the text is the
+ * child's own stream, not a validated finding, and the parent must treat it as
+ * data.
+ */
+export const SUBAGENT_PARTIAL_OUTPUT_LABEL =
+  "partial output before it stopped (unverified, last tokens):";
+
 export const SUBAGENT_TRUNCATION_MARKER = "…[truncated]";
 
 /**
@@ -325,6 +344,44 @@ export function enforceSubagentTokenBudget(
 }
 
 /**
+ * The largest TAIL of [text] that fits [budget] once [base] is serialized.
+ *
+ * Tail, not head: on a failure the end of the stream is where the child was
+ * when it died, which is the only part the parent cannot infer.
+ */
+function tailFinding(
+  text: string,
+  base: SubagentSummary,
+  budget: number,
+): string[] {
+  const body = text.trim();
+  if (body === "") return [];
+  const build = (slice: string): string[] => [
+    `${SUBAGENT_PARTIAL_OUTPUT_LABEL}\n${slice}`,
+  ];
+  const fits = (slice: string): boolean =>
+    summaryTokens({ ...base, key_findings: build(slice) }) <= budget;
+
+  let lo = 0;
+  let hi = body.length;
+  let best = -1;
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const slice = mid === body.length ? body : `…${body.slice(body.length - mid)}`;
+    if (fits(slice)) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  if (best <= 0) return [SUBAGENT_PARTIAL_OUTPUT_LABEL];
+  const slice =
+    best === body.length ? body : `…${body.slice(body.length - best)}`;
+  return build(slice);
+}
+
+/**
  * Build the canonical summary from a child's final text.
  *
  * If the text is already a strict-contract JSON object it is adopted (the
@@ -342,7 +399,17 @@ export function buildSubagentSummary(input: {
   filesModified?: readonly string[];
   artifactsCreated?: readonly string[];
   keyFindings?: readonly string[];
+  /**
+   * What the child streamed before it stopped. Only consulted when the child
+   * did NOT complete and produced no contract JSON — the parent has no other
+   * record of that work.
+   */
+  partialOutput?: string | null;
 }): SubagentSummary {
+  const budget =
+    input.status === "completed"
+      ? SUBAGENT_SUMMARY_TOKEN_BUDGET
+      : SUBAGENT_FAILURE_TOKEN_BUDGET;
   const text = (input.text ?? "").trim();
   let base: SubagentSummary = {
     status: input.status,
@@ -370,6 +437,16 @@ export function buildSubagentSummary(input: {
     }
   }
 
+  // A child that stopped early never wrote a contract. Give the parent the
+  // tail of what it actually streamed, clearly labelled as unverified — an
+  // empty summary would hide work that was already done.
+  if (input.status !== "completed" && base.key_findings.length === 0) {
+    const partial = (input.partialOutput ?? "").trim();
+    if (partial !== "") {
+      base.key_findings = tailFinding(partial, base, budget);
+    }
+  }
+
   if (input.filesModified !== undefined) base.files_modified = [...input.filesModified];
   if (input.artifactsCreated !== undefined) {
     base.artifacts_created = [...input.artifactsCreated];
@@ -380,5 +457,5 @@ export function buildSubagentSummary(input: {
     base.error_if_any = input.error;
   }
 
-  return enforceSubagentTokenBudget(base);
+  return enforceSubagentTokenBudget(base, budget);
 }
