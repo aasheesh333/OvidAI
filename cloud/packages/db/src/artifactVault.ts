@@ -395,6 +395,50 @@ export const artifactVault = {
             .limit(1);
     return row ? toRow(origin, row) : null;
   },
+
+  /**
+   * Remove one artifact from the account.
+   *
+   * Returns the row that was removed (so the caller can delete its bytes and
+   * report the freed size), or null when it is not the caller's.
+   *
+   * Generated rows are soft-deleted (`status = 'deleted'`) because every
+   * quota and listing query filters `status = 'active'` — that is what frees
+   * the space — while the row survives for audit. Uploads have no soft-delete
+   * column, so the row is removed outright; the file's owner asked for it to
+   * be gone and nothing else references it by id.
+   *
+   * The database write is deliberately FIRST. A failed storage delete leaves
+   * orphaned bytes (recoverable by a sweep, invisible to the user), whereas
+   * the reverse order would leave a row pointing at bytes that no longer
+   * exist — a broken entry in the library.
+   */
+  async remove(
+    db: Db,
+    userId: string,
+    id: string,
+    origin: ArtifactVaultOrigin,
+  ): Promise<ArtifactVaultRow | null> {
+    const row = await this.get(db, userId, id, origin);
+    if (row === null) return null;
+    if (origin === "generated") {
+      await db
+        .update(workspaceObjectsTable)
+        .set({ status: "deleted" })
+        .where(
+          and(
+            eq(workspaceObjectsTable.id, id),
+            eq(workspaceObjectsTable.userId, userId),
+            eq(workspaceObjectsTable.kind, "artifact"),
+          ),
+        );
+    } else {
+      await db
+        .delete(attachmentsTable)
+        .where(and(eq(attachmentsTable.id, id), eq(attachmentsTable.userId, userId)));
+    }
+    return row;
+  },
 };
 
 export type { WorkspaceObjectRow };

@@ -19,6 +19,7 @@ const session: SessionDto = {
   title: null,
   mode: "auto",
   projectId: null,
+  pinnedAt: null,
   createdAt: "2026-10-15T12:00:00.000Z",
   updatedAt: "2026-10-15T12:00:00.000Z",
 };
@@ -56,6 +57,13 @@ describe("rest schemas", () => {
     expect(() => sessionDtoSchema.parse(withoutMode)).toThrow();
     expect(() => sessionDtoSchema.parse({ ...session, mode: "control" })).toThrow();
     expect(() => sessionDtoSchema.parse({ ...session, mode: 42 })).toThrow();
+  });
+
+  it("sessionPatchSchema accepts pinning alone and rejects an empty body", () => {
+    expect(sessionPatchSchema.parse({ pinned: true })).toEqual({ pinned: true });
+    expect(sessionPatchSchema.parse({ pinned: false })).toEqual({ pinned: false });
+    // A body with nothing in it is a mistake, not a no-op 200.
+    expect(() => sessionPatchSchema.parse({})).toThrow();
   });
 
   it("sessionPatchSchema parses title-only, mode-only, and both together", () => {

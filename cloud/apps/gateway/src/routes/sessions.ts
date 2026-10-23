@@ -14,6 +14,7 @@ export function toSessionDto(row: SessionRow): SessionDto {
     title: row.title,
     mode: row.mode as SessionDto["mode"],
     projectId: row.projectId,
+    pinnedAt: row.pinnedAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };

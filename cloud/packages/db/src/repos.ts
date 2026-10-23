@@ -352,13 +352,24 @@ export const sessions = {
     db: Db,
     sessionId: string,
     userId: string,
-    fields: { title?: string | null; mode?: string },
+    fields: { title?: string | null; mode?: string; pinned?: boolean },
   ): Promise<SessionRow | null> {
-    const set: { title?: string | null; mode?: string; updatedAt: Date } = {
+    const set: {
+      title?: string | null;
+      mode?: string;
+      pinnedAt?: Date | null;
+      updatedAt: Date;
+    } = {
       updatedAt: new Date(),
     };
     if (fields.title !== undefined) set.title = fields.title;
     if (fields.mode !== undefined) set.mode = fields.mode;
+    // Pinning is a timestamp, not a flag: unpinning clears it, and the value
+    // gives a stable order among pinned chats. Re-pinning an already pinned
+    // chat keeps the original instant so the row does not jump.
+    if (fields.pinned !== undefined) {
+      set.pinnedAt = fields.pinned ? new Date() : null;
+    }
     const rows = await db
       .update(sessionsTable)
       .set(set)

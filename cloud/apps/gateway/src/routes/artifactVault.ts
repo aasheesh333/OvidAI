@@ -134,6 +134,59 @@ export function registerArtifactVaultRoutes(app: FastifyInstance, deps: GatewayD
     });
   });
 
+  /**
+   * Remove one artifact.
+   *
+   * `source` is required for the same reason the URL mint requires it: an id
+   * alone is ambiguous across the two canonical sources, and guessing would
+   * mean guessing which table to delete from.
+   *
+   * The bytes are deleted best-effort AFTER the row. A storage failure is
+   * logged and still answers 200: the file is already gone from the user's
+   * library and their quota, and an error would invite a retry that 404s.
+   */
+  app.delete("/artifacts/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const { uid } = request.principal;
+    const query = request.query as Record<string, string | string[] | undefined>;
+
+    if (!isUuid(id)) {
+      return vaultError(reply, 404, "not_found", "Artifact not found.");
+    }
+    const rawSource = queryValue(query.source);
+    const origin = SOURCES.find((s) => s === rawSource);
+    if (origin === undefined) {
+      return sendError(
+        reply,
+        400,
+        "bad_request",
+        "source must be 'generated' or 'uploaded'.",
+      );
+    }
+
+    const row = await artifactVault.remove(deps.db, uid, id, origin);
+    if (row === null) {
+      return vaultError(reply, 404, "not_found", "Artifact not found.");
+    }
+
+    if (deps.storage !== undefined) {
+      try {
+        await deps.storage.delete(row.r2Key);
+      } catch (e) {
+        // The row is gone either way; the object is now orphaned and a sweep
+        // can reclaim it. Never log the key: it is a storage address.
+        console.warn("[gateway] artifact bytes could not be deleted", {
+          id,
+          origin,
+          error: String(e),
+        });
+      }
+    }
+
+    reply.header("cache-control", "no-store");
+    return { id, origin, freedBytes: row.sizeBytes };
+  });
+
   app.get("/artifacts/:id/url", async (request, reply) => {
     const { id } = request.params as { id: string };
     const { uid } = request.principal;

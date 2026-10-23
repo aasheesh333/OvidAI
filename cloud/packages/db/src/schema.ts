@@ -104,6 +104,12 @@ export const sessions = pgTable(
     createdAt: timestamptz("created_at").notNull().defaultNow(),
     updatedAt: timestamptz("updated_at").notNull().defaultNow(),
     archivedAt: timestamptz("archived_at"),
+    /**
+     * Pinned chats sort above the rest in the sidebar and survive the
+     * "recent" cut. NULL = not pinned; a timestamp (not a boolean) so the
+     * order among pinned chats is stable and meaningful.
+     */
+    pinnedAt: timestamptz("pinned_at"),
     // Soft delete (DELETE /sessions/:id): the row stays for audit/history but
     // every read path filters `deleted_at IS NULL` — repos.sessions and the
     // ownership joins in runs/searchMessages.
@@ -112,6 +118,8 @@ export const sessions = pgTable(
   (t) => [
     index("sessions_user_id_idx").on(t.userId),
     index("sessions_project_id_idx").on(t.projectId),
+    // Pinned-first listing reads this per user; a partial index keeps it small.
+    index("sessions_pinned_idx").on(t.userId, t.pinnedAt),
   ],
 );
 

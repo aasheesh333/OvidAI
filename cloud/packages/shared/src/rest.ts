@@ -8,6 +8,8 @@ export interface SessionDto {
   mode: "safe" | "auto" | "drive" | "studio";
   /** W1: the project this chat belongs to, or null for an ungrouped chat. */
   projectId: string | null;
+  /** ISO instant when pinned, or null. Pinned chats sort first. */
+  pinnedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -354,6 +356,7 @@ export const sessionDtoSchema: z.ZodType<SessionDto> = z.object({
   title: z.string().nullable(),
   mode: sessionModeSchema,
   projectId: z.string().min(1).nullable(),
+  pinnedAt: z.string().min(1).nullable(),
   createdAt: z.string().min(1),
   updatedAt: z.string().min(1),
 });
@@ -394,13 +397,22 @@ export const sessionPatchSchema = z
   .object({
     title: z.string().nullable().optional(),
     mode: sessionModeSchema.optional(),
+    pinned: z.boolean().optional(),
   })
   .strict()
-  .refine((body) => body.title !== undefined || body.mode !== undefined, {
-    message: "At least one of 'title' or 'mode' is required.",
-  });
+  .refine(
+    (body) =>
+      body.title !== undefined || body.mode !== undefined || body.pinned !== undefined,
+    {
+      message: "At least one of 'title', 'mode' or 'pinned' is required.",
+    },
+  );
 
-export type SessionPatch = { title?: string | null; mode?: SessionDto["mode"] };
+export type SessionPatch = {
+  title?: string | null;
+  mode?: SessionDto["mode"];
+  pinned?: boolean;
+};
 
 export const messageDtoSchema: z.ZodType<MessageDto> = z.object({
   id: z.string().min(1),

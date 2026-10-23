@@ -162,6 +162,13 @@
       "when": 1792514234416,
       "tag": "0022_project_file_scope",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1792747936152,
+      "tag": "0023_session_pin",
+      "breakpoints": true
     }
   ]
 }
