@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
 import '../../../core/cloud/artifact_vault.dart';
+import '../../../core/connectors/connector_api.dart';
 import '../../../core/chat_integration_ports.dart';
 import '../../../core/firebase_service.dart';
 import '../../../core/github_service.dart';
@@ -13,6 +14,7 @@ import '../../../core/state.dart';
 import '../../../core/session_artifacts.dart';
 import '../../github_login_sheet.dart';
 import '../browser/browser_live_page.dart';
+import '../connectors/connector_catalog_loader.dart';
 import '../connectors/connectors_page.dart';
 import '../library/artifact_detail_page.dart';
 import '../library/artifacts_page.dart';
@@ -153,21 +155,32 @@ class V2WorkRoutes {
     sessionId: AppState.I.activeSessionId,
   );
 
+  /// Opens the connector catalogue the GATEWAY serves.
+  ///
+  /// The list used to be a hardcoded empty array, so every row came from the
+  /// built-in design catalogue and enabling one only set a local flag. The
+  /// server is now the source of truth: what it does not serve, the screen
+  /// does not offer.
   static Future<void> openConnectors(
     BuildContext context,
     V2SettingsActions actions,
   ) async {
+    V2ConnectorsData data;
+    try {
+      data = await loadConnectorCatalog(ConnectorApi());
+    } catch (_) {
+      data = connectorCatalogError();
+    }
+    if (!context.mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => ConnectorsPage(
-          data: const V2ConnectorsData(
-            status: V2ConnectorsStatus.content,
-            connectors: [],
-          ),
+          data: data,
           // The cap follows the server-confirmed plan, not the display cache.
           plan: V2ConnectorPlan.forTier(
             confirmedPlanTier ?? AppState.I.ovidCloudTier,
           ),
+          onRetry: () => openConnectors(context, actions),
         ),
       ),
     );

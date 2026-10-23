@@ -198,6 +198,25 @@ class CloudRestClient {
         await _authed('POST', _uri(path), body, timeout: timeout));
   }
 
+  /// GET for endpoints that answer a bare JSON array (`GET /mcp/servers`).
+  /// Same auth, 401-retry and error mapping as [getJson]; only the success
+  /// shape differs.
+  Future<List<dynamic>> getJsonList(String path,
+      {Map<String, String>? query, Duration? timeout}) async {
+    final response =
+        await _authed('GET', _uri(path, query), null, timeout: timeout);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw _toError(response);
+    }
+    final dynamic parsed = _tryJson(response.body);
+    if (parsed is List) return parsed;
+    throw CloudApiException(
+      status: response.statusCode,
+      code: 'internal',
+      message: 'Unexpected response format from Ovid Cloud.',
+    );
+  }
+
   Future<Map<String, dynamic>> patchJson(String path,
       {Object? body, Duration? timeout}) async {
     return _decode(
