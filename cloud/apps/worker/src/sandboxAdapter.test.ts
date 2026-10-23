@@ -110,6 +110,12 @@ function fakeManager() {
       if (userId !== "u1") throw new Error(`unknown user: ${userId}`);
       return handle;
     },
+    attachSession: async (userId: string, sessionId: string) => {
+      if (userId !== "u1") throw new Error(`unknown user: ${userId}`);
+      (manager as unknown as { lastSessionId?: string }).lastSessionId = sessionId;
+      return handle;
+    },
+    sessionWorkspaceDir: async () => workspaceDir,
     get: (userId: string) => (userId === "u1" ? handle : undefined),
     destroy: async () => {},
     list: () => [] as never[],
@@ -434,5 +440,23 @@ describe("createStepLimiter", () => {
     ]);
     // With one permit the second step cannot enter until the first leaves.
     expect(peak).toBe(1);
+  });
+});
+
+describe("per-session workspace", () => {
+  it("a port built with a sessionId attaches that session's workspace, not the user's", async () => {
+    const { manager, execCalls } = fakeManager();
+    const port = createSandboxPort(manager, { sessionId: "sess-42" });
+    await port.exec("u1", { cmd: "pwd" });
+    expect(execCalls).toHaveLength(1);
+    // The handle handed out must be the session view.
+    expect((manager as unknown as { lastSessionId?: string }).lastSessionId).toBe("sess-42");
+  });
+
+  it("a port built without a sessionId keeps the legacy per-user attach", async () => {
+    const { manager } = fakeManager();
+    const port = createSandboxPort(manager);
+    await port.exec("u1", { cmd: "pwd" });
+    expect((manager as unknown as { lastSessionId?: string }).lastSessionId).toBeUndefined();
   });
 });

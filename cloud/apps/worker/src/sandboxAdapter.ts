@@ -117,6 +117,12 @@ export function createSandboxPort(
   opts?: {
     tier?: "free" | "pro";
     /**
+     * The chat this port belongs to. When set, every handle it hands out is a
+     * per-session VIEW of the user's env (`attachSession`), so the agent's
+     * file/shell tools can never see another chat's workspace.
+     */
+    sessionId?: string;
+    /**
      * Shared across EVERY port instance (one per run) — the bound is on the
      * box, not on a run. Absent ⇒ unbounded (tests / non-production).
      */
@@ -125,7 +131,13 @@ export function createSandboxPort(
 ): SandboxPort {
   const calls = new Map<string, TrackedExec>();
   const attach = (userId: string) =>
-    manager.attach(userId, opts?.tier ? { tier: opts.tier } : undefined);
+    opts?.sessionId !== undefined
+      ? manager.attachSession(
+          userId,
+          opts.sessionId,
+          opts.tier !== undefined ? { tier: opts.tier } : undefined,
+        )
+      : manager.attach(userId, opts?.tier ? { tier: opts.tier } : undefined);
   const step = <T>(fn: () => Promise<T>): Promise<T> =>
     opts?.stepLimit === undefined ? fn() : opts.stepLimit.run(fn);
 

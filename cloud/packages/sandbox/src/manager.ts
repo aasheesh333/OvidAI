@@ -85,6 +85,23 @@ export interface SandboxManager {
    * disk pressure.
    */
   attach(userId: string, opts?: { tier?: "free" | "pro" }): Promise<SandboxHandle>;
+  /**
+   * Create-if-needed for ONE chat. Reuses the user's env (one cgroup, one
+   * `.home`, one admission slot) but binds
+   * `{workspacesRoot}/{uid}/sessions/{sessionId}/workspace` at `/workspace`,
+   * so two chats of one user can never read each other's files. Idempotent
+   * per (userId, sessionId).
+   */
+  attachSession(
+    userId: string,
+    sessionId: string,
+    opts?: { tier?: "free" | "pro" },
+  ): Promise<SandboxHandle>;
+  /**
+   * Host path of a session's workspace (`…/sessions/{sessionId}/workspace`),
+   * created, chowned and quota-applied. The same path `attachSession` binds.
+   */
+  sessionWorkspaceDir(userId: string, sessionId: string): Promise<string>;
   get(userId: string): SandboxHandle | undefined;
   destroy(userId: string): Promise<void>;
   list(): SandboxInfo[];
@@ -240,6 +257,13 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
   const handles = new Map<string, ManagedHandle>();
   /** Concurrent attach for the same userId dedupes onto one create. */
   const inFlight = new Map<string, Promise<SandboxHandle>>();
+  /**
+   * The jail context each live env was built with, so a per-session handle can
+   * clone it with a different workspace bind (one env, many session views).
+   */
+  const ctxByUser = new Map<string, JailContext>();
+  /** Per-session handles, keyed `userId\0sessionId` — same env, own workspace. */
+  const sessionHandles = new Map<string, ManagedHandle>();
   /** user → uid, so destroy→attach and workspaceDir→attach reuse the uid (the prod allocator is idempotent; this makes the manager so too). */
   const uidByUser = new Map<string, number>();
   /**
@@ -299,6 +323,11 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     const handle = handles.get(userId);
     if (handle === undefined) return;
     handles.delete(userId);
+    ctxByUser.delete(userId);
+    // Session views share this env; their handles die with it.
+    for (const [key, sessionHandle] of [...sessionHandles]) {
+      if (sessionHandle.userId === userId) sessionHandles.delete(key);
+    }
     // Task 9: kill live leaves (ptys/jobs/spawned) FIRST, before the env —
     // each leaf's tree gets its own cgroup.kill, then the env follows.
     try {
@@ -400,6 +429,8 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
         homeDir,
         etcDir,
       });
+      // Kept so attachSession can mint a per-session view of this same env.
+      ctxByUser.set(userId, ctx);
 
       // -- Task 9 leaf registries (ptys / jobs / spawned processes) ---------
       const ptys = new Map<string, PtySession>();
@@ -492,8 +523,7 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
 
   // -- the G1 seam ----------------------------------------------------------
 
-  async function workspaceDirFor(userId: string, sessionId: string): Promise<string> {
-    const attached = handles.get(userId);
+  async function workspaceDirFor(userId: string, sessionId: string): Promise<string> {    const attached = handles.get(userId);
     let uid = attached?.uid ?? uidByUser.get(userId);
     if (uid === undefined) {
       uid = await deps.allocateUid(userId);
@@ -520,6 +550,100 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     const quotaMb = tier === "free" ? config.workspaceQuotaMb : config.proWorkspaceQuotaMb;
     await quota.applyQuota(dir, workspaceProjectId(uid), quotaMb * MB);
     return dir;
+  }
+
+  /**
+   * The session's workspace itself (`…/sessions/{id}/workspace`), created and
+   * chowned. The XFS project quota applied to the parent session dir covers
+   * this subtree, so no second `applyQuota` is needed.
+   */
+  async function sessionWorkspaceDir(userId: string, sessionId: string): Promise<string> {
+    // sessionId reaches this from a job payload: never let it escape the tree.
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(sessionId)) {
+      throw new Error("sessionId must be 1-64 chars of A-Za-z0-9_-");
+    }
+    const sessionRoot = await workspaceDirFor(userId, sessionId);
+    const dir = join(sessionRoot, "workspace");
+    const uid = handles.get(userId)?.uid ?? uidByUser.get(userId);
+    await mkdir(dir, { recursive: true });
+    if (uid !== undefined) await chown(dir, uid, uid);
+    return dir;
+  }
+
+  /**
+   * A per-session VIEW of the user's env. One cgroup and one `.home` are
+   * shared (an env per chat would burn an admission slot per chat); only the
+   * `/workspace` bind differs, and bwrap gives every exec its own mount
+   * namespace, so concurrent sessions cannot see each other's files.
+   */
+  async function attachSession(
+    userId: string,
+    sessionId: string,
+    opts?: { tier?: "free" | "pro" },
+  ): Promise<SandboxHandle> {
+    const key = `${userId}\u0000${sessionId}`;
+    const existing = sessionHandles.get(key);
+    if (existing !== undefined) return existing;
+
+    const base = await attach(userId, opts);
+    const parentCtx = ctxByUser.get(userId);
+    if (parentCtx === undefined) {
+      throw new Error("sandbox env is missing its jail context after attach");
+    }
+    const workspaceDir = await sessionWorkspaceDir(userId, sessionId);
+    const ctx: JailContext = { ...parentCtx, workspaceDir };
+
+    const ptys = new Map<string, PtySession>();
+    let jobRegistry: JobRegistry | undefined;
+    const spawnedProcs = new Set<SpawnedProcess>();
+
+    const handle: ManagedHandle = {
+      userId,
+      uid: base.uid,
+      workspaceDir,
+      homeDir: base.homeDir,
+      jailWorkspaceDir: JAIL_WORKSPACE,
+      exec: (req: ExecRequest) => execOnce(ctx, req),
+      createPty: async (req: PtyRequest, handlers: PtyHandlers) => {
+        const session = await createPtySession(ctx, req, handlers);
+        ptys.set(session.id, session);
+        void session.exit.then(() => {
+          ptys.delete(session.id);
+        });
+        return session;
+      },
+      getPty: (ptyId: string) => ptys.get(ptyId),
+      get jobs(): JobRegistry {
+        if (jobRegistry === undefined) jobRegistry = createJobRegistry(ctx);
+        return jobRegistry;
+      },
+      spawnProcess: async (req: { argv: string[]; cwd?: string; env?: Record<string, string> }) => {
+        const proc = await spawnLongRunning(ctx, req);
+        spawnedProcs.add(proc);
+        proc.onExit(() => {
+          spawnedProcs.delete(proc);
+        });
+        return proc;
+      },
+      killLeaves: async () => {
+        const kills: Promise<unknown>[] = [];
+        for (const session of ptys.values()) kills.push(session.kill());
+        if (jobRegistry !== undefined) kills.push(jobRegistry.killAll());
+        for (const proc of spawnedProcs) kills.push(proc.kill());
+        await Promise.allSettled(kills);
+        ptys.clear();
+        spawnedProcs.clear();
+      },
+      // A session view is not an env: dropping it leaves the user's sandbox
+      // (and every other chat) alive.
+      destroy: async () => {
+        sessionHandles.delete(key);
+      },
+      createdAt: clock(),
+      tier: tierByUid.get(base.uid) ?? "free",
+    };
+    sessionHandles.set(key, handle);
+    return handle;
   }
 
   // -- recovery -------------------------------------------------------------
@@ -568,6 +692,8 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
 
   return {
     attach,
+    attachSession,
+    sessionWorkspaceDir,
     get: (userId: string) => handles.get(userId),
     destroy: destroyUser,
     list: () =>

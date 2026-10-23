@@ -326,14 +326,18 @@ export interface FullRunDeps {
    * transports. Default 120000; a fresh timer is armed per attempt.
    */
   streamIdleTimeoutMs?: number;
-  /** Optional P2 handle factory (production: SandboxManager.attach). */
-  sandboxHandleFor?: (userId: string, tier: "free" | "pro") => Promise<SandboxHandle>;
+  /** Optional P2 handle factory (production: SandboxManager.attachSession). */
+  sandboxHandleFor?: (
+    userId: string,
+    tier: "free" | "pro",
+    sessionId: string,
+  ) => Promise<SandboxHandle>;
   /**
    * P3 Task 16 review I2: per-tier SandboxPort. Production wires one port per
    * tier so the user's quota project is honoured (`free` 500 MB / `pro`
    * 2048 MB); absent → `sandbox` serves both tiers (tests/dev).
    */
-  sandboxForTier?: (tier: "free" | "pro") => SandboxPort;
+  sandboxForTier?: (tier: "free" | "pro", sessionId: string) => SandboxPort;
   /**
    * Test-only egress override. Production MUST omit this: the default is the
    * provider-origin allowlist over the SSRF-guarded fetch (spec D3/§11).
@@ -1089,7 +1093,7 @@ export function createAgentRunProcessor(
     const promptImages: AgentImage[] = [];
     try {
       // `useTools` above guarantees both are present (legacy path returned).
-      handle = await deps.sandbox!.attach(userId, {
+      handle = await deps.sandbox!.attachSession(userId, sessionId, {
         tier: job.data.tier === "free" ? "free" : "pro",
       });
 
@@ -1269,7 +1273,7 @@ export function createAgentRunProcessor(
       skills: NOOP_SKILLS,
       // Non-null so the sandbox-backed P2 roster is advertised. Spill is
       // disabled: P2's caps stay byte-for-byte (the P2 suite pins them).
-      sandbox: createSandboxPort(deps.sandbox!),
+      sandbox: createSandboxPort(deps.sandbox!, { sessionId }),
       windowTokens: DEFAULT_WINDOW_TOKENS,
       maxToolRounds: MAX_TOOL_ROUNDS,
       systemPromptOverride: SYSTEM_PROMPT_V1,
@@ -1606,7 +1610,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     const adapterDeps = {
       sandboxFor: async (ctx: CoreToolContext) =>
         deps.sandboxHandleFor !== undefined
-          ? deps.sandboxHandleFor(ctx.userId, o.tier)
+          ? deps.sandboxHandleFor(ctx.userId, o.tier, ctx.sessionId)
           : portBackedHandle(o.sandbox, ctx),
       emitEvent: async () => {},
       emitEventFor: (ctx: CoreToolContext) => (type: SessionEventType, payload: Record<string, unknown>) =>
@@ -1751,7 +1755,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     // full path exactly as it did on the compat path. Raw DB tier text:
     // "free" → free, anything else → pro (P2 Task 12 convention).
     const tier: "free" | "pro" = job.data.tier === "free" ? "free" : "pro";
-    const runSandbox = deps.sandboxForTier?.(tier) ?? deps.sandbox;
+    const runSandbox = deps.sandboxForTier?.(tier, sessionId) ?? deps.sandbox;
 
     // ---- session state snapshot (read ONCE per run) -----------------------
     // Ruling R4's mode feed, the vision gate below and the prompt-hook
@@ -1908,7 +1912,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
         }
       }
 
-      const handle = await deps.sandboxHandleFor(userId, tier);
+      const handle = await deps.sandboxHandleFor(userId, tier, sessionId);
       const uploadsDir = join(handle.workspaceDir, "uploads");
       await mkdir(uploadsDir, { recursive: true });
       for (const row of rows) {

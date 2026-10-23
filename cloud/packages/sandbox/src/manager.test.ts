@@ -556,3 +556,71 @@ describe.skipIf(!isRoot)("close()", () => {
     expect(existsSync(fx.cgroups.envPath(200002))).toBe(false);
   });
 });
+
+describe.skipIf(!isRoot)("attachSession — per-session workspace isolation", () => {
+  it("gives two sessions of one user different workspace paths under the uid tree", async () => {
+    const fx = await freshFixture();
+    const a = await fx.manager.attachSession("u1", "sess-a");
+    const b = await fx.manager.attachSession("u1", "sess-b");
+
+    const userRoot = join(fx.wsRoot, "200001");
+    expect(a.workspaceDir).toBe(join(userRoot, "sessions", "sess-a", "workspace"));
+    expect(b.workspaceDir).toBe(join(userRoot, "sessions", "sess-b", "workspace"));
+    expect(a.workspaceDir).not.toBe(b.workspaceDir);
+    // Both exist on disk so file tools can write into them immediately.
+    expect(existsSync(a.workspaceDir)).toBe(true);
+    expect(existsSync(b.workspaceDir)).toBe(true);
+    // Neither session sees the legacy per-user workspace.
+    expect(a.workspaceDir).not.toBe(join(userRoot, "workspace"));
+  });
+
+  it("binds each session's own workspace at /workspace in the jail", async () => {
+    const fx = await freshFixture();
+    const a = await fx.manager.attachSession("u1", "sess-a");
+    const b = await fx.manager.attachSession("u1", "sess-b");
+    fx.launcher.nextScript = { stdout: ["ok\n"], exitCode: 0 };
+
+    await a.exec({ command: "echo a" });
+    await b.exec({ command: "echo b" });
+
+    expect(fx.launcher.spawns).toHaveLength(2);
+    const [ra, rb] = fx.launcher.spawns;
+    // buildBwrapArgs emits the workspace bind as `<hostPath> /workspace`.
+    expect(ra.bwrapArgv.join(" ")).toContain(`${a.workspaceDir} /workspace`);
+    expect(rb.bwrapArgv.join(" ")).toContain(`${b.workspaceDir} /workspace`);
+    expect(ra.bwrapArgv.join(" ")).not.toContain(b.workspaceDir);
+  });
+
+  it("reuses one env per user — a second session does not allocate a second uid", async () => {
+    const fx = await freshFixture();
+    const a = await fx.manager.attachSession("u1", "sess-a");
+    const b = await fx.manager.attachSession("u1", "sess-b");
+    expect(a.uid).toBe(b.uid);
+    expect(fx.allocateCalls).toEqual(["u1"]);
+    expect(fx.manager.activeCount()).toBe(1);
+  });
+
+  it("is idempotent per session — the same session returns the same handle", async () => {
+    const fx = await freshFixture();
+    const h1 = await fx.manager.attachSession("u1", "sess-a");
+    const h2 = await fx.manager.attachSession("u1", "sess-a");
+    expect(h2).toBe(h1);
+  });
+
+  it("sessionWorkspaceDir creates the directory and returns the same path attachSession binds", async () => {
+    const fx = await freshFixture();
+    const dir = await fx.manager.sessionWorkspaceDir("u1", "sess-a");
+    expect(existsSync(dir)).toBe(true);
+    const h = await fx.manager.attachSession("u1", "sess-a");
+    expect(h.workspaceDir).toBe(dir);
+  });
+
+  it("destroying the user's env tears down every session handle for that user", async () => {
+    const fx = await freshFixture();
+    await fx.manager.attachSession("u1", "sess-a");
+    await fx.manager.attachSession("u1", "sess-b");
+    await fx.manager.destroy("u1");
+    expect(fx.manager.activeCount()).toBe(0);
+    expect(existsSync(fx.cgroups.envPath(200001))).toBe(false);
+  });
+});

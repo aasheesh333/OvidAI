@@ -922,8 +922,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     // Review I2: one port per tier so the workspace quota project matches
     // the user's plan (free 500 MB / pro 2048 MB), and the P2 handle the
     // adapted six-tool roster needs is attached with the SAME tier.
-    sandboxForTier: (tier) => createSandboxPort(manager, { tier, stepLimit }),
-    sandboxHandleFor: (userId, tier) => manager.attach(userId, { tier }),
+    sandboxForTier: (tier, sessionId) =>
+      createSandboxPort(manager, { tier, sessionId, stepLimit }),
+    sandboxHandleFor: (userId, tier, sessionId) =>
+      manager.attachSession(userId, sessionId, { tier }),
     github,
     litellmBaseUrl: cfg.litellmBaseUrl,
     defaultModel: cfg.defaultModel,
