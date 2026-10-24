@@ -7,11 +7,13 @@
  * firebase-adjacent test is the credentials-unset construction smoke.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   accountSettings,
   createDb,
   devices,
+  notificationDeliveryClaims,
+  pushSubscriptionsRepo,
   migrate,
   schema,
   users,
@@ -100,6 +102,99 @@ describe.skipIf(!TEST_DATABASE_URL)("createNotifier (real postgres)", () => {
     expect(rows).toHaveLength(2);
     expect(rows.every((r) => r.status === "sent" && r.deviceToken !== null)).toBe(true);
     expect(new Set(rows.map((r) => r.deviceToken))).toEqual(new Set(["tok-a", "tok-b"]));
+  });
+
+  it("agentFinished is private, run-scoped, and delivered once across competing workers", async () => {
+    const uid = await newUser();
+    await devices.upsert(db, { token: "tok-finished", userId: uid, platform: "android" });
+    const { sent, push } = stubPush();
+    const notifier = createNotifier({ db, push });
+
+    await Promise.all([
+      notifier.notifyAgentFinished({ userId: uid, runId: "run-finished-1", sessionId: "ses-finished" }),
+      notifier.notifyAgentFinished({ userId: uid, runId: "run-finished-1", sessionId: "ses-finished" }),
+    ]);
+    await notifier.notifyAgentFinished({ userId: uid, runId: "run-finished-1", sessionId: "ses-finished" });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.notification).toEqual({
+      title: "Ovid finished your task",
+      body: "Tap to see the answer.",
+    });
+    expect(sent[0]!.data).toMatchObject({
+      kind: "agentFinished",
+      runId: "run-finished-1",
+      sessionId: "ses-finished",
+      route: "/c/ses-finished",
+    });
+    expect(JSON.stringify(sent[0])).not.toContain("private answer");
+  });
+
+  it("only one claimant owns an already-pending completion", async () => {
+    const uid = await newUser();
+    const args = { userId: uid, kind: "agentFinished", runId: "run-pending-lease" };
+    await notificationDeliveryClaims.claim(db, { ...args, claimant: "first" });
+    await notificationDeliveryClaims.release(db, { ...args, claimant: "first" });
+    const results = await Promise.all([
+      notificationDeliveryClaims.claim(db, { ...args, claimant: "second" }),
+      notificationDeliveryClaims.claim(db, { ...args, claimant: "third" }),
+    ]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    const deliveredBySecond = notificationDeliveryClaims.delivered(db, { ...args, claimant: "second" });
+    const deliveredByThird = notificationDeliveryClaims.delivered(db, { ...args, claimant: "third" });
+    await Promise.all([deliveredBySecond, deliveredByThird]);
+    const rows = await db.select().from(schema.notificationDeliveryClaims);
+    const claim = rows.find((row) => row.userId === uid && row.runId.trim() === args.runId);
+    expect(claim?.state).toBe("delivered");
+    // One winner alone completes the delivery; losing claimants cannot alter it.
+    expect(await notificationDeliveryClaims.claim(db, { ...args, claimant: "fourth" })).toBe(false);
+  });
+
+  it("a transient device-list failure releases the completion for a retry", async () => {
+    const uid = await newUser();
+    await devices.upsert(db, { token: "tok-finished-retry", userId: uid, platform: "android" });
+    const { sent, push } = stubPush();
+    const original = devices.listForUser;
+    let failures = 1;
+    devices.listForUser = async (...args) => {
+      if (failures > 0) {
+        failures -= 1;
+        throw new Error("temporary device read failure");
+      }
+      return original(...args);
+    };
+    try {
+      const notifier = createNotifier({ db, push });
+      const args = { userId: uid, runId: "run-retry-1", sessionId: "ses-retry" };
+      await notifier.notifyAgentFinished(args);
+      expect(sent).toHaveLength(0);
+      await notifier.notifyAgentFinished(args);
+      expect(sent).toHaveLength(1);
+      await notifier.notifyAgentFinished(args);
+      expect(sent).toHaveLength(1);
+    } finally {
+      devices.listForUser = original;
+    }
+  });
+
+  it("browser delivery shares the completion event and prunes an expired endpoint", async () => {
+    const uid = await newUser();
+    const endpoint = "https://push.example.test/expired";
+    await pushSubscriptionsRepo.upsert(db, {
+      userId: uid, endpoint, p256dh: "client-key", auth: "client-auth",
+    });
+    const webPush = {
+      send: vi.fn(async () => ({ ok: false as const, code: "unregistered" as const })),
+    };
+    const notifier = createNotifier({ db, push: stubPush().push, webPush });
+    await notifier.notifyAgentFinished({ userId: uid, runId: "run-web-1", sessionId: "ses-web" });
+
+    expect(webPush.send).toHaveBeenCalledOnce();
+    expect(webPush.send.mock.calls[0]![0]).toMatchObject({
+      route: "/c/ses-web",
+      subscription: { endpoint, p256dh: "client-key", auth: "client-auth" },
+    });
+    expect(await pushSubscriptionsRepo.listForUser(db, uid)).toHaveLength(0);
   });
 
   it("Wave 4 (SE-010): Notifications off → no push to any device, inbox keeps a skipped row", async () => {

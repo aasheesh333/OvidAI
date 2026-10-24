@@ -271,6 +271,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       verifier,
       tickets: createTicketStore(redisQ),
       keys: createMintRedisKeyProvider(redisMint),
+      webPushPublicKey: process.env.VAPID_PUBLIC_KEY ?? null,
       // Wave 1a: the send's `model` is validated against the mint's
       // published model groups (same mint redis as the key read).
       modelCatalog: createMintModelCatalog(redisMint),

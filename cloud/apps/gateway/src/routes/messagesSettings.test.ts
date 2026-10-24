@@ -4,7 +4,8 @@
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { sessionState, userPreferences, type Db } from "@ovid/db";
+import { sessionState, userPreferences, users, type Db } from "@ovid/db";
+import { planFor } from "@ovid/shared";
 import { buildGateway, type GatewayDeps } from "../app.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
 import {
@@ -63,6 +64,17 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1a send settings + preferences (real p
 
   const catalog = async (): Promise<readonly string[]> => ["auto", "glm-5.3", "gemini-3.8-flash"];
 
+  async function createManualModelUser(uid: string): Promise<void> {
+    await users.ensure(db, uid, `${uid}@stub.test`);
+    const row = await users.ensure(db, uid, `${uid}@stub.test`);
+    const tier = ["plus", "pro", "max", "7x", "15x"].find(
+      (candidate) => planFor(candidate).manualModels,
+    );
+    expect(tier).not.toBeNull();
+    await db.$client.unsafe("UPDATE users SET tier = $2 WHERE uid = $1", [uid, tier!]);
+    expect(row.uid).toBe(uid);
+  }
+
   async function createSession(h: TestApp, uid: string, title?: string): Promise<string> {
     const res = await h.app.inject({
       method: "POST",
@@ -91,6 +103,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1a send settings + preferences (real p
   it("persists model/mode/planMode/presetId into agent state, mode on the job and the row, and echoes the model", async () => {
     const h = makeApp({ catalog });
     const uid = testUid("w1a-set");
+    await createManualModelUser(uid);
     const sid = await createSession(h, uid);
     const res = await send(h, uid, sid, {
       content: "hi",
@@ -136,6 +149,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1a send settings + preferences (real p
   it("unknown model while the catalog is known → 400 model_unavailable before mint or any write", async () => {
     const h = makeApp({ catalog });
     const uid = testUid("w1a-badmodel");
+    await createManualModelUser(uid);
     const sid = await createSession(h, uid);
     const res = await send(h, uid, sid, { content: "hi", model: "not-a-model" });
     expect(res.statusCode).toBe(400);
@@ -152,6 +166,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1a send settings + preferences (real p
       },
     });
     const uid = testUid("w1a-failopen");
+    await createManualModelUser(uid);
     const sid = await createSession(h, uid);
     const res = await send(h, uid, sid, { content: "hi", model: "anything-x" });
     expect(res.statusCode).toBe(202);
@@ -171,6 +186,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1a send settings + preferences (real p
   it("a failed mint persists no settings", async () => {
     const h = makeApp({ catalog, mintThrows: new Error("mint down") });
     const uid = testUid("w1a-mintfail");
+    await createManualModelUser(uid);
     const sid = await createSession(h, uid);
     const res = await send(h, uid, sid, { content: "hi", model: "glm-5.3", mode: "drive" });
     expect(res.statusCode).toBe(409);
@@ -182,6 +198,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1a send settings + preferences (real p
   it("CH-010: a clientMsgId retry replays the original run with no second run and no re-persisted settings", async () => {
     const h = makeApp({ catalog });
     const uid = testUid("w1a-replay");
+    await createManualModelUser(uid);
     const sid = await createSession(h, uid);
     const first = await send(h, uid, sid, { content: "hi", clientMsgId: "k-1", model: "glm-5.3", mode: "safe" });
     expect(first.statusCode).toBe(202);

@@ -10,9 +10,11 @@
  * logged and never lands in a `notifications.error` cell.
  */
 
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-import { accountSettings, devices, notifications, type Db } from "@ovid/db";
+import { accountSettings, devices, notificationDeliveryClaims, notifications, pushSubscriptionsRepo, type Db } from "@ovid/db";
+import type { WebPushSender } from "./webPush.js";
 import {
   chatRoute,
   notificationChannelFor,
@@ -166,10 +168,17 @@ export function createFcmPushSender(): PushSender {
 export interface NotifierDeps {
   db: Db;
   push: PushSender;
+  /** Optional browser fan-out beside Android FCM; null means not configured. */
+  webPush?: WebPushSender | null;
   clock?: () => Date;
 }
 
 export interface Notifier {
+  notifyAgentFinished(a: {
+    userId: string;
+    runId: string;
+    sessionId: string;
+  }): Promise<void>;
   notifyScheduleSucceeded(a: {
     userId: string;
     scheduleId: string;
@@ -224,7 +233,7 @@ export function createNotifier(deps: NotifierDeps): Notifier {
     body: string;
     route: string;
     data: Record<string, string>;
-  }): Promise<void> {
+  }): Promise<"delivered" | "retry"> {
     // Wave 4 (SE-010): the user's Notifications switch. Off = no push to any
     // device; the attempt is still kept in the inbox so nothing is lost. A
     // settings read failure fails OPEN (push is the documented default).
@@ -250,18 +259,24 @@ export function createNotifier(deps: NotifierDeps): Notifier {
       } catch (err) {
         console.error("[notify] inbox record failed", err);
       }
-      return;
+      return "delivered";
     }
 
     let userDevices;
+    let browserSubscriptions: Awaited<ReturnType<typeof pushSubscriptionsRepo.listForUser>> = [];
     try {
-      userDevices = await devices.listForUser(deps.db, args.userId);
+      [userDevices, browserSubscriptions] = await Promise.all([
+        devices.listForUser(deps.db, args.userId),
+        deps.webPush
+          ? pushSubscriptionsRepo.listForUser(deps.db, args.userId)
+          : Promise.resolve([]),
+      ]);
     } catch (err) {
-      console.error("[notify] device list failed", err);
-      return;
+      console.error("[notify] device/subscription list failed", err);
+      return "retry";
     }
 
-    if (userDevices.length === 0) {
+    if (userDevices.length === 0 && browserSubscriptions.length === 0) {
       try {
         await notifications.record(deps.db, {
           userId: args.userId,
@@ -277,9 +292,10 @@ export function createNotifier(deps: NotifierDeps): Notifier {
       } catch (err) {
         console.error("[notify] inbox record failed", err);
       }
-      return;
+      return "delivered";
     }
 
+    let delivered = false;
     const androidChannelId = androidChannelIdFor(notificationChannelFor(args.kind));
     for (const device of userDevices) {
       try {
@@ -300,6 +316,7 @@ export function createNotifier(deps: NotifierDeps): Notifier {
         }
 
         if (outcome.ok) {
+          delivered = true;
           await notifications.record(deps.db, {
             userId: args.userId,
             deviceToken: device.token,
@@ -344,9 +361,118 @@ export function createNotifier(deps: NotifierDeps): Notifier {
         );
       }
     }
+
+    for (const subscription of browserSubscriptions) {
+      try {
+        const outcome = await deps.webPush!.send({
+          subscription: {
+            endpoint: subscription.endpoint,
+            p256dh: subscription.p256dh,
+            auth: subscription.auth,
+          },
+          title: args.title,
+          body: args.body,
+          route: args.route,
+          data: args.data,
+        });
+        if (outcome.ok) {
+          delivered = true;
+          await notifications.record(deps.db, {
+            userId: args.userId,
+            deviceToken: subscription.endpoint,
+            kind: args.kind,
+            channel: notificationChannelFor(args.kind),
+            title: args.title,
+            body: args.body,
+            route: args.route,
+            data: args.data,
+            status: "sent",
+          });
+        } else {
+          if (outcome.code === "unregistered") {
+            await pushSubscriptionsRepo.remove(deps.db, args.userId, subscription.endpoint);
+          }
+          await notifications.record(deps.db, {
+            userId: args.userId,
+            deviceToken: subscription.endpoint,
+            kind: args.kind,
+            channel: notificationChannelFor(args.kind),
+            title: args.title,
+            body: args.body,
+            route: args.route,
+            data: args.data,
+            status: "failed",
+            error: outcome.error ?? outcome.code,
+          });
+        }
+      } catch {
+        // One endpoint must not prevent delivery to other browsers/devices.
+      }
+    }
+    return delivered ? "delivered" : "retry";
   }
 
   return {
+    async notifyAgentFinished(a) {
+      const kind: NotificationKind = "agentFinished";
+      const claimant = randomUUID();
+      try {
+        const claimed = await notificationDeliveryClaims.claim(deps.db, {
+          userId: a.userId,
+          kind,
+          runId: a.runId,
+          claimant,
+        });
+        if (!claimed) return;
+      } catch (err) {
+        console.error("[notify] completion claim failed; skipping duplicate-risk fan-out", err);
+        return;
+      }
+      const route = chatRoute(a.sessionId);
+      try {
+        const outcome = await fanOut({
+          userId: a.userId,
+          kind,
+          title: "Ovid finished your task",
+          body: "Tap to see the answer.",
+          route,
+          data: {
+            kind,
+            channel: notificationChannelFor(kind),
+            route,
+            sessionId: a.sessionId,
+            runId: a.runId,
+            ts: clock().toISOString(),
+          },
+        });
+        if (outcome === "retry") {
+          await notificationDeliveryClaims.release(deps.db, {
+            userId: a.userId,
+            kind,
+            runId: a.runId,
+            claimant,
+          });
+          return;
+        }
+        await notificationDeliveryClaims.delivered(deps.db, {
+          userId: a.userId,
+          kind,
+          runId: a.runId,
+          claimant,
+        });
+      } catch (err) {
+        // A crash or transient read failure is retryable. A delivered claim is
+        // never reclaimed, so replaying the durable run cannot duplicate push.
+        await notificationDeliveryClaims.release(deps.db, {
+          userId: a.userId,
+          kind,
+          runId: a.runId,
+          claimant,
+        }).catch(() => {});
+        console.error("[notify] completion delivery remains pending for retry", err);
+      }
+    },
+
     async notifyScheduleSucceeded(a) {
       const kind: NotificationKind = "scheduleSucceeded";
       const title = `Scheduled task done: ${notificationSummary(a.title, { max: 48 })}`;

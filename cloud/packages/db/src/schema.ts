@@ -990,10 +990,41 @@ export const notifications = pgTable(
   (t) => [index("notifications_user_id_idx").on(t.userId)],
 );
 
+export const notificationDeliveryClaims = pgTable(
+  "notification_delivery_claims",
+  {
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.uid, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    runId: char("run_id", { length: 36 }).notNull(),
+    state: text("state").notNull().default("pending"),
+    claimant: text("claimant"),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.kind, t.runId] })],
+);
+
+export const pushSubscriptions = pgTable(
+  "push_subscriptions",
+  {
+    endpoint: text("endpoint").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.uid, { onDelete: "cascade" }),
+    p256dh: text("p256dh").notNull(),
+    auth: text("auth").notNull(),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [index("push_subscriptions_user_id_idx").on(t.userId)],
+);
+
 export type ScheduleRow = typeof schedules.$inferSelect;
 export type ScheduleRunRow = typeof scheduleRuns.$inferSelect;
 export type DeviceRow = typeof devices.$inferSelect;
 export type NotificationRow = typeof notifications.$inferSelect;
+export type PushSubscriptionRow = typeof pushSubscriptions.$inferSelect;
 
 // Wave 3: per-model-call token ledger. The worker records one row per
 // LiteLLM call (AgentResponse.usage) best-effort; the gateway aggregates it

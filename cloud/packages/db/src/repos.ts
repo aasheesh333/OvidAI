@@ -209,9 +209,9 @@ export const userPreferences = {
 const CURSOR_MS_MIN = -62_135_596_800_000; // 0001-01-01T00:00:00.000Z
 const CURSOR_MS_MAX = 253_402_300_799_999; // 9999-12-31T23:59:59.999Z
 
-// Opaque keyset cursor for sessions.list: "<updatedAt epoch ms>~<session id>".
-function encodeSessionCursor(row: SessionRow): string {
-  return `${row.updatedAt.getTime()}~${row.id}`;
+// Opaque keyset cursor for sessions.list: "<activity-or-created epoch ms>~<session id>".
+function encodeSessionCursor(row: SessionRow, immutable = false): string {
+  return `${(immutable ? row.createdAt : row.updatedAt).getTime()}~${row.id}`;
 }
 
 function decodeSessionCursor(
@@ -309,31 +309,41 @@ export const sessions = {
     userId: string,
     limit: number,
     cursor?: string | null,
+    immutable = false,
+    snapshotMs?: number,
   ): Promise<{ rows: SessionRow[]; nextCursor: string | null }> {
     const key = decodeSessionCursor(cursor);
     // deleted_at IS NULL: soft-deleted sessions never appear in the list —
     // the client's refresh must not resurrect a deleted chat.
     const alive = isNull(sessionsTable.deletedAt);
+    const activity = immutable ? sessionsTable.createdAt : sessionsTable.updatedAt;
     const where = key
       ? and(
           eq(sessionsTable.userId, userId),
           alive,
           or(
-            lt(sessionsTable.updatedAt, key.updatedAt),
-            and(eq(sessionsTable.updatedAt, key.updatedAt), lt(sessionsTable.id, key.id)),
+            lt(activity, key.updatedAt),
+            and(eq(activity, key.updatedAt), lt(sessionsTable.id, key.id)),
           ),
         )
-      : and(eq(sessionsTable.userId, userId), alive);
+      : and(
+          eq(sessionsTable.userId, userId),
+          alive,
+          ...(immutable ? [lte(sessionsTable.createdAt, new Date(snapshotMs!))] : []),
+        );
     const found = await db
       .select()
       .from(sessionsTable)
       .where(where)
-      .orderBy(desc(sessionsTable.updatedAt), desc(sessionsTable.id))
+      .orderBy(desc(activity), desc(sessionsTable.id))
       .limit(limit + 1);
     const hasMore = found.length > limit;
     const rows = hasMore ? found.slice(0, limit) : found;
     const last = rows[rows.length - 1];
-    return { rows, nextCursor: hasMore && last ? encodeSessionCursor(last) : null };
+    return {
+      rows,
+      nextCursor: hasMore && last ? encodeSessionCursor(last, immutable) : null,
+    };
   },
 
   async touch(db: Db, sessionId: string): Promise<void> {
@@ -1317,6 +1327,13 @@ export interface McpServerPatch {
   config?: Record<string, unknown> | null;
   secretsSealed?: SealedEnvelope | null;
   enabled?: boolean;
+}
+
+/** Serialize custom connector creation for one user inside this transaction. */
+export async function lockCustomConnectorCreates(db: Db, uid: string): Promise<void> {
+  await db.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`custom-connectors:${uid}`}, 0))`,
+  );
 }
 
 export const mcpServers = {

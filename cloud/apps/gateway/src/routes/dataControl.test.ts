@@ -52,7 +52,10 @@ import {
 const DELETE_ALL = "/cloud/v1/data/delete-all";
 const RESET_MEMORY = "/cloud/v1/memory/reset";
 
-function stubStorage(failKeys: ReadonlySet<string> = new Set()) {
+function stubStorage(
+  failKeys: ReadonlySet<string> = new Set(),
+  removeBeforeFailure = false,
+) {
   const deleted: string[] = [];
   const adapter: StorageAdapter = {
     kind: "fs",
@@ -63,7 +66,10 @@ function stubStorage(failKeys: ReadonlySet<string> = new Set()) {
     getBuffer: async () => null,
     head: async () => null,
     delete: async (key) => {
-      if (failKeys.has(key)) throw new Error("storage unavailable");
+      if (failKeys.has(key)) {
+        if (removeBeforeFailure) deleted.push(key);
+        throw new Error("storage unavailable");
+      }
       deleted.push(key);
     },
     presignGet: async () => "",
@@ -91,12 +97,22 @@ function buildApp(opts: { storage?: StorageAdapter; verifier?: Verifier } = {}) 
 async function post(
   url: string,
   body: unknown,
-  opts: { storage?: StorageAdapter; verifier?: Verifier; uid?: string } = {},
+  opts: {
+    storage?: StorageAdapter;
+    verifier?: Verifier;
+    uid?: string;
+    capable?: boolean;
+  } = {},
 ) {
   const response = await buildApp(opts).inject({
     method: "POST",
     url,
-    headers: authHeaders(opts.uid ?? "u1"),
+    headers: {
+      ...authHeaders(opts.uid ?? "u1"),
+      ...(opts.capable === false
+        ? {}
+        : { "x-ovid-client-capabilities": "data-control-partial-v1" }),
+    },
     payload: body as Record<string, unknown>,
   });
   return { status: response.statusCode, body: response.json() };
@@ -189,7 +205,7 @@ describe("POST /cloud/v1/data/delete-all", () => {
     expect(repo.deleteAllData).not.toHaveBeenCalled();
   });
 
-  it("does not touch the database when a byte delete fails — no orphaned objects, no half-delete", async () => {
+  it("keeps rows for a retry but reports bytes already removed before a storage failure", async () => {
     repo.ownedStorageKeys.mockResolvedValue(["users/u1/a.bin", "users/u1/b.bin"]);
     const { adapter, deleted } = stubStorage(new Set(["users/u1/b.bin"]));
     const { status, body } = await post(
@@ -198,8 +214,45 @@ describe("POST /cloud/v1/data/delete-all", () => {
       { storage: adapter },
     );
     expect(status).toBe(503);
-    expect(body.error.code).toBe("storage_delete_failed");
+    expect(body.error.code).toBe("storage_delete_partial");
+    expect(body.error.message).not.toContain("Nothing was deleted");
+    expect(body.error.confirmedDeletedStorageObjects).toBe(1);
+    expect(body.error.message).toContain("At least 1 stored file was removed");
     expect(deleted).toEqual(["users/u1/a.bin"]);
+    expect(repo.deleteAllData).not.toHaveBeenCalled();
+  });
+
+  it("does not claim nothing was deleted when the failing storage outcome is ambiguous", async () => {
+    repo.ownedStorageKeys.mockResolvedValue(["users/u1/a.bin"]);
+    const { adapter, deleted } = stubStorage(
+      new Set(["users/u1/a.bin"]),
+      true,
+    );
+    const { status, body } = await post(
+      DELETE_ALL,
+      { confirmation: "u1@stub.test" },
+      { storage: adapter },
+    );
+    expect(status).toBe(503);
+    expect(body.error.code).toBe("storage_delete_failed");
+    expect(body.error.message).not.toContain("Nothing was deleted");
+    expect(body.error.message).toContain("chats were not deleted");
+    expect(deleted).toEqual(["users/u1/a.bin"]);
+    expect(repo.deleteAllData).not.toHaveBeenCalled();
+  });
+
+  it("refuses an unsupported client before reading or deleting any storage", async () => {
+    repo.ownedStorageKeys.mockResolvedValue(["users/u1/a.bin"]);
+    const { adapter, deleted } = stubStorage();
+    const { status, body } = await post(
+      DELETE_ALL,
+      { confirmation: "u1@stub.test" },
+      { storage: adapter, capable: false },
+    );
+    expect(status).toBe(409);
+    expect(body.error.code).toBe("client_upgrade_required");
+    expect(repo.ownedStorageKeys).not.toHaveBeenCalled();
+    expect(deleted).toEqual([]);
     expect(repo.deleteAllData).not.toHaveBeenCalled();
   });
 

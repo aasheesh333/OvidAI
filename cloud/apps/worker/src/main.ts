@@ -72,6 +72,7 @@ import { createServerKeyResolver } from "./keyResolver.js";
 import { buildFileService } from "./fileService.js";
 import { createMcpRuntime } from "./mcpRuntime.js";
 import { createNotifier, createFcmPushSender } from "./notify.js";
+import { createWebPushSender } from "./webPush.js";
 import { createPluginInstallProcessor } from "./pluginInstallProcessor.js";
 import { startWorkerPtyBridge } from "./ptyBridge.js";
 import { createSandboxPort, createStepLimiter } from "./sandboxAdapter.js";
@@ -454,7 +455,17 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   // channel subscribes to the same `user:<uid>:system` channels. The notifier
   // is best-effort by contract (never throws, never affects bookkeeping).
   const system = createRedisSystemBus(redisQ);
-  const notifier = createNotifier({ db, push: createFcmPushSender() });
+  const notifier = createNotifier({
+    db,
+    push: createFcmPushSender(),
+    webPush: createWebPushSender({
+      publicKey: process.env.VAPID_PUBLIC_KEY ?? "",
+      privateKey: process.env.VAPID_PRIVATE_KEY ?? "",
+      subject: process.env.VAPID_SUBJECT ?? "",
+      allowedHosts: (process.env.WEB_PUSH_ALLOWED_HOSTS ?? "")
+        .split(",").map((host) => host.trim()).filter((host) => host !== ""),
+    }),
+  });
 
   // ---- W8: cloud image generation/editing tools --------------------------
   // Host-side tools call mint's signed internal image routes. The worker

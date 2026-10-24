@@ -1,9 +1,10 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNull, or } from "drizzle-orm";
 import type { Db } from "./client.js";
 import { newId } from "./repos.js";
 import {
   devices as devicesTable,
   notifications as notificationsTable,
+  notificationDeliveryClaims as notificationDeliveryClaimsTable,
   type DeviceRow,
   type NotificationRow,
 } from "./schema.js";
@@ -56,6 +57,66 @@ export const devices = {
       .from(devicesTable)
       .where(eq(devicesTable.userId, userId))
       .orderBy(desc(devicesTable.updatedAt));
+  },
+};
+
+export const notificationDeliveryClaims = {
+  /** True only for the worker that claims a new or unfinished completion. */
+  async claim(
+    db: Db,
+    input: { userId: string; kind: string; runId: string; claimant: string },
+  ): Promise<boolean> {
+    const inserted = await db
+      .insert(notificationDeliveryClaimsTable)
+      .values({ ...input, state: "in_progress" })
+      .onConflictDoUpdate({
+        target: [
+          notificationDeliveryClaimsTable.userId,
+          notificationDeliveryClaimsTable.kind,
+          notificationDeliveryClaimsTable.runId,
+        ],
+        set: { state: "in_progress", claimant: input.claimant },
+        where: or(
+          eq(notificationDeliveryClaimsTable.state, "pending"),
+          isNull(notificationDeliveryClaimsTable.claimant),
+        ),
+      })
+      .returning({ runId: notificationDeliveryClaimsTable.runId });
+    return inserted.length === 1;
+  },
+
+  async delivered(
+    db: Db,
+    input: { userId: string; kind: string; runId: string; claimant: string },
+  ): Promise<void> {
+    await db
+      .update(notificationDeliveryClaimsTable)
+      .set({ state: "delivered" })
+      .where(
+        and(
+          eq(notificationDeliveryClaimsTable.userId, input.userId),
+          eq(notificationDeliveryClaimsTable.kind, input.kind),
+          eq(notificationDeliveryClaimsTable.runId, input.runId),
+          eq(notificationDeliveryClaimsTable.claimant, input.claimant),
+        ),
+      );
+  },
+
+  async release(
+    db: Db,
+    input: { userId: string; kind: string; runId: string; claimant: string },
+  ): Promise<void> {
+    await db
+      .delete(notificationDeliveryClaimsTable)
+      .where(
+        and(
+          eq(notificationDeliveryClaimsTable.userId, input.userId),
+          eq(notificationDeliveryClaimsTable.kind, input.kind),
+          eq(notificationDeliveryClaimsTable.runId, input.runId),
+          eq(notificationDeliveryClaimsTable.state, "in_progress"),
+          eq(notificationDeliveryClaimsTable.claimant, input.claimant),
+        ),
+      );
   },
 };
 

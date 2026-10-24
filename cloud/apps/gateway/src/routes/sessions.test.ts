@@ -237,6 +237,107 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway session routes (real postgres)", ()
     expect(sessionPage.parse(fresh.json())).toEqual({ items: [], nextCursor: null });
   });
 
+  it("snapshot pagination does not skip an unfetched chat pinned between pages", async () => {
+    const uid = testUid("sess-snapshot");
+    const created: SessionDto[] = [];
+    for (let i = 0; i < 3; i++) created.push(await createSession(uid, `s${i}`));
+    const snapshot = String(Date.now());
+
+    const first = await app.inject({
+      method: "GET",
+      url: `/cloud/v1/sessions?limit=1&snapshot=${encodeURIComponent(snapshot)}`,
+      headers: authHeaders(uid),
+    });
+    expect(first.statusCode).toBe(200);
+    const page = sessionPage.parse(first.json()) as Page<SessionDto>;
+    expect(page.nextCursor).not.toBeNull();
+
+    // Mutating activity order must not change this immutable snapshot walk.
+    await app.inject({
+      method: "PATCH",
+      url: `/cloud/v1/sessions/${created[0]!.id}`,
+      headers: authHeaders(uid),
+      payload: { pinned: true, title: "renamed between pages" },
+    });
+
+    const seen = page.items.map((session) => session.id);
+    let cursor = page.nextCursor;
+    while (cursor !== null) {
+      const next = await app.inject({
+        method: "GET",
+        url: `/cloud/v1/sessions?limit=1&snapshot=${encodeURIComponent(snapshot)}&cursor=${encodeURIComponent(cursor)}`,
+        headers: authHeaders(uid),
+      });
+      expect(next.statusCode).toBe(200);
+      const body = sessionPage.parse(next.json()) as Page<SessionDto>;
+      seen.push(...body.items.map((session) => session.id));
+      cursor = body.nextCursor;
+    }
+    expect(new Set(seen)).toEqual(new Set(created.map((session) => session.id)));
+    expect(seen).toHaveLength(3);
+  });
+
+  it("snapshot enumeration includes a chat created during pagination but never repeats the boundary", async () => {
+    const uid = testUid("sess-snapshot-create");
+    const firstCreated = await createSession(uid, "first");
+    const secondCreated = await createSession(uid, "second");
+    const snapshot = String(Date.now());
+    const first = await app.inject({
+      method: "GET",
+      url: `/cloud/v1/sessions?limit=1&snapshot=${snapshot}`,
+      headers: authHeaders(uid),
+    });
+    const firstPage = sessionPage.parse(first.json()) as Page<SessionDto>;
+    expect(firstPage.nextCursor).not.toBeNull();
+    const newDuringWalk = await createSession(uid, "created during walk");
+
+    const second = await app.inject({
+      method: "GET",
+      url: `/cloud/v1/sessions?limit=1&snapshot=${snapshot}&cursor=${encodeURIComponent(firstPage.nextCursor!)}`,
+      headers: authHeaders(uid),
+    });
+    const secondPage = sessionPage.parse(second.json()) as Page<SessionDto>;
+    expect(secondPage.nextCursor).toBeNull();
+    const revalidated = await app.inject({
+      method: "GET",
+      url: "/cloud/v1/sessions?limit=100",
+      headers: authHeaders(uid),
+    });
+    const boundary = (sessionPage.parse(revalidated.json()) as Page<SessionDto>).items;
+    const ids = new Set([
+      ...firstPage.items.map((item) => item.id),
+      ...secondPage.items.map((item) => item.id),
+      ...boundary
+        .filter((item) => Date.parse(item.createdAt) > Number(snapshot))
+        .map((item) => item.id),
+    ]);
+    expect(ids).toEqual(new Set([firstCreated.id, secondCreated.id, newDuringWalk.id]));
+  });
+
+  it("revalidation includes a session created exactly on the snapshot millisecond without duplicating it", async () => {
+    const uid = testUid("sess-snapshot-same-ms");
+    const existing = await createSession(uid, "existing");
+    const snapshot = Date.now();
+    const concurrent = await createSession(uid, "same millisecond");
+    await db.$client.unsafe("UPDATE sessions SET created_at = $2 WHERE id IN ($1, $3)", [
+      existing.id, new Date(snapshot).toISOString(), concurrent.id,
+    ]);
+    const snapshotRows = await app.inject({
+      method: "GET", url: `/cloud/v1/sessions?limit=100&snapshot=${snapshot}`, headers: authHeaders(uid),
+    });
+    const latestRows = await app.inject({
+      method: "GET", url: "/cloud/v1/sessions?limit=100", headers: authHeaders(uid),
+    });
+    const items = (sessionPage.parse(snapshotRows.json()) as Page<SessionDto>).items;
+    const latest = (sessionPage.parse(latestRows.json()) as Page<SessionDto>).items;
+    const merged = new Map(items.map((item) => [item.id, item]));
+    for (const item of latest.filter((candidate) => Date.parse(candidate.createdAt) >= snapshot)) {
+      merged.set(item.id, item);
+    }
+    expect(merged.has(concurrent.id)).toBe(true);
+    expect(merged.size).toBe(2);
+  });
+
   it("GET /sessions clamps limit (ruling: clamp, never 400)", async () => {
     const uid = testUid("sess-clamp");
     for (let i = 0; i < 5; i++) await createSession(uid, `c${i}`);

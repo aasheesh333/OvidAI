@@ -7,6 +7,7 @@ export * from "./billingRepos.js";
 export * from "./scheduleRepos.js";
 export * from "./scheduleService.js";
 export * from "./deviceRepos.js";
+export * from "./pushSubscriptionRepos.js";
 export * from "./runUsageRepos.js";
 export * from "./accountSettingsRepos.js";
 export * from "./privateMemory.js";

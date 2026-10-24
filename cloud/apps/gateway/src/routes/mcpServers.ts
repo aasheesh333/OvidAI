@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import {
+  lockCustomConnectorCreates,
   mcpOauthTokens,
   mcpServers as mcpServersRepo,
   users,
@@ -14,7 +15,7 @@ import {
   safeServerName,
   type ImportedMcp,
 } from "@ovid/mcp";
-import type { McpServerDto } from "@ovid/shared";
+import { planFor, type McpServerDto } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
 import { badRequest, isUuid, notFound, sendError, zodBadRequest } from "./http.js";
 
@@ -79,6 +80,38 @@ function mcpNotFound(reply: FastifyReply): FastifyReply {
 
 function serverExists(reply: FastifyReply): FastifyReply {
   return sendError(reply, 409, "server_exists", SERVER_EXISTS);
+}
+
+class CustomConnectorLimitError extends Error {
+  constructor(readonly limit: number) {
+    super(
+      `Your plan includes ${limit} custom connector${limit === 1 ? "" : "s"}. Delete one before adding another.`,
+    );
+    this.name = "CustomConnectorLimitError";
+  }
+}
+
+function assertCustomConnectorCapacity(
+  tier: string | null,
+  rows: McpServerRow[],
+  adding: number,
+): void {
+  const limit = planFor(tier).customConnectors;
+  const current = rows.filter((row) => row.curatedId === null).length;
+  if (current + adding > limit) throw new CustomConnectorLimitError(limit);
+}
+
+/** Serialize a user's whole custom-create batch, then check its cap in the same transaction. */
+async function withCustomConnectorLock<T>(
+  deps: GatewayDeps,
+  uid: string,
+  work: (db: Db) => Promise<T>,
+): Promise<T> {
+  return deps.db.transaction(async (tx) => {
+    const db = tx as unknown as Db;
+    await lockCustomConnectorCreates(db, uid);
+    return work(db);
+  });
 }
 
 /** Detects PostgreSQL unique-violation (23505) through drizzle's error wrap. */
@@ -264,7 +297,8 @@ export function registerMcpServerRoutes(app: FastifyInstance, deps: GatewayDeps)
       if (deps.crypto === undefined) {
         return sendError(reply, 503, "unavailable", "MCP secret sealing is not configured.");
       }
-      if ((await users.getTier(deps.db, uid)) === "free") {
+      const tier = await users.getTier(deps.db, uid);
+      if (planFor(tier).customConnectors === 0) {
         return sendError(reply, 402, "pro_required", PRO_REQUIRED_MESSAGE);
       }
 
@@ -283,17 +317,29 @@ export function registerMcpServerRoutes(app: FastifyInstance, deps: GatewayDeps)
         return badRequest(reply, "The pasted MCP configuration declares no servers.");
       }
 
-      const created: McpServerDto[] = [];
       try {
-        for (const entry of imported) {
-          const row = await createCustom(deps, uid, entry);
-          created.push(await dtoFor(deps, row, uid));
-        }
+        const created = await withCustomConnectorLock(deps, uid, async (db) => {
+          const scoped = { ...deps, db };
+          assertCustomConnectorCapacity(
+            tier,
+            await mcpServersRepo.list(db, uid),
+            imported.length,
+          );
+          const batch: McpServerDto[] = [];
+          for (const entry of imported) {
+            const row = await createCustom(scoped, uid, entry);
+            batch.push(await dtoFor(scoped, row, uid));
+          }
+          return batch;
+        });
+        return reply.code(201).send(created);
       } catch (err) {
+        if (err instanceof CustomConnectorLimitError) {
+          return sendError(reply, 403, "connector_limit_reached", err.message);
+        }
         if (err instanceof Error && err.message === "server_exists") return serverExists(reply);
         throw err;
       }
-      return reply.code(201).send(created);
     }
 
     // ── curated credential row (ALL tiers) ───────────────────────────────
@@ -329,7 +375,8 @@ export function registerMcpServerRoutes(app: FastifyInstance, deps: GatewayDeps)
     }
     const invalid = validateTransport(parsed.data);
     if (invalid !== null) return badRequest(reply, invalid);
-    if ((await users.getTier(deps.db, uid)) === "free") {
+    const tier = await users.getTier(deps.db, uid);
+    if (planFor(tier).customConnectors === 0) {
       return sendError(reply, 402, "pro_required", PRO_REQUIRED_MESSAGE);
     }
 
@@ -345,9 +392,16 @@ export function registerMcpServerRoutes(app: FastifyInstance, deps: GatewayDeps)
     };
 
     try {
-      const row = await createCustom(deps, uid, imported);
+      const row = await withCustomConnectorLock(deps, uid, async (db) => {
+        const scoped = { ...deps, db };
+        assertCustomConnectorCapacity(tier, await mcpServersRepo.list(db, uid), 1);
+        return createCustom(scoped, uid, imported);
+      });
       return reply.code(201).send(await dtoFor(deps, row, uid));
     } catch (err) {
+      if (err instanceof CustomConnectorLimitError) {
+        return sendError(reply, 403, "connector_limit_reached", err.message);
+      }
       if (err instanceof Error && err.message === "server_exists") return serverExists(reply);
       throw err;
     }

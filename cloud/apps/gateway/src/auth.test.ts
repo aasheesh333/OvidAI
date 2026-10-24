@@ -9,6 +9,7 @@ import {
   type Verifier,
 } from "./auth.js";
 import { loadGatewayEnv } from "./env.js";
+import { DEFAULT_TRUSTED_PROXY_CIDRS } from "./clientIp.js";
 
 const PRINCIPAL: AuthPrincipal = {
   uid: "u1",
@@ -368,6 +369,7 @@ describe("loadGatewayEnv", () => {
       presignTtlSeconds: 3600,
       hydrateWaitMs: 20_000,
       redisCUrl: "redis://q:6379",
+      trustedProxyCidrs: [...DEFAULT_TRUSTED_PROXY_CIDRS],
       masterKey: "ab7d31c4e59f60a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071829",
       mcpRedirectUri: "https://example.test/oauth/callback",
       appCheckMode: "required",

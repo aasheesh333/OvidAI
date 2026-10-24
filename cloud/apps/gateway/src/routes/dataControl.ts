@@ -24,8 +24,9 @@ import { sendError, zodBadRequest } from "./http.js";
  *   - BYTES BEFORE ROWS. Storage objects are deleted through the existing
  *     StorageAdapter first. If that fails the database is untouched, so the
  *     operation cannot orphan an R2 object; a retry is safe because the
- *     adapter's delete is idempotent. A deployment without a storage adapter
- *     refuses with 503 instead of deleting rows whose bytes it cannot remove.
+ *     adapter's delete is idempotent. Objects removed before a later failure
+ *     are reported as a partial outcome, never as "nothing was deleted". A
+ *     deployment without storage refuses before deleting any rows or bytes.
  *   - ONLY REFERENCED BYTES. The keys come from the caller's own rows
  *     (attachments + workspace_objects); nothing under the account's prefix is
  *     swept blindly, so an object the database does not know about survives.
@@ -104,6 +105,22 @@ export function registerDataControlRoutes(app: FastifyInstance, deps: GatewayDep
 
     if (!(await confirm(deps, uid, email, request.body, reply))) return reply;
 
+    const capabilities = request.headers["x-ovid-client-capabilities"];
+    const supportsPartialOutcome =
+      typeof capabilities === "string" &&
+      capabilities.split(",").map((value) => value.trim()).includes("data-control-partial-v1");
+    if (!supportsPartialOutcome) {
+      // Older installed clients report an unknown error as "nothing deleted".
+      // Refuse before touching bytes: only this pre-write refusal is safe for
+      // them. Capable clients opt into the richer outcome vocabulary above.
+      return sendError(
+        reply,
+        409,
+        "client_upgrade_required",
+        "This app version cannot safely report storage deletion results. Update Ovid Si before deleting your data. Nothing was deleted.",
+      );
+    }
+
     const keys = await dataControlRepo.ownedStorageKeys(deps.db, uid);
 
     // Rows are about to disappear; their bytes must not survive them. Without
@@ -121,22 +138,34 @@ export function registerDataControlRoutes(app: FastifyInstance, deps: GatewayDep
       );
     }
 
-    // Bytes first. A failure here leaves every row (and therefore every
-    // reference) intact, so nothing is orphaned and the call can be retried.
+    // Bytes first. A failure leaves every row (and therefore every reference)
+    // intact for a retry, but earlier byte deletes cannot be rolled back. Say
+    // exactly that instead of promising that nothing was deleted.
+    let deletedStorageObjects = 0;
     for (const key of keys) {
       try {
         await deps.storage!.delete(key);
+        deletedStorageObjects += 1;
       } catch (e) {
         // NEVER log the key: it is a storage address, not user-facing data.
         console.warn("[gateway] delete-all: storage delete failed", {
           uid,
           error: String(e),
         });
+        if (deletedStorageObjects > 0) {
+          return reply.code(503).send({
+            error: {
+              code: "storage_delete_partial",
+              message: `At least ${deletedStorageObjects} stored ${deletedStorageObjects === 1 ? "file was" : "files were"} removed before another file could not be removed. Your chats were not deleted; try again to finish removing your data.`,
+              confirmedDeletedStorageObjects: deletedStorageObjects,
+            },
+          });
+        }
         return sendError(
           reply,
           503,
           "storage_delete_failed",
-          "Some of your files could not be removed from storage. Nothing was deleted; try again shortly.",
+          "Your chats were not deleted. Stored-file removal may be incomplete; try again to finish.",
         );
       }
     }

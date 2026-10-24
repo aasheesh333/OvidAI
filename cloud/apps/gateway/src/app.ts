@@ -24,6 +24,7 @@ import type { ByokRouteOverrides } from "./routes/byok.js";
 import type { GithubRouteOverrides } from "./studioGithub.js";
 import type { StudioGitTransport } from "./studioGit.js";
 import { registerDevicesRoutes } from "./routes/devices.js";
+import { registerWebPushRoutes } from "./routes/webPush.js";
 import { registerUsageHistoryRoutes } from "./routes/usageHistory.js";
 import { registerEventRoutes } from "./routes/events.js";
 import { registerHealthRoutes } from "./routes/health.js";
@@ -189,6 +190,8 @@ export interface GatewayDeps {
   putMaxBytes?: number;
   presignTtlSeconds?: number;
   hydrateWaitMs?: number;
+  /** Public half of Web Push VAPID; private half stays only on the worker. */
+  webPushPublicKey?: string | null;
   /**
    * Reserved for time-sensitive logic (Task 8 WS heartbeats, TTL math); the
    * REST routes deliberately use DB time (repos) so pagination and ordering
@@ -392,6 +395,7 @@ export function buildGateway(
       registerSearchRoutes(scope, deps);
       registerAccountHealthRoutes(scope, deps);
       registerDataControlRoutes(scope, deps);
+      registerWebPushRoutes(scope, deps);
       // Wave 4: account settings (push, BYOK routing), custom presets, memory files.
       registerAccountSettingsRoutes(scope, deps);
       registerMemoryRoutes(scope, deps);

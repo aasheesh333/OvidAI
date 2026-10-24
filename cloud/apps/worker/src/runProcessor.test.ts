@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Redis } from "ioredis";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   accountSettings,
   createDb,
@@ -1862,6 +1862,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
      */
     async function startTurnSse(
       turns: Array<Array<Record<string, unknown>>>,
+      chooseTurn?: (messages: ChatMessage[]) => number | undefined,
     ): Promise<{
       url: string;
       requests: Array<{
@@ -1894,7 +1895,8 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
             model: body.model,
             max_tokens: body.max_tokens,
           });
-          const turn = turns[Math.min(requests.length - 1, turns.length - 1)]!;
+          const selected = chooseTurn?.(body.messages);
+          const turn = turns[selected ?? Math.min(requests.length - 1, turns.length - 1)]!;
           res.writeHead(200, { "content-type": "text/event-stream" });
           for (const event of turn) res.write(`data: ${JSON.stringify(event)}\n\n`);
           res.end("data: [DONE]\n\n");
@@ -1969,7 +1971,12 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         toolCallTurn("call_1", "run_shell", { command: "echo hi" }),
         textTurn("done"),
       ]);
-      const processor = createFullAgentRunProcessor(makeFullDeps(sse.url, sbx.port));
+      const notifyAgentFinished = vi.fn(async () => {});
+      const processor = createFullAgentRunProcessor(
+        makeFullDeps(sse.url, sbx.port, {
+          notifier: { notifyAgentFinished, notifyAgentFailed: async () => {} },
+        }),
+      );
       try {
         await processor(jobOf(seeded));
       } finally {
@@ -2009,6 +2016,38 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(sse.requests[0]!.messages[0]!.role).toBe("system");
       expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
       expect(await readMirror(seeded.sessionId)).toEqual(evts);
+      expect(notifyAgentFinished).toHaveBeenCalledOnce();
+      expect(notifyAgentFinished).toHaveBeenCalledWith({
+        userId: seeded.uid,
+        runId: seeded.runId,
+        sessionId: seeded.sessionId,
+      });
+    });
+
+    it("full processor: scheduled success keeps the existing schedule notification path", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakePort();
+      const sse = await startTurnSse([textTurn("done")]);
+      const notifyAgentFinished = vi.fn(async () => {});
+      const processor = createFullAgentRunProcessor(
+        makeFullDeps(sse.url, sbx.port, {
+          notifier: { notifyAgentFinished, notifyAgentFailed: async () => {} },
+        }),
+      );
+      try {
+        await processor({
+          data: {
+            ...jobOf(seeded).data,
+            schedule: { scheduleId: "sch-1", scheduleRunId: "sr-1", autonomy: "auto" },
+          },
+        });
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+
+      expect(notifyAgentFinished).not.toHaveBeenCalled();
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
     });
 
     it("full processor: every model call's usage lands in run_usage (Wave 3 ledger)", async () => {
@@ -2141,18 +2180,35 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(generate?.function.description).toContain("ovid-image:img-one");
     });
 
-    it("full processor: dispatch_agent runs a real child loop and returns its report (fix I-1)", async () => {
+    it("full processor: dispatch_agent starts a child and its completion arrives separately", async () => {
       const seeded = await seedRun();
       const sbx = makeFakePort();
       const sse = await startTurnSse([
         toolCallTurn("call_d", "dispatch_agent", { prompt: "child task" }),
         textTurn("child answer"),
         textTurn("parent done"),
-      ]);
+      ], (messages) =>
+        JSON.stringify(messages).includes("child task") ? 1 : undefined,
+      );
+      let unsubscribe: (() => Promise<void>) | undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const childCompleted = new Promise<void>((resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("subagent completion timed out")), 10_000);
+        void events.subscribe(seeded.sessionId, (event) => {
+          if (event.type !== "subagent_completed") return;
+          clearTimeout(timer);
+          resolve();
+        }).then((stop) => {
+          unsubscribe = stop;
+        }, reject);
+      });
       const processor = createFullAgentRunProcessor(makeFullDeps(sse.url, sbx.port));
       try {
         await processor(jobOf(seeded));
+        await childCompleted;
       } finally {
+        clearTimeout(timer);
+        await unsubscribe?.();
         await processor.close();
         await sse.close();
       }
@@ -2163,7 +2219,9 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       const completed = evts.find(
         (e) => e.type === "tool_completed" && e.payload.name === "dispatch_agent",
       )!;
-      expect(completed.payload).toMatchObject({ ok: true, content: "child answer" });
+      expect(completed.payload).toMatchObject({ ok: true });
+      expect(completed.payload.content).toContain("started");
+      expect(completed.payload.content).not.toBe("child answer");
       // The child is a real session with its own persisted transcript.
       const started = evts.find((e) => e.type === "subagent_started")!;
       const childSessionId = String(started.payload.childSessionId);
@@ -2764,27 +2822,53 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         toolCallTurn("call_search", "session_search", { query: "childlookup" }),
         textTurn("child done"),
         textTurn("parent done"),
-      ]);
+      ], (messages) => {
+        const childTask = messages.some((message) =>
+          message.role === "user" && message.content === "Search only your own task history",
+        );
+        if (!childTask) return undefined;
+        return messages.some((message) =>
+          message.role === "tool" && message.tool_call_id === "call_search",
+        ) ? 2 : 1;
+      });
       const processor = createFullAgentRunProcessor(makeFullDeps(sse.url, sbx.port));
+      let childId: string | undefined;
+      const childDone = (async () => {
+        for (let attempt = 0; attempt < 500; attempt += 1) {
+          const events = await readEvents(seeded.sessionId);
+          childId ??= events.find((event) => event.type === "subagent_started")?.payload.childSessionId as string | undefined;
+          if (childId) {
+            const childEvents = await readEvents(childId);
+            if (childEvents.some((event) => event.type === "tool_completed" && event.payload.name === "session_search") &&
+                childEvents.some((event) => event.type === "run_completed") &&
+                events.some((event) => event.type === "subagent_completed")) {
+              return childEvents;
+            }
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        throw new Error("child completion timed out");
+      })();
       try {
         await processor(jobOf(seeded));
+        const childEvents = await childDone;
+        const search = childEvents.find((e) => e.type === "tool_completed" && e.payload.name === "session_search")!;
+        expect(search).toBeDefined();
+        expect(String(search.payload.content)).not.toContain(marker);
+        expect(String(search.payload.content)).not.toContain(other.id);
       } finally {
         await processor.close();
         await sse.close();
       }
-      expect(sse.requests).toHaveLength(4);
-      for (const childRequest of sse.requests.slice(1, 3)) {
-        expect(toolNames(childRequest).filter((n) => n.startsWith("memory_"))).toEqual([]);
-        expect(wireText(childRequest)).not.toContain(marker);
-        expect(wireText(childRequest)).not.toContain(parentMarker);
-      }
-      const started = (await readEvents(seeded.sessionId)).find((e) => e.type === "subagent_started")!;
-      expect(started).toBeDefined();
-      const childEvents = await readEvents(String(started.payload.childSessionId));
-      const search = childEvents.find((e) => e.type === "tool_completed" && e.payload.name === "session_search")!;
-      expect(search).toBeDefined();
-      expect(String(search.payload.content)).not.toContain(marker);
-      expect(String(search.payload.content)).not.toContain(other.id);
+      const childRequest = sse.requests.find((request) =>
+        request.messages.some((message) =>
+          message.role === "user" && message.content === "Search only your own task history",
+        ),
+      )!;
+      expect(childRequest).toBeDefined();
+      expect(toolNames(childRequest).filter((n) => n.startsWith("memory_"))).toEqual([]);
+      expect(wireText(childRequest)).not.toContain(marker);
+      expect(wireText(childRequest)).not.toContain(parentMarker);
     });
 
     it("SE-005: Memory OFF removes every memory_* tool from the model's tool list", async () => {

@@ -53,9 +53,13 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp server routes (real postgres)"
     await closeDb(db);
   });
 
-  async function seedPro(uid: string): Promise<void> {
+  async function seedTier(uid: string, tier: string): Promise<void> {
     await users.ensure(db, uid, `${uid}@stub.test`);
-    await db.$client.unsafe("UPDATE users SET tier = 'pro' WHERE uid = $1", [uid]);
+    await db.$client.unsafe("UPDATE users SET tier = $2 WHERE uid = $1", [uid, tier]);
+  }
+
+  async function seedPro(uid: string): Promise<void> {
+    await seedTier(uid, "pro");
   }
 
   async function postServer(uid: string, payload: NonNullable<InjectOptions["payload"]>) {
@@ -76,6 +80,73 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp server routes (real postgres)"
     });
     expect(res.statusCode).toBe(402);
     expect(res.json()).toEqual({ error: { code: "pro_required", message: PRO_REQUIRED_MESSAGE } });
+  });
+
+  it("Go allows five custom connectors and refuses the sixth with the shared error code", async () => {
+    const uid = testUid("mcp-go-cap");
+    await seedTier(uid, "go");
+    for (let index = 0; index < 5; index += 1) {
+      const res = await postServer(uid, {
+        name: `custom-${index}`,
+        transport: "http",
+        url: "https://mcp.example.test/mcp",
+      });
+      expect(res.statusCode, res.body).toBe(201);
+    }
+    const refused = await postServer(uid, {
+      name: "custom-over-cap",
+      transport: "http",
+      url: "https://mcp.example.test/mcp",
+    });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json().error.code).toBe("connector_limit_reached");
+    const rows = await db.$client.unsafe(
+      "SELECT id FROM mcp_servers WHERE user_id = $1 AND curated_id IS NULL",
+      [uid],
+    );
+    expect(rows).toHaveLength(5);
+  });
+
+  it("a pasted batch over the plan cap is refused without a partial import", async () => {
+    const uid = testUid("mcp-go-batch");
+    await seedTier(uid, "go");
+    const pasted = JSON.stringify({
+      mcpServers: Object.fromEntries(
+        Array.from({ length: 6 }, (_, index) => [
+          `custom-${index}`,
+          { command: "npx", args: ["-y", "some-mcp-server"] },
+        ]),
+      ),
+    });
+    const res = await postServer(uid, { pasted });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe("connector_limit_reached");
+    const rows = await db.$client.unsafe(
+      "SELECT id FROM mcp_servers WHERE user_id = $1",
+      [uid],
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  it("parallel custom creates cannot race past the plan cap", async () => {
+    const uid = testUid("mcp-go-race");
+    await seedTier(uid, "go");
+    const responses = await Promise.all(
+      Array.from({ length: 10 }, (_, index) =>
+        postServer(uid, {
+          name: `custom-${index}`,
+          transport: "http",
+          url: "https://mcp.example.test/mcp",
+        }),
+      ),
+    );
+    expect(responses.filter((res) => res.statusCode === 201)).toHaveLength(5);
+    expect(responses.filter((res) => res.statusCode === 403)).toHaveLength(5);
+    const rows = await db.$client.unsafe(
+      "SELECT id FROM mcp_servers WHERE user_id = $1 AND curated_id IS NULL",
+      [uid],
+    );
+    expect(rows).toHaveLength(5);
   });
 
   it("POST custom as pro → 201; secrets sealed (no plaintext in row or response)", async () => {

@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { join } from "node:path";
 import { attachments, createPrivateMemoryStore, eventMirror, grantsRepo, messages, projectsRepo, runs, sessions, userPreferences, type Db } from "@ovid/db";
 import type { EventLog } from "@ovid/events";
+import { withRunCompletionNotification } from "./runCompletionNotifications.js";
 import type { AgentRunJob } from "@ovid/queue";
 import {
   RootfsUnavailable,
@@ -205,13 +206,20 @@ export interface RunDeps {
    * 2026-10-18). Absent → the failure still lands in the run log and the
    * session event stream; only the push is skipped.
    */
-  notifier?: { notifyAgentFailed(a: {
-    userId: string;
-    sessionId: string;
-    sessionTitle: string;
-    code: string;
-    message: string;
-  }): Promise<void> };
+  notifier?: {
+    notifyAgentFailed(a: {
+      userId: string;
+      sessionId: string;
+      sessionTitle: string;
+      code: string;
+      message: string;
+    }): Promise<void>;
+    notifyAgentFinished?(a: {
+      userId: string;
+      runId: string;
+      sessionId: string;
+    }): Promise<void>;
+  };
   /**
    * The model catalog, read once per run only when the run carries images
    * (see modelCapabilities.ts). Absent → the static family list decides.
@@ -292,13 +300,20 @@ export interface FullRunDeps {
    * 2026-10-18). Absent → the failure still lands in the run log and the
    * session event stream; only the push is skipped.
    */
-  notifier?: { notifyAgentFailed(a: {
-    userId: string;
-    sessionId: string;
-    sessionTitle: string;
-    code: string;
-    message: string;
-  }): Promise<void> };
+  notifier?: {
+    notifyAgentFailed(a: {
+      userId: string;
+      sessionId: string;
+      sessionTitle: string;
+      code: string;
+      message: string;
+    }): Promise<void>;
+    notifyAgentFinished?(a: {
+      userId: string;
+      runId: string;
+      sessionId: string;
+    }): Promise<void>;
+  };
   /**
    * The model catalog, read once per run only when the run carries images
    * (see modelCapabilities.ts). Absent → the static family list decides.
@@ -914,12 +929,18 @@ export function createAgentRunProcessor(
       unattended: job.data.unattended ?? job.data.schedule !== undefined,
       byokKeyId: job.data.byokKeyId ?? null,
     };
+    const runEvents = withRunCompletionNotification(deps.events, deps.notifier, {
+      runId,
+      sessionId,
+      userId,
+      scheduled: job.data.schedule !== undefined,
+    });
 
     const emit = async (
       type: SessionEventType,
       payload: Record<string, unknown>,
     ): Promise<SessionEvent> => {
-      const event = await deps.events.append(sessionId, type, payload);
+      const event = await runEvents.append(sessionId, type, payload);
       await eventMirror.put(deps.db, event);
       return event;
     };
@@ -1201,7 +1222,7 @@ export function createAgentRunProcessor(
      * The P2-compat sink: every engine append is normalized to P2's exact
      * spelling before it reaches Redis (and the mirror).
      */
-    const compatEvents = compatEventLog(deps.events);
+    const compatEvents = compatEventLog(runEvents);
     const compatEmit = async (
       type: SessionEventType,
       payload: Record<string, unknown>,
@@ -1452,9 +1473,9 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
 
   const state = createPostgresSessionStateStore(deps.db);
 
-  const sinkFor = (sessionId: string) => ({
+  const sinkFor = (sessionId: string, events = deps.events) => ({
     async emit(type: SessionEventType, payload: Record<string, unknown>): Promise<void> {
-      const event = await deps.events.append(sessionId, type, payload);
+      const event = await events.append(sessionId, type, payload);
       await eventMirror.put(deps.db, event);
     },
   });
@@ -1677,6 +1698,12 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     };
   }): Promise<void> => {
     const { runId, sessionId, userId } = job.data;
+    const runEvents = withRunCompletionNotification(deps.events, deps.notifier, {
+      runId,
+      sessionId,
+      userId,
+      scheduled: job.data.schedule !== undefined,
+    });
     // P9 Task 9: the per-run resolution context and the agent-core adapter.
     // Both the engine and the auxiliary model calls (hooks/compaction) ride
     // the SAME resolved key for this run.
@@ -2184,7 +2211,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     if (prePass.kind === "finish") {
       // The feedback IS the turn's output: persist it, complete the run, and
       // never call the model (Dart's composer-command contract).
-      const sink = sinkFor(sessionId);
+      const sink = sinkFor(sessionId, runEvents);
       await sink.emit("run_started", { runId });
       const assistant = await messages.append(deps.db, {
         sessionId,
@@ -2216,7 +2243,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
 
     engine = createAgentEngine({
       db: deps.db,
-      events: deps.events,
+      events: runEvents,
       // The engine replaces this with its per-session sink; the field is part
       // of the pinned LoopDeps shape.
       sink: { async emit() {} },

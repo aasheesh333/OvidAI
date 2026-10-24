@@ -111,6 +111,24 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway credential routes (real postgres)",
     expect(crypto.decrypt(row.notes_sealed as never, browserCredentialRecordId(row.id as string))).toBe(NOTES);
   });
 
+  it("rejects non-HTTPS or secret-bearing site metadata before any row is written", async () => {
+    const uid = testUid("cred-site-guard");
+    const app = makeApp();
+    for (const site of [
+      "http://example.test/login",
+      "https://user:password@example.test/login",
+      "https://example.test/login?access_token=private",
+      "https://example.test/login#secret",
+    ]) {
+      const result = await create(app, uid, { site });
+      expect(result.statusCode).toBe(400);
+      expect(result.body.error.code).toBe("bad_request");
+    }
+    const valid = await create(app, uid, { site: "example.test/login" });
+    expect(valid.statusCode).toBe(201);
+    expect(valid.body.site).toBe("https://example.test/login");
+  });
+
   it("GET lists metadata only (no secret, no ciphertext)", async () => {
     const uid = testUid("cred-get");
     const app = makeApp();

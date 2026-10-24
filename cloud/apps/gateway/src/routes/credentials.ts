@@ -42,15 +42,25 @@ function isUniqueViolation(err: unknown): boolean {
   return false;
 }
 
-/** A site must carry a real host; bare hosts are accepted ("example.com"). */
-function validSite(raw: string): boolean {
+/** Canonical HTTPS origin/path metadata; credentials never travel in `site`. */
+function normalizeSite(raw: string): string | null {
   const site = raw.trim();
-  if (site === "") return false;
+  if (site === "") return null;
   try {
     const url = new URL(site.includes("://") ? site : `https://${site}`);
-    return url.hostname !== "";
+    if (
+      url.protocol !== "https:" ||
+      url.hostname === "" ||
+      url.username !== "" ||
+      url.password !== "" ||
+      url.search !== "" ||
+      url.hash !== ""
+    ) {
+      return null;
+    }
+    return url.toString();
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -109,8 +119,9 @@ export function registerCredentialRoutes(app: FastifyInstance, deps: GatewayDeps
     const parsed = createBody.safeParse(request.body);
     if (!parsed.success) return zodBadRequest(reply, parsed.error);
     const body = parsed.data;
-    if (!validSite(body.site)) {
-      return sendError(reply, 400, "bad_request", "site must be a URL or a hostname.");
+    const site = normalizeSite(body.site);
+    if (site === null) {
+      return sendError(reply, 400, "bad_request", "site must be an HTTPS URL without credentials, query or fragment.");
     }
 
     const { uid, email } = request.principal;
@@ -137,7 +148,7 @@ export function registerCredentialRoutes(app: FastifyInstance, deps: GatewayDeps
         id,
         userId: uid,
         label: body.label,
-        site: body.site,
+        site,
         username: body.username ?? "",
         secretKind: body.secretKind ?? "password",
         secretSealed,
@@ -161,8 +172,9 @@ export function registerCredentialRoutes(app: FastifyInstance, deps: GatewayDeps
     const parsed = patchBody.safeParse(request.body);
     if (!parsed.success) return zodBadRequest(reply, parsed.error);
     const body = parsed.data;
-    if (body.site !== undefined && !validSite(body.site)) {
-      return sendError(reply, 400, "bad_request", "site must be a URL or a hostname.");
+    const site = body.site === undefined ? undefined : normalizeSite(body.site);
+    if (site === null) {
+      return sendError(reply, 400, "bad_request", "site must be an HTTPS URL without credentials, query or fragment.");
     }
     if (Object.keys(body).length === 0) {
       return sendError(reply, 400, "bad_request", "Nothing to update.");
@@ -176,7 +188,7 @@ export function registerCredentialRoutes(app: FastifyInstance, deps: GatewayDeps
     try {
       row = await browserCredentialsRepo.update(deps.db, uid, id, {
         ...(body.label !== undefined ? { label: body.label } : {}),
-        ...(body.site !== undefined ? { site: body.site } : {}),
+        ...(site !== undefined ? { site } : {}),
         ...(body.username !== undefined ? { username: body.username } : {}),
         ...(body.secretKind !== undefined ? { secretKind: body.secretKind } : {}),
         ...(body.secret !== undefined

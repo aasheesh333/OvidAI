@@ -1,9 +1,20 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import { runs, sessionState, sessions, users, type SessionRow } from "@ovid/db";
 import { sessionPatchSchema, type Page, type SessionDto } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
-import { isUuid, notFound, parsePageLimit, queryValue, zodBadRequest } from "./http.js";
+import { badRequest, isUuid, notFound, parsePageLimit, queryValue, zodBadRequest } from "./http.js";
+
+const MIN_CURSOR_MS = -62_135_596_800_000;
+const MAX_CURSOR_MS = 253_402_300_799_999;
+
+function snapshotTime(raw: string | null): number | null | undefined {
+  if (raw === null) return undefined;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= MIN_CURSOR_MS && value <= MAX_CURSOR_MS
+    ? value
+    : null;
+}
 import { cancelActiveRun } from "./runs.js";
 
 // Session routes — all mounted inside the authenticated /cloud/v1 scope.
@@ -37,15 +48,22 @@ export function registerSessionRoutes(app: FastifyInstance, deps: GatewayDeps): 
     return reply.code(201).send(toSessionDto(row));
   });
 
-  app.get("/sessions", async (request): Promise<Page<SessionDto>> => {
+  app.get("/sessions", async (request, reply): Promise<Page<SessionDto> | FastifyReply> => {
     const query = request.query as Record<string, string | string[] | undefined>;
     const limit = parsePageLimit(query.limit);
     const cursor = queryValue(query.cursor);
+    const snapshot = snapshotTime(queryValue(query.snapshot));
+    if (snapshot === null) {
+      return badRequest(reply, "snapshot must be an epoch-millisecond instant.");
+    }
+    const immutable = snapshot !== undefined;
     const { rows, nextCursor } = await sessions.list(
       deps.db,
       request.principal.uid,
       limit,
       cursor,
+      immutable,
+      snapshot,
     );
     return { items: rows.map(toSessionDto), nextCursor };
   });
