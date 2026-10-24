@@ -40,6 +40,9 @@ import zipfile
 
 ABIS = {'arm64-v8a': (2, 183), 'armeabi-v7a': (1, 40), 'x86_64': (2, 62)}
 BOOTSTRAP = 'libovid_bootstrap.so'
+# Present only through android/app/src/play/AndroidManifest.xml. Observing it
+# in the merged artifact distinguishes the actual overlay from --profile.
+PLAY_OVERLAY_MARKER = 'google_analytics_adid_collection_enabled'
 # proot ships a 32-bit loader next to the 64-bit one (to exec 32-bit guests).
 # It is the only bootstrap member allowed to be the ABI's 32-bit counterpart.
 PROOT_LOADER32 = 'libexec/proot/loader32'
@@ -323,7 +326,9 @@ def bundle_manifest(data):
             'target_sdk': int(sdk['targetSdkVersion']),
             'debuggable': app.get('debuggable', 'false') in ('true', '1'),
             'extract_native_libs': app.get('extractNativeLibs', 'default'),
-            'permissions': sorted(a['name'] for n, a in elements if n.startswith('uses-permission'))}
+            'permissions': sorted(a['name'] for n, a in elements if n.startswith('uses-permission')),
+            'play_overlay': any(n == 'meta-data' and a.get('name') == PLAY_OVERLAY_MARKER
+                                for n, a in elements)}
 
 
 def apk_manifest(path, tools):
@@ -341,7 +346,21 @@ def apk_manifest(path, tools):
             'target_sdk': int(field(r"targetSdkVersion:'(\d+)'")),
             'debuggable': 'application-debuggable' in badging,
             'extract_native_libs': re.findall(r'android:extractNativeLibs[^\n]+', tree),
-            'permissions': sorted(re.findall(r"uses-permission[^:]*: name='([^']+)'", badging))}
+            'permissions': sorted(re.findall(r"uses-permission[^:]*: name='([^']+)'", badging)),
+            'play_overlay': PLAY_OVERLAY_MARKER in tree}
+
+
+def write_json_evidence(path, report):
+    """Atomically create new evidence; never truncate or follow an old path."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, 'O_NOFOLLOW'):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    with os.fdopen(descriptor, 'w') as stream:
+        json.dump(report, stream, indent=2)
+        stream.write('\n')
 
 
 def main():
@@ -365,7 +384,8 @@ def main():
     release = args.mode == 'release'
     strict = production or release
     report = {'schema': 1, 'artifact': str(args.artifact), 'mode': args.mode, 'profile': args.profile,
-              'source_revision': os.environ.get('GITHUB_SHA'), 'errors': [],
+              'source_revision': os.environ.get('GITHUB_SHA'),
+              'build_command': os.environ.get('OVID_RELEASE_BUILD_COMMAND'), 'errors': [],
               'qualification': 'static inventory only; no device, split-delivery or Play approval evidence'}
     kind = args.artifact.suffix.removeprefix('.')
     try:
@@ -404,6 +424,14 @@ def main():
                 report['manifest'] = bundle_manifest(z.read('base/manifest/AndroidManifest.xml'))
             report['zip_alignment'] = 'not applicable to AAB; delivered APKs require separate zipalign/device checks'
         manifest = report['manifest']
+        play_overlay = bool(manifest.get('play_overlay'))
+        report['distribution_profile'] = {
+            'requested': args.profile,
+            'play_manifest_overlay_present': play_overlay,
+        }
+        if args.profile == 'sideload' and play_overlay:
+            report['errors'].append(
+                'sideload artifact contains the actual Play manifest overlay')
         if manifest['package'] != 'com.dhanuk.ovidai' or manifest['min_sdk'] != args.expected_min or manifest['target_sdk'] != args.expected_target:
             report['errors'].append('artifact package/minSdk/targetSdk differs from explicit inventory contract')
         if strict and manifest['debuggable']:
@@ -438,8 +466,12 @@ def main():
     except (ValueError, OSError, KeyError, StopIteration, struct.error, zipfile.BadZipFile, subprocess.TimeoutExpired) as error:
         report['errors'].append(f'inventory: {error}')
     report['passed'] = not report['errors']
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(report, indent=2) + '\n')
+    try:
+        write_json_evidence(args.output, report)
+    except OSError:
+        print('Release inventory evidence output must be a new writable regular file',
+              file=sys.stderr)
+        return 1
     print(json.dumps({'passed': report['passed'], 'report': str(args.output),
                       'errors': len(report['errors']),
                       'alignment_findings': len(report.get('native', {}).get('alignment_errors', []))}))

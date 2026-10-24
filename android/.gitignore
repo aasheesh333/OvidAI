@@ -3,6 +3,10 @@ gradle-wrapper.jar
 /captures/
 /gradlew
 /gradlew.bat
+# These three generated launcher files are reproducible, non-secret inputs.
+!/gradle/wrapper/gradle-wrapper.jar
+!/gradlew
+!/gradlew.bat
 /local.properties
 GeneratedPluginRegistrant.java
 .cxx/
