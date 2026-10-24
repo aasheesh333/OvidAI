@@ -3,13 +3,18 @@
  *
  * The vault stores an entry per login: URL/site, username, password-or-token
  * (AES-256-GCM sealed server-side) and optional notes. The agent may list
- * non-secret metadata only. Legacy browser credential autofill is disabled:
- * it is absent from every roster and its direct execution boundary refuses
- * before resolving a secret or touching a page.
+ * non-secret metadata only. Legacy direct autofill always refuses. A separate
+ * exact-origin broker tool is absent unless explicitly enabled and fully composed.
  */
 
 import { z } from "zod";
 
+import type { BrowserOperationCoordinator } from "../browserOperations.js";
+import type {
+  BrokerToolContext,
+  BrowserCredentialBroker,
+  CredentialUseApprover,
+} from "../credentialBroker.js";
 import {
   TOOL_ERROR_PREFIX,
   defineBrowserTool,
@@ -20,6 +25,25 @@ import {
 
 const NO_VAULT = `${TOOL_ERROR_PREFIX}the credentials vault is not configured on this deployment`;
 const LEGACY_AUTOFILL_REFUSAL = `${TOOL_ERROR_PREFIX}credential_autofill_disabled`;
+
+/** Additive here because tools/types.ts belongs to Task 10's observation gate. */
+export interface CredentialToolsDeps {
+  credentialBroker?: BrowserCredentialBroker;
+  credentialApprover?: CredentialUseApprover;
+  browserOperations?: BrowserOperationCoordinator;
+}
+
+type CredentialToolDeps = BrowserToolsDeps & CredentialToolsDeps;
+
+function brokerReady(deps: CredentialToolDeps): boolean {
+  return (
+    deps.cfg.credentialBrokerEnabled &&
+    deps.credentials !== undefined &&
+    deps.credentialBroker !== undefined &&
+    deps.credentialApprover !== undefined &&
+    deps.browserOperations !== undefined
+  );
+}
 
 function listSpec(deps: BrowserToolsDeps): BrowserToolSpec {
   return {
@@ -42,6 +66,43 @@ function listSpec(deps: BrowserToolsDeps): BrowserToolSpec {
           )
           .join("\n"),
       };
+    },
+  };
+}
+
+function brokerSpec(deps: CredentialToolDeps): BrowserToolSpec {
+  return {
+    name: "browser_login_with_credential",
+    description:
+      "Submit one saved credential on its exact HTTPS origin after per-use approval. Supports only a simple main-frame login form; submission is not verified login.",
+    parameters: {
+      type: "object",
+      properties: {
+        credentialId: { type: "string", description: "Id from browser_list_credentials." },
+      },
+      required: ["credentialId"],
+      additionalProperties: false,
+    },
+    inputSchema: z.object({ credentialId: z.string().min(1) }).strict(),
+    async execute(input, ctx) {
+      const signal = (ctx as BrokerToolContext).signal;
+      if (signal === undefined) {
+        return { content: `${TOOL_ERROR_PREFIX}credential_context_required: an abort signal is required` };
+      }
+      try {
+        const outcome = await deps.credentialBroker!.login({
+          ctx: ctx as BrokerToolContext,
+          credentialId: input.credentialId,
+          approver: deps.credentialApprover!,
+          signal,
+        });
+        return { content: `${outcome.status}: ${outcome.code}: ${outcome.message}` };
+      } catch {
+        // Never relay an arbitrary broker error: it could contain a secret or URL.
+        return {
+          content: `${TOOL_ERROR_PREFIX}credential_operation_failed: Credential login was refused without a verified submission.`,
+        };
+      }
     },
   };
 }
@@ -93,6 +154,9 @@ export function legacyCredentialAutofillTool(deps: BrowserToolsDeps): BrowserToo
   });
 }
 
-export function credentialTools(deps: BrowserToolsDeps): BrowserToolDef[] {
-  return [defineBrowserTool(deps, listSpec(deps))];
+export function credentialTools(deps: CredentialToolDeps): BrowserToolDef[] {
+  return [
+    defineBrowserTool(deps, listSpec(deps)),
+    ...(brokerReady(deps) ? [defineBrowserTool(deps, brokerSpec(deps))] : []),
+  ];
 }

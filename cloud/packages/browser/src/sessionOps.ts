@@ -14,6 +14,7 @@
 
 import type { Page } from "playwright-core";
 
+import type { BrowserOperationCoordinator } from "./browserOperations.js";
 import type { BrowserEngineConfig } from "./config.js";
 import type { BrowserPool } from "./pool.js";
 import type { BrowserSessionRegistry, SessionBrowser } from "./sessions.js";
@@ -33,6 +34,8 @@ export interface SessionOps {
   registry: BrowserSessionRegistry;
   persistence: StorageStatePersistence | null;
   cfg: BrowserEngineConfig;
+  /** Structural additive seam; Task 10 uses the same coordinator for all entry points. */
+  browserOperations?: Pick<BrowserOperationCoordinator, "isCredentialOperationActive">;
   notifyState?(sessionId: string): void;
   /**
    * Diagnostic sink for swallowed release-time capture/flush failures.
@@ -78,7 +81,21 @@ const opening = new Map<string, Promise<SessionBrowser>>();
  */
 const lastUrls = new Map<string, string>();
 
-function rememberUrl(sessionId: string, url: string): void {
+function credentialOperationActive(ops: SessionOps, sessionId: string): boolean {
+  return ops.browserOperations?.isCredentialOperationActive(sessionId) === true;
+}
+
+/** Purge on credential entry/unwind so a sensitive URL can never be restored later. */
+export function purgeSessionUrlMemory(sessionId: string): void {
+  lastUrls.delete(sessionId);
+}
+
+function rememberUrl(ops: SessionOps, sessionId: string, url: string): void {
+  if (credentialOperationActive(ops, sessionId)) {
+    // Never persist OR retain an earlier URL across a credential operation.
+    purgeSessionUrlMemory(sessionId);
+    return;
+  }
   if (url.startsWith("http://") || url.startsWith("https://")) {
     lastUrls.set(sessionId, url);
   }
@@ -115,7 +132,9 @@ export async function ensureSession(ops: SessionOps, ctx: BrowserToolContext): P
     // Ephemeral-lease restore: a context that was frozen mid-session comes
     // back on the page it was showing. Best-effort — a dead URL must not turn
     // a tool call into an error, the caller's own navigation still applies.
-    const previous = lastUrls.get(ctx.sessionId);
+    const credentialActive = credentialOperationActive(ops, ctx.sessionId);
+    if (credentialActive) purgeSessionUrlMemory(ctx.sessionId);
+    const previous = credentialActive ? undefined : lastUrls.get(ctx.sessionId);
     if (previous !== undefined) {
       try {
         await handle.page.goto(previous, { waitUntil: "domcontentloaded", timeout: 15_000 });
@@ -171,7 +190,7 @@ export async function releaseSession(ops: SessionOps, sessionId: string): Promis
  * work (a tool body may call this directly in Task 13).
  */
 export async function withSession<T>(
-  deps: BrowserToolsDeps,
+  deps: BrowserToolsDeps & Pick<SessionOps, "browserOperations">,
   ctx: BrowserToolContext,
   fn: (session: SessionBrowser, page: Page) => Promise<T>,
 ): Promise<T> {
@@ -185,7 +204,7 @@ export async function withSession<T>(
     return await fn(session, page);
   } finally {
     // Remember where the step left the tab so an idle freeze can restore it.
-    rememberUrl(ctx.sessionId, page.url());
+    rememberUrl(deps, ctx.sessionId, page.url());
   }
 }
 

@@ -39,7 +39,24 @@ import type { BrowserContext, Page } from "playwright-core";
 import type { BrowserInputEvent, BrowserStateDto } from "@ovid/shared";
 
 import { createRedisBrowserBridge } from "./bridge.js";
+import { BrowserOperationCoordinator } from "./browserOperations.js";
 import type { BrowserEngineConfig } from "./config.js";
+import { BrowserCredentialBroker, type CredentialUseApprover } from "./credentialBroker.js";
+
+// index.ts is outside Task 9's scope; engine.ts is already a public barrel.
+export { BrowserCredentialBroker, parseCredentialOrigin } from "./credentialBroker.js";
+export { BrowserOperationCoordinator } from "./browserOperations.js";
+export type {
+  BrokerToolContext,
+  BrowserCredentialBrokerDeps,
+  BrowserCredentialLoginInput,
+  BrowserCredentialLoginResult,
+  CredentialLoginStatus,
+  CredentialUseApproval,
+  CredentialUseApprover,
+} from "./credentialBroker.js";
+export { BrowserOperationRefusal } from "./browserOperations.js";
+export type { BrowserOperationKind, BrowserOperationOptions } from "./browserOperations.js";
 import { createDetachGrace } from "./detachGrace.js";
 import { applyInputEvent } from "./input.js";
 import { createLightpandaPool, lightpandaAvailable, type LightpandaPool } from "./lightpanda.js";
@@ -90,6 +107,11 @@ export interface BrowserEngineDeps {
   prepareUidDrop?(cfg: BrowserEngineConfig): Promise<BrowserUidDrop | null>;
   /** Wave 6 W4: the owner-scoped credentials vault (agent list/use only). */
   credentials?: BrowserCredentialsPort;
+  /** Task 9: no broker roster entry unless the flag and every dependency are present. */
+  credentialApprover?: CredentialUseApprover;
+  browserOperations?: BrowserOperationCoordinator;
+  /** Test/composition seam; production normally constructs the broker from credentials. */
+  credentialBroker?: BrowserCredentialBroker;
   /** Wave 6 W4: workspace ↔ Artifact Vault bridge for browser uploads/downloads. */
   artifactVault?: BrowserArtifactVaultPort;
   now?(): number;
@@ -218,6 +240,24 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     log,
   };
 
+  const browserOperations = deps.browserOperations ?? new BrowserOperationCoordinator();
+  const credentialBroker =
+    cfg.credentialBrokerEnabled && deps.credentials !== undefined && deps.credentialApprover !== undefined
+      ? deps.credentialBroker ??
+        new BrowserCredentialBroker({
+          pool,
+          registry,
+          persistence,
+          cfg,
+          workspaceDir,
+          notifyState: (sessionId: string) => publishState(sessionId),
+          log,
+          now,
+          credentials: deps.credentials,
+          operations: browserOperations,
+        })
+      : undefined;
+
   const tools = createBrowserTools({
     pool,
     registry,
@@ -227,7 +267,11 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     notifyState: (sessionId: string) => publishState(sessionId),
     log,
     now,
+    browserOperations,
     ...(deps.credentials !== undefined ? { credentials: deps.credentials } : {}),
+    ...(credentialBroker !== undefined && deps.credentialApprover !== undefined
+      ? { credentialBroker, credentialApprover: deps.credentialApprover }
+      : {}),
     ...(deps.artifactVault !== undefined ? { artifactVault: deps.artifactVault } : {}),
   });
 

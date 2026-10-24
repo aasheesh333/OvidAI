@@ -7,11 +7,11 @@
 import { inspectionTools } from "./inspection.js";
 import { interactionTools } from "./interaction.js";
 import { navigationTools } from "./navigation.js";
-import { credentialTools } from "./credentials.js";
+import { credentialTools, type CredentialToolsDeps } from "./credentials.js";
 import { transferTools } from "./transfers.js";
 import type { BrowserToolDef, BrowserToolsDeps } from "./types.js";
 
-/** Production roster: legacy credential autofill is disabled and absent. Sorted by name. */
+/** Default-off base roster. The fully composed broker is additive in createBrowserTools only. */
 export const BROWSER_TOOL_NAMES: readonly string[] = Object.freeze([
   "browser_back",
   "browser_click",
@@ -52,7 +52,7 @@ export const BROWSER_TOOL_NAMES: readonly string[] = Object.freeze([
   "browser_wait_for",
 ]);
 
-export function createBrowserTools(deps: BrowserToolsDeps): BrowserToolDef[] {
+export function createBrowserTools(deps: BrowserToolsDeps & CredentialToolsDeps): BrowserToolDef[] {
   return [
     ...navigationTools(deps),
     ...inspectionTools(deps),

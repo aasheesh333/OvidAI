@@ -63,12 +63,14 @@ describe("adaptBrowserTools", () => {
       def("browser_open", { content: "ok" }, (_input, c) => seen.push({ ...c })),
     ]);
 
-    await tool!.execute({ url: "https://example.com" }, ctx({ sessionId: "s-9", userId: "u-9" }));
-    await tool!.execute({ url: "https://example.com" }, ctx({ sessionId: "s-10", userId: "u-9" }));
+    const first = ctx({ sessionId: "s-9", userId: "u-9", runId: "r-9" });
+    const second = ctx({ sessionId: "s-10", userId: "u-9", runId: "r-10" });
+    await tool!.execute({ url: "https://example.com" }, first);
+    await tool!.execute({ url: "https://example.com" }, second);
 
     expect(seen).toEqual([
-      { sessionId: "user-u-9", userId: "u-9", workspaceSessionId: "s-9" },
-      { sessionId: "user-u-9", userId: "u-9", workspaceSessionId: "s-10" },
+      { sessionId: "user-u-9", userId: "u-9", workspaceSessionId: "s-9", runId: "r-9", signal: first.signal },
+      { sessionId: "user-u-9", userId: "u-9", workspaceSessionId: "s-10", runId: "r-10", signal: second.signal },
     ]);
   });
 
@@ -127,17 +129,21 @@ describe("adaptBrowserTools", () => {
     expect(tools.map((t) => t.spec.name)).toEqual(names);
   });
 
-  it("does not forward the abort signal (documented limitation, not silence)", () => {
-    // BrowserToolDef.execute takes no signal. Pinning the absence means a
-    // future signature change is a deliberate act, not an accident.
+  it("forwards the run id and abort signal needed by per-use credential approval and cleanup", async () => {
+    const run = ctx({ runId: "run-credential", sessionId: "chat-credential" });
     const spy = vi.fn((_input: unknown, c: BrowserToolContext) => {
-      expect(Object.keys(c).sort()).toEqual(["sessionId", "userId", "workspaceSessionId"]);
+      expect(Object.keys(c).sort()).toEqual(["runId", "sessionId", "signal", "userId", "workspaceSessionId"]);
+      expect(c).toMatchObject({
+        sessionId: "user-u-1",
+        workspaceSessionId: "chat-credential",
+        runId: "run-credential",
+        signal: run.signal,
+      });
       return Promise.resolve({ content: "ok" });
     });
     const [tool] = adaptBrowserTools([{ ...def("browser_wait_for", { content: "ok" }), execute: spy }]);
-    return tool!.execute({}, ctx()).then(() => {
-      expect(spy).toHaveBeenCalledTimes(1);
-    });
+    await tool!.execute({}, run);
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });
 

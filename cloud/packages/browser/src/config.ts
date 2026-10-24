@@ -61,6 +61,8 @@ export interface BrowserEngineConfig {
    * memory and CPU enough to run many more live contexts on the same box.
    */
   blockHeavyResources: boolean;
+  /** OVID_BROWSER_CREDENTIAL_BROKER: exact "1" opts in; default false. */
+  credentialBrokerEnabled: boolean;
   chromiumArgs: string[];
   /**
    * OVID_BROWSER_EGRESS_UID — the dedicated uid every browser process
@@ -212,6 +214,13 @@ function optionalString(env: NodeJS.ProcessEnv, name: string): string | null {
   return raw;
 }
 
+function credentialBrokerEnabled(env: NodeJS.ProcessEnv): boolean {
+  const raw = env.OVID_BROWSER_CREDENTIAL_BROKER;
+  if (raw === undefined || raw === "" || raw === "0") return false;
+  if (raw === "1") return true;
+  throw new Error(`OVID config: OVID_BROWSER_CREDENTIAL_BROKER must be "0" or "1", got ${JSON.stringify(raw)}`);
+}
+
 export function loadBrowserEngineConfig(raw: NodeJS.ProcessEnv): BrowserEngineConfig {
   const nodeEnv = raw.NODE_ENV?.trim() || "development";
   const production = nodeEnv === "production";
@@ -271,6 +280,7 @@ export function loadBrowserEngineConfig(raw: NodeJS.ProcessEnv): BrowserEngineCo
       .filter((h) => h !== ""),
     ownPublicIp: optionalString(raw, "OVID_PUBLIC_IP"),
     blockHeavyResources: (raw.OVID_BROWSER_BLOCK_HEAVY_RESOURCES ?? "1") !== "0",
+    credentialBrokerEnabled: credentialBrokerEnabled(raw),
     // Resource diet (Muse ephemeral-lease model): a small V8 heap, at most
     // two renderers, no extensions/background networking/media. The per-
     // context cost measured ~240 MB before; the diet plus the 15 s lease is

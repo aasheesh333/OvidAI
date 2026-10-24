@@ -7,6 +7,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { loadBrowserEngineConfig } from "@ovid/browser";
 
 import { loadWorkerEnv } from "./main.js";
 
@@ -25,6 +26,17 @@ const baseEnv = (overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
 /** A well-formed OVID_MASTER_KEY (64 hex chars = 32 bytes). */
 const MASTER_KEY_HEX =
   "ab7d31c4e59f60a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071829";
+
+describe("worker credential broker flag", () => {
+  it("is default-off in the production browser config and only exact 1 opts in", () => {
+    expect(loadBrowserEngineConfig(baseEnv()).credentialBrokerEnabled).toBe(false);
+    expect(loadBrowserEngineConfig(baseEnv({ OVID_BROWSER_CREDENTIAL_BROKER: "0" })).credentialBrokerEnabled).toBe(false);
+    expect(loadBrowserEngineConfig(baseEnv({ OVID_BROWSER_CREDENTIAL_BROKER: "1" })).credentialBrokerEnabled).toBe(true);
+    expect(() => loadBrowserEngineConfig(baseEnv({ OVID_BROWSER_CREDENTIAL_BROKER: "true" }))).toThrow(
+      /OVID_BROWSER_CREDENTIAL_BROKER/,
+    );
+  });
+});
 
 describe("worker browser env (P6 Task 14)", () => {
   it("OVID_BROWSER_STATE_DIR set + OVID_MASTER_KEY missing → throws naming OVID_MASTER_KEY", () => {

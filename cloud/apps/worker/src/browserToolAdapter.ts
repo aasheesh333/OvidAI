@@ -1,5 +1,5 @@
 import type { Tool } from "@ovid/agent-core";
-import type { BrowserToolDef } from "@ovid/browser";
+import type { BrowserToolContext, BrowserToolDef } from "@ovid/browser";
 import { userBrowserKey } from "@ovid/shared";
 
 /**
@@ -17,13 +17,11 @@ import { userBrowserKey } from "@ovid/shared";
  *   the adapter does not need to translate exceptions. It still maps
  *   `artifacts` through untouched: screenshots and downloads are what the
  *   client renders.
- * - `BrowserToolContext` needs only `{sessionId, userId}`; the canonical
- *   `ToolContext` carries both.
- * - The abort `signal` is NOT forwarded: `BrowserToolDef.execute` has no
- *   parameter for it. A cancelled run therefore lets the current browser
- *   action finish (bounded by its own Playwright timeout) and the run's
- *   `releaseSession` closes the context afterwards. Documented rather than
- *   silently ignored.
+ * - The canonical `ToolContext` carries the browser/session/user/run identity
+ *   and abort signal needed by this additive browser context.
+ * - `BrowserToolContext` remains structurally additive: runId and the abort
+ *   signal ride beside the per-user browser key for the credential broker's
+ *   per-use approval and cancellation. Other browser tools ignore them.
  */
 
 /** Per-action ceiling. Navigation and screenshot capture are the slow ones. */
@@ -80,13 +78,16 @@ export function adaptBrowserTools(defs: readonly BrowserToolDef[], leases?: User
     timeoutMs: BROWSER_TOOL_TIMEOUT_MS,
     async execute(args, ctx) {
       leases?.note(ctx.userId, ctx.runId);
-      const result = await def.execute(args, {
+      const browserContext: BrowserToolContext & { runId: string; signal: AbortSignal } = {
         // The browser key is the USER (R2); artifacts still land in the
         // run's own session workspace.
         sessionId: userBrowserKey(ctx.userId),
         userId: ctx.userId,
         workspaceSessionId: ctx.sessionId,
-      });
+        runId: ctx.runId,
+        signal: ctx.signal,
+      };
+      const result = await def.execute(args, browserContext);
       return {
         content: result.content,
         ...(result.artifacts !== undefined && result.artifacts.length > 0

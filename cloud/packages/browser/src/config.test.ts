@@ -63,6 +63,7 @@ describe("loadBrowserEngineConfig defaults", () => {
     expect(cfg.ownPublicIp).toBeNull();
     // Resource diet: a small V8 heap, two renderers, no background work.
     expect(cfg.blockHeavyResources).toBe(true);
+    expect(cfg.credentialBrokerEnabled).toBe(false);
     expect(cfg.chromiumArgs).toEqual([
       "--no-sandbox",
       "--disable-dev-shm-usage",
@@ -145,6 +146,24 @@ describe("loadBrowserEngineConfig malformed input", () => {
       /OVID_SCREENCAST_LOAD_MAX/,
     );
   });
+});
+
+describe("credential broker feature flag", () => {
+  it("defaults off and only exact OVID_BROWSER_CREDENTIAL_BROKER=1 opts in", () => {
+    expect(loadBrowserEngineConfig({}).credentialBrokerEnabled).toBe(false);
+    expect(loadBrowserEngineConfig({ OVID_BROWSER_CREDENTIAL_BROKER: "" }).credentialBrokerEnabled).toBe(false);
+    expect(loadBrowserEngineConfig({ OVID_BROWSER_CREDENTIAL_BROKER: "0" }).credentialBrokerEnabled).toBe(false);
+    expect(loadBrowserEngineConfig({ OVID_BROWSER_CREDENTIAL_BROKER: "1" }).credentialBrokerEnabled).toBe(true);
+  });
+
+  it.each(["true", "yes", "on", "2", "01", " 1", "false"])(
+    "fails fast for non-boolean OVID_BROWSER_CREDENTIAL_BROKER=%s",
+    (value) => {
+      expect(() => loadBrowserEngineConfig({ OVID_BROWSER_CREDENTIAL_BROKER: value })).toThrow(
+        /OVID_BROWSER_CREDENTIAL_BROKER/,
+      );
+    },
+  );
 });
 
 describe("browser egress uid validation", () => {
