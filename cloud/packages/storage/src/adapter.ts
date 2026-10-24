@@ -14,6 +14,15 @@ export interface HeadResult {
   sha256Hex: string | null;
   etag: string | null;
   metadata: Record<string, string>;
+  /** Actual stored type, or null when the backend has none. */
+  contentType?: string | null;
+}
+
+export interface PresignPutInput {
+  key: string;
+  ttlSeconds: number;
+  /** Declared canonical type to bind into the PUT signature. */
+  contentType?: string;
 }
 
 export interface PutOpts {
@@ -37,7 +46,7 @@ export interface StorageAdapter {
   delete(key: string): Promise<void>;
   presignGet(key: string, ttlSeconds: number): Promise<string>;
   /** Ruling R3: powers P8-T3 attachment uploads (contract 6). */
-  presignPut(key: string, ttlSeconds: number): Promise<string>;
+  presignPut(input: PresignPutInput): Promise<string>;
   /** Range-read handle spec; null = missing. */
   readerSpec(key: string): Promise<ReaderSpec | null>;
 }

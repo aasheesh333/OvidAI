@@ -60,7 +60,8 @@ function scoped(adapter: StorageAdapter, prefix: string, keys: Set<string>): Sto
     head: (key) => adapter.head(full(key)),
     delete: (key) => adapter.delete(full(key)),
     presignGet: (key, ttl) => adapter.presignGet(full(key), ttl),
-    presignPut: (key, ttl) => adapter.presignPut(full(key), ttl),
+    presignPut: ({ key, ttlSeconds, contentType }) =>
+      adapter.presignPut({ key: full(key), ttlSeconds, contentType }),
     readerSpec: (key) => adapter.readerSpec(full(key)),
   };
 }
@@ -152,7 +153,7 @@ describe.skipIf(cfg === null)("r2-live — presign fetch, range reader, multipar
   it("presigned PUT accepts an upload: PUT → head/getBuffer round-trip", async () => {
     const body = Buffer.from("presign-put-body-abcdefghij");
     const key = full("put-upload.bin");
-    const url = await adapter.presignPut(key, 300);
+    const url = await adapter.presignPut({ key, ttlSeconds: 300 });
     const res = await fetch(url, { method: "PUT", body });
     expect(res.status).toBeLessThan(300);
     const head = await adapter.head(key);

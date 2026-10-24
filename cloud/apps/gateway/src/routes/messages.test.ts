@@ -619,7 +619,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
 
   /** Fake presigner (the P8-Q3 seam) so the attachments route can create rows. */
   const fakePresigner: AttachmentPresigner = {
-    async presignPut(key) {
+    async presignPut({ key }) {
       return `https://r2.test/bucket/${encodeURIComponent(key)}`;
     },
   };

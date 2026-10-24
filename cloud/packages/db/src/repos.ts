@@ -1021,6 +1021,8 @@ export const attachments = {
       name: string;
       size: number;
       r2Key: string;
+      /** Canonical declared type; omitted uses the database's unknown fallback. */
+      contentType?: string;
       /**
        * W1 follow-up (0022): optional explicit project attribution. The
        * SESSION is authoritative when it has one — new writes always stamp

@@ -218,6 +218,13 @@
       "when": 1793400000000,
       "tag": "0030_notification_claim_lease",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1793500000000,
+      "tag": "0031_attachment_provider_connections",
+      "breakpoints": true
     }
   ]
 }

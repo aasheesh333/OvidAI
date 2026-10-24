@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { createServer } from "node:http";
+import { PutObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   createR2Storage,
@@ -8,6 +11,13 @@ import {
   R2_QUEUE_SIZE,
 } from "./r2Adapter.js";
 import { KeyLayoutError } from "./errors.js";
+
+vi.mock("@aws-sdk/s3-request-presigner", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@aws-sdk/s3-request-presigner")>();
+  return { ...actual, getSignedUrl: vi.fn(actual.getSignedUrl) };
+});
+
+const getSignedUrlSpy = vi.mocked(getSignedUrl);
 
 /**
  * Offline config/presign pins — NO network. The presign tests use an
@@ -92,6 +102,22 @@ describe("createR2Storage — offline pins", () => {
     bucket: "b",
   };
 
+  // Compile-only negative pins: tsconfig.check.json includes tests and fails on
+  // an unused @ts-expect-error. This branch deliberately never executes.
+  if (false) {
+    const adapter = createR2Storage(FAKE_CFG);
+    // @ts-expect-error ttlSeconds is required on the object-shaped contract.
+    void adapter.presignPut({ key: "users/u/missing-ttl.bin" });
+    // @ts-expect-error ttlSeconds must be a number, not an unchecked string.
+    void adapter.presignPut({ key: "users/u/string-ttl.bin", ttlSeconds: "60" });
+    // @ts-expect-error the legacy positional signature is no longer accepted.
+    void adapter.presignPut("users/u/positional.bin", 60);
+  }
+
+  beforeEach(() => {
+    getSignedUrlSpy.mockClear();
+  });
+
   it("kind is \"r2\"", () => {
     expect(createR2Storage(FAKE_CFG).kind).toBe("r2");
   });
@@ -113,7 +139,7 @@ describe("createR2Storage — offline pins", () => {
 
   it("presignPut signs OFFLINE with the same shape — the P8-T3 upload seam (ruling R3)", async () => {
     const adapter = createR2Storage(FAKE_CFG);
-    const url = await adapter.presignPut("users/u/x.bin", 60);
+    const url = await adapter.presignPut({ key: "users/u/x.bin", ttlSeconds: 60 });
     const u = new URL(url);
     expect(u.origin).toBe("https://a.r2.cloudflarestorage.com");
     expect(u.pathname).toContain("users/u/x.bin");
@@ -121,10 +147,74 @@ describe("createR2Storage — offline pins", () => {
     expect(u.searchParams.get("X-Amz-Expires")).toBe("60");
   });
 
+  it("presignPut signs the exact declared type in PutObjectCommand and SignedHeaders", async () => {
+    const adapter = createR2Storage(FAKE_CFG);
+    const key = "users/u/unknown.bin";
+    const url = await adapter.presignPut({
+      key,
+      ttlSeconds: 60,
+      contentType: "application/x-ovid-unknown",
+    });
+
+    expect(getSignedUrlSpy).toHaveBeenCalledOnce();
+    const command = getSignedUrlSpy.mock.calls[0]![1];
+    expect(command).toBeInstanceOf(PutObjectCommand);
+    expect(command.input).toEqual({
+      Bucket: "b",
+      Key: key,
+      ContentType: "application/x-ovid-unknown",
+    });
+    expect(new URL(url).searchParams.get("X-Amz-SignedHeaders")).toBe("content-type;host");
+  });
+
+  it("presignPut without a declared type signs no Content-Type header", async () => {
+    const adapter = createR2Storage(FAKE_CFG);
+    const key = "users/u/legacy.bin";
+    const url = await adapter.presignPut({ key, ttlSeconds: 60 });
+
+    const command = getSignedUrlSpy.mock.calls[0]![1];
+    expect(command).toBeInstanceOf(PutObjectCommand);
+    expect(command.input).toEqual({ Bucket: "b", Key: key });
+    expect(new URL(url).searchParams.get("X-Amz-SignedHeaders")).toBe("host");
+  });
+
   it("presignGet/presignPut reject unsafe keys before any request (key layout seam)", async () => {
     const adapter = createR2Storage(FAKE_CFG);
     await expect(adapter.presignGet("../escape", 60)).rejects.toBeInstanceOf(KeyLayoutError);
-    await expect(adapter.presignPut("a/../../b", 60)).rejects.toBeInstanceOf(KeyLayoutError);
+    await expect(adapter.presignPut({ key: "a/../../b", ttlSeconds: 60 })).rejects.toBeInstanceOf(KeyLayoutError);
+  });
+
+  it("HEAD exposes the object's actual content type", async () => {
+    const server = createServer((request, response) => {
+      expect(request.method).toBe("HEAD");
+      expect(request.url).toContain("/users/u/typed.bin");
+      response.writeHead(200, {
+        "Content-Length": "3",
+        "Content-Type": "application/x-actual-head-type",
+        ETag: '"head-etag"',
+        "x-amz-meta-probe": "head",
+      });
+      response.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      if (address === null || typeof address === "string") throw new Error("missing test address");
+      const adapter = createR2Storage({
+        ...FAKE_CFG,
+        endpoint: `http://127.0.0.1:${address.port}`,
+      });
+      await expect(adapter.head("users/u/typed.bin")).resolves.toMatchObject({
+        bytes: 3,
+        contentType: "application/x-actual-head-type",
+        etag: '"head-etag"',
+        metadata: { probe: "head" },
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error === undefined ? resolve() : reject(error)));
+      });
+    }
   });
 
   it("put rejects unsafe keys before any request (no network)", async () => {

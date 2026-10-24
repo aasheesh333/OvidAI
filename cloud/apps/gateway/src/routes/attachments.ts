@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { assertProjectFileCapacity, attachments, newId, ProjectFileLimitError, sessions, users } from "@ovid/db";
 import {
+  normalizeAttachmentContentType,
   sanitizeAttachmentName,
   type AttachmentUploadResponse,
 } from "@ovid/shared";
@@ -16,12 +17,12 @@ import { isUuid, notFound, sendError, zodBadRequest } from "./http.js";
 
 /**
  * The P8-Q3 presigner seam: structurally the StorageAdapter.presignPut
- * contract from @ovid/storage (ruling R3 / contract 6 — `presignPut(key,
- * ttlSeconds)`), so the R2 adapter (or the fs adapter in dev) satisfies it
- * as-is. Injectable via GatewayDeps.presigner; the composition root wires it.
+ * contract from @ovid/storage (ruling R3 / contract 6). The declared type is
+ * optional independently of the stored octet-stream fallback: old clients do
+ * not sign or send a Content-Type header. Injectable via GatewayDeps.presigner.
  */
 export interface AttachmentPresigner {
-  presignPut(key: string, ttlSeconds: number): Promise<string>;
+  presignPut(input: { key: string; ttlSeconds: number; contentType?: string }): Promise<string>;
 }
 
 /** Hard size cap (brief): anything over 25 MB is refused before signing. */
@@ -40,8 +41,21 @@ export function attachmentObjectKey(
 }
 
 // name non-empty string; size a positive integer. .strict() rejects unknown keys.
+// The optional transform keeps absent distinct from the canonical stored fallback.
+const normalizedContentType = z.string().transform((value, ctx) => {
+  try {
+    return normalizeAttachmentContentType(value);
+  } catch {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Invalid attachment contentType" });
+    return z.NEVER;
+  }
+});
 const createAttachmentBody = z
-  .object({ name: z.string().min(1), size: z.number().int().positive() })
+  .object({
+    name: z.string().min(1),
+    size: z.number().int().positive(),
+    contentType: normalizedContentType.optional(),
+  })
   .strict();
 
 export function registerAttachmentRoutes(app: FastifyInstance, deps: GatewayDeps): void {
@@ -63,7 +77,8 @@ export function registerAttachmentRoutes(app: FastifyInstance, deps: GatewayDeps
     // 2. Body validation.
     const parsed = createAttachmentBody.safeParse(request.body ?? undefined);
     if (!parsed.success) return zodBadRequest(reply, parsed.error);
-    const { name, size } = parsed.data;
+    const { name, size, contentType: declaredContentType } = parsed.data;
+    const storedContentType = normalizeAttachmentContentType(declaredContentType);
 
     // 3. Size cap → 400 attachment_too_large (checked BEFORE signing and any
     //    write, so a refused upload costs neither).
@@ -112,7 +127,11 @@ export function registerAttachmentRoutes(app: FastifyInstance, deps: GatewayDeps
     }
     const attachmentId = newId();
     const r2Key = attachmentObjectKey(uid, sessionId, attachmentId);
-    const uploadUrl = await presigner.presignPut(r2Key, ATTACHMENT_UPLOAD_TTL_SECONDS);
+    const uploadUrl = await presigner.presignPut({
+      key: r2Key,
+      ttlSeconds: ATTACHMENT_UPLOAD_TTL_SECONDS,
+      ...(declaredContentType !== undefined ? { contentType: declaredContentType } : {}),
+    });
 
     // 5. Provision the users row (FK target) and persist the attachment.
     await users.ensure(deps.db, uid, email);
@@ -127,6 +146,7 @@ export function registerAttachmentRoutes(app: FastifyInstance, deps: GatewayDeps
         // Stamp from the session the route already loaded (authoritative at
         // creation time); the repo also re-checks the cap under its lock.
         projectId: session.projectId,
+        contentType: storedContentType,
       });
     } catch (err) {
       if (err instanceof ProjectFileLimitError) {
@@ -135,8 +155,8 @@ export function registerAttachmentRoutes(app: FastifyInstance, deps: GatewayDeps
       throw err;
     }
 
-    // 6. Answer: the four-field wire contract. `path` is where the worker will
-    //    materialize the file in the session workspace — uploads/{safe name}.
+    // 6. Answer: the additive wire contract. New servers always emit the
+    //    canonical stored type and the exact headers the signed PUT requires.
     //    expiresAt comes from the gateway clock (deps.clock when wired).
     const now = deps.clock?.() ?? new Date();
     const body: AttachmentUploadResponse = {
@@ -144,6 +164,10 @@ export function registerAttachmentRoutes(app: FastifyInstance, deps: GatewayDeps
       uploadUrl,
       path: `uploads/${sanitizeAttachmentName(name)}`,
       expiresAt: new Date(now.getTime() + ATTACHMENT_UPLOAD_TTL_SECONDS * 1000).toISOString(),
+      contentType: storedContentType,
+      uploadHeaders: declaredContentType === undefined
+        ? {}
+        : { "Content-Type": declaredContentType },
     };
     return reply.code(201).send(body);
   });

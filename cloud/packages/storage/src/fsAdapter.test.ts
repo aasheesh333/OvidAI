@@ -74,10 +74,20 @@ describe("createFsStorage — fs-specific pins", () => {
     );
     expect(head!.sha256Hex).toBe(expectedHash);
     expect(head!.metadata).toEqual({ sessionId: "s1" });
+    expect(head!.contentType).toBe("application/zstd");
     expect(head!.etag).toBeTypeOf("string");
 
     const back = await adapter.getBuffer(key);
     expect(back!.toString()).toBe(chunks.join(""));
+  });
+
+  it("overwriting without a declared type clears the old actual content type", async () => {
+    const adapter = createFsStorage(root);
+    await adapter.put("typed.bin", Buffer.from("typed"), { contentType: "text/plain" });
+    expect((await adapter.head("typed.bin"))!.contentType).toBe("text/plain");
+
+    await adapter.put("typed.bin", Buffer.from("untyped"));
+    expect((await adapter.head("typed.bin"))!.contentType).toBeNull();
   });
 
   it("get() stream reassembles to identical bytes", async () => {
@@ -136,7 +146,7 @@ describe("createFsStorage — fs-specific pins", () => {
     const adapter = createFsStorage(root);
     await adapter.put("k.bin", Buffer.from("v"));
     const g = await adapter.presignGet("k.bin", 60);
-    const p = await adapter.presignPut("k.bin", 60);
+    const p = await adapter.presignPut({ key: "k.bin", ttlSeconds: 60, contentType: "application/octet-stream" });
     expect(g).toMatch(/^file:\/\/\/.*#ovid-exp=\d+$/);
     expect(p).toMatch(/^file:\/\/\/.*#ovid-exp=\d+$/);
   });

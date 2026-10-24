@@ -1,6 +1,10 @@
 import { z } from "zod";
 import type { SessionEvent } from "./events.js";
 
+// Re-export through the existing public rest entry so the package index stays
+// unchanged while consumers share one attachment MIME normalizer.
+export { normalizeAttachmentContentType } from "./attachments.js";
+
 export interface SessionDto {
   id: string;
   title: string | null;
@@ -180,6 +184,9 @@ export interface AttachmentUploadResponse {
   uploadUrl: string;
   path: string;
   expiresAt: string;
+  /** Additive: old servers omit these; new servers always emit both. */
+  contentType?: string;
+  uploadHeaders?: Record<string, string>;
 }
 
 export const attachmentUploadResponseSchema: z.ZodType<AttachmentUploadResponse> = z
@@ -188,6 +195,8 @@ export const attachmentUploadResponseSchema: z.ZodType<AttachmentUploadResponse>
     uploadUrl: z.string().min(1),
     path: z.string().min(1),
     expiresAt: z.string().min(1),
+    contentType: z.string().min(1).optional(),
+    uploadHeaders: z.record(z.string(), z.string()).optional(),
   })
   .strict();
 

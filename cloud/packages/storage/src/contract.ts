@@ -69,7 +69,7 @@ function runStorageContract(
     f.it("presignGet/presignPut return non-empty strings", async () => {
       await adapter.put("contract/presign.bin", Buffer.from("v"));
       const g = await adapter.presignGet("contract/presign.bin", 60);
-      const p = await adapter.presignPut("contract/presign.bin", 60);
+      const p = await adapter.presignPut({ key: "contract/presign.bin", ttlSeconds: 60 });
       f.expect(typeof g).toBe("string");
       f.expect(g.length).toBeGreaterThan(0);
       f.expect(typeof p).toBe("string");
@@ -84,6 +84,7 @@ function runStorageContract(
       const head = await adapter.head("contract/meta.bin");
       f.expect(head).not.toBeNull();
       f.expect(head!.metadata).toEqual({ foo: "bar", n: "42" });
+      f.expect(head!.contentType).toBe("text/plain");
     });
 
     f.it("delete-then-get is null", async () => {

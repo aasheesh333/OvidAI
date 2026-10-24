@@ -33,7 +33,7 @@ import { Upload } from "@aws-sdk/lib-storage";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { Transform, type Readable } from "node:stream";
 
-import type { HeadResult, PutOpts, PutResult, StorageAdapter } from "./adapter.js";
+import type { HeadResult, PresignPutInput, PutOpts, PutResult, StorageAdapter } from "./adapter.js";
 import { assertSafeRelPath } from "./keys.js";
 import type { ReaderSpec } from "./rangeReader.js";
 
@@ -146,6 +146,7 @@ export function createR2Storage(
         sha256Hex,
         etag: res.ETag ?? null,
         metadata,
+        contentType: res.ContentType ?? null,
       };
     } catch (err) {
       if (isNotFound(err)) return null;
@@ -244,12 +245,22 @@ export function createR2Storage(
       );
     },
 
-    async presignPut(key: string, ttlSeconds: number): Promise<string> {
-      const k = safeKey(key);
+    async presignPut(input: PresignPutInput): Promise<string> {
+      const k = safeKey(input.key);
       return getSignedUrl(
         client,
-        new PutObjectCommand({ Bucket: cfg.bucket, Key: k }),
-        { expiresIn: ttlSeconds },
+        new PutObjectCommand({
+          Bucket: cfg.bucket,
+          Key: k,
+          ...(input.contentType !== undefined ? { ContentType: input.contentType } : {}),
+        }),
+        {
+          expiresIn: input.ttlSeconds,
+          // S3 presigning does not mark ContentType signable by default.
+          ...(input.contentType !== undefined
+            ? { signableHeaders: new Set(["content-type"]) }
+            : {}),
+        },
       );
     },
 

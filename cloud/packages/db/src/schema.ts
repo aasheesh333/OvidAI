@@ -257,6 +257,16 @@ export const attachments = pgTable(
     name: text("name").notNull(),
     size: integer("size").notNull(),
     r2Key: text("r2_key").notNull(),
+    // Canonical declared type; octet-stream means the client did not declare
+    // one. Actual object metadata stays nullable until HEAD proves it.
+    contentType: text("content_type").notNull().default("application/octet-stream"),
+    uploadStatus: text("upload_status")
+      .notNull()
+      .default("pending")
+      .$type<"pending" | "ready" | "failed">(),
+    actualBytes: bigint("actual_bytes", { mode: "number" }),
+    actualContentType: text("actual_content_type"),
+    finalizedAt: timestamptz("finalized_at"),
     // Wave 1b (CH-006): the user message this upload was sent with — set by
     // the send route once the prompt row exists, so history pages can render
     // the attachment chips under the right bubble. NULL = staged but never
@@ -269,6 +279,7 @@ export const attachments = pgTable(
     index("attachments_session_id_idx").on(t.sessionId),
     index("attachments_message_id_idx").on(t.messageId),
     index("attachments_project_id_idx").on(t.projectId),
+    check("attachments_upload_status_check", sql`${t.uploadStatus} IN ('pending','ready','failed')`),
   ],
 );
 
@@ -631,6 +642,24 @@ export const mcpServers = pgTable(
     name: text("name").notNull(),
     transport: text("transport").notNull(), // "http" | "sse" | "stdio" | "native"
     curatedId: text("curated_id"),
+    // Stable provider identity is separate from the per-user connection id.
+    // NULL on custom/legacy-writer rows; curated backfill comes from curatedId.
+    providerId: text("provider_id"),
+    agentEnabled: boolean("agent_enabled").notNull().default(false),
+    // Legacy auth was never checked under this state machine: unknown, not a
+    // fabricated authorized/missing verdict. Health likewise starts unchecked.
+    authState: text("auth_state").notNull().default("unknown"),
+    healthState: text("health_state")
+      .notNull()
+      .default("never_checked")
+      .$type<"never_checked" | "checking" | "healthy" | "degraded" | "needs_auth" | "refreshing" | "revoked" | "unavailable" | "disabled">(),
+    lastCheckedAt: timestamptz("last_checked_at"),
+    lastSuccessAt: timestamptz("last_success_at"),
+    configVersion: integer("config_version").notNull().default(1),
+    disconnectGeneration: integer("disconnect_generation").notNull().default(0),
+    approvedSourceId: text("approved_source_id"),
+    approvedDigest: text("approved_digest"),
+    normalizedConnectionName: text("normalized_connection_name"),
     config: jsonb("config").$type<Record<string, unknown> | null>(),
     secretsSealed: jsonb("secrets_sealed").$type<SealedEnvelope | null>(),
     enabled: boolean("enabled").notNull().default(true),
@@ -640,6 +669,18 @@ export const mcpServers = pgTable(
   (t) => [
     uniqueIndex("mcp_servers_user_name_idx").on(t.userId, t.name),
     index("mcp_servers_user_id_idx").on(t.userId),
+    // Expression fallbacks keep legacy NULL-writing readers/writers inside
+    // the same identity invariants during the expand/contract rollout.
+    uniqueIndex("mcp_servers_curated_provider_uq")
+      .on(t.userId, sql`COALESCE(${t.providerId}, ${t.curatedId})`)
+      .where(sql`${t.curatedId} IS NOT NULL`),
+    uniqueIndex("mcp_servers_custom_identity_uq")
+      .on(
+        t.userId,
+        sql`COALESCE(${t.normalizedConnectionName}, lower(btrim(${t.name})))`,
+        sql`COALESCE(${t.approvedSourceId}, ${t.approvedDigest}, '')`,
+      )
+      .where(sql`${t.curatedId} IS NULL`),
   ],
 );
 

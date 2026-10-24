@@ -7,7 +7,8 @@
  * - put streams through a pipeline into `${path}.part-${pid}` and renames —
  *   atomic: a torn write is never visible under the final key.
  * - sha256 is computed while streaming and persisted in a `${path}.sha256`
- *   sidecar; metadata in `${path}.meta.json`; both re-surfaced by head().
+ *   sidecar; metadata in `${path}.meta.json`; content type in
+ *   `${path}.content-type`; all three are re-surfaced by head().
  * - presignGet/presignPut return `file://` pseudo-URLs with an expiry stamp
  *   — documented NOT capability URLs. In fs mode uploads go through put();
  *   only the R2 adapter signs real GET/PUT URLs (Task 2).
@@ -20,7 +21,7 @@ import { dirname, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Readable, Transform } from "node:stream";
 
-import type { PutOpts, PutResult, HeadResult, StorageAdapter } from "./adapter.js";
+import type { PutOpts, PutResult, HeadResult, PresignPutInput, StorageAdapter } from "./adapter.js";
 import { KeyLayoutError } from "./errors.js";
 import { assertSafeRelPath } from "./keys.js";
 import type { ReaderSpec } from "./rangeReader.js";
@@ -104,6 +105,11 @@ export function createFsStorage(rootDir: string): StorageAdapter {
       } else {
         await rm(`${path}.meta.json`, { force: true });
       }
+      if (opts?.contentType !== undefined) {
+        await writeFile(`${path}.content-type`, opts.contentType, "utf8");
+      } else {
+        await rm(`${path}.content-type`, { force: true });
+      }
       return { key, bytes };
     },
 
@@ -144,6 +150,7 @@ export function createFsStorage(rootDir: string): StorageAdapter {
         return null;
       }
       const sha256Hex = await readSidecar(`${path}.sha256`);
+      const contentType = await readSidecar(`${path}.content-type`);
       let metadata: Record<string, string> = {};
       const metaRaw = await readSidecar(`${path}.meta.json`);
       if (metaRaw !== null) {
@@ -159,6 +166,7 @@ export function createFsStorage(rootDir: string): StorageAdapter {
         // dev-only adapter: an fs-safe stand-in etag (size+hash prefix)
         etag: sha256Hex === null ? null : `"${sha256Hex.slice(0, 16)}-${size}"`,
         metadata,
+        contentType,
       };
     },
 
@@ -167,6 +175,7 @@ export function createFsStorage(rootDir: string): StorageAdapter {
       await rm(path, { force: true }); // idempotent
       await rm(`${path}.sha256`, { force: true });
       await rm(`${path}.meta.json`, { force: true });
+      await rm(`${path}.content-type`, { force: true });
     },
 
     async presignGet(key: string, ttlSeconds: number): Promise<string> {
@@ -175,9 +184,9 @@ export function createFsStorage(rootDir: string): StorageAdapter {
       return `file://${path}#ovid-exp=${exp}`;
     },
 
-    async presignPut(key: string, ttlSeconds: number): Promise<string> {
-      const path = keyToPath(rootDir, key);
-      const exp = Math.floor(Date.now() / 1000) + ttlSeconds;
+    async presignPut(input: PresignPutInput): Promise<string> {
+      const path = keyToPath(rootDir, input.key);
+      const exp = Math.floor(Date.now() / 1000) + input.ttlSeconds;
       return `file://${path}#ovid-exp=${exp}`;
     },
 

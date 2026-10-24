@@ -29,16 +29,17 @@ const UUIDV7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a
 interface PresignCall {
   key: string;
   ttlSeconds: number;
+  contentType?: string;
 }
 
 function stubPresigner(behavior: { fail?: boolean } = {}): AttachmentPresigner & { calls: PresignCall[] } {
   const calls: PresignCall[] = [];
   return {
     calls,
-    async presignPut(key, ttlSeconds) {
-      calls.push({ key, ttlSeconds });
+    async presignPut(input) {
+      calls.push({ ...input });
       if (behavior.fail) throw new Error("presigner unavailable");
-      return `https://r2.test/bucket/${encodeURIComponent(key)}?X-Signature=stub`;
+      return `https://r2.test/bucket/${encodeURIComponent(input.key)}?X-Signature=stub`;
     },
   };
 }
@@ -132,6 +133,10 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway attachment routes (real postgres)",
     const expectedKey = `users/${uid}/sessions/${sid}/uploads/${body.attachmentId}`;
     expect(presigner.calls).toEqual([{ key: expectedKey, ttlSeconds: 900 }]);
     expect(body.uploadUrl).toBe(`https://r2.test/bucket/${encodeURIComponent(expectedKey)}?X-Signature=stub`);
+    // The old {name,size} request persists the unknown-type fallback but does
+    // not sign or require a Content-Type header, even for a .png filename.
+    expect(body.contentType).toBe("application/octet-stream");
+    expect(body.uploadHeaders).toEqual({});
 
     // path is the workspace-relative uploads/{sanitizedName}
     expect(body.path).toBe("uploads/photo_1.png");
@@ -151,7 +156,39 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway attachment routes (real postgres)",
       name: "photo 1.png",
       size: 1234,
       r2Key: expectedKey,
+      contentType: "application/octet-stream",
+      uploadStatus: "pending",
+      actualBytes: null,
+      actualContentType: null,
+      finalizedAt: null,
     });
+  });
+
+  it.each([
+    ["Application/PDF", "application/pdf"],
+    ["application/x-ovid-unknown", "application/x-ovid-unknown"],
+  ])("normalizes %s and binds the identical type to signing and exact upload headers", async (declared, canonical) => {
+    const { app, presigner } = makeApp();
+    const uid = testUid("att-typed");
+    const sid = await createSession(app, uid);
+
+    const res = await postAttachment(app, uid, sid, {
+      name: "misleading-extension.txt",
+      size: 2048,
+      contentType: declared,
+    });
+    expect(res.statusCode).toBe(201);
+    const body = attachmentUploadResponseSchema.parse(res.json()) as AttachmentUploadResponse;
+    expect(body.contentType).toBe(canonical);
+    expect(body.uploadHeaders).toEqual({ "Content-Type": canonical });
+    expect(presigner.calls).toEqual([{
+      key: `users/${uid}/sessions/${sid}/uploads/${body.attachmentId}`,
+      ttlSeconds: 900,
+      contentType: canonical,
+    }]);
+    const rows = await attachments.getForSession(db, sid);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ contentType: canonical, uploadStatus: "pending" });
   });
 
   it("size over the 25 MB cap → 400 attachment_too_large; exactly 25_000_000 is allowed; nothing written over the cap", async () => {
@@ -196,6 +233,32 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway attachment routes (real postgres)",
       expect(res.json().error.code).toBe("bad_request");
     }
     expect(presigner.calls).toHaveLength(0);
+    expect(await attachments.getForSession(db, sid)).toEqual([]);
+  });
+
+  it("invalid contentType values are rejected before signing or attachment writes", async () => {
+    const { app, presigner } = makeApp();
+    const uid = testUid("att-bad-mime");
+    const sid = await createSession(app, uid);
+    const invalid = [
+      "",
+      `${"a".repeat(128)}/${"b".repeat(127)}`,
+      "text/plain; charset=utf-8",
+      "text/*",
+      "*/plain",
+      "text/plain\r\nX-Injected: yes",
+      "text/\u2028plain",
+      "text/\u2029plain",
+      "text/pläin",
+      " text/plain ",
+    ];
+
+    for (const contentType of invalid) {
+      const res = await postAttachment(app, uid, sid, { name: "ok.bin", size: 10, contentType });
+      expect(res.statusCode, JSON.stringify(contentType)).toBe(400);
+      expect(res.json().error.code).toBe("bad_request");
+    }
+    expect(presigner.calls).toEqual([]);
     expect(await attachments.getForSession(db, sid)).toEqual([]);
   });
 
