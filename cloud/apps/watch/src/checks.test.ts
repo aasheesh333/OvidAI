@@ -241,6 +241,78 @@ describe("collectChecks", () => {
     expect(result(results, "disk-80").ok).toBe(true);
   });
 
+  it("degraded anomaly, mail, reservation and notification facts each fail their own check", async () => {
+    for (const [field, name] of [
+      ["anomaly", "anomaly-enforcement"],
+      ["mail", "suspension-mail"],
+      ["reservation", "reservation-reconciliation"],
+      ["notification", "notification-delivery"],
+    ] as const) {
+      const results = await collectChecks(
+        deps({
+          fetchJson: async () => ({
+            status: "ok",
+            checks: { db: true, redisQ: true, anomaly: true, mail: true, reservation: true, notification: true, [field]: false },
+          }),
+        }),
+      );
+      expect(result(results, name)).toMatchObject({ ok: false, value: 0, threshold: 1 });
+      expect(result(results, name).detail).toMatch(/degraded/i);
+    }
+  });
+
+  it("healthy operational facts pass and the health payload is fetched once per pass", async () => {
+    let fetches = 0;
+    const results = await collectChecks(
+      deps({
+        fetchJson: async () => {
+          fetches += 1;
+          return {
+            status: "ok",
+            checks: { db: true, redisQ: true, anomaly: true, mail: true, reservation: true, notification: true },
+          };
+        },
+      }),
+    );
+    for (const name of ["anomaly-enforcement", "suspension-mail", "reservation-reconciliation", "notification-delivery"] as const) {
+      expect(result(results, name)).toMatchObject({ ok: true, value: 1, threshold: 1 });
+    }
+    expect(fetches).toBe(1);
+  });
+
+  it.each([
+    ["missing checks", { status: "ok" }],
+    ["null body", null],
+    ["null checks", { status: "ok", checks: null }],
+    ["array checks", { status: "ok", checks: [] }],
+    ["string checks", { status: "ok", checks: "not-an-object" }],
+    ["numeric checks", { status: "ok", checks: 42 }],
+    ["malformed fields", { status: "ok", checks: { anomaly: "yes", mail: 0, reservation: null, notification: [] } }],
+  ])("every operational check is loud unknown for %s", async (_label, payload) => {
+    const results = await collectChecks(deps({ fetchJson: async () => payload }));
+    for (const name of ["anomaly-enforcement", "suspension-mail", "reservation-reconciliation", "notification-delivery"] as const) {
+      expect(result(results, name)).toMatchObject({
+        ok: false,
+        value: 0,
+        threshold: 1,
+      });
+      expect(result(results, name).detail).toMatch(/unknown/i);
+    }
+  });
+
+  it("an unreachable health payload degrades every operational check without blinding disk/redis", async () => {
+    const results = await collectChecks(
+      deps({
+        fetchJson: () => { throw new Error("gateway unavailable"); },
+      }),
+    );
+    for (const name of ["anomaly-enforcement", "suspension-mail", "reservation-reconciliation", "notification-delivery"] as const) {
+      expect(result(results, name).ok).toBe(false);
+    }
+    expect(result(results, "disk-80").ok).toBe(true);
+    expect(result(results, "redis-mem-80").ok).toBe(true);
+  });
+
   it("pins the plan's default thresholds", () => {
     expect(DEFAULT_THRESHOLDS).toEqual({
       queueWaiting: 50,

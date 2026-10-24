@@ -21,7 +21,11 @@ export type CheckName =
   | "worker-lag"
   | "disk-80"
   | "redis-mem-80"
-  | "spend-parity";
+  | "spend-parity"
+  | "anomaly-enforcement"
+  | "suspension-mail"
+  | "reservation-reconciliation"
+  | "notification-delivery";
 
 export interface CheckResult {
   name: CheckName;
@@ -132,10 +136,13 @@ export async function collectChecks(deps: WatchDeps): Promise<CheckResult[]> {
   const gatewayHealthUrl = config.gatewayHealthUrl ?? DEFAULT_GATEWAY_HEALTH_URL;
   const diskPath = config.diskPath ?? DEFAULT_DISK_PATH;
   const spendParity = config.spendParity ?? true;
+  // One payload feeds gateway liveness and the four operational facts. A
+  // missing field is unknown (and failing), never an implicit healthy value.
+  const healthPayload = Promise.resolve().then(() => deps.fetchJson(gatewayHealthUrl));
 
   const gatewayHealth = async (): Promise<CheckResult> => {
     try {
-      const body = (await deps.fetchJson(gatewayHealthUrl)) as {
+      const body = (await healthPayload) as {
         status?: unknown;
         ok?: unknown;
       } | null;
@@ -311,6 +318,37 @@ export async function collectChecks(deps: WatchDeps): Promise<CheckResult[]> {
     };
   };
 
+  const operational = async (
+    name: "anomaly-enforcement" | "suspension-mail" | "reservation-reconciliation" | "notification-delivery",
+    field: "anomaly" | "mail" | "reservation" | "notification",
+  ): Promise<CheckResult> => {
+    try {
+      const body = (await healthPayload) as { checks?: unknown } | null;
+      const rawChecks = typeof body === "object" && body !== null && !Array.isArray(body)
+        ? body.checks
+        : undefined;
+      const value = typeof rawChecks === "object" && rawChecks !== null && !Array.isArray(rawChecks)
+        ? (rawChecks as Record<string, unknown>)[field]
+        : undefined;
+      const ok = value === true;
+      return {
+        name,
+        ok,
+        value: ok ? 1 : 0,
+        threshold: 1,
+        detail: `${field} ${ok ? "healthy" : value === false ? "degraded" : "unknown"}`,
+      };
+    } catch {
+      return {
+        name,
+        ok: false,
+        value: 0,
+        threshold: 1,
+        detail: `${field} unknown: health payload unavailable`,
+      };
+    }
+  };
+
   const checks: Array<[CheckName, () => Promise<CheckResult>]> = [
     ["gateway-health", gatewayHealth],
     ["queue-depth", queueDepth],
@@ -318,6 +356,10 @@ export async function collectChecks(deps: WatchDeps): Promise<CheckResult[]> {
     ["disk-80", disk],
     ["redis-mem-80", redisMem],
     ["spend-parity", spend],
+    ["anomaly-enforcement", () => operational("anomaly-enforcement", "anomaly")],
+    ["suspension-mail", () => operational("suspension-mail", "mail")],
+    ["reservation-reconciliation", () => operational("reservation-reconciliation", "reservation")],
+    ["notification-delivery", () => operational("notification-delivery", "notification")],
   ];
 
   const results: CheckResult[] = [];
@@ -352,5 +394,10 @@ function thresholdsFor(name: CheckName, t: WatchThresholds): number {
       return t.redisMemPct;
     case "spend-parity":
       return t.spendDriftCents;
+    case "anomaly-enforcement":
+    case "suspension-mail":
+    case "reservation-reconciliation":
+    case "notification-delivery":
+      return 1;
   }
 }
