@@ -39,8 +39,13 @@ import { createRedisPtyBridge } from "./wsPty.js";
 import { createRedisApprovalPublisher, createWsSocketRegistry } from "./ws.js";
 import { createSystemHub } from "./systemChannel.js";
 import { DEFAULT_IP_ANOMALY_POLICY } from "./anomaly.js";
-import { createIpAnomalyGuard } from "./ipAnomalyGuard.js";
+import {
+  createIpAnomalyGuard,
+  createIpAnomalySuspension,
+} from "./ipAnomalyGuard.js";
 import { createIpObservationStore } from "./ipObservations.js";
+import { createRateLimiter } from "./rateLimits.js";
+import { createSuspensionMailerFromEnv } from "./suspensionMailer.js";
 
 /**
  * Composition root — intentionally untested-thin (Task 10's e2e exercises the
@@ -78,6 +83,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
   // selector, so the key provider does a plain GET).
   const redisQ = new Redis(cfg.redisQUrl);
   const redisMint = new Redis(cfg.redisMintUrl);
+  const keyAdmin = createHttpKeyAdmin(
+    env.OVID_LITELLM_BASE?.trim() || "http://127.0.0.1:4000",
+    env.OVID_LITELLM_MASTER_KEY?.trim() ?? "",
+  );
 
   // P9 final review H2: a REAL R2 prefix deleter (ListObjectsV2 +
   // DeleteObjects). The no-op seam is only kept for dev/no-R2 compositions;
@@ -138,10 +147,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
         db,
         redisDb2: redisMint,
         redisQueue: redisQ,
-        litellm: createHttpKeyAdmin(
-          env.OVID_LITELLM_BASE?.trim() || "http://127.0.0.1:4000",
-          env.OVID_LITELLM_MASTER_KEY?.trim() ?? "",
-        ),
+        litellm: keyAdmin,
         r2: r2Deleter ?? createNoopR2Deleter(),
         images: {
           deleteAccount: async (uid) => {
@@ -238,23 +244,36 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
     );
   }
   const activity = createActivityTracker(redisC);
-  // IP fan-out admission (stolen/shared-key detection). Observations are
-  // cache-class state: the cache redis (REDIS_C_URL) is the right home, and
-  // losing a key only weakens detection for one window — never a send.
-  // The trusted-proxy set is boot-validated config; a blocked send is
-  // refused before any DB/mint/queue work (routes/messages.ts).
-  const ipAnomaly = createIpAnomalyGuard({
-    store: createIpObservationStore(redisC, {
-      windowMs: DEFAULT_IP_ANOMALY_POLICY.windowMs,
-    }),
-    trustedProxyCidrs: cfg.trustedProxyCidrs,
-    onError: (err) => {
-      console.warn(
-        "[gateway] ip-observation store unavailable; send admitted (fail-open):",
-        err,
-      );
-    },
-  });
+  // New runtime controls start flag-off. Enabling anomaly enforcement wires the
+  // complete durable suspension path; there is no request-only "block" that
+  // could masquerade as account/key suspension or fabricated mail delivery.
+  const ipAnomaly = env.OVID_IP_ANOMALY_ENABLED === "true"
+    ? createIpAnomalyGuard({
+        store: createIpObservationStore(redisC, {
+          windowMs: DEFAULT_IP_ANOMALY_POLICY.windowMs,
+        }),
+        trustedProxyCidrs: cfg.trustedProxyCidrs,
+        suspension: createIpAnomalySuspension({
+          db,
+          redis: redisMint,
+          keyAdmin,
+          mailer: createSuspensionMailerFromEnv(env),
+        }),
+        onError: (err) => {
+          console.warn(
+            "[gateway] ip anomaly observation/enforcement degraded:",
+            err,
+          );
+        },
+      })
+    : undefined;
+  const rateLimiter = env.OVID_RATE_LIMITS_ENABLED === "true"
+    ? createRateLimiter(redisQ)
+    : undefined;
+  const rateLimitInternalSecret = env.OVID_RATE_LIMIT_INTERNAL_SECRET?.trim() ?? "";
+  if (rateLimitInternalSecret !== "" && Buffer.byteLength(rateLimitInternalSecret) < 32) {
+    throw new Error("OVID_RATE_LIMIT_INTERNAL_SECRET must be at least 32 bytes");
+  }
   const worker = createWorkerClient({
     baseUrl: cfg.workerInternalUrl,
     token: cfg.internalToken,
@@ -310,6 +329,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       ...(cfg.cdn !== undefined ? { cdn: cfg.cdn } : {}),
       activity,
       ipAnomaly,
+      rateLimiter,
+      rateLimitInternalSecret,
+      trustedProxyCidrs: cfg.trustedProxyCidrs,
+      onRateLimitDegraded: () => {
+        console.warn("[gateway] rate limit store degraded; request refused");
+      },
       worker,
       inlineMaxBytes: cfg.fileInlineMaxBytes,
       putMaxBytes: cfg.putMaxBytes,

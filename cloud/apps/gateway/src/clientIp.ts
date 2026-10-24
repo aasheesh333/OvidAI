@@ -186,11 +186,48 @@ export interface ClientIpInput {
   trustedProxies: readonly TrustedProxy[];
 }
 
+function canonicalAddress(bytes: readonly number[]): string {
+  const mapped = mappedIpv4(bytes);
+  if (mapped !== null) return mapped.join(".");
+  if (bytes.length === 4) return bytes.join(".");
+  const groups: number[] = [];
+  for (let i = 0; i < 16; i += 2) groups.push((bytes[i]! << 8) | bytes[i + 1]!);
+
+  // RFC 5952: lower-case hex and the FIRST longest run of two or more zero
+  // groups compressed. Canonical spellings keep one client in one IP bucket.
+  let bestStart = -1;
+  let bestLength = 0;
+  for (let i = 0; i < groups.length; ) {
+    if (groups[i] !== 0) {
+      i += 1;
+      continue;
+    }
+    let end = i;
+    while (end < groups.length && groups[end] === 0) end += 1;
+    if (end - i > bestLength) {
+      bestStart = i;
+      bestLength = end - i;
+    }
+    i = end;
+  }
+  const hex = groups.map((group) => group.toString(16));
+  if (bestLength < 2) return hex.join(":");
+  const left = hex.slice(0, bestStart).join(":");
+  const right = hex.slice(bestStart + bestLength).join(":");
+  return `${left}::${right}`;
+}
+
 function normalizeAddress(raw: string | undefined): string | null {
   if (raw === undefined) return null;
   const bare = bareHost(raw.trim());
   if (bare === "" || bare.toLowerCase() === "unknown") return null;
-  return parseAddressBytes(bare) === null ? null : bare;
+  const bytes = parseAddressBytes(bare);
+  return bytes === null ? null : canonicalAddress(bytes);
+}
+
+/** Canonical client IP for durable buckets, or null for malformed/unknown input. */
+export function canonicalizeClientIp(raw: string | null | undefined): string | null {
+  return normalizeAddress(raw ?? undefined);
 }
 
 /**
@@ -235,4 +272,35 @@ export function resolveClientIp(input: ClientIpInput): string | null {
     if (!isTrustedProxy(entry, input.trustedProxies)) return entry;
   }
   return entries[0]!;
+}
+
+export interface ClientNetworkInput extends ClientIpInput {
+  /** Edge-supplied ASN header. Trusted only under the same proxy/XFF contract. */
+  asn: string | readonly string[] | undefined;
+}
+
+export interface ClientNetwork {
+  ip: string | null;
+  asn: string | null;
+}
+
+/**
+ * Resolve IP and ASN as ONE trusted edge observation. An ASN is accepted only
+ * from a configured proxy that also supplied a complete, valid XFF chain. A
+ * malformed chain, duplicate ASN, arbitrary label, or direct-client header is
+ * unknown evidence (null), never an attacker-selected network identity.
+ */
+export function resolveClientNetwork(input: ClientNetworkInput): ClientNetwork {
+  const ip = resolveClientIp(input);
+  const peer = normalizeAddress(input.peerAddress);
+  if (peer === null || !isTrustedProxy(peer, input.trustedProxies)) return { ip, asn: null };
+  const entries = forwardedEntries(input.forwardedFor);
+  if (entries === null || entries.length === 0 || typeof input.asn !== "string") {
+    return { ip, asn: null };
+  }
+  const match = /^(?:as)?(\d{1,10})$/i.exec(input.asn.trim());
+  if (match === null) return { ip, asn: null };
+  const value = Number(match[1]);
+  if (!Number.isSafeInteger(value) || value > 4_294_967_295) return { ip, asn: null };
+  return { ip, asn: `AS${value}` };
 }

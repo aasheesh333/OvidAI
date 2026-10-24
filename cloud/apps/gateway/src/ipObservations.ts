@@ -16,11 +16,10 @@
  * longer than the window, so a noisy uid cannot grow memory without bound
  * and an abandoned uid's key expires on its own.
  *
- * ASN DATA IS NOT SUPPLIED TODAY. The gateway's edge (Caddy) forwards only
- * X-Forwarded-For, so every observation here has `asn: null` and
- * `evaluateIpAnomaly` uses its distinct-network fallback. The field stays on
- * the wire so an ASN-aware edge can be added without changing the store or
- * the decision function.
+ * ASN DATA IS TRUSTED EDGE EVIDENCE ONLY. ipAnomalyGuard supplies a numeric
+ * ASN solely when a configured proxy also supplied a valid forwarding chain
+ * (or the Web edge supplied a verified signature). Direct/malformed headers
+ * remain null and the evaluator uses its conservative network fallback.
  *
  * The redis parameter is structural (ioredis-shaped): production passes a
  * live ioredis instance, tests pass an in-memory fake.

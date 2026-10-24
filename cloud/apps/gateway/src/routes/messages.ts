@@ -33,6 +33,7 @@ import {
 } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
 import { DEFAULT_MINT_TIMEOUT_MS, MintTimeoutError } from "../keys.js";
+import { verifiedEdgeNetwork } from "../rateLimits.js";
 import {
   evaluateTokenCaps,
   utcDayStart,
@@ -542,19 +543,26 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
     //    direct client could otherwise choose its own address. See
     //    clientIp.ts for the exact hop read and the Caddy contract.
     //
-    //    EMAIL FOLLOW-UP: the product also requires emailing the account
-    //    owner on a block. The gateway has NO mailer today (no SMTP or
-    //    provider dependency in this package), so this task deliberately
-    //    does not send mail and does not fake one. This log line is the hook
-    //    a future mailer/notification consumer uses.
+    //    A configured automatic guard persists account standing and blocks live
+    //    keys BEFORE sanitized registered-email delivery. Mail failure is only
+    //    an outcome here: it never turns this refusal back into an allow.
     if (deps.ipAnomaly !== undefined) {
+      const edge = verifiedEdgeNetwork(request);
       const decision = await deps.ipAnomaly.admit(uid, {
         peerAddress: request.socket.remoteAddress,
         forwardedFor: request.headers["x-forwarded-for"],
+        // Raw client/proxy ASN headers are not evidence. Only the complete
+        // signed edge bundle verified by the rate-limit pre-handler is used.
+        ...(edge !== undefined ? { edge } : {}),
       });
       if (decision.block) {
         request.log.warn(
-          { uid, reason: decision.reason },
+          {
+            uid,
+            reason: decision.reason,
+            suspension: decision.suspension,
+            mailOutcome: decision.mailOutcome,
+          },
           "ip anomaly: send refused (key blocked)",
         );
         return sendError(

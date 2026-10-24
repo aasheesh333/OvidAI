@@ -5,6 +5,7 @@ import {
   isTrustedProxy,
   parseTrustedProxyCidrs,
   resolveClientIp,
+  resolveClientNetwork,
 } from "./clientIp.js";
 
 /**
@@ -115,6 +116,77 @@ describe("resolveClientIp — untrusted peer", () => {
         trustedProxies: TRUSTED,
       }),
     ).toBeNull();
+  });
+});
+
+describe("trusted edge network identity", () => {
+  it("accepts a numeric ASN only from a trusted proxy with a valid XFF chain", () => {
+    expect(
+      resolveClientNetwork({
+        peerAddress: "127.0.0.1",
+        forwardedFor: "203.0.113.7",
+        asn: "64500",
+        trustedProxies: TRUSTED,
+      }),
+    ).toEqual({ ip: "203.0.113.7", asn: "AS64500" });
+  });
+
+  it("ignores ASN from an untrusted peer even when its XFF looks valid", () => {
+    expect(
+      resolveClientNetwork({
+        peerAddress: "203.0.113.9",
+        forwardedFor: "198.51.100.1",
+        asn: "AS64500",
+        trustedProxies: TRUSTED,
+      }),
+    ).toEqual({ ip: "203.0.113.9", asn: null });
+  });
+
+  it.each(["AS-not-a-number", "AS64500, AS1", "-1", "4294967296", ""])
+    ("drops malformed ASN %s rather than counting attacker labels", (asn) => {
+      expect(
+        resolveClientNetwork({
+          peerAddress: "127.0.0.1",
+          forwardedFor: "203.0.113.7",
+          asn,
+          trustedProxies: TRUSTED,
+        }).asn,
+      ).toBeNull();
+    });
+
+  it("drops ASN when XFF is malformed or duplicated", () => {
+    for (const forwardedFor of ["203.0.113.7, garbage", ["AS1", "AS2"]]) {
+      expect(
+        resolveClientNetwork({
+          peerAddress: "127.0.0.1",
+          forwardedFor,
+          asn: "AS64500",
+          trustedProxies: TRUSTED,
+        }).asn,
+      ).toBeNull();
+    }
+  });
+
+  it("canonicalizes equivalent client IP spellings for shared buckets", () => {
+    const expanded = resolveClientIp({
+      peerAddress: "127.0.0.1",
+      forwardedFor: "2001:0db8:0000:0000:0000:0000:0000:0001",
+      trustedProxies: TRUSTED,
+    });
+    const compressed = resolveClientIp({
+      peerAddress: "127.0.0.1",
+      forwardedFor: "2001:db8::1",
+      trustedProxies: TRUSTED,
+    });
+    expect(expanded).toBe("2001:db8::1");
+    expect(compressed).toBe(expanded);
+    expect(
+      resolveClientIp({
+        peerAddress: "127.0.0.1",
+        forwardedFor: "::ffff:203.0.113.7",
+        trustedProxies: TRUSTED,
+      }),
+    ).toBe("203.0.113.7");
   });
 });
 

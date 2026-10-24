@@ -164,4 +164,185 @@ describe("createIpAnomalyGuard", () => {
       { ip: "", asn: null, at: NOW },
     ]);
   });
+
+  it("records a trusted edge ASN and ignores a direct client's spoofed ASN", async () => {
+    const store = createIpObservationStore(fakeRedis(), { windowMs: WINDOW });
+    const guard = createIpAnomalyGuard({
+      store,
+      now: () => NOW,
+      trustedProxyCidrs: ["127.0.0.0/8"],
+    });
+
+    await guard.admit("uid-asn", {
+      peerAddress: "127.0.0.1",
+      forwardedFor: "203.0.113.7",
+      asn: "64500",
+    });
+    await guard.admit("uid-asn-spoof", {
+      peerAddress: "203.0.113.9",
+      forwardedFor: "198.51.100.1",
+      asn: "AS64500",
+    });
+
+    expect(await store.read("uid-asn", NOW)).toEqual([
+      { ip: "203.0.113.7", asn: "AS64500", at: NOW },
+    ]);
+    expect(await store.read("uid-asn-spoof", NOW)).toEqual([
+      { ip: "203.0.113.9", asn: null, at: NOW },
+    ]);
+  });
+
+  it("malformed ASN stays unknown instead of becoming an attacker-chosen label", async () => {
+    const store = createIpObservationStore(fakeRedis(), { windowMs: WINDOW });
+    const guard = createIpAnomalyGuard({
+      store,
+      now: () => NOW,
+      trustedProxyCidrs: ["127.0.0.0/8"],
+    });
+    await guard.admit("uid-malformed-asn", {
+      peerAddress: "127.0.0.1",
+      forwardedFor: "203.0.113.7",
+      asn: "AS64500, AS1",
+    });
+    expect(await store.read("uid-malformed-asn", NOW)).toEqual([
+      { ip: "203.0.113.7", asn: null, at: NOW },
+    ]);
+  });
+
+  it("mobile↔Wi-Fi handoff does not call automatic suspension", async () => {
+    const store = createIpObservationStore(fakeRedis(), { windowMs: WINDOW });
+    let suspensions = 0;
+    const guard = createIpAnomalyGuard({
+      store,
+      now: () => NOW,
+      trustedProxyCidrs: ["127.0.0.0/8"],
+      suspension: {
+        async suspend() {
+          suspensions += 1;
+          return { mailOutcome: "sent" };
+        },
+      },
+    });
+    for (let index = 0; index < 40; index += 1) {
+      const decision = await guard.admit("uid-mobile-handoff", {
+        peerAddress: "127.0.0.1",
+        forwardedFor: index % 2 === 0 ? "198.51.100.7" : "203.0.113.9",
+        asn: index % 2 === 0 ? "AS64500" : "AS64501",
+      });
+      expect(decision.block).toBe(false);
+    }
+    expect(suspensions).toBe(0);
+  });
+
+  it("IPv6 privacy rotation inside one /64 does not call automatic suspension", async () => {
+    const store = createIpObservationStore(fakeRedis(), { windowMs: WINDOW });
+    let suspensions = 0;
+    const guard = createIpAnomalyGuard({
+      store,
+      now: () => NOW,
+      trustedProxyCidrs: ["127.0.0.0/8"],
+      suspension: {
+        async suspend() {
+          suspensions += 1;
+          return { mailOutcome: "sent" };
+        },
+      },
+    });
+    for (let index = 0; index < 30; index += 1) {
+      const decision = await guard.admit("uid-ipv6-privacy", {
+        peerAddress: "127.0.0.1",
+        forwardedFor: `2001:db8:abcd:1234:aaaa:bbbb:cccc:${(0x1000 + index).toString(16)}`,
+      });
+      expect(decision.block).toBe(false);
+    }
+    expect(suspensions).toBe(0);
+  });
+
+  it("a real multi-IP block applies suspension with a stable anomaly id before returning", async () => {
+    const store = createIpObservationStore(fakeRedis(), { windowMs: WINDOW });
+    await seed(store, "uid-real-block", 13);
+    const calls: Array<{ uid: string; blockId: string; reason: string }> = [];
+    const guard = createIpAnomalyGuard({
+      store,
+      now: () => NOW,
+      trustedProxyCidrs: ["127.0.0.0/8"],
+      suspension: {
+        async suspend(input) {
+          calls.push(input);
+          return { mailOutcome: "sent" };
+        },
+      },
+    });
+
+    const decision = await guard.admit("uid-real-block", {
+      peerAddress: "127.0.0.1",
+      forwardedFor: "203.0.113.200",
+    });
+    const window = Math.floor(NOW / WINDOW);
+    expect(calls).toEqual([
+      {
+        uid: "uid-real-block",
+        blockId: `anomaly:uid-real-block:${window}:network_fanout`,
+        reason: "network_fanout",
+      },
+    ]);
+    expect(decision).toEqual({
+      block: true,
+      reason: "network_fanout",
+      suspension: "applied",
+      mailOutcome: "sent",
+    });
+  });
+
+  it("mail failure is an outcome and never changes the block decision", async () => {
+    const store = createIpObservationStore(fakeRedis(), { windowMs: WINDOW });
+    await seed(store, "uid-mail-failed", 13);
+    const guard = createIpAnomalyGuard({
+      store,
+      now: () => NOW,
+      trustedProxyCidrs: ["127.0.0.0/8"],
+      suspension: {
+        async suspend() {
+          return { mailOutcome: "failed" };
+        },
+      },
+    });
+    const decision = await guard.admit("uid-mail-failed", {
+      peerAddress: "127.0.0.1",
+      forwardedFor: "203.0.113.200",
+    });
+    expect(decision).toEqual({
+      block: true,
+      reason: "network_fanout",
+      suspension: "applied",
+      mailOutcome: "failed",
+    });
+  });
+
+  it("a degraded suspension never fails open or claims mail was sent", async () => {
+    const store = createIpObservationStore(fakeRedis(), { windowMs: WINDOW });
+    await seed(store, "uid-suspension-degraded", 13);
+    const errors: unknown[] = [];
+    const guard = createIpAnomalyGuard({
+      store,
+      now: () => NOW,
+      trustedProxyCidrs: ["127.0.0.0/8"],
+      onError: (error) => errors.push(error),
+      suspension: {
+        async suspend() {
+          throw new Error("key admin unavailable");
+        },
+      },
+    });
+    const decision = await guard.admit("uid-suspension-degraded", {
+      peerAddress: "127.0.0.1",
+      forwardedFor: "203.0.113.200",
+    });
+    expect(decision).toEqual({
+      block: true,
+      reason: "network_fanout",
+      suspension: "degraded",
+    });
+    expect(errors).toHaveLength(1);
+  });
 });

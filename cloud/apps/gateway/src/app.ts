@@ -35,7 +35,7 @@ import {
   registerMcpOauthPublicCallbackRoute,
   registerMcpOauthRoutes,
 } from "./routes/mcpOauth.js";
-import { registerMcpServerRoutes } from "./routes/mcpServers.js";
+import { registerMcpServerRoutes, type ConnectionHealthAdapter } from "./routes/mcpServers.js";
 import { registerMessageRoutes } from "./routes/messages.js";
 import { registerPreferenceRoutes } from "./routes/preferences.js";
 import { registerModelRoutes } from "./routes/models.js";
@@ -65,6 +65,11 @@ import type { BrowserChannelDeps } from "./browserChannel.js";
 import { PtyBridgeError, type PtyBridge } from "./wsPty.js";
 import type { SystemHub } from "./systemChannel.js";
 import type { IpAnomalyGuard } from "./ipAnomalyGuard.js";
+import {
+  createRateLimitPreHandler,
+  registerRateLimitInternalRoute,
+  type RateLimiter,
+} from "./rateLimits.js";
 
 export interface GatewayDeps {
   db: Db;
@@ -160,17 +165,25 @@ export interface GatewayDeps {
    */
   activity?: ActivityTracker;
   /**
-   * IP fan-out admission for POST /sessions/:id/messages. main() wires a
-   * Redis-backed observation store + the pure decision function; a block
+   * IP fan-out admission for POST /sessions/:id/messages. The enabled composition
+   * wires a Redis-backed observation store + the pure decision function; a block
    * refuses the send (typed 403 ip_anomaly_blocked) BEFORE ownership, body
    * validation, mint, writes or enqueue.
    *
-   * OPTIONAL only so pre-existing compositions (spine/e2e/unit suites) stay
-   * source-compatible. ABSENT = the check is skipped; production always
-   * wires it. The guard fails OPEN on a Redis outage (`store_unavailable`),
-   * documented in ipAnomalyGuard.ts.
+   * OPTIONAL for pre-existing compositions and the rollout flag. ABSENT = the
+   * check is skipped; main wires the complete durable suspension path only
+   * when OVID_IP_ANOMALY_ENABLED=true. The guard fails OPEN on an observation
+   * Redis outage (`store_unavailable`), with explicit degraded telemetry.
    */
   ipAnomaly?: IpAnomalyGuard;
+  /** Durable Redis UID/IP buckets. Optional for flag-off/legacy compositions. */
+  rateLimiter?: RateLimiter;
+  /** Independent Web-edge signature secret; never the mint signing secret. */
+  rateLimitInternalSecret?: string;
+  /** Verified Caddy/Cloudflare peers for direct-client forwarding headers. */
+  trustedProxyCidrs?: readonly string[];
+  /** Explicit degraded-store telemetry; a failure is never a healthy allow. */
+  onRateLimitDegraded?: (error: unknown) => void;
   /**
    * P7 Task 12: the worker file-service proxy — the gateway's only view of
    * workspace bytes. OPTIONAL for the same composition-compat reason; when
@@ -343,6 +356,24 @@ export function buildGateway(
     return reply.code(404).send(body);
   });
 
+  if (deps.rateLimiter !== undefined) {
+    const rateLimitOptions = {
+      rateLimiter: deps.rateLimiter,
+      verifier: deps.verifier,
+      rateLimitInternalSecret: deps.rateLimitInternalSecret,
+      trustedProxyCidrs: deps.trustedProxyCidrs,
+      clock: deps.clock,
+      onDegraded: deps.onRateLimitDegraded,
+    };
+    if ((deps.rateLimitInternalSecret?.trim() ?? "") !== "") {
+      registerRateLimitInternalRoute(app, {
+        ...rateLimitOptions,
+        rateLimitInternalSecret: deps.rateLimitInternalSecret!,
+      });
+    }
+    app.addHook("preHandler", createRateLimitPreHandler(rateLimitOptions));
+  }
+
   // Public scope: health + the MCP OAuth callback. Both are explicitly
   // NO-auth: the orchestrator probes health, and the authorization server's
   // browser redirect carries no Ovid credentials — the one-use `state` IS
@@ -372,7 +403,9 @@ export function buildGateway(
   // onto /health above.
   app.register(
     async (scope) => {
-      scope.addHook("preHandler", authHook(deps.verifier));
+      // onRequest establishes the verified principal before the root rate-limit
+      // preHandler; all routes still execute the SAME separate authorization hook.
+      scope.addHook("onRequest", authHook(deps.verifier));
 
       // Single-use WS ticket for Task 8's handshake.
       scope.post("/auth/ticket", async (request) => ({
