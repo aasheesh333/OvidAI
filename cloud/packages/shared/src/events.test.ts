@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ADDITIVE_SUBAGENT_EVENT_TYPES } from "./contracts.js";
 import { sessionEvent, sessionEventSchema } from "./events.js";
 import type { SessionEvent, SessionEventType } from "./events.js";
 
@@ -44,6 +45,8 @@ const allEventTypes = [
   "compaction_completed",
   // Wave 1b addition.
   "message_segment",
+  // Production-completion Task 1 additions; append only, never reorder old events.
+  ...ADDITIVE_SUBAGENT_EVENT_TYPES,
 ] as const satisfies readonly SessionEventType[];
 
 // Compile-time exhaustiveness: true is assignable only when every
@@ -92,7 +95,8 @@ describe("sessionEvent", () => {
         t !== "workspace_hibernated" &&
         t !== "workspace_hydrated" &&
         t !== "message_segment" &&
-        !P3_EVENT_TYPES.includes(t as (typeof P3_EVENT_TYPES)[number]),
+        !P3_EVENT_TYPES.includes(t as (typeof P3_EVENT_TYPES)[number]) &&
+        !ADDITIVE_SUBAGENT_EVENT_TYPES.includes(t as (typeof ADDITIVE_SUBAGENT_EVENT_TYPES)[number]),
     );
     expect(oldTypes).toHaveLength(9);
     for (const type of oldTypes) {
@@ -169,8 +173,8 @@ describe("sessionEvent P3 Task 12 additions (additive)", () => {
     expect(sessionEvent(resolved)).toEqual(resolved);
   });
 
-  it("the union count is 12 + 9 (+ Wave 1b's 1) members (no reordering, nothing removed)", () => {
-    expect(allEventTypes).toHaveLength(22);
+  it("the union count is 12 + 9 + Wave 1b + Task 1 (no reordering, nothing removed)", () => {
+    expect(allEventTypes).toHaveLength(28);
     expect(allEventTypes.slice(0, 12)).toEqual([
       "run_started",
       "message_delta",
@@ -194,7 +198,7 @@ describe("sessionEvent P3 Task 12 additions (additive)", () => {
 // between its tool calls. Appended at the END (additive only).
 describe("sessionEvent Wave 1b addition", () => {
   it("message_segment is the 22nd member and round-trips", () => {
-    expect(allEventTypes).toHaveLength(22);
+    expect(allEventTypes).toHaveLength(28);
     expect(allEventTypes[21]).toBe("message_segment");
     const event = {
       ...valid,
@@ -202,5 +206,20 @@ describe("sessionEvent Wave 1b addition", () => {
       payload: { runId: "r", content: "Let me look." },
     } as const;
     expect(sessionEvent(event)).toEqual(event);
+  });
+});
+
+describe("sessionEvent production-completion Task 1 additions", () => {
+  it("appends all six additive types and accepts them through both canonical parsers", () => {
+    expect(allEventTypes.slice(22)).toEqual(ADDITIVE_SUBAGENT_EVENT_TYPES);
+    for (const type of ADDITIVE_SUBAGENT_EVENT_TYPES) {
+      const event = {
+        ...valid,
+        type,
+        payload: { futureOptionalField: { retained: true } },
+      };
+      expect(sessionEvent(event)).toEqual(event);
+      expect(sessionEventSchema.parse(event)).toEqual(event);
+    }
   });
 });

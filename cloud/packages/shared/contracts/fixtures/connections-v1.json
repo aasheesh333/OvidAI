@@ -1,0 +1,52 @@
+{
+  "contractVersion": 1,
+  "legacyListResponse": [
+    {
+      "id": "connection-1",
+      "name": "Google Drive",
+      "transport": "native",
+      "curatedId": "google-drive",
+      "enabled": true,
+      "hasSecrets": true,
+      "needsAuth": true,
+      "createdAt": "2026-10-24T12:00:00.000Z",
+      "updatedAt": "2026-10-24T12:00:00.000Z"
+    }
+  ],
+  "configuredResponse": {
+    "items": [
+      {
+        "id": "connection-1",
+        "name": "Google Drive",
+        "transport": "native",
+        "curatedId": "google-drive",
+        "enabled": true,
+        "hasSecrets": true,
+        "needsAuth": true,
+        "createdAt": "2026-10-24T12:00:00.000Z",
+        "updatedAt": "2026-10-24T12:00:00.000Z",
+        "connectionId": "connection-1",
+        "providerId": "google-drive",
+        "agentEnabled": false,
+        "authState": "needs_auth",
+        "healthState": "never_checked",
+        "lastCheckedAt": null,
+        "lastSuccessAt": null,
+        "configVersion": 1,
+        "disconnectGeneration": 0
+      }
+    ]
+  },
+  "catalogResponse": {
+    "items": [
+      {
+        "curatedId": "google-drive",
+        "displayName": "Google Drive",
+        "description": "Configured Google Drive connection fixture",
+        "credentialFields": [],
+        "tools": [],
+        "configured": true
+      }
+    ]
+  }
+}

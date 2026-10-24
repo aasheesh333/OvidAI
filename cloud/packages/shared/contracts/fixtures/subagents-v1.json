@@ -1,0 +1,212 @@
+{
+  "contractVersion": 1,
+  "events": [
+    {
+      "type": "subagent_requested",
+      "sessionId": "session-1",
+      "runId": "root-run-1",
+      "rootTaskRunId": "root-run-1",
+      "batchId": "batch-1",
+      "agentType": "general-purpose",
+      "launchReason": "Independent contract research",
+      "requestedAt": "2026-10-24T12:00:00.000Z",
+      "admittedAt": null,
+      "startedAt": null,
+      "prompt": "Inspect the current contract fixture",
+      "capacity": {
+        "active": 49,
+        "limit": 50,
+        "available": 1,
+        "awaiting": 2
+      },
+      "checkpoint": null,
+      "logAvailable": false
+    },
+    {
+      "type": "subagent_deferred",
+      "sessionId": "session-1",
+      "runId": "root-run-1",
+      "rootTaskRunId": "root-run-1",
+      "childRunId": null,
+      "childSessionId": null,
+      "batchId": "batch-1",
+      "deferredRequestId": "deferred-1",
+      "requestedAt": "2026-10-24T12:00:01.000Z",
+      "admittedAt": null,
+      "startedAt": null,
+      "status": "awaiting_next_user_task",
+      "reason": "capacity_exhausted",
+      "provenance": {
+        "platform": "web",
+        "actorUserId": "user-1"
+      },
+      "checkpoint": null,
+      "logAvailable": false
+    },
+    {
+      "type": "subagent_admitted",
+      "sessionId": "session-1",
+      "runId": "root-run-1",
+      "rootTaskRunId": "root-run-1",
+      "childRunId": "child-run-1",
+      "childSessionId": "worker-1",
+      "batchId": "batch-1",
+      "deferredRequestId": "deferred-1",
+      "decisionActorRunId": "root-run-2",
+      "schedulingReason": "Main selected this request after the next user task",
+      "requestedAt": "2026-10-24T12:00:01.000Z",
+      "admittedAt": "2026-10-24T12:05:00.000Z",
+      "startedAt": null,
+      "availableSlotsBefore": 1,
+      "availableSlotsAfter": 0,
+      "checkpoint": null,
+      "logAvailable": false
+    },
+    {
+      "type": "subagent_started",
+      "sessionId": "session-1",
+      "runId": "root-run-1",
+      "rootTaskRunId": "root-run-1",
+      "childRunId": "child-run-1",
+      "childSessionId": "worker-1",
+      "batchId": "batch-1",
+      "agentType": "general-purpose",
+      "launchReason": "Independent contract research",
+      "requestedAt": "2026-10-24T12:00:01.000Z",
+      "admittedAt": "2026-10-24T12:05:00.000Z",
+      "startedAt": "2026-10-24T12:05:01.000Z",
+      "prompt": "Inspect the current contract fixture",
+      "status": "running",
+      "logicalWorkerId": "worker-1",
+      "attemptId": "attempt-worker-1",
+      "attemptNumber": 1,
+      "checkpoint": null,
+      "logAvailable": false
+    },
+    {
+      "type": "subagent_controlled",
+      "sessionId": "session-1",
+      "runId": "root-run-control",
+      "rootTaskRunId": "root-run-control",
+      "childRunId": "child-run-3",
+      "childSessionId": "worker-3",
+      "logicalWorkerId": "worker-3",
+      "attemptId": "attempt-worker-3",
+      "action": "stop",
+      "actorKind": "main",
+      "actorRunId": "root-run-2",
+      "reason": "Explicit user instruction for this worker",
+      "controlledAt": "2026-10-24T12:06:00.000Z",
+      "status": "cancelled",
+      "requestedTransition": "running_to_cancelled",
+      "performedTransition": "running_to_cancelled",
+      "checkpoint": null,
+      "logAvailable": false
+    },
+    {
+      "type": "subagent_completed",
+      "sessionId": "session-1",
+      "runId": "root-run-1",
+      "rootTaskRunId": "root-run-1",
+      "childRunId": "child-run-1",
+      "childSessionId": "worker-1",
+      "batchId": "batch-1",
+      "agentType": "general-purpose",
+      "requestedAt": "2026-10-24T12:00:01.000Z",
+      "admittedAt": "2026-10-24T12:05:00.000Z",
+      "startedAt": "2026-10-24T12:05:01.000Z",
+      "endedAt": "2026-10-24T12:07:00.000Z",
+      "status": "completed",
+      "summary": "Fixture-only successful worker report",
+      "structuredReport": {
+        "subagent_id": "worker-1",
+        "status": "completed",
+        "files_modified": [
+          "src/example.ts"
+        ],
+        "artifacts_created": [],
+        "key_findings": "Fixture-only finding for parser compatibility.",
+        "error_if_any": null
+      },
+      "checkpoint": null,
+      "logAvailable": false
+    },
+    {
+      "type": "root_finalized",
+      "sessionId": "session-1",
+      "runId": "root-run-1",
+      "rootTaskRunId": "root-run-1",
+      "executionEpoch": 1,
+      "activeWorkerCount": 0,
+      "reportsIncluded": [
+        "worker-1"
+      ],
+      "finalSynthesisCount": 1,
+      "finalizedAt": "2026-10-24T12:07:01.000Z"
+    }
+  ],
+  "legacyCurrentEmissions": {
+    "started": {
+      "runId": "parent-run",
+      "childSessionId": "child-session",
+      "childRunId": "child-run",
+      "prompt": "Inspect the current contract fixture",
+      "agentType": "general-purpose"
+    },
+    "completed": {
+      "childRunId": "child-run",
+      "status": "completed",
+      "childSessionId": "child-session",
+      "agentType": "general-purpose",
+      "summary": "child answer"
+    }
+  },
+  "terminalReports": [
+    {
+      "subagent_id": "worker-1",
+      "status": "completed",
+      "files_modified": [
+        "src/example.ts"
+      ],
+      "artifacts_created": [],
+      "key_findings": "Fixture-only finding for parser compatibility.",
+      "error_if_any": null
+    },
+    {
+      "subagent_id": "worker-2",
+      "status": "failed",
+      "files_modified": [],
+      "artifacts_created": [],
+      "key_findings": "Partial fixture work is unverified.",
+      "error_if_any": "Sanitized fixture failure reason."
+    }
+  ],
+  "nonPreemption": [
+    {
+      "name": "ordinary",
+      "message": "Please also review this ordinary follow-up.",
+      "newRootAccepted": true,
+      "activeWorkerCount": 1,
+      "availableSlots": 49,
+      "interimResponseEmitted": true,
+      "rootCancelled": false,
+      "cancelledWorkerIds": [],
+      "executionEpochChanged": false,
+      "mainSelectedUrgentNewTask": false,
+      "finalResponseEmitted": false
+    },
+    {
+      "name": "self-described-urgent",
+      "message": "URGENT: please also review this follow-up.",
+      "newRootAccepted": true,
+      "activeWorkerCount": 1,
+      "availableSlots": 49,
+      "interimResponseEmitted": true,
+      "rootCancelled": false,
+      "cancelledWorkerIds": [],
+      "executionEpochChanged": false,
+      "mainSelectedUrgentNewTask": true,
+      "finalResponseEmitted": false
+    }
+  ]
+}

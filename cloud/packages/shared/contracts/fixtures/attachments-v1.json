@@ -1,0 +1,37 @@
+{
+  "contractVersion": 1,
+  "create": {
+    "legacy": {
+      "name": "notes.txt",
+      "size": 12
+    },
+    "typed": {
+      "name": "report.pdf",
+      "size": 2048,
+      "contentType": "application/pdf"
+    },
+    "unknownValidType": {
+      "name": "payload.bin",
+      "size": 4,
+      "contentType": "application/x-ovid-fixture"
+    }
+  },
+  "uploadResponses": {
+    "legacy": {
+      "attachmentId": "attachment-legacy",
+      "uploadUrl": "https://uploads.example.invalid/legacy?signature=fixture",
+      "path": "uploads/notes.txt",
+      "expiresAt": "2026-10-24T12:15:00.000Z"
+    },
+    "typed": {
+      "attachmentId": "attachment-typed",
+      "uploadUrl": "https://uploads.example.invalid/typed?signature=fixture",
+      "path": "uploads/report.pdf",
+      "expiresAt": "2026-10-24T12:15:00.000Z",
+      "contentType": "application/pdf",
+      "uploadHeaders": {
+        "Content-Type": "application/pdf"
+      }
+    }
+  }
+}

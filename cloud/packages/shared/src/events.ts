@@ -31,7 +31,15 @@ export type SessionEventType =
   // turn — {runId, content} — emitted when a turn ends in tool calls (the
   // final turn's text rides message_completed). Clients that ignore it lose
   // nothing they had before.
-  | "message_segment";
+  | "message_segment"
+  // Production-completion Task 1: additive orchestration/compaction events.
+  // Append only: existing event names and their payload envelopes stay unchanged.
+  | "subagent_requested"
+  | "subagent_deferred"
+  | "subagent_admitted"
+  | "subagent_controlled"
+  | "subagent_compacted"
+  | "root_finalized";
 
 export interface SessionEvent {
   sessionId: string;
@@ -69,6 +77,12 @@ export const sessionEventSchema: z.ZodType<SessionEvent> = z.object({
     "subagent_completed",
     "compaction_completed",
     "message_segment",
+    "subagent_requested",
+    "subagent_deferred",
+    "subagent_admitted",
+    "subagent_controlled",
+    "subagent_compacted",
+    "root_finalized",
   ]),
   payload: z.record(z.string(), z.unknown()),
   ts: z.string().min(1),
