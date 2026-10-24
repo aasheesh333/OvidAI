@@ -411,10 +411,10 @@ describe.skipIf(!chromiumExecutableExists())("browser tools II", () => {
     expect(result.content).toContain("invalid arguments");
   });
 
-  it("exposes the final sorted 38-tool roster with no duplicates", () => {
+  it("exposes the final sorted 37-tool roster with no duplicates", () => {
     const names = createBrowserTools(deps).map((t) => t.name);
-    expect(names).toHaveLength(38);
-    expect(new Set(names).size).toBe(38);
+    expect(names).toHaveLength(37);
+    expect(new Set(names).size).toBe(37);
     expect([...names].sort()).toEqual(names);
     for (const name of names) expect(name.startsWith("browser_")).toBe(true);
     expect([...BROWSER_TOOL_NAMES]).toEqual(names);

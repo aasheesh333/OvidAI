@@ -11,7 +11,7 @@ import { credentialTools } from "./credentials.js";
 import { transferTools } from "./transfers.js";
 import type { BrowserToolDef, BrowserToolsDeps } from "./types.js";
 
-/** Final roster (Task 13): Task-12's 17 + Task-13's 19. Sorted by name. */
+/** Production roster: legacy credential autofill is disabled and absent. Sorted by name. */
 export const BROWSER_TOOL_NAMES: readonly string[] = Object.freeze([
   "browser_back",
   "browser_click",
@@ -29,7 +29,6 @@ export const BROWSER_TOOL_NAMES: readonly string[] = Object.freeze([
   "browser_hover",
   "browser_list_credentials",
   "browser_list_tabs",
-  "browser_login_with_credential",
   "browser_long_press",
   "browser_navigate",
   "browser_network",

@@ -394,7 +394,7 @@ describe.skipIf(!chromiumExecutableExists())("browser tools I", () => {
   // Roster pin
   // -------------------------------------------------------------------------
 
-  it("exposes the final sorted 38-tool roster with model-facing schemas", () => {
+  it("exposes the final sorted 37-tool roster with model-facing schemas", () => {
     const expected = [
       "browser_back",
       "browser_click",
@@ -412,7 +412,6 @@ describe.skipIf(!chromiumExecutableExists())("browser tools I", () => {
       "browser_hover",
       "browser_list_credentials",
       "browser_list_tabs",
-      "browser_login_with_credential",
       "browser_long_press",
       "browser_navigate",
       "browser_network",

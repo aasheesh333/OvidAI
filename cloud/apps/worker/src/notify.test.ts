@@ -3,9 +3,11 @@
  * Dart notification-copy ports (title/body/route/channel/data), the device
  * fan-out (per-device send + inbox row), unregistered-token pruning, the
  * zero-device skipped record, the never-throws contract, and the Q5
- * key_not_minted push body. The PushSender is a capturing stub; the only
- * firebase-adjacent test is the credentials-unset construction smoke.
+ * key_not_minted push body. Most tests use a capturing PushSender stub; FCM
+ * classification/fan-out tests mock only the Firebase transport instead.
  */
+
+import { fileURLToPath } from "node:url";
 
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -31,7 +33,47 @@ import {
 } from "./notify.js";
 import type { WebPushSender } from "./webPush.js";
 
+const { fcmSend } = vi.hoisted(() => ({ fcmSend: vi.fn() }));
+vi.mock("firebase-admin/app", () => ({
+  getApps: () => [{ name: "test" }],
+  initializeApp: () => ({ name: "test" }),
+}));
+vi.mock("firebase-admin/messaging", () => ({
+  getMessaging: () => ({ send: fcmSend }),
+}));
+
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
+const FCM_MESSAGE: PushMessage = {
+  token: "secret-fcm-token",
+  notification: { title: "title", body: "body" },
+  data: {},
+  androidChannelId: "ovid_agent_updates.chime.v1",
+};
+const DEAD_FCM_CODES = ["registration-token-not-registered", "invalid-registration-token"] as const;
+
+function firebaseError(code: string, message: string): Error {
+  return Object.assign(new Error(message), { code });
+}
+
+async function withFcmCredentials<T>(run: () => Promise<T>): Promise<T> {
+  const previous = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  // createFcmPushSender only checks readability; Firebase initialization is mocked.
+  process.env.GOOGLE_APPLICATION_CREDENTIALS = fileURLToPath(import.meta.url);
+  try {
+    return await run();
+  } finally {
+    if (previous === undefined) delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    else process.env.GOOGLE_APPLICATION_CREDENTIALS = previous;
+  }
+}
+
+async function sendFcmError(error: unknown): Promise<PushOutcome> {
+  return withFcmCredentials(async () => {
+    fcmSend.mockReset();
+    fcmSend.mockRejectedValueOnce(error);
+    return createFcmPushSender().send(FCM_MESSAGE);
+  });
+}
 
 /** Capturing PushSender stub; `handler` decides the outcome per message. */
 function stubPush(
@@ -326,6 +368,88 @@ describe.skipIf(!TEST_DATABASE_URL)("createNotifier (real postgres)", () => {
     expect(sentRow?.status).toBe("sent");
   });
 
+  it("Firebase-shaped dead-token errors prune only the dead device and later fan-out skips it", async () => {
+    const uid = await newUser();
+    const deadToken = "firebase-dead-token";
+    const liveToken = "firebase-live-token";
+    await devices.upsert(db, { token: deadToken, userId: uid, platform: "android" });
+    await devices.upsert(db, { token: liveToken, userId: uid, platform: "android" });
+
+    await withFcmCredentials(async () => {
+      fcmSend.mockReset();
+      fcmSend.mockImplementation(async ({ token }: { token: string }) => {
+        if (token === deadToken) {
+          throw firebaseError(
+            "messaging/registration-token-not-registered",
+            `Requested entity was not found: ${token}`,
+          );
+        }
+        return "live-message-id";
+      });
+      const notifier = createNotifier({ db, push: createFcmPushSender() });
+      const first = { userId: uid, runId: "run-firebase-dead-live-1", sessionId: "ses-firebase" };
+      await notifier.notifyAgentFinished(first);
+
+      expect(fcmSend).toHaveBeenCalledTimes(2);
+      expect(fcmSend.mock.calls.map(([message]) => message.token)).toEqual(
+        expect.arrayContaining([deadToken, liveToken]),
+      );
+      expect((await devices.listForUser(db, uid)).map((device) => device.token)).toEqual([liveToken]);
+      const rows = await inbox(uid);
+      expect(rows).toHaveLength(2);
+      expect(rows.find((row) => row.deviceToken === deadToken)).toMatchObject({
+        status: "failed",
+        error: "unregistered",
+      });
+      expect(rows.find((row) => row.deviceToken === liveToken)?.status).toBe("sent");
+      expect(JSON.stringify(rows)).not.toContain(`Requested entity was not found: ${deadToken}`);
+
+      await notifier.notifyAgentFinished({ ...first, runId: "run-firebase-dead-live-2" });
+      expect(fcmSend).toHaveBeenCalledTimes(3);
+      expect(fcmSend.mock.calls[2]![0].token).toBe(liveToken);
+
+      const claims = await db.select().from(schema.notificationDeliveryClaims);
+      expect(claims.filter((row) => row.userId === uid).map((row) => row.state)).toEqual([
+        "delivered",
+        "delivered",
+      ]);
+    });
+  });
+
+  it("a pruned last device lets the next completion attempt settle as skipped_no_devices", async () => {
+    const uid = await newUser();
+    const deadToken = "firebase-only-dead-token";
+    await devices.upsert(db, { token: deadToken, userId: uid, platform: "android" });
+
+    await withFcmCredentials(async () => {
+      fcmSend.mockReset();
+      fcmSend.mockRejectedValue(firebaseError(
+        "messaging/invalid-registration-token",
+        `Invalid registration token: ${deadToken}`,
+      ));
+      const notifier = createNotifier({ db, push: createFcmPushSender() });
+      const completion = { userId: uid, runId: "run-firebase-no-devices", sessionId: "ses-firebase-only" };
+      await notifier.notifyAgentFinished(completion);
+
+      expect(await devices.listForUser(db, uid)).toHaveLength(0);
+      let claims = await db.select().from(schema.notificationDeliveryClaims);
+      expect(claims.some((row) => row.userId === uid && row.runId.trim() === completion.runId)).toBe(false);
+
+      await notifier.notifyAgentFinished(completion);
+      expect(fcmSend).toHaveBeenCalledTimes(1);
+      const rows = await inbox(uid);
+      expect(rows).toHaveLength(2);
+      expect(rows.find((row) => row.deviceToken === deadToken)).toMatchObject({
+        status: "failed",
+        error: "unregistered",
+      });
+      expect(rows.find((row) => row.status === "skipped_no_devices")?.deviceToken).toBeNull();
+      claims = await db.select().from(schema.notificationDeliveryClaims);
+      expect(claims.find((row) => row.userId === uid && row.runId.trim() === completion.runId)?.state)
+        .toBe("delivered");
+    });
+  });
+
   it("(d) zero devices: exactly one skipped_no_devices row with a null token, zero sends", async () => {
     const uid = await newUser();
     const { sent, push } = stubPush();
@@ -412,6 +536,46 @@ describe.skipIf(!TEST_DATABASE_URL)("createNotifier (real postgres)", () => {
     expect(approval!.data.kind).toBe("agentNeedsApproval");
     expect(approval!.notification.body).toBe("Sess — Summ");
     expect(untitled!.notification.body).toBe("Summ");
+  });
+});
+
+describe("createFcmPushSender error classification", () => {
+  it.each(DEAD_FCM_CODES)("classifies Firebase public code messaging/%s as unregistered", async (code) => {
+    const outcome = await sendFcmError(firebaseError(
+      `messaging/${code}`,
+      `Firebase rejected ${FCM_MESSAGE.token}`,
+    ));
+
+    expect(outcome).toMatchObject({ ok: false, code: "unregistered" });
+    expect(JSON.stringify(outcome)).not.toContain(FCM_MESSAGE.token);
+  });
+
+  it.each(DEAD_FCM_CODES)("retains legacy bare errorInfo.code %s as unregistered", async (code) => {
+    const outcome = await sendFcmError({
+      errorInfo: { code },
+      message: `Firebase rejected ${FCM_MESSAGE.token}`,
+    });
+
+    expect(outcome).toMatchObject({ ok: false, code: "unregistered" });
+    expect(JSON.stringify(outcome)).not.toContain(FCM_MESSAGE.token);
+  });
+
+  it.each([
+    "messaging/mismatched-credential",
+    "messaging/authentication-error",
+    "messaging/third-party-auth-error",
+    "messaging/message-rate-exceeded",
+    "messaging/server-unavailable",
+    "messaging/internal-error",
+    "ECONNRESET",
+    "ETIMEDOUT",
+    "messaging/registration-token-not-registered-extra",
+    "messaging/messaging/registration-token-not-registered",
+  ])("does not classify non-dead error %s as unregistered", async (code) => {
+    const outcome = await sendFcmError(firebaseError(code, `Firebase rejected ${FCM_MESSAGE.token}`));
+
+    expect(outcome).toMatchObject({ ok: false, code: "error" });
+    expect(JSON.stringify(outcome)).not.toContain(FCM_MESSAGE.token);
   });
 });
 

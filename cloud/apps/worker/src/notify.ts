@@ -82,7 +82,8 @@ const UNREGISTERED_FCM_CODES = new Set([
 function fcmErrorCode(err: unknown): string | null {
   const e = err as { code?: unknown; errorInfo?: { code?: unknown } };
   const raw = e?.errorInfo?.code ?? e?.code;
-  return typeof raw === "string" ? raw : null;
+  if (typeof raw !== "string") return null;
+  return raw.startsWith("messaging/") ? raw.slice("messaging/".length) : raw;
 }
 
 function describeError(err: unknown): string {
