@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../../core/cloud/trajectory_projection.dart';
 import '../../../core/format.dart';
 import '../../design/o_components.dart';
 import '../../design/o_screen.dart';
@@ -54,6 +55,7 @@ class V2SubagentPageData {
     this.reportedStatus,
     this.createdAt,
     this.finishedAt,
+    this.trajectoryWorker,
   });
 
   final String name;
@@ -123,6 +125,9 @@ class V2SubagentPageData {
   /// When the run really ended, or null while it is still running.
   final DateTime? finishedAt;
 
+  /// Canonical read-only worker projection used by live Trajectory routes.
+  final TrajectoryWorker? trajectoryWorker;
+
   /// The run's real state.
   ///
   /// The host's typed [reportedStatus] wins when present. Otherwise a
@@ -131,6 +136,8 @@ class V2SubagentPageData {
   /// is failed or cancelled, and a finished session is **unknown** — never
   /// completed, because no summary means no completion claim.
   V2SubagentRunStatus get runStatus {
+    final canonical = trajectoryWorker;
+    if (canonical != null) return v2SubagentRunStatusOf(canonical.status);
     final typed = reportedStatus;
     if (typed != null) return typed;
     final reported = v2SubagentRunStatusOf(summary?.status);
@@ -266,6 +273,7 @@ class _SubagentPageState extends State<SubagentPage> {
   /// The status shown on screen. A run still marked running past the 8 hour
   /// ceiling is timed out, because the runtime cannot run one longer.
   V2SubagentRunStatus get _status {
+    if (widget.data.trajectoryWorker != null) return widget.data.runStatus;
     final reported = widget.data.runStatus;
     if (reported != V2SubagentRunStatus.running) return reported;
     final elapsed = _computedElapsed;
@@ -308,7 +316,8 @@ class _SubagentPageState extends State<SubagentPage> {
       // One calm reading column: never wider than 640, whatever the window.
       maxWidth: 640,
       actions: [
-        if (data.status == V2SubagentStatus.ready &&
+        if (data.trajectoryWorker == null &&
+            data.status == V2SubagentStatus.ready &&
             _status == V2SubagentRunStatus.running &&
             widget.onStop != null)
           OIconButton(
@@ -324,10 +333,143 @@ class _SubagentPageState extends State<SubagentPage> {
           onRetry: widget.onRetry,
         ),
         V2SubagentStatus.empty => _empty(),
-        V2SubagentStatus.ready => _content(context),
+        V2SubagentStatus.ready =>
+          data.trajectoryWorker == null
+              ? _content(context)
+              : _canonicalContent(context),
       },
     );
   }
+
+  Widget _canonicalContent(BuildContext context) {
+    final worker = widget.data.trajectoryWorker!;
+    final c = OColors.of(context);
+    final runtime = workerRuntimeDuration(worker);
+    final deferred = workerDeferredAge(worker);
+    final compaction = worker.compaction;
+    final logAction =
+        worker.hasTranscript &&
+            worker.logAvailable == true &&
+            widget.onViewLog != null
+        ? OButton(
+            label: 'View log',
+            semanticLabel: 'View subagent log',
+            icon: Icons.terminal_rounded,
+            variant: OButtonVariant.secondary,
+            expand: true,
+            onPressed: widget.onViewLog,
+          )
+        : null;
+
+    Widget field(String label, String value) => Padding(
+      padding: const EdgeInsets.only(bottom: OSpace.m),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: OType.overline.copyWith(color: c.textFaint)),
+          const SizedBox(height: OSpace.xs),
+          Text(value, style: OType.bodySm.copyWith(color: c.text)),
+        ],
+      ),
+    );
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(
+        OSpace.l,
+        OSpace.m,
+        OSpace.l,
+        OSpace.l,
+      ),
+      children: [
+        field('STATUS', _canonicalStatusLabel(worker.status)),
+        if (worker.launchReason != null)
+          field('LAUNCH REASON', worker.launchReason!),
+        if (worker.schedulingReason != null)
+          field('SCHEDULING REASON', worker.schedulingReason!),
+        if (worker.prompt == null)
+          field('PROMPT UNAVAILABLE', trajectoryUnknownValue)
+        else
+          field('PROMPT PREVIEW', worker.prompt!),
+        field(
+          'LOGICAL WORKER',
+          worker.logicalWorkerId ?? trajectoryUnknownValue,
+        ),
+        field('ATTEMPT', worker.attemptId ?? trajectoryUnknownValue),
+        field('ROOT TASK', worker.rootTaskRunId ?? trajectoryUnknownValue),
+        field(
+          'REQUESTED',
+          worker.requestedAt?.toLocal().toIso8601String() ??
+              trajectoryUnknownValue,
+        ),
+        field(
+          'ADMITTED',
+          worker.admittedAt?.toLocal().toIso8601String() ??
+              trajectoryUnknownValue,
+        ),
+        field(
+          'STARTED',
+          worker.startedAt?.toLocal().toIso8601String() ??
+              trajectoryUnknownValue,
+        ),
+        field(
+          'ENDED',
+          worker.endedAt?.toLocal().toIso8601String() ?? trajectoryUnknownValue,
+        ),
+        field(
+          'RUNTIME',
+          runtime == null
+              ? trajectoryUnknownValue
+              : formatCompactDuration(runtime),
+        ),
+        if (worker.isDeferred)
+          field(
+            'DEFERRED AGE',
+            deferred == null
+                ? trajectoryUnknownValue
+                : formatCompactDuration(deferred),
+          ),
+        field('ACTIVITY', worker.lastActivity ?? trajectoryUnknownValue),
+        field(
+          'ACTIVITY AT',
+          worker.lastActivityAt?.toLocal().toIso8601String() ??
+              trajectoryUnknownValue,
+        ),
+        if (worker.summary != null) field('SUMMARY', worker.summary!),
+        if (worker.error != null) field('ERROR', worker.error!),
+        if (worker.report != null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: OSpace.m),
+            child: TrajectoryReportCard(report: worker.report!),
+          ),
+        if (compaction != null) ...[
+          field('COMPACTION', compaction.compactionId),
+          field('CHECKPOINT', compaction.checkpointId),
+          field('MODEL', compaction.model),
+          field('CONTEXT LIMIT', '${compaction.contextLimit}'),
+          field('BEFORE TOKENS', '${compaction.beforeTokens}'),
+          field('AFTER TOKENS', '${compaction.afterTokens}'),
+          field('USAGE SOURCE', compaction.usageSource),
+          field('CONTINUATION', compaction.continuation),
+        ],
+        field('LOG', switch (worker.logAvailable) {
+          true => 'Log available',
+          false => 'Log unavailable',
+          null => trajectoryUnknownValue,
+        }),
+        ?logAction,
+      ],
+    );
+  }
+
+  String _canonicalStatusLabel(String status) => switch (status) {
+    'awaiting_next_user_task' => 'Awaiting next user task',
+    'running' => 'Running',
+    'completed' => 'Completed',
+    'failed' => 'Failed',
+    'cancelled' => 'Cancelled',
+    'timeout' => 'Timed out',
+    _ => trajectoryUnknownValue,
+  };
 
   Widget _empty() {
     return OEmptyState(
@@ -502,10 +644,7 @@ class _SubagentPageState extends State<SubagentPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'FILES',
-          style: OType.overline.copyWith(color: c.textFaint),
-        ),
+        Text('FILES', style: OType.overline.copyWith(color: c.textFaint)),
         const SizedBox(height: OSpace.xs),
         Wrap(
           spacing: OSpace.s,

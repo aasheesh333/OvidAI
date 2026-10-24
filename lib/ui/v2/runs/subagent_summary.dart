@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
+import '../../../core/cloud/trajectory_projection.dart';
 import '../../design/o_components.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
@@ -344,6 +345,87 @@ class SubagentSummaryCard extends StatelessWidget {
               : const _ValueText('None'),
         ),
       ],
+    );
+  }
+}
+
+/// Read-only presentation of the canonical six-key §6.3 report. This is kept
+/// separate from the legacy five-field preview card so a legacy list-shaped
+/// `key_findings` value can never be mistaken for the canonical string.
+class TrajectoryReportCard extends StatelessWidget {
+  const TrajectoryReportCard({super.key, required this.report});
+
+  final TrajectoryReport report;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    Widget label(String text) =>
+        Text(text, style: OType.overline.copyWith(color: c.textFaint));
+    Widget value(String text, {bool mono = false, Color? color}) => Text(
+      text,
+      style: (mono ? OType.mono : OType.bodySm).copyWith(
+        color: color ?? c.text,
+      ),
+    );
+    Widget field(String name, Widget child) => Padding(
+      padding: const EdgeInsets.only(bottom: OSpace.m),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          label(name),
+          const SizedBox(height: OSpace.xs),
+          child,
+        ],
+      ),
+    );
+
+    return OCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Canonical report',
+            style: OType.bodySm.copyWith(
+              color: c.text,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: OSpace.m),
+          field('SUBAGENT ID', value(report.subagentId, mono: true)),
+          field('STATUS', value(v2SubagentReportedStatusLabel(report.status))),
+          field(
+            'FILES MODIFIED',
+            value(
+              report.filesModified.isEmpty
+                  ? 'None'
+                  : report.filesModified.join(', '),
+              mono: true,
+            ),
+          ),
+          field(
+            'ARTIFACTS CREATED',
+            value(
+              report.artifactsCreated.isEmpty
+                  ? 'None'
+                  : report.artifactsCreated.join(', '),
+              mono: true,
+            ),
+          ),
+          field('KEY FINDINGS', value(report.keyFindings)),
+          field(
+            'ERROR IF ANY',
+            value(
+              report.errorIfAny?.trim().isNotEmpty ?? false
+                  ? report.errorIfAny!.trim()
+                  : 'None',
+              color: report.errorIfAny?.trim().isNotEmpty ?? false
+                  ? c.danger
+                  : null,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

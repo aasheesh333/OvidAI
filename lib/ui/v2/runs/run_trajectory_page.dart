@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 
+import '../../../core/cloud/trajectory_projection.dart';
 import '../../../core/format.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
@@ -77,6 +78,7 @@ class V2RunTrajectoryPageData {
     this.endedAt,
     this.status = V2RunTrajectoryStatus.ready,
     this.errorMessage = 'We could not load this run.',
+    this.trajectory,
   });
 
   final String title;
@@ -97,6 +99,10 @@ class V2RunTrajectoryPageData {
 
   final V2RunTrajectoryStatus status;
   final String errorMessage;
+
+  /// Canonical full-step/worker projection. Null retains the legacy preview
+  /// data used by the design registry; live routes supply this projection.
+  final TrajectoryRoot? trajectory;
 
   /// "1 subagent" / "3 subagents".
   String get subagentCountLabel =>
@@ -200,12 +206,22 @@ class RunTrajectoryPage extends StatefulWidget {
     required this.data,
     this.onShareRun,
     this.onOpenSubagent,
+    this.onExpandWorker,
+    this.onCollapseWorker,
+    this.onLoadEarlier,
+    this.onShowRaw,
+    this.onBack,
     this.onRetry,
   });
 
   final V2RunTrajectoryPageData data;
   final VoidCallback? onShareRun;
   final ValueChanged<String>? onOpenSubagent;
+  final ValueChanged<TrajectoryWorker>? onExpandWorker;
+  final VoidCallback? onCollapseWorker;
+  final VoidCallback? onLoadEarlier;
+  final Future<RawTrajectoryPage> Function(String? after)? onShowRaw;
+  final VoidCallback? onBack;
   final VoidCallback? onRetry;
 
   @override
@@ -224,6 +240,8 @@ class _RunTrajectoryPageState extends State<RunTrajectoryPage> {
   /// Set only for the duration of a follow animation, so a content-size change
   /// can re-anchor the tail without yanking a reader who scrolled up.
   bool _following = false;
+
+  final Set<String> _expandedWorkers = <String>{};
 
   @override
   void initState() {
@@ -323,7 +341,16 @@ class _RunTrajectoryPageState extends State<RunTrajectoryPage> {
       title: 'Run trajectory',
       subtitle: runLabel.isEmpty ? null : runLabel,
       padding: false,
+      leading: widget.onBack == null
+          ? null
+          : OIconButton(
+              icon: Icons.arrow_back_rounded,
+              semanticLabel: 'Back',
+              onPressed: widget.onBack,
+            ),
       actions: [
+        if (widget.onShowRaw != null && data.trajectory != null)
+          OTextAction(label: 'Show raw', onPressed: _showRaw),
         if (widget.onShareRun != null)
           OIconButton(
             icon: Icons.share_rounded,
@@ -345,7 +372,30 @@ class _RunTrajectoryPageState extends State<RunTrajectoryPage> {
     );
   }
 
+  void _showRaw() {
+    final load = widget.onShowRaw;
+    if (load == null) return;
+    showDialog<void>(
+      context: context,
+      builder: (_) => _RawTrajectoryDialog(load: load),
+    );
+  }
+
   Widget _empty() {
+    if (widget.data.trajectory != null) {
+      return OEmptyState(
+        icon: Icons.timeline_rounded,
+        title: 'No trajectory events yet',
+        message: 'Canonical main steps and workers appear here as they arrive.',
+        action: widget.onRetry == null
+            ? null
+            : OButton(
+                label: 'Reload',
+                icon: Icons.refresh_rounded,
+                onPressed: widget.onRetry,
+              ),
+      );
+    }
     return OEmptyState(
       icon: Icons.account_tree_rounded,
       title: 'No subagents yet',
@@ -363,6 +413,9 @@ class _RunTrajectoryPageState extends State<RunTrajectoryPage> {
   }
 
   Widget _content(V2RunTrajectoryPageData data) {
+    final trajectory = data.trajectory;
+    if (trajectory != null) return _richContent(trajectory);
+
     // The workers are the only rows. The main agent's own steps are the chat
     // the person is already in, so the list is built from the launches alone.
     final subagents = data.orderedSubagents;
@@ -411,6 +464,360 @@ class _RunTrajectoryPageState extends State<RunTrajectoryPage> {
       ),
     );
   }
+
+  Widget _richContent(TrajectoryRoot root) {
+    final counts = root.counts;
+    final countText = <String>[
+      '${counts.totalLabel} total',
+      '${counts.runningLabel} running',
+      '${counts.awaitingNextUserTaskLabel} awaiting next user task',
+      '${counts.completedLabel} completed',
+      '${counts.failedLabel} failed',
+      '${counts.cancelledLabel} cancelled',
+      '${counts.timeoutLabel} timeout',
+    ].join(' · ');
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(OSpace.l, OSpace.s, OSpace.l, 0),
+          child: Semantics(
+            container: true,
+            label:
+                'Canonical worker counts. ${countText.replaceAll(' · ', '. ')}',
+            child: ExcludeSemantics(
+              child: Text(
+                countText,
+                style: OType.caption.copyWith(
+                  color: OColors.of(context).textMuted,
+                ),
+              ),
+            ),
+          ),
+        ),
+        Expanded(
+          child: ListView(
+            key: const ValueKey<String>('rich-trajectory-list'),
+            padding: const EdgeInsets.fromLTRB(
+              OSpace.l,
+              OSpace.s,
+              OSpace.l,
+              OSpace.l,
+            ),
+            children: [
+              if (root.earlierCursor != null && widget.onLoadEarlier != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: OSpace.s),
+                  child: OButton(
+                    label: 'Load earlier events',
+                    variant: OButtonVariant.secondary,
+                    onPressed: widget.onLoadEarlier,
+                  ),
+                ),
+              Text(
+                'Main steps',
+                style: OType.overline.copyWith(
+                  color: OColors.of(context).textMuted,
+                ),
+              ),
+              const SizedBox(height: OSpace.s),
+              if (root.mainSteps.isEmpty)
+                Text(
+                  'No main steps reported',
+                  style: OType.bodySm.copyWith(
+                    color: OColors.of(context).textMuted,
+                  ),
+                )
+              else
+                for (var i = 0; i < root.mainSteps.length; i++)
+                  _richMainStep(root.mainSteps[i], i, root.mainSteps.length),
+              const SizedBox(height: OSpace.l),
+              Text(
+                'Workers',
+                style: OType.overline.copyWith(
+                  color: OColors.of(context).textMuted,
+                ),
+              ),
+              const SizedBox(height: OSpace.s),
+              if (root.workers.isEmpty)
+                Text(
+                  'No workers reported',
+                  style: OType.bodySm.copyWith(
+                    color: OColors.of(context).textMuted,
+                  ),
+                )
+              else
+                for (var i = 0; i < root.workers.length; i++)
+                  _richWorker(root.workers[i], i, root.workers.length),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _richMainStep(TrajectoryStep step, int index, int total) {
+    final title = step.output ?? step.prompt ?? step.type;
+    final item = V2TimelineItem(
+      id: 'main-${step.sessionId}-${step.seq}',
+      title: title.isEmpty ? 'Main step' : title,
+      description: step.prompt == title ? null : step.prompt,
+      timeLabel: step.timestamp?.toLocal().toIso8601String(),
+      statusLabel:
+          '${_richActorLabel(step.actorKind)} · ${_richKindLabel(step.kind)}',
+      expandedDetail: step.evidence,
+      details: <V2TimelineDetail>[
+        V2TimelineDetail(label: 'Files', value: step.filesLabel, mono: true),
+        V2TimelineDetail(label: 'Diffs', value: step.diffsLabel, mono: true),
+        V2TimelineDetail(
+          label: 'Artifacts',
+          value: step.artifactsLabel,
+          mono: true,
+        ),
+        V2TimelineDetail(
+          label: 'Requested model',
+          value: step.requestedModelLabel,
+        ),
+        V2TimelineDetail(
+          label: 'Provider model',
+          value: step.providerModelLabel,
+        ),
+        V2TimelineDetail(
+          label: 'Input tokens',
+          value: step.usage.inputTokensLabel,
+        ),
+        V2TimelineDetail(
+          label: 'Output tokens',
+          value: step.usage.outputTokensLabel,
+        ),
+        V2TimelineDetail(
+          label: 'Cache read tokens',
+          value: step.usage.cacheReadTokensLabel,
+        ),
+        V2TimelineDetail(
+          label: 'Cache write tokens',
+          value: step.usage.cacheWriteTokensLabel,
+        ),
+        V2TimelineDetail(label: 'Cost', value: step.usage.costLabel),
+        if (step.preview != null)
+          V2TimelineDetail(label: 'Preview', value: step.preview!),
+      ],
+    );
+    return V2TimelineRow(
+      key: ValueKey<String>('rich-main-${step.sessionId}-${step.seq}'),
+      item: item,
+      index: index,
+      total: total,
+      isLast: index == total - 1,
+      positionLabel: 'Main step ${index + 1} of $total',
+    );
+  }
+
+  String _richActorLabel(String actorKind) => switch (actorKind) {
+    'main' => 'Main',
+    'worker' => 'Worker',
+    final other => other.trim().isEmpty ? trajectoryUnknownValue : other,
+  };
+
+  String _richKindLabel(String kind) => switch (kind) {
+    'model' => 'Model',
+    'tool' => 'Tool',
+    'subagent' => 'Subagent',
+    'system' => 'System',
+    final other => other.trim().isEmpty ? trajectoryUnknownValue : other,
+  };
+
+  String _richWorkerKey(TrajectoryWorker worker, int index) =>
+      worker.logicalWorkerId ??
+      worker.childRunId ??
+      worker.deferredRequestId ??
+      worker.childSessionId ??
+      'orphan-$index';
+
+  Widget _richWorker(TrajectoryWorker worker, int index, int total) {
+    final key = _richWorkerKey(worker, index);
+    final runtime = workerRuntimeDuration(worker);
+    final deferredAge = workerDeferredAge(worker);
+    final compaction = worker.compaction;
+    final onOpen = widget.onOpenSubagent;
+    final details = <V2TimelineDetail>[
+      V2TimelineDetail(
+        label: 'Logical worker',
+        value: worker.logicalWorkerId ?? trajectoryUnknownValue,
+        mono: true,
+      ),
+      V2TimelineDetail(
+        label: 'Attempt',
+        value: worker.attemptId ?? trajectoryUnknownValue,
+        mono: true,
+      ),
+      V2TimelineDetail(
+        label: 'Root task',
+        value: worker.rootTaskRunId ?? trajectoryUnknownValue,
+        mono: true,
+      ),
+      V2TimelineDetail(
+        label: 'Requested',
+        value:
+            worker.requestedAt?.toLocal().toIso8601String() ??
+            trajectoryUnknownValue,
+      ),
+      V2TimelineDetail(
+        label: 'Admitted',
+        value:
+            worker.admittedAt?.toLocal().toIso8601String() ??
+            trajectoryUnknownValue,
+      ),
+      V2TimelineDetail(
+        label: 'Started',
+        value:
+            worker.startedAt?.toLocal().toIso8601String() ??
+            trajectoryUnknownValue,
+      ),
+      V2TimelineDetail(
+        label: 'Ended',
+        value:
+            worker.endedAt?.toLocal().toIso8601String() ??
+            trajectoryUnknownValue,
+      ),
+      V2TimelineDetail(
+        label: 'Runtime',
+        value: runtime == null
+            ? trajectoryUnknownValue
+            : formatCompactDuration(runtime),
+      ),
+      if (worker.isDeferred)
+        V2TimelineDetail(
+          label: 'Deferred age',
+          value: deferredAge == null
+              ? trajectoryUnknownValue
+              : formatCompactDuration(deferredAge),
+        ),
+      V2TimelineDetail(
+        label: 'Activity',
+        value: worker.lastActivity ?? trajectoryUnknownValue,
+      ),
+      V2TimelineDetail(
+        label: 'Activity at',
+        value:
+            worker.lastActivityAt?.toLocal().toIso8601String() ??
+            trajectoryUnknownValue,
+      ),
+      for (final step in worker.steps)
+        V2TimelineDetail(
+          label:
+              '${_richActorLabel(step.actorKind)} · ${_richKindLabel(step.kind)} · #${step.seq}',
+          value:
+              step.output ??
+              step.evidence ??
+              step.prompt ??
+              trajectoryUnknownValue,
+        ),
+      V2TimelineDetail(
+        label: 'Log',
+        value: switch (worker.logAvailable) {
+          true => 'Log available',
+          false => 'Log unavailable',
+          null => trajectoryUnknownValue,
+        },
+      ),
+      if (compaction != null) ...<V2TimelineDetail>[
+        V2TimelineDetail(label: 'Compaction', value: compaction.compactionId),
+        V2TimelineDetail(label: 'Model', value: compaction.model),
+        V2TimelineDetail(
+          label: 'Context limit',
+          value: '${compaction.contextLimit}',
+        ),
+        V2TimelineDetail(
+          label: 'Before tokens',
+          value: '${compaction.beforeTokens}',
+        ),
+        V2TimelineDetail(
+          label: 'After tokens',
+          value: '${compaction.afterTokens}',
+        ),
+        V2TimelineDetail(label: 'Checkpoint', value: compaction.checkpointId),
+        V2TimelineDetail(label: 'Usage source', value: compaction.usageSource),
+        V2TimelineDetail(label: 'Continuation', value: compaction.continuation),
+      ],
+      if (worker.hasTranscript && onOpen != null)
+        V2TimelineDetail(
+          label: 'Transcript',
+          value: 'Open transcript',
+          onTap: () => onOpen(worker.childSessionId!),
+        ),
+    ];
+    final item = V2TimelineItem(
+      id: 'worker-$key',
+      title:
+          worker.agentType ??
+          worker.logicalWorkerId ??
+          worker.deferredRequestId ??
+          'Subagent',
+      description:
+          worker.launchReason ??
+          worker.schedulingReason ??
+          (worker.prompt == null ? null : 'Prompt preview: ${worker.prompt}'),
+      timeLabel: (worker.startedAt ?? worker.requestedAt)
+          ?.toLocal()
+          .toIso8601String(),
+      durationLabel: runtime == null ? null : formatCompactDuration(runtime),
+      status: _richWorkerStatus(worker),
+      statusLabel: _richWorkerStatusLabel(worker),
+      icon: Icons.account_tree_rounded,
+      details: details,
+      errorMessage: worker.error,
+    );
+    return V2TimelineRow(
+      key: ValueKey<String>('rich-worker-$key'),
+      item: item,
+      index: index,
+      total: total,
+      isLast: index == total - 1,
+      positionLabel: 'Worker ${index + 1} of $total',
+      expanded: _expandedWorkers.contains(key),
+      onExpandedChanged: (expanded) {
+        setState(() {
+          if (expanded) {
+            for (final old in _expandedWorkers.toList()) {
+              if (old != key) widget.onCollapseWorker?.call();
+            }
+            _expandedWorkers
+              ..clear()
+              ..add(key);
+          } else {
+            _expandedWorkers.remove(key);
+          }
+        });
+        if (expanded) {
+          widget.onExpandWorker?.call(worker);
+        } else {
+          widget.onCollapseWorker?.call();
+        }
+      },
+    );
+  }
+
+  V2TimelineStatus _richWorkerStatus(TrajectoryWorker worker) =>
+      switch (worker.status) {
+        'running' => V2TimelineStatus.running,
+        'completed' => V2TimelineStatus.success,
+        'failed' => V2TimelineStatus.danger,
+        'timeout' => V2TimelineStatus.warning,
+        'cancelled' => V2TimelineStatus.warning,
+        'awaiting_next_user_task' => V2TimelineStatus.warning,
+        _ => V2TimelineStatus.neutral,
+      };
+
+  String _richWorkerStatusLabel(TrajectoryWorker worker) =>
+      switch (worker.status) {
+        'running' => 'Running',
+        'completed' => 'Completed',
+        'failed' => 'Failed',
+        'timeout' => 'Timed out',
+        'cancelled' => 'Cancelled',
+        'awaiting_next_user_task' => 'Awaiting next user task',
+        _ => trajectoryUnknownValue,
+      };
 
   /// One muted line of real counts above the timeline.
   ///
@@ -486,10 +893,126 @@ class _RunTrajectoryPageState extends State<RunTrajectoryPage> {
   }
 
   static bool _hasContent(V2RunTrajectoryPageData data) =>
-      data.subagents.isNotEmpty;
+      data.subagents.isNotEmpty ||
+      (data.trajectory?.mainSteps.isNotEmpty ?? false) ||
+      (data.trajectory?.workers.isNotEmpty ?? false);
 
   static String _identityOf(V2RunTrajectoryPageData data) {
     if (data.subagents.isNotEmpty) return data.subagents.first.id;
     return data.title;
+  }
+}
+
+class _RawTrajectoryDialog extends StatefulWidget {
+  const _RawTrajectoryDialog({required this.load});
+
+  final Future<RawTrajectoryPage> Function(String? after) load;
+
+  @override
+  State<_RawTrajectoryDialog> createState() => _RawTrajectoryDialogState();
+}
+
+class _RawTrajectoryDialogState extends State<_RawTrajectoryDialog> {
+  final List<RawTrajectoryEntry> _entries = <RawTrajectoryEntry>[];
+  String? _nextCursor;
+  bool _truncated = false;
+  bool _loading = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load(null);
+  }
+
+  Future<void> _load(String? after) async {
+    if (_loading) return;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final page = await widget.load(after);
+      if (!mounted) return;
+      setState(() {
+        final known = _entries.map((entry) => entry.dedupeKey).toSet();
+        _entries.addAll(
+          page.entries.where((entry) => known.add(entry.dedupeKey)),
+        );
+        _nextCursor = page.nextCursor;
+        _truncated = page.truncated;
+        _loading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'We could not load raw trajectory history.';
+        _loading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final displayPage = RawTrajectoryPage(
+      entries: _entries,
+      nextCursor: _nextCursor,
+      truncated: _truncated,
+    );
+    return AlertDialog(
+      title: const Text('Raw trajectory'),
+      content: SizedBox(
+        width: 560,
+        height: 480,
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (_entries.isEmpty && _loading)
+                const Padding(
+                  padding: EdgeInsets.all(OSpace.l),
+                  child: Center(child: CircularProgressIndicator()),
+                )
+              else
+                SelectableText(
+                  displayPage.displayText,
+                  key: const ValueKey<String>('trajectory-raw-content'),
+                  style: OType.mono,
+                ),
+              if (_truncated)
+                const Padding(
+                  padding: EdgeInsets.only(top: OSpace.s),
+                  child: Text('Truncated by server'),
+                ),
+              if (_error != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: OSpace.s),
+                  child: Text(_error!),
+                ),
+              if (_loading && _entries.isNotEmpty)
+                const Padding(
+                  padding: EdgeInsets.only(top: OSpace.s),
+                  child: LinearProgressIndicator(),
+                ),
+              if (_nextCursor != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: OSpace.s),
+                  child: OButton(
+                    label: 'Load more raw',
+                    variant: OButtonVariant.secondary,
+                    onPressed: _loading ? null : () => _load(_nextCursor),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Close'),
+        ),
+      ],
+    );
   }
 }

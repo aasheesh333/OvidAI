@@ -1,9 +1,13 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../../core/cloud/cloud_agent_facade.dart';
+import '../../../core/cloud/cloud_session_store.dart';
+import '../../../core/cloud/trajectory_client.dart';
+import '../../../core/cloud/trajectory_projection.dart';
 import '../../../core/conversation_share_service.dart';
 import '../../../core/format.dart';
 import '../../../core/state.dart';
@@ -30,27 +34,19 @@ class V2RunRoutes {
     BuildContext context,
     String sessionId,
   ) async {
+    final store = CloudSessionStore.I;
+    await store.ready;
+    final serverId = store.serverIdFor(sessionId) ?? sessionId;
+    if (!context.mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (routeContext) => AnimatedBuilder(
-          animation: AppState.I,
-          builder: (context, _) {
+        builder: (routeContext) => _CanonicalTrajectoryHost(
+          api: TrajectoryApi(),
+          sessionId: serverId,
+          title: AppState.I.sessionById(sessionId)?.title ?? 'Run',
+          onShareRun: () {
             final session = AppState.I.sessionById(sessionId);
-            return RunTrajectoryPage(
-              data: trajectoryDataFor(
-                session,
-                allSessions: AppState.I.sessions,
-              ),
-              onShareRun: session == null
-                  ? null
-                  : () => _shareRun(routeContext, session),
-              onOpenSubagent: (id) => openSubagent(routeContext, id),
-              onRetry: () => AppState.I.loadSessions(),
-              // onOpenFile / onRerun / onOpenPreview stay unset: the minimal
-              // trajectory screen renders no file, rerun or preview control,
-              // so a callback here would never reach the user. The share
-              // action above is the screen's one wired action.
-            );
+            if (session != null) _shareRun(routeContext, session);
           },
         ),
       ),
@@ -82,6 +78,34 @@ class V2RunRoutes {
               onRetry: () => AppState.I.loadSessions(),
             );
           },
+        ),
+      ),
+    );
+  }
+
+  static Future<void> openCanonicalSubagent(
+    BuildContext context,
+    TrajectoryWorker worker,
+  ) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (routeContext) => SubagentPage(
+          data: V2SubagentPageData(
+            name: worker.agentType ?? worker.logicalWorkerId ?? 'Subagent',
+            instanceLabel: worker.attemptId ?? '',
+            stepLabel: worker.lastActivity ?? '',
+            // Canonical dispatch text is a bounded preview, not a full goal.
+            goal: '',
+            startedLabel: worker.startedAt?.toLocal().toIso8601String() ?? '',
+            elapsedLabel: '',
+            timeLimitLabel: notReported,
+            remainingLabel: '',
+            totalLogLines: 0,
+            trajectoryWorker: worker,
+          ),
+          onBackToChat: () => Navigator.of(routeContext).maybePop(),
+          // No lifecycle mutation, deferred transcript, or fabricated log
+          // action is wired on the canonical read-only route.
         ),
       ),
     );
@@ -555,5 +579,222 @@ class V2RunRoutes {
     final local = at.toLocal();
     final s = local.second.toString().padLeft(2, '0');
     return '${_timeOfDay(local)}:$s';
+  }
+}
+
+/// Owns the navigator in which Trajectory drill-down routes are covered.
+/// RouteObserver must belong to this same navigator; an observer attached to
+/// an ancestor cannot report these pushes to the root trajectory route.
+class _CanonicalTrajectoryHost extends StatefulWidget {
+  const _CanonicalTrajectoryHost({
+    required this.api,
+    required this.sessionId,
+    required this.title,
+    this.onShareRun,
+  });
+
+  final TrajectoryApi api;
+  final String sessionId;
+  final String title;
+  final VoidCallback? onShareRun;
+
+  @override
+  State<_CanonicalTrajectoryHost> createState() =>
+      _CanonicalTrajectoryHostState();
+}
+
+class _CanonicalTrajectoryHostState extends State<_CanonicalTrajectoryHost> {
+  final RouteObserver<ModalRoute<void>> _observer =
+      RouteObserver<ModalRoute<void>>();
+
+  @override
+  Widget build(BuildContext context) {
+    return Navigator(
+      observers: <NavigatorObserver>[_observer],
+      onGenerateInitialRoutes: (_, _) => <Route<void>>[
+        MaterialPageRoute<void>(
+          builder: (_) => CanonicalTrajectoryPage(
+            api: widget.api,
+            sessionId: widget.sessionId,
+            title: widget.title,
+            onShareRun: widget.onShareRun,
+            onBack: () => Navigator.of(context, rootNavigator: true).maybePop(),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Live canonical Trajectory route. The controller owns visible-only refresh,
+/// older-page merging and one expanded-child cursor; the page remains purely
+/// presentational/read-only apart from its explicit Show raw request.
+class CanonicalTrajectoryPage extends StatefulWidget {
+  const CanonicalTrajectoryPage({
+    super.key,
+    required this.api,
+    required this.sessionId,
+    required this.title,
+    this.onShareRun,
+    this.onBack,
+  });
+
+  final TrajectoryApi api;
+  final String sessionId;
+  final String title;
+  final VoidCallback? onShareRun;
+  final VoidCallback? onBack;
+
+  @override
+  State<CanonicalTrajectoryPage> createState() =>
+      _CanonicalTrajectoryPageState();
+}
+
+class _CanonicalTrajectoryPageState extends State<CanonicalTrajectoryPage>
+    with WidgetsBindingObserver, RouteAware {
+  late TrajectoryController _controller;
+  RouteObserver<ModalRoute<void>>? _routeObserver;
+  ModalRoute<void>? _subscribedRoute;
+  bool _appVisible = true;
+  bool _covered = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _createController();
+  }
+
+  void _createController() {
+    _controller = TrajectoryController(
+      api: widget.api,
+      sessionId: widget.sessionId,
+    )..addListener(_changed);
+    if (_appVisible && !_covered) unawaited(_controller.start());
+  }
+
+  void _syncVisibility() {
+    _controller.setVisible(_appVisible && !_covered);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    RouteObserver<ModalRoute<void>>? observer;
+    for (final candidate in Navigator.of(context).widget.observers) {
+      if (candidate is RouteObserver<ModalRoute<void>>) {
+        observer = candidate;
+        break;
+      }
+    }
+    if (identical(observer, _routeObserver) &&
+        identical(route, _subscribedRoute)) {
+      return;
+    }
+    final oldObserver = _routeObserver;
+    final oldRoute = _subscribedRoute;
+    if (oldObserver != null && oldRoute != null) {
+      oldObserver.unsubscribe(this);
+    }
+    _routeObserver = observer;
+    _subscribedRoute = route;
+    if (observer != null && route != null) {
+      observer.subscribe(this, route);
+    }
+    _syncVisibility();
+  }
+
+  @override
+  void didPushNext() {
+    _covered = true;
+    _syncVisibility();
+  }
+
+  @override
+  void didPopNext() {
+    _covered = false;
+    _syncVisibility();
+  }
+
+  void _changed() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void didUpdateWidget(covariant CanonicalTrajectoryPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.sessionId == widget.sessionId &&
+        oldWidget.api == widget.api) {
+      return;
+    }
+    _controller
+      ..removeListener(_changed)
+      ..dispose();
+    _createController();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _appVisible = true;
+    } else if (state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.paused) {
+      _appVisible = false;
+    }
+    _syncVisibility();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    final observer = _routeObserver;
+    if (observer != null && _subscribedRoute != null) {
+      observer.unsubscribe(this);
+    }
+    _controller
+      ..removeListener(_changed)
+      ..dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final root = _controller.root;
+    final empty = root.mainSteps.isEmpty && root.workers.isEmpty;
+    final loading = _controller.loading && empty;
+    final failed = _controller.error != null && empty && !_controller.loading;
+    return RunTrajectoryPage(
+      data: V2RunTrajectoryPageData(
+        title: widget.title,
+        runLabel: '',
+        trajectory: root,
+        status: loading
+            ? V2RunTrajectoryStatus.loading
+            : failed
+            ? V2RunTrajectoryStatus.error
+            : empty
+            ? V2RunTrajectoryStatus.empty
+            : V2RunTrajectoryStatus.ready,
+        errorMessage: _controller.error ?? 'We could not load this trajectory.',
+      ),
+      onShareRun: widget.onShareRun,
+      onBack: widget.onBack,
+      onRetry: () => unawaited(_controller.refresh()),
+      onLoadEarlier: root.earlierCursor == null
+          ? null
+          : () => unawaited(_controller.loadEarlier()),
+      onExpandWorker: (worker) => unawaited(_controller.expandWorker(worker)),
+      onCollapseWorker: _controller.collapseWorker,
+      onOpenSubagent: (childSessionId) {
+        for (final worker in root.workers) {
+          if (worker.childSessionId == childSessionId && worker.hasTranscript) {
+            unawaited(V2RunRoutes.openCanonicalSubagent(context, worker));
+            return;
+          }
+        }
+      },
+      onShowRaw: (after) => widget.api.showRaw(widget.sessionId, after: after),
+    );
   }
 }

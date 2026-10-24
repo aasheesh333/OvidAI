@@ -1,9 +1,9 @@
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 
 import '../core/cloud/cloud_rest.dart';
 import '../core/cloud/cloud_session_store.dart';
+import '../core/cloud/trajectory_client.dart';
+import '../core/cloud/trajectory_projection.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import 'widgets/aether_primitives.dart';
@@ -22,7 +22,8 @@ import 'widgets/aether_primitives.dart';
 /// always explicit.
 class TrajectoryScreen extends StatefulWidget {
   final String sessionId;
-  const TrajectoryScreen({super.key, required this.sessionId});
+  final TrajectoryApi? api;
+  const TrajectoryScreen({super.key, required this.sessionId, this.api});
 
   /// Events decoded per page. The mirror is paged newest-first on open and
   /// older pages are loaded on request.
@@ -33,6 +34,7 @@ class TrajectoryScreen extends StatefulWidget {
 }
 
 class _TrajectoryScreenState extends State<TrajectoryScreen> {
+  late final TrajectoryApi _api;
   List<Map<String, dynamic>> _events = [];
 
   /// True while older events may exist (`before=<oldest seq>`).
@@ -44,6 +46,7 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
   @override
   void initState() {
     super.initState();
+    _api = widget.api ?? TrajectoryApi();
     _load();
   }
 
@@ -126,9 +129,9 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _loadingEarlier = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(_errorMessage(e))),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(_errorMessage(e))));
     }
   }
 
@@ -152,22 +155,12 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
     return payload is Map ? Map<String, dynamic>.from(payload) : const {};
   }
 
-  void _showDetail(Map<String, dynamic> event) {
+  void _showRaw() {
     showDialog<void>(
       context: context,
-      builder: (context) => AlertDialog(
-        scrollable: true,
-        title: Text(_titleFor(event)),
-        content: SelectableText(
-          const JsonEncoder.withIndent('  ').convert(event),
-          style: AetherType.mono,
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Close'),
-          ),
-        ],
+      builder: (_) => _TrajectoryRawDialog(
+        load: (after) async =>
+            _api.showRaw(await _serverSessionId(), after: after),
       ),
     );
   }
@@ -191,6 +184,7 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
     'goal_updated' => Icons.flag_outlined,
     'plan_mode_changed' => Icons.account_tree_outlined,
     'compaction_completed' => Icons.compress,
+    'subagent_compacted' => Icons.compress,
     'system_note' => Icons.notes_outlined,
     'message_completed' => Icons.chat_bubble_outline,
     _ => Icons.circle_outlined,
@@ -263,10 +257,12 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
       'todo_updated' => 'Todo updated',
       'goal_updated' => 'Goal updated',
       'plan_mode_changed' => 'Plan mode changed',
-      'subagent_started' => 'Subagent started: ${p['agent'] ?? p['name'] ?? '?'}',
+      'subagent_started' =>
+        'Subagent started: ${p['agent'] ?? p['name'] ?? '?'}',
       'subagent_completed' =>
         'Subagent done: ${p['agent'] ?? p['name'] ?? '?'}',
       'compaction_completed' => 'Compaction completed',
+      'subagent_compacted' => 'Worker compacted: ${p['workerId'] ?? '—'}',
       final type => type.isEmpty ? 'Event' : type,
     };
   }
@@ -286,6 +282,12 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
             '${p['error'] != null ? ' · ${p['error']}' : ''}',
       'system_note' => '${p['message'] ?? p['code'] ?? ''}',
       'message_delta' => _preview(p['content'] ?? p['text']),
+      'subagent_compacted' =>
+        '${p['beforeTokens'] ?? '—'} → ${p['afterTokens'] ?? '—'} tokens · '
+            '${p['model'] ?? '—'} · limit ${p['contextLimit'] ?? '—'} · '
+            'checkpoint ${p['checkpointId'] ?? '—'} · '
+            'compaction ${p['compactionId'] ?? '—'} · '
+            '${p['continuation'] ?? '—'}',
       _ => '',
     };
   }
@@ -302,113 +304,144 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
     return detail.isEmpty ? title : '$title. ${detail.replaceAll(' · ', '. ')}';
   }
 
-  Widget _eventsContent() => CustomScrollView(
-        slivers: [
-          if (_error != null && _events.isNotEmpty)
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
-                child: AetherEmptyState(
-                  icon: Icons.error_outline,
-                  title: 'Could not refresh events',
-                  message: _error,
-                  action: AetherSecondaryButton(label: 'Retry', onPressed: _load),
-                ),
+  Widget _eventsContent() {
+    // Main compaction is diagnostics-only. Worker compaction remains visible
+    // as operational metadata, never as private thoughts or an ordinary main
+    // step. The full main diagnostic is available only through Show raw.
+    final visibleEvents = <Map<String, dynamic>>[
+      for (final event in _events)
+        if (_typeOf(event) != 'compaction_completed') event,
+    ];
+    return CustomScrollView(
+      slivers: [
+        if (_error != null && visibleEvents.isNotEmpty)
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
+              child: AetherEmptyState(
+                icon: Icons.error_outline,
+                title: 'Could not refresh events',
+                message: _error,
+                action: AetherSecondaryButton(label: 'Retry', onPressed: _load),
               ),
             ),
-          if (_events.isEmpty)
-            const SliverToBoxAdapter(child: AetherEmptyState(
+          ),
+        if (visibleEvents.isEmpty)
+          const SliverToBoxAdapter(
+            child: AetherEmptyState(
               key: ValueKey('trajectory-empty'),
               icon: Icons.timeline_outlined,
               title: 'No events yet',
               message: 'Events appear here as the agent runs in this session.',
-            ))
-          else
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(14, 4, 14, 16),
-              sliver: SliverList.builder(
-                itemCount: _events.length + (_hasEarlier ? 2 : 1),
-                itemBuilder: (_, row) {
-                  if (row == 0) {
-                    return const Padding(
-                      padding: EdgeInsets.fromLTRB(2, 4, 2, 10),
-                      child: AetherSectionTitle(
-                        key: ValueKey('trajectory-events-title'),
-                        eyebrow: 'Events',
-                      ),
-                    );
-                  }
-                  if (_hasEarlier && row == 1) {
-                    return Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: AetherSecondaryButton(
-                        key: const ValueKey('trajectory-load-earlier'),
-                        label: _loadingEarlier ? 'Loading…' : 'Load earlier events',
-                        onPressed: _loadingEarlier ? null : _loadEarlier,
-                      ),
-                    );
-                  }
-                  final index = row - (_hasEarlier ? 2 : 1);
-                  final e = _events[index];
-                  final detail = _detailFor(e);
-                  final type = _typeOf(e);
-                  final color = _colorFor(type, failed: _isFailed(e));
-                  final outcome = _outcomeLabel(e);
+            ),
+          )
+        else
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(14, 4, 14, 16),
+            sliver: SliverList.builder(
+              itemCount: visibleEvents.length + (_hasEarlier ? 2 : 1),
+              itemBuilder: (_, row) {
+                if (row == 0) {
+                  return const Padding(
+                    padding: EdgeInsets.fromLTRB(2, 4, 2, 10),
+                    child: AetherSectionTitle(
+                      key: ValueKey('trajectory-events-title'),
+                      eyebrow: 'Events',
+                    ),
+                  );
+                }
+                if (_hasEarlier && row == 1) {
                   return Padding(
                     padding: const EdgeInsets.only(bottom: 8),
-                    child: AetherCard(
-                      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Icon(_eventIcon(e), size: 16, color: color),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text('${e['ts'] ?? ''}', style: AetherType.mono.copyWith(fontSize: 12, color: Aether.textFaint)),
+                    child: AetherSecondaryButton(
+                      key: const ValueKey('trajectory-load-earlier'),
+                      label: _loadingEarlier
+                          ? 'Loading…'
+                          : 'Load earlier events',
+                      onPressed: _loadingEarlier ? null : _loadEarlier,
+                    ),
+                  );
+                }
+                final index = row - (_hasEarlier ? 2 : 1);
+                final e = visibleEvents[index];
+                final detail = _detailFor(e);
+                final type = _typeOf(e);
+                final color = _colorFor(type, failed: _isFailed(e));
+                final outcome = _outcomeLabel(e);
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: AetherCard(
+                    padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(_eventIcon(e), size: 16, color: color),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                '${e['ts'] ?? ''}',
+                                style: AetherType.mono.copyWith(
+                                  fontSize: 12,
+                                  color: Aether.textFaint,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                '#${e['seq'] ?? index + 1} · ${_titleFor(e)}',
+                                style: AetherType.title.copyWith(fontSize: 13),
+                              ),
+                              if (outcome != null) ...[
                                 const SizedBox(height: 2),
-                                Text('#${e['seq'] ?? index + 1} · ${_titleFor(e)}', style: AetherType.title.copyWith(fontSize: 13)),
-                                if (outcome != null) ...[
-                                  const SizedBox(height: 2),
-                                  Text(
-                                    outcome,
-                                    style: AetherType.caption.copyWith(
-                                      color: _isFailed(e)
-                                          ? Aether.danger
-                                          : Aether.success,
-                                    ),
-                                  ),
-                                ],
-                                if (detail.isNotEmpty) ...[
-                                  const SizedBox(height: 4),
-                                  Text(detail, style: AetherType.bodyMuted.copyWith(fontSize: 12)),
-                                ],
-                                Semantics(
-                                  container: true,
-                                  label: _accessibilityLabel(e),
-                                  button: true,
-                                  child: TextButton(
-                                    key: ValueKey('trajectory-detail-${e['seq'] ?? index + 1}'),
-                                    onPressed: () => _showDetail(e),
-                                    child: const Text('View details'),
+                                Text(
+                                  outcome,
+                                  style: AetherType.caption.copyWith(
+                                    color: _isFailed(e)
+                                        ? Aether.danger
+                                        : Aether.success,
                                   ),
                                 ),
                               ],
-                            ),
+                              if (detail.isNotEmpty) ...[
+                                const SizedBox(height: 4),
+                                Text(
+                                  detail,
+                                  style: AetherType.bodyMuted.copyWith(
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ],
+                              Semantics(
+                                container: true,
+                                label: _accessibilityLabel(e),
+                                button: true,
+                                child: TextButton(
+                                  key: ValueKey(
+                                    'trajectory-detail-${e['seq'] ?? index + 1}',
+                                  ),
+                                  onPressed: _showRaw,
+                                  child: const Text('Show raw'),
+                                ),
+                              ),
+                            ],
                           ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
-                  );
-                },
-              ),
+                  ),
+                );
+              },
             ),
-          SliverToBoxAdapter(child: SizedBox(height: MediaQuery.paddingOf(context).bottom)),
-        ],
-      );
+          ),
+        SliverToBoxAdapter(
+          child: SizedBox(height: MediaQuery.paddingOf(context).bottom),
+        ),
+      ],
+    );
+  }
 
   Widget _body() {
     if (_loading && _events.isEmpty) {
@@ -455,6 +488,7 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
           ),
         ),
         actions: [
+          TextButton(onPressed: _showRaw, child: const Text('Show raw')),
           IconButton(
             tooltip: 'Reload events',
             icon: const Icon(Icons.refresh, size: 19),
@@ -462,7 +496,103 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
           ),
         ],
       ),
-       body: _body(),
+      body: _body(),
+    );
+  }
+}
+
+class _TrajectoryRawDialog extends StatefulWidget {
+  const _TrajectoryRawDialog({required this.load});
+
+  final Future<RawTrajectoryPage> Function(String? after) load;
+
+  @override
+  State<_TrajectoryRawDialog> createState() => _TrajectoryRawDialogState();
+}
+
+class _TrajectoryRawDialogState extends State<_TrajectoryRawDialog> {
+  final List<RawTrajectoryEntry> _entries = <RawTrajectoryEntry>[];
+  String? _nextCursor;
+  String? _error;
+  bool _loading = false;
+  bool _truncated = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load(null);
+  }
+
+  Future<void> _load(String? after) async {
+    if (_loading) return;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final page = await widget.load(after);
+      if (!mounted) return;
+      setState(() {
+        final ids = _entries.map((entry) => entry.dedupeKey).toSet();
+        _entries.addAll(
+          page.entries.where((entry) => ids.add(entry.dedupeKey)),
+        );
+        _nextCursor = page.nextCursor;
+        _truncated = page.truncated;
+        _loading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'We could not load raw trajectory history.';
+        _loading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final page = RawTrajectoryPage(
+      entries: _entries,
+      nextCursor: _nextCursor,
+      truncated: _truncated,
+    );
+    return AlertDialog(
+      title: const Text('Raw trajectory'),
+      content: SizedBox(
+        width: 560,
+        height: 440,
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (_entries.isEmpty && _loading)
+                const Center(child: CircularProgressIndicator())
+              else
+                SelectableText(
+                  page.displayText,
+                  key: const ValueKey<String>('trajectory-raw-content'),
+                  style: AetherType.mono,
+                ),
+              if (_truncated) const Text('Truncated by server'),
+              if (_error != null) Text(_error!),
+              if (_loading && _entries.isNotEmpty)
+                const LinearProgressIndicator(minHeight: 2),
+              if (_nextCursor != null)
+                TextButton(
+                  onPressed: _loading ? null : () => _load(_nextCursor),
+                  child: const Text('Load more raw'),
+                ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Close'),
+        ),
+      ],
     );
   }
 }
