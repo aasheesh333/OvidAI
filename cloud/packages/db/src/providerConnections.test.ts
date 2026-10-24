@@ -8,6 +8,7 @@ import {
   createConnectionWithinCap,
   disconnectConnection,
   normalizeConnectionName,
+  recordConnectionHealth,
   revalidateConnection,
   transitionConnection,
   type CreateConnectionInput,
@@ -318,5 +319,90 @@ describe.skipIf(!TEST_DATABASE_URL)("provider connections against isolated real 
     expect(probed[0]?.health_state).toBe("healthy");
     expect(new Date(probed[0]!.last_checked_at).toISOString()).toBe(subsequentCheck.toISOString());
     expect(new Date(probed[0]!.last_success_at).toISOString()).toBe(subsequentCheck.toISOString());
+  });
+
+  it("records fenced health evidence without changing config or disconnect generations", async () => {
+    const uid = await seedUser(db, "pro");
+    const created = await createConnectionWithinCap(
+      db,
+      createInput(uid, "Health evidence", { authState: "configured" }),
+    );
+    const priorSuccess = new Date("2026-10-24T12:00:00.000Z");
+    await db.$client.unsafe(
+      "UPDATE mcp_servers SET health_state = 'healthy', last_checked_at = $2, last_success_at = $2 WHERE id = $1",
+      [created.connectionId, priorSuccess.toISOString()],
+    );
+    const checkedAt = new Date("2026-10-24T12:05:00.000Z");
+    const expected = { configVersion: 1, disconnectGeneration: 0 };
+
+    const degraded = await recordConnectionHealth(
+      db,
+      created.connectionId,
+      uid,
+      expected,
+      { state: "degraded", checkedAt },
+    );
+    expect(degraded).toMatchObject({
+      healthState: "degraded",
+      lastCheckedAt: checkedAt.toISOString(),
+      lastSuccessAt: priorSuccess.toISOString(),
+      configVersion: 1,
+      disconnectGeneration: 0,
+    });
+
+    const healthyAt = new Date("2026-10-24T12:06:00.000Z");
+    const healthy = await recordConnectionHealth(
+      db,
+      created.connectionId,
+      uid,
+      expected,
+      { state: "healthy", checkedAt: healthyAt },
+    );
+    expect(healthy).toMatchObject({
+      healthState: "healthy",
+      lastCheckedAt: healthyAt.toISOString(),
+      lastSuccessAt: healthyAt.toISOString(),
+    });
+
+    const staleAt = new Date("2026-10-24T12:07:00.000Z");
+    expect(await recordConnectionHealth(
+      db,
+      created.connectionId,
+      newId(),
+      expected,
+      { state: "healthy", checkedAt: staleAt },
+    )).toBeNull();
+    expect(await recordConnectionHealth(
+      db,
+      created.connectionId,
+      uid,
+      { configVersion: 2, disconnectGeneration: 0 },
+      { state: "healthy", checkedAt: staleAt },
+    )).toBeNull();
+    const row = await db.$client.unsafe(
+      "SELECT health_state, last_checked_at, last_success_at, config_version, disconnect_generation FROM mcp_servers WHERE id = $1",
+      [created.connectionId],
+    );
+    expect(row[0]?.health_state).toBe("healthy");
+    expect(new Date(row[0]!.last_checked_at).toISOString()).toBe(healthyAt.toISOString());
+    expect(new Date(row[0]!.last_success_at).toISOString()).toBe(healthyAt.toISOString());
+    expect(row[0]).toMatchObject({ config_version: 1, disconnect_generation: 0 });
+
+    const disconnected = await disconnectConnection(db, created.connectionId, uid, 1);
+    expect(disconnected).toMatchObject({ disconnectGeneration: 1, healthState: "revoked" });
+    expect(await recordConnectionHealth(
+      db,
+      created.connectionId,
+      uid,
+      expected,
+      { state: "healthy", checkedAt: staleAt },
+    )).toBeNull();
+    const afterDisconnect = await db.$client.unsafe(
+      "SELECT health_state, last_success_at, disconnect_generation FROM mcp_servers WHERE id = $1",
+      [created.connectionId],
+    );
+    expect(afterDisconnect[0]?.health_state).toBe("revoked");
+    expect(new Date(afterDisconnect[0]!.last_success_at).toISOString()).toBe(healthyAt.toISOString());
+    expect(afterDisconnect[0]?.disconnect_generation).toBe(1);
   });
 });

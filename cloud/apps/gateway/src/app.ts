@@ -248,6 +248,12 @@ export interface GatewayDeps {
    */
   crypto?: EnvelopeCrypto;
   /**
+   * Optional per-provider connection-health adapter. Production composition
+   * deliberately leaves this absent until real typed provider probes exist;
+   * the connection health route then reports `unavailable`, never a fake ping.
+   */
+  connectionHealth?: ConnectionHealthAdapter;
+  /**
    * P5 Task 15: the Task-9 server-side OAuth flow (start/callback/disconnect).
    * main() wires createOAuthFlow with its system publisher routed through the
    * SAME `systemHub` field above. OPTIONAL for the same composition-compat

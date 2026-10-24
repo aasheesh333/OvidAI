@@ -33,7 +33,7 @@ export interface CreateConnectionInput {
   secrets?: Record<string, unknown>;
   sealSecrets?: SealConnectionSecrets;
   enabled?: boolean;
-  agentEnabled: false;
+  agentEnabled: boolean;
   authState?: ProviderAuthState;
   approvedSourceId?: string;
   approvedDigest?: string;
@@ -42,6 +42,18 @@ export interface CreateConnectionInput {
 export interface ConnectionVersionExpected {
   configVersion: number;
   disconnectGeneration: number;
+}
+
+export type ConnectionHealthEvidenceState =
+  | "checking"
+  | "healthy"
+  | "degraded"
+  | "needs_auth"
+  | "unavailable";
+
+export interface ConnectionHealthEvidence {
+  state: ConnectionHealthEvidenceState;
+  checkedAt: Date;
 }
 
 export interface TransitionConnectionPatch {
@@ -208,7 +220,7 @@ export async function createConnectionWithinCap(
           transport: input.transport,
           curatedId: input.kind === "curated" ? input.providerId : null,
           providerId: input.providerId,
-          agentEnabled: false,
+          agentEnabled: input.agentEnabled,
           authState: input.authState ?? (input.secrets === undefined ? "missing" : "configured"),
           healthState: "never_checked",
           configVersion: 1,
@@ -292,6 +304,43 @@ export async function transitionConnection(
     if (isUniqueViolation(error)) throw serverExists();
     throw error;
   }
+}
+
+/**
+ * Commit health evidence only against the exact enabled connection generation
+ * that was checked. Health never advances either execution fence, and only a
+ * healthy result creates new last-success evidence.
+ */
+export async function recordConnectionHealth(
+  db: Db,
+  id: string,
+  uid: string,
+  expected: ConnectionVersionExpected,
+  evidence: ConnectionHealthEvidence,
+): Promise<McpConnectionRow | null> {
+  const set: {
+    updatedAt: Date;
+    healthState: ConnectionHealthEvidenceState;
+    lastCheckedAt: Date;
+    lastSuccessAt?: Date;
+  } = {
+    updatedAt: evidence.checkedAt,
+    healthState: evidence.state,
+    lastCheckedAt: evidence.checkedAt,
+  };
+  if (evidence.state === "healthy") set.lastSuccessAt = evidence.checkedAt;
+  const rows = await db
+    .update(mcpServers)
+    .set(set)
+    .where(and(
+      eq(mcpServers.id, id),
+      eq(mcpServers.userId, uid),
+      eq(mcpServers.enabled, true),
+      eq(mcpServers.configVersion, expected.configVersion),
+      eq(mcpServers.disconnectGeneration, expected.disconnectGeneration),
+    ))
+    .returning();
+  return rows[0] === undefined ? null : toMcpConnectionRow(rows[0]);
 }
 
 /** Disconnect is a state transition, not a delete: stale generations remain observable. */

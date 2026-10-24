@@ -554,7 +554,7 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp server routes (real postgres)"
       name: "Bad activation",
       agentEnabled: true,
     });
-    expect(eager.statusCode).toBe(400);
+    expect(eager.statusCode).toBe(409);
     const plaintextConfigSecret = await postConnection(uid, {
       providerId: "unsupported-config-secret",
       name: "Secret in config",
