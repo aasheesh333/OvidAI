@@ -37,13 +37,15 @@ import {
 } from "./routes/mcpOauth.js";
 import { registerMcpServerRoutes, type ConnectionHealthAdapter } from "./routes/mcpServers.js";
 import { registerMessageRoutes } from "./routes/messages.js";
-import { registerPreferenceRoutes } from "./routes/preferences.js";
 import { registerModelRoutes } from "./routes/models.js";
 import { registerPlanRoutes } from "./routes/plans.js";
 import { registerSearchRoutes } from "./routes/search.js";
 import { registerAccountHealthRoutes } from "./routes/accountHealth.js";
 import { registerDataControlRoutes } from "./routes/dataControl.js";
-import { registerAccountSettingsRoutes } from "./routes/accountSettings.js";
+import {
+  registerAccountSettingsRoutes,
+  registerPreferenceRoutes,
+} from "./routes/accountSettings.js";
 import { registerMemoryRoutes } from "./routes/memory.js";
 import { registerPluginRoutes } from "./routes/plugins.js";
 import { registerProjectRoutes } from "./routes/projects.js";
@@ -54,6 +56,7 @@ import { registerScheduleRoutes } from "./routes/schedules.js";
 import { registerStudioRoutes } from "./routes/studio.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerSystemResponseRoutes } from "./routes/systemResponses.js";
+import { registerSystemRequestRoutes } from "./routes/systemRequests.js";
 import { registerSharesRoutes } from "./shares/routes.js";
 import type { SharesConfig } from "./shares/routes.js";
 import { registerWorkspaceRoutes } from "./routes/workspace.js";
@@ -459,6 +462,7 @@ export function buildGateway(
       registerMcpOauthRoutes(scope, deps);
       registerPluginRoutes(scope, deps);
       registerSystemResponseRoutes(scope, deps);
+      registerSystemRequestRoutes(scope, deps);
 
       // P4 Task 11: schedule CRUD + runs feed + FCM device registration.
       registerScheduleRoutes(scope, deps);

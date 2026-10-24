@@ -1,5 +1,15 @@
 import type { FastifyInstance } from "fastify";
-import { accountSettings, byokKeysRepo, customPresets, sessions, sessionState, users } from "@ovid/db";
+import { z } from "zod";
+import {
+  accountSettings,
+  byokKeysRepo,
+  createResponseWaitStore,
+  customPresets,
+  sessions,
+  sessionState,
+  userPreferences,
+  users,
+} from "@ovid/db";
 import {
   accountSettingsPatchSchema,
   CLOUD_PRESET_IDS,
@@ -10,6 +20,7 @@ import {
   sessionPresetBodySchema,
   type AccountSettings,
   type CustomPreset,
+  type UserPreferences,
 } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
 import { badRequest, isUuid, notFound, sendError, zodBadRequest } from "./http.js";
@@ -43,6 +54,45 @@ async function modelCatalog(deps: GatewayDeps): Promise<Set<string> | null> {
 
 function isBuiltInPreset(id: string): boolean {
   return (CLOUD_PRESET_IDS as readonly string[]).includes(id);
+}
+
+const preferencePatchSchema = z
+  .object({
+    memoryEnabled: z.boolean().optional(),
+    shareSessionMemory: z.boolean().optional(),
+    showReasoning: z.boolean().optional(),
+    responseWaitSeconds: z.number().int().min(15).max(600).optional(),
+  })
+  .strict()
+  .refine((body) => Object.values(body).some((value) => value !== undefined), {
+    message: "At least one preference is required.",
+  });
+
+/** Compose the JSON preferences and migration 0033's independent response-wait scalar. */
+export function registerPreferenceRoutes(app: FastifyInstance, deps: GatewayDeps): void {
+  const responseWait = createResponseWaitStore(deps.db);
+  const read = async (uid: string): Promise<UserPreferences & { responseWaitSeconds: number }> => {
+    const [preferences, responseWaitSeconds] = await Promise.all([
+      userPreferences.get(deps.db, uid),
+      responseWait.get(uid),
+    ]);
+    return { ...preferences, responseWaitSeconds };
+  };
+
+  app.get("/preferences", async (request) => read(request.principal.uid));
+
+  app.patch("/preferences", async (request, reply) => {
+    const parsed = preferencePatchSchema.safeParse(request.body ?? {});
+    if (!parsed.success) return zodBadRequest(reply, parsed.error);
+    const { uid, email } = request.principal;
+    const { responseWaitSeconds, ...jsonPatch } = parsed.data;
+    await users.ensure(deps.db, uid, email);
+    await userPreferences.patch(deps.db, uid, jsonPatch);
+    if (responseWaitSeconds !== undefined) {
+      await responseWait.set(uid, responseWaitSeconds);
+    }
+    return read(uid);
+  });
 }
 
 export function registerAccountSettingsRoutes(app: FastifyInstance, deps: GatewayDeps): void {

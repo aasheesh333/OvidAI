@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { accountSettings, byokKeysRepo, sessionState, users, userPreferences, type Db } from "@ovid/db";
+import { accountSettings, byokKeysRepo, createResponseWaitStore, sessionState, users, userPreferences, type Db } from "@ovid/db";
 import { buildGateway, type GatewayDeps } from "../app.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
 import {
@@ -151,6 +151,93 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 4 account settings routes (real postgr
       payload: { notificationsEnabled: "off" },
     });
     expect(res.statusCode).toBe(400);
+  });
+
+  it("preferences compose responseWaitSeconds with a 45 default, strict 15..600 patches, and durable reads", async () => {
+    const app = makeApp();
+    const uid = testUid("response-wait");
+    const get = await app.inject({
+      method: "GET",
+      url: "/cloud/v1/preferences",
+      headers: authHeaders(uid),
+    });
+    expect(get.statusCode).toBe(200);
+    expect(get.json()).toEqual({
+      memoryEnabled: true,
+      shareSessionMemory: false,
+      showReasoning: true,
+      responseWaitSeconds: 45,
+    });
+
+    const mixed = await app.inject({
+      method: "PATCH",
+      url: "/cloud/v1/preferences",
+      headers: authHeaders(uid),
+      payload: { memoryEnabled: false, showReasoning: false, responseWaitSeconds: 15 },
+    });
+    expect(mixed.statusCode).toBe(200);
+    expect(mixed.json()).toEqual({
+      memoryEnabled: false,
+      shareSessionMemory: false,
+      showReasoning: false,
+      responseWaitSeconds: 15,
+    });
+
+    for (const seconds of [45, 120, 600]) {
+      const patch = await app.inject({
+        method: "PATCH",
+        url: "/cloud/v1/preferences",
+        headers: authHeaders(uid),
+        payload: { responseWaitSeconds: seconds },
+      });
+      expect(patch.statusCode).toBe(200);
+      expect(patch.json()).toEqual({
+        memoryEnabled: false,
+        shareSessionMemory: false,
+        showReasoning: false,
+        responseWaitSeconds: seconds,
+      });
+    }
+
+    for (const payload of [
+      { responseWaitSeconds: 14 },
+      { responseWaitSeconds: 601 },
+      { responseWaitSeconds: 15.5 },
+      { responseWaitSeconds: "45" },
+      { responseWaitSeconds: null },
+      { responseWaitSeconds: 45, unknownField: true },
+      {},
+    ]) {
+      const rejected = await app.inject({
+        method: "PATCH",
+        url: "/cloud/v1/preferences",
+        headers: authHeaders(uid),
+        payload,
+      });
+      expect(rejected.statusCode, JSON.stringify(payload)).toBe(400);
+    }
+    expect(await createResponseWaitStore(db).get(uid)).toBe(600);
+    expect(await userPreferences.get(db, uid)).toEqual({
+      memoryEnabled: false,
+      shareSessionMemory: false,
+      showReasoning: false,
+    });
+
+    // A newly composed gateway reads the same durable scalar; no in-memory
+    // timeout or cancellation timer owns this preference.
+    const restarted = makeApp();
+    const afterRestart = await restarted.inject({
+      method: "GET",
+      url: "/cloud/v1/preferences",
+      headers: authHeaders(uid),
+    });
+    expect(afterRestart.statusCode).toBe(200);
+    expect(afterRestart.json()).toEqual({
+      memoryEnabled: false,
+      shareSessionMemory: false,
+      showReasoning: false,
+      responseWaitSeconds: 600,
+    });
   });
 
   // -- /presets ----------------------------------------------------------------
