@@ -49,18 +49,38 @@ export interface EgressConfig {
 // rebound/resolved address slips past the TOCTOU-prone guard. CGNAT and the
 // v6 special-purpose ranges were added for P6 final-review parity (Finding 2).
 export const DEFAULT_BLOCKED_V4: readonly string[] = [
+  "0.0.0.0/8",
   "10.0.0.0/8",
   "100.64.0.0/10", // CGNAT (app guard: 100.64/10)
   "127.0.0.0/8",
   "169.254.0.0/16",
   "172.16.0.0/12",
+  "192.0.0.0/24",
   "192.168.0.0/16",
+  "198.18.0.0/15",
+  "224.0.0.0/4",
+  "240.0.0.0/4", // reserved, including the limited-broadcast address
 ];
 
-// v6 parity with url.ts: loopback, link-local, ULA, site-local, multicast,
-// 6to4, and NAT64.
+// v6 parity with the shared classifier: unspecified, loopback, every
+// nonpublic IPv4-compatible form, mapped v4, link-local, ULA, site-local,
+// multicast, 6to4, and NAT64. Compatible forms use precise embedded-v4
+// prefixes; a broad ::/96 would also block public addresses such as ::8.8.8.8.
 export const DEFAULT_BLOCKED_V6: readonly string[] = [
+  "::/128",
   "::1/128",
+  "::/104",
+  "::a00:0/104",
+  "::6440:0/106",
+  "::7f00:0/104",
+  "::a9fe:0/112",
+  "::ac10:0/108",
+  "::c000:0/120",
+  "::c0a8:0/112",
+  "::c612:0/111",
+  "::e000:0/100",
+  "::f000:0/100",
+  "::ffff:0:0/96",
   "fe80::/10",
   "fc00::/7",
   "fec0::/10",
@@ -253,6 +273,10 @@ export function renderNftRuleset(cfg: EgressConfig): string {
     "\tset blocked_v6 {",
     "\t\ttype ipv6_addr",
     "\t\tflags interval",
+    // ::/104 covers compatible 0/8 and therefore contains the separately
+    // pinned ::/128 and ::1/128. auto-merge preserves the same deny set while
+    // allowing nft to coalesce those precise overlapping intervals.
+    "\t\tauto-merge",
     `\t\telements = { ${cfg.blockedV6.join(", ")} }`,
     "\t}",
     "",

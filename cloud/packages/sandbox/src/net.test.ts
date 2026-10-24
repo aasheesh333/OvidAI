@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isNonPublicAddress, parseAddressBytes } from "@ovid/shared";
 import { beforeAll, afterAll, describe, expect, it } from "vitest";
 import {
   DEFAULT_BLOCKED_V4,
@@ -31,6 +32,71 @@ const BROWSER: EgressConfig = {
   browserUidRange: [230_000, 230_099],
   browserAllowedV4: ["10.1.2.3/32", "172.20.0.0/16"],
 };
+
+// Hand-derived from isNonPublicAddress. Keep these literals independent of
+// the exported defaults so deleting a default cannot delete its expectation.
+const REQUIRED_BLOCKED_V4 = [
+  "0.0.0.0/8",
+  "10.0.0.0/8",
+  "100.64.0.0/10",
+  "127.0.0.0/8",
+  "169.254.0.0/16",
+  "172.16.0.0/12",
+  "192.0.0.0/24",
+  "192.168.0.0/16",
+  "198.18.0.0/15",
+  "224.0.0.0/4",
+  "240.0.0.0/4",
+] as const;
+
+const REQUIRED_BLOCKED_V6 = [
+  "::/128",
+  "::1/128",
+  // IPv4-compatible forms need the same precise embedded-v4 classification;
+  // ::/104 is deliberately NOT the over-broad ::/96.
+  "::/104",
+  "::a00:0/104", // ::10.0.0.0/8 embedded
+  "::6440:0/106", // ::100.64.0.0/10 embedded
+  "::7f00:0/104", // ::127.0.0.0/8 embedded
+  "::a9fe:0/112", // ::169.254.0.0/16 embedded
+  "::ac10:0/108", // ::172.16.0.0/12 embedded
+  "::c000:0/120", // ::192.0.0.0/24 embedded
+  "::c0a8:0/112", // ::192.168.0.0/16 embedded
+  "::c612:0/111", // ::198.18.0.0/15 embedded
+  "::e000:0/100", // ::224.0.0.0/4 embedded
+  "::f000:0/100", // ::240.0.0.0/4 embedded
+  "::ffff:0:0/96",
+  "fe80::/10",
+  "fc00::/7",
+  "fec0::/10",
+  "ff00::/8",
+  "2002::/16",
+  "64:ff9b::/96",
+] as const;
+
+function cidrContains(address: string, cidr: string): boolean {
+  const slash = cidr.lastIndexOf("/");
+  const network = cidr.slice(0, slash);
+  const prefix = Number(cidr.slice(slash + 1));
+  const addressBytes = parseAddressBytes(address);
+  const networkBytes = parseAddressBytes(network);
+  if (addressBytes === null || networkBytes === null || addressBytes.length !== networkBytes.length) {
+    throw new Error(`bad parity fixture: ${address} vs ${cidr}`);
+  }
+  for (let bit = 0; bit < prefix; bit++) {
+    const mask = 1 << (7 - (bit % 8));
+    const index = Math.floor(bit / 8);
+    if ((addressBytes[index] & mask) !== (networkBytes[index] & mask)) return false;
+  }
+  return true;
+}
+
+function coveredByDefaults(address: string): boolean {
+  const bytes = parseAddressBytes(address);
+  if (bytes === null) throw new Error(`bad parity address: ${address}`);
+  const ranges = bytes.length === 4 ? DEFAULT_BLOCKED_V4 : DEFAULT_BLOCKED_V6;
+  return ranges.some((cidr) => cidrContains(address, cidr));
+}
 
 /** Every line of the ruleset that ends a rule with `drop` must be uid-keyed. */
 function dropLines(ruleset: string): string[] {
@@ -97,27 +163,71 @@ describe("renderNftRuleset — sandbox range", () => {
     expect(rs).toContain("set blocked_v6");
   });
 
-  it("defaults carry CGNAT and the FULL app-guard v6 set (P6 Finding 2 parity)", () => {
-    // Literal pins, not a loop over the exported arrays: dropping a range
-    // from DEFAULT_BLOCKED_* must fail here (the parametric test above would
-    // still pass). The list must never be narrower than the browser app
-    // guard in cloud/packages/browser/src/url.ts `isNonPublicAddress`.
+  it("renders the complete nonpublic backstop without ::/96", () => {
+    expect(DEFAULT_BLOCKED_V4).toEqual(REQUIRED_BLOCKED_V4);
+    expect(DEFAULT_BLOCKED_V6).toEqual(REQUIRED_BLOCKED_V6);
+    expect(DEFAULT_BLOCKED_V6).not.toContain("::/96");
     const rs = renderNftRuleset(BASE);
-    expect(DEFAULT_BLOCKED_V4).toContain("100.64.0.0/10");
-    expect(rs).toContain("100.64.0.0/10");
-    const v6 = [
-      "::1/128",
-      "fe80::/10",
-      "fc00::/7",
-      "fec0::/10",
-      "ff00::/8",
-      "2002::/16",
-      "64:ff9b::/96",
-    ];
-    for (const cidr of v6) {
-      expect(DEFAULT_BLOCKED_V6, `DEFAULT_BLOCKED_V6 missing ${cidr}`).toContain(cidr);
+    for (const cidr of [...REQUIRED_BLOCKED_V4, ...REQUIRED_BLOCKED_V6]) {
       expect(rs, `rendered ruleset missing ${cidr}`).toContain(cidr);
     }
+  });
+
+  it.each([
+    "0.0.0.5",
+    "10.0.0.1",
+    "100.100.100.200",
+    "127.0.0.1",
+    "169.254.169.254",
+    "172.31.255.255",
+    "192.0.0.9",
+    "192.168.1.1",
+    "198.19.255.255",
+    "224.0.0.1",
+    "255.255.255.255",
+    "::",
+    "::1",
+    "::0.0.0.2",
+    "::ffff:127.0.0.1",
+    "::ffff:10.0.0.1",
+    "::127.0.0.1",
+    "::10.0.0.1",
+    "::100.100.100.200",
+    "::169.254.169.254",
+    "::172.16.0.1",
+    "::192.0.0.9",
+    "::192.168.1.1",
+    "::198.18.0.1",
+    "::224.0.0.1",
+    "::255.255.255.255",
+    "fc00::1",
+    "fdff::1",
+    "fe80::1",
+    "fec0::1",
+    "ff02::1",
+    "64:ff9b::a00:1",
+    "2002:7f00:1::1",
+  ])("classifier/render parity covers nonpublic %s", (address) => {
+    expect(isNonPublicAddress(address), `shared classifier fixture ${address}`).toBe(true);
+    expect(coveredByDefaults(address), `nft defaults must cover ${address}`).toBe(true);
+  });
+
+  it.each([
+    "8.8.8.8",
+    "100.128.0.1",
+    "192.0.1.1",
+    "198.20.0.1",
+    "223.255.255.255",
+    "2606:4700::1111",
+    "2001:4860:4860::8888",
+    // Public IPv4-compatible addresses are the counterexamples that forbid
+    // the broad ::/96 block. Mapped/6to4/NAT64 are intentional supersets.
+    "::1.2.3.4",
+    "::8.8.8.8",
+    "::93.184.216.34",
+  ])("classifier/render parity leaves public %s outside the default sets", (address) => {
+    expect(isNonPublicAddress(address), `shared classifier fixture ${address}`).toBe(false);
+    expect(coveredByDefaults(address), `nft defaults must not cover ${address}`).toBe(false);
   });
 
   it("output chain: filter hook, priority 0, policy accept", () => {
@@ -398,6 +508,25 @@ describe("renderCli — env contract (gap G4: rules key on the CONFIGURED range)
     }
     expect(rs).not.toContain("200000");
     expect(rs).not.toContain("209999");
+  });
+
+  it.each([
+    { name: "production", base: undefined, key: "200000-209999" },
+    { name: "staging", base: "220000", key: "220000-229999" },
+  ])("renders the full nonpublic superset for $name UID $key", ({ base, key }) => {
+    const rs = renderCli({
+      OVID_PUBLIC_IP: "203.0.113.7",
+      ...(base === undefined ? {} : { OVID_SANDBOX_UID_BASE: base }),
+    });
+    for (const cidr of [...REQUIRED_BLOCKED_V4, ...REQUIRED_BLOCKED_V6]) {
+      expect(rs, `${key} rendered ruleset missing ${cidr}`).toContain(cidr);
+    }
+    for (const line of dropLines(rs)) expect(line).toContain(`skuid ${key}`);
+    const accepts = (rs.match(/^.*accept$/gm) ?? []).map((line) => line.trim());
+    expect(accepts, "the range update must not open new ports").toEqual([
+      `meta skuid ${key} tcp dport { 53, 80, 443 } counter accept`,
+      `meta skuid ${key} udp dport { 53 } counter accept`,
+    ]);
   });
 
   it("explicit OVID_SANDBOX_UID_MAX narrows the key; out-of-width values throw", () => {

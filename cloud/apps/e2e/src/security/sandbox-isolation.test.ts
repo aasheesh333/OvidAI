@@ -11,7 +11,7 @@
  * On the release/staging box:
  *
  *     cloud/scripts/staging.sh up          # loads the staging nft ruleset
- *     cd cloud && OVID_ROOTFS=/opt/ovid-rootfs/current \
+ *     cd cloud && OVID_SANDBOX_HOST_TESTS=1 OVID_ROOTFS=/opt/ovid-rootfs/current \
  *       pnpm --filter @ovid/e2e exec vitest run src/security/sandbox-isolation.test.ts
  *
  * `OVID_ROOTFS` must point at a CURRENT extracted rootfs (the r2 extract on
@@ -58,6 +58,7 @@ import {
   chownSync,
   existsSync,
   lchownSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -125,22 +126,34 @@ const STAGING_NFT_TABLE = process.env.OVID_STAGING_NFT_TABLE ?? "sandbox_egress_
 const OWN_PUBLIC_IP = process.env.OVID_PUBLIC_IP ?? "148.113.44.36";
 const LIVE_GATEWAY_PORT = process.env.OVID_PUBLIC_GATEWAY_PORT ?? "8082";
 
-/** Non-egress groups do not need the nft staging table. */
-const baseGate: CapabilityGate = capabilityGate({
-  bwrapPath: BWRAP_PATH,
-  cgroupRoot: CG_ROOT,
-  rootfsPath: ROOTFS_PATH,
-  requireNft: false,
-});
+const HOST_OPT_IN: CapabilityGate = {
+  ok: process.env.OVID_SANDBOX_HOST_TESTS === "1",
+  reasons: process.env.OVID_SANDBOX_HOST_TESTS === "1"
+    ? []
+    : ["host proof not run: set OVID_SANDBOX_HOST_TESTS=1 explicitly"],
+};
+
+/** Non-egress groups do not need the nft staging table. No capability probe
+ * runs before the explicit host opt-in. */
+const baseGate: CapabilityGate = HOST_OPT_IN.ok
+  ? capabilityGate({
+      bwrapPath: BWRAP_PATH,
+      cgroupRoot: CG_ROOT,
+      rootfsPath: ROOTFS_PATH,
+      requireNft: false,
+    })
+  : HOST_OPT_IN;
 
 /** The egress group additionally requires the staging nft ruleset. */
-const egressGate: CapabilityGate = capabilityGate({
-  bwrapPath: BWRAP_PATH,
-  cgroupRoot: CG_ROOT,
-  rootfsPath: ROOTFS_PATH,
-  nftTable: STAGING_NFT_TABLE,
-  requireNft: true,
-});
+const egressGate: CapabilityGate = HOST_OPT_IN.ok
+  ? capabilityGate({
+      bwrapPath: BWRAP_PATH,
+      cgroupRoot: CG_ROOT,
+      rootfsPath: ROOTFS_PATH,
+      nftTable: STAGING_NFT_TABLE,
+      requireNft: true,
+    })
+  : HOST_OPT_IN;
 
 function title(label: string, gate: CapabilityGate): string {
   return gate.ok ? label : `${label} [SKIPPED]`;
@@ -343,6 +356,44 @@ async function curlInJail(handle: SandboxHandle, url: string) {
     command: `curl -m 5 -s -o /dev/null -w '%{http_code}' ${url}`,
     timeoutMs: 15_000,
   });
+}
+
+function shSingle(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+// Writes an outcome even when the connection is refused/times out, so a
+// postinstall that never ran cannot be mistaken for a successful denial.
+const RAW_SOCKET_PY = [
+  "import json, socket, sys",
+  "address, port, output = sys.argv[1], int(sys.argv[2]), sys.argv[3]",
+  "try:",
+  "    s = socket.create_connection((address, port), timeout=5)",
+  "    s.close()",
+  "    outcome = {'rc': 0, 'error': 'connected'}",
+  "except socket.timeout:",
+  "    outcome = {'rc': 28, 'error': 'ETIMEDOUT'}",
+  "except OSError as e:",
+  "    outcome = {'rc': 1, 'error': f'{type(e).__name__}: {e}'}",
+  "with open(output, 'w') as f:",
+  "    json.dump(outcome, f)",
+].join("\n");
+
+async function rawSocketInJail(
+  handle: SandboxHandle,
+  address: string,
+  port: number,
+  outputName: string,
+): Promise<{ rc: number; error: string }> {
+  const result = await handle.exec({
+    command: `python3 /workspace/ovid-raw-probe.py ${shSingle(address)} ${port} ${shSingle(`/workspace/${outputName}`)}`,
+    timeoutMs: 20_000,
+  });
+  expect(result.exitCode, `raw socket probe failed: ${result.stderr}`).toBe(0);
+  return JSON.parse(readFileSync(join(handle.workspaceDir, outputName), "utf8")) as {
+    rc: number;
+    error: string;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -863,6 +914,107 @@ describe("security — sandbox isolation corpus (host-gated)", () => {
         ruleCounter(nftTableText(), blockedV6Predicate),
         "[::1] must increment the uid-keyed blocked_v6 counter",
       ).toBeGreaterThan(blockedV6Start);
+
+      // Raw sockets cannot bypass the HTTP-client protections. Every denied
+      // attempt must also move the appropriate uid-keyed counter.
+      const rawProbePath = join(h.workspaceDir, "ovid-raw-probe.py");
+      writeFileSync(rawProbePath, RAW_SOCKET_PY, { mode: 0o644 });
+      chownSync(rawProbePath, UID, UID);
+      const rawCases = [
+        {
+          name: "mapped loopback",
+          address: "::ffff:127.0.0.1",
+          port: 16_379,
+          output: "raw-mapped-loopback.json",
+          own: false,
+        },
+        {
+          name: "own host",
+          address: OWN_PUBLIC_IP,
+          port: Number(LIVE_GATEWAY_PORT),
+          output: "raw-own-host.json",
+          own: true,
+        },
+        {
+          name: "metadata",
+          address: "169.254.169.254",
+          port: 80,
+          output: "raw-metadata.json",
+          own: false,
+        },
+      ];
+      for (const c of rawCases) {
+        const beforeText = nftTableText();
+        const beforeV4 = ruleCounter(beforeText, blockedPredicate);
+        const beforeV6 = ruleCounter(beforeText, blockedV6Predicate);
+        const beforeOwn = ruleCounter(beforeText, ownPredicate);
+        const outcome = await rawSocketInJail(h, c.address, c.port, c.output);
+        expect(outcome.rc, `${c.name} raw socket must time out: ${outcome.error}`).toBe(28);
+        const afterText = nftTableText();
+        if (c.own) {
+          expect(
+            ruleCounter(afterText, ownPredicate),
+            `${c.name} must increment the own-IP deny counter`,
+          ).toBeGreaterThan(beforeOwn);
+        } else {
+          const deniedDelta =
+            ruleCounter(afterText, blockedPredicate) - beforeV4 +
+            ruleCounter(afterText, blockedV6Predicate) - beforeV6;
+          expect(deniedDelta, `${c.name} must increment a blocked-set deny counter`).toBeGreaterThan(0);
+        }
+      }
+
+      // Force lifecycle scripts ON in a dependency-free local package. The
+      // result files are mandatory; ignore-scripts/missing npm is not proof.
+      const postDir = join(h.workspaceDir, "ovid-postinstall-proof");
+      mkdirSync(postDir, { recursive: true });
+      chownSync(postDir, UID, UID);
+      const postHostCommand =
+        `python3 raw_probe.py ${shSingle(OWN_PUBLIC_IP)} ${Number(LIVE_GATEWAY_PORT)} post-host.json`;
+      const postMetadataCommand = "python3 raw_probe.py 169.254.169.254 80 post-metadata.json";
+      writeFileSync(join(postDir, "raw_probe.py"), RAW_SOCKET_PY, { mode: 0o644 });
+      writeFileSync(
+        join(postDir, "package.json"),
+        JSON.stringify({
+          name: "ovid-staging-postinstall-proof",
+          version: "1.0.0",
+          private: true,
+          scripts: { postinstall: `${postHostCommand} && ${postMetadataCommand}` },
+        }),
+        { mode: 0o644 },
+      );
+      chownSync(join(postDir, "raw_probe.py"), UID, UID);
+      chownSync(join(postDir, "package.json"), UID, UID);
+      const postBeforeText = nftTableText();
+      const postBeforeOwn = ruleCounter(postBeforeText, ownPredicate);
+      const postBeforeV4 = ruleCounter(postBeforeText, blockedPredicate);
+      const postBeforeV6 = ruleCounter(postBeforeText, blockedV6Predicate);
+      const postinstall = await h.exec({
+        command:
+          "cd /workspace/ovid-postinstall-proof && " +
+          "npm install --ignore-scripts=false --offline --no-audit --no-fund --package-lock=false",
+        timeoutMs: 60_000,
+      });
+      expect(postinstall.exitCode, `forced-on postinstall failed: ${postinstall.stderr}`).toBe(0);
+      const postHost = JSON.parse(readFileSync(join(postDir, "post-host.json"), "utf8")) as {
+        rc: number;
+        error: string;
+      };
+      const postMetadata = JSON.parse(readFileSync(join(postDir, "post-metadata.json"), "utf8")) as {
+        rc: number;
+        error: string;
+      };
+      expect(postHost.rc, `postinstall own-host bypass: ${postHost.error}`).toBe(28);
+      expect(postMetadata.rc, `postinstall metadata bypass: ${postMetadata.error}`).toBe(28);
+      const postAfterText = nftTableText();
+      expect(
+        ruleCounter(postAfterText, ownPredicate),
+        "postinstall own-host attempt must increment the own-IP counter",
+      ).toBeGreaterThan(postBeforeOwn);
+      const postDeniedDelta =
+        ruleCounter(postAfterText, blockedPredicate) - postBeforeV4 +
+        ruleCounter(postAfterText, blockedV6Predicate) - postBeforeV6;
+      expect(postDeniedDelta, "postinstall metadata attempt must increment a blocked-set counter").toBeGreaterThan(0);
 
       // Control: allowed egress still works (the filter is not a blanket drop).
       const allowed = await h.exec({
