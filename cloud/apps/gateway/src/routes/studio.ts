@@ -1,6 +1,7 @@
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { mcpServers, sessions, studioRepos } from "@ovid/db";
+import { assertSafeRelPath, KeyLayoutError } from "@ovid/storage";
 import type { GatewayDeps } from "../app.js";
 import {
   GithubError,
@@ -16,6 +17,7 @@ import {
 } from "../studioGithub.js";
 import { StudioGitRefusal, type StudioGitErrorCode } from "../studioGit.js";
 import {
+  badRequest,
   isUuid,
   notFound,
   parsePageLimit,
@@ -68,6 +70,25 @@ const branchBody = z
     branch: z.string().trim().min(1).max(255),
   })
   .strict();
+
+const preflightBody = z.object({}).strict();
+const emptyQuery = z.object({}).strict();
+const diffQuery = z.object({
+  staged: z.enum(["true", "false"]).optional(),
+  path: z.string().trim().min(1).max(4_096).optional(),
+}).strict();
+const logsQuery = z.object({ limit: z.string().trim().max(16).optional() }).strict();
+const searchQuery = z.object({
+  q: z.string().trim().min(1).max(512),
+  path: z.string().trim().min(1).max(4_096).optional(),
+  limit: z.string().trim().max(16).optional(),
+}).strict();
+
+const DIFF_MAX_BYTES = 256 * 1024;
+const DEFAULT_LOG_LIMIT = 20;
+const MAX_LOG_LIMIT = 50;
+const DEFAULT_SEARCH_LIMIT = 50;
+const MAX_SEARCH_LIMIT = 100;
 
 /** The GitHub credential, as the user's curated `github` integration holds it. */
 type GithubConnection =
@@ -208,6 +229,7 @@ const REFUSAL_MAP: Record<StudioGitErrorCode, { status: number; code: string }> 
   sync_failed: { status: 502, code: "sync_failed" },
   stash_failed: { status: 409, code: "stash_failed" },
   switch_failed: { status: 409, code: "switch_failed" },
+  search_failed: { status: 500, code: "internal" },
   token_unavailable: { status: 409, code: "github_not_connected" },
   credential_leak: { status: 500, code: "internal" },
 };
@@ -228,6 +250,84 @@ function gitUnavailable(reply: FastifyReply): FastifyReply {
     "studio_git_unavailable",
     "The git service is temporarily unavailable; please retry shortly.",
   );
+}
+
+/** One ownership + server-binding fence for every canonical Studio operation. */
+async function requireBoundGitRepo(
+  deps: GatewayDeps,
+  uid: string,
+  sessionId: string,
+  reply: FastifyReply,
+): Promise<{ userId: string; sessionId: string; repoDir: string } | null> {
+  if (!isUuid(sessionId)) {
+    notFound(reply);
+    return null;
+  }
+  const session = await sessions.get(deps.db, sessionId, uid);
+  if (session === null) {
+    notFound(reply);
+    return null;
+  }
+  const binding = await studioRepos.get(deps.db, uid, sessionId);
+  if (binding === null) {
+    sendError(reply, 409, "no_repo", "Clone a repository into this session first.");
+    return null;
+  }
+  return { userId: uid, sessionId, repoDir: binding.repoDir };
+}
+
+function boundedLimit(
+  reply: FastifyReply,
+  raw: string | undefined,
+  fallback: number,
+  maximum: number,
+): number | null {
+  if (raw === undefined) return fallback;
+  if (!/^\d+$/.test(raw)) {
+    badRequest(reply, "limit must be a positive integer.");
+    return null;
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1) {
+    badRequest(reply, "limit must be a positive integer.");
+    return null;
+  }
+  return Math.min(value, maximum);
+}
+
+/** Normalize a relative path and reject .git/option-looking escapes locally. */
+function safeStudioPath(reply: FastifyReply, raw: string): string | null {
+  try {
+    const path = assertSafeRelPath(raw);
+    if (path.startsWith("-") || path.split("/").includes(".git")) {
+      badRequest(reply, "That Studio path is not allowed.");
+      return null;
+    }
+    return path;
+  } catch (err) {
+    if (err instanceof KeyLayoutError) {
+      badRequest(reply, "That Studio path is not allowed.");
+      return null;
+    }
+    throw err;
+  }
+}
+
+function relayGitOperationError(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  err: unknown,
+  operation: string,
+): FastifyReply {
+  const sessionId = (request.params as { id: string }).id;
+  if (err instanceof StudioGitRefusal) {
+    if (err.code === "credential_leak") {
+      request.log.error({ sessionId }, "studio git reported a credential leak");
+    }
+    return relayRefusal(reply, err);
+  }
+  request.log.error({ err, sessionId }, `studio git ${operation} transport failed`);
+  return gitUnavailable(reply);
 }
 
 export function registerStudioRoutes(app: FastifyInstance, deps: GatewayDeps): void {
@@ -519,6 +619,123 @@ export function registerStudioRoutes(app: FastifyInstance, deps: GatewayDeps): v
     }
 
     return reply.send(result);
+  });
+
+  // -- POST /studio/sessions/:id/git/preflight ------------------------------
+  // Fetch-only inspection. This deliberately never calls sync or changes the
+  // server-side branch binding; sync remains the sole fast-forward operation.
+  app.post("/studio/sessions/:id/git/preflight", async (request, reply) => {
+    noStore(reply);
+    const { id: sessionId } = request.params as { id: string };
+    const ref = await requireBoundGitRepo(deps, request.principal.uid, sessionId, reply);
+    if (ref === null) return reply;
+    if (!emptyQuery.safeParse(request.query).success) {
+      return badRequest(reply, "Invalid Studio preflight query.");
+    }
+    if (request.body !== undefined && !preflightBody.safeParse(request.body).success) {
+      return badRequest(reply, "Invalid Studio preflight body.");
+    }
+    if (!gitOr503(deps, reply)) return reply;
+    try {
+      return reply.send(await deps.studioGit!.inspect(ref));
+    } catch (err) {
+      return relayGitOperationError(request, reply, err, "preflight");
+    }
+  });
+
+  // -- GET /studio/sessions/:id/git/status ---------------------------------
+  app.get("/studio/sessions/:id/git/status", async (request, reply) => {
+    noStore(reply);
+    const { id: sessionId } = request.params as { id: string };
+    const ref = await requireBoundGitRepo(deps, request.principal.uid, sessionId, reply);
+    if (ref === null) return reply;
+    if (!emptyQuery.safeParse(request.query).success) {
+      return badRequest(reply, "Invalid Studio status query.");
+    }
+    if (!gitOr503(deps, reply)) return reply;
+    try {
+      return reply.send(await deps.studioGit!.status(ref));
+    } catch (err) {
+      return relayGitOperationError(request, reply, err, "status");
+    }
+  });
+
+  // -- GET /studio/sessions/:id/git/diff?staged&path ------------------------
+  app.get("/studio/sessions/:id/git/diff", async (request, reply) => {
+    noStore(reply);
+    const { id: sessionId } = request.params as { id: string };
+    const ref = await requireBoundGitRepo(deps, request.principal.uid, sessionId, reply);
+    if (ref === null) return reply;
+    const parsed = diffQuery.safeParse(request.query);
+    if (!parsed.success) return badRequest(reply, "Invalid Studio diff query.");
+    let path: string | undefined;
+    if (parsed.data.path !== undefined) {
+      const safePath = safeStudioPath(reply, parsed.data.path);
+      if (safePath === null) return reply;
+      path = safePath;
+    }
+    if (!gitOr503(deps, reply)) return reply;
+    try {
+      return reply.send(await deps.studioGit!.diff({
+        ...ref,
+        ...(parsed.data.staged !== undefined ? { staged: parsed.data.staged === "true" } : {}),
+        ...(path !== undefined ? { path } : {}),
+        maxBytes: DIFF_MAX_BYTES,
+      }));
+    } catch (err) {
+      return relayGitOperationError(request, reply, err, "diff");
+    }
+  });
+
+  // -- GET /studio/sessions/:id/git/logs?limit ------------------------------
+  app.get("/studio/sessions/:id/git/logs", async (request, reply) => {
+    noStore(reply);
+    const { id: sessionId } = request.params as { id: string };
+    const ref = await requireBoundGitRepo(deps, request.principal.uid, sessionId, reply);
+    if (ref === null) return reply;
+    const parsed = logsQuery.safeParse(request.query);
+    if (!parsed.success) return badRequest(reply, "Invalid Studio logs query.");
+    const limit = boundedLimit(reply, parsed.data.limit, DEFAULT_LOG_LIMIT, MAX_LOG_LIMIT);
+    if (limit === null) return reply;
+    if (!gitOr503(deps, reply)) return reply;
+    try {
+      return reply.send(await deps.studioGit!.logs({ ...ref, limit }));
+    } catch (err) {
+      return relayGitOperationError(request, reply, err, "logs");
+    }
+  });
+
+  // -- GET /studio/sessions/:id/files/search?q&path&limit -------------------
+  app.get("/studio/sessions/:id/files/search", async (request, reply) => {
+    noStore(reply);
+    const { id: sessionId } = request.params as { id: string };
+    const ref = await requireBoundGitRepo(deps, request.principal.uid, sessionId, reply);
+    if (ref === null) return reply;
+    const parsed = searchQuery.safeParse(request.query);
+    if (!parsed.success) return badRequest(reply, "Invalid Studio file search query.");
+    let path: string | undefined;
+    if (parsed.data.path !== undefined) {
+      const safePath = safeStudioPath(reply, parsed.data.path);
+      if (safePath === null) return reply;
+      path = safePath;
+    }
+    const limit = boundedLimit(reply, parsed.data.limit, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT);
+    if (limit === null) return reply;
+    const repoDir = path === undefined
+      ? ref.repoDir
+      : ref.repoDir === "." ? path : `${ref.repoDir}/${path}`;
+    if (!gitOr503(deps, reply)) return reply;
+    try {
+      return reply.send(await deps.studioGit!.search({
+        userId: ref.userId,
+        sessionId: ref.sessionId,
+        repoDir,
+        query: parsed.data.q,
+        limit,
+      }));
+    } catch (err) {
+      return relayGitOperationError(request, reply, err, "search");
+    }
   });
 
   // -- POST /studio/sessions/:id/git/sync ----------------------------------

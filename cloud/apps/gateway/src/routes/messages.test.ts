@@ -1,6 +1,6 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { accountSettings, attachments, byokKeysRepo, messages, newId, runs, runUsage, type Db } from "@ovid/db";
+import { accountSettings, attachments, byokKeysRepo, messages, newId, runs, runUsage, sessionState, sessions, users, type Db } from "@ovid/db";
 import { AGENT_RUN_JOB_NAME } from "@ovid/queue";
 import {
   messageDtoSchema,
@@ -1116,6 +1116,22 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
     expect(handle.adds).toHaveLength(1);
   });
 
+  it("accepts Studio mode without a blanket repository-binding rejection", async () => {
+    const handle = makeApp();
+    const uid = testUid("msg-studio-mode");
+    const sid = await createSession(handle, uid);
+
+    const res = await sendMessage(handle, uid, sid, {
+      content: "Continue in Studio",
+      mode: "studio",
+    });
+
+    expect(res.statusCode).toBe(202);
+    expect(res.json().error?.code).not.toBe("no_repo");
+    expect(handle.adds).toHaveLength(1);
+    expect(handle.adds[0]!.data).toMatchObject({ mode: "studio", sessionId: sid, userId: uid });
+  });
+
   it("BYOK sends are not held to the Ovid token allowance", async () => {
     // The cap measures what Ovid's own key spends. A BYOK send costs Ovid
     // nothing, so an exhausted plan allowance must not block it (the same
@@ -1136,5 +1152,67 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
     expect(res.statusCode).toBe(202);
     expect(handle.mint.calls).toEqual([]);
     expect(handle.adds[0]!.data).toMatchObject({ byokKeyId: key.id });
+  });
+});
+
+describe("Studio mode message route (repository boundary)", () => {
+  it("POST /sessions/:id/messages accepts mode studio without requiring a repo binding", async () => {
+    const uid = "studio-user";
+    const sid = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
+    const messageId = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5c";
+    const runId = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5d";
+    const keyId = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5e";
+    vi.spyOn(sessions, "get").mockResolvedValue({ id: sid, userId: uid } as never);
+    vi.spyOn(users, "ensure").mockResolvedValue({ uid, tier: "pro" } as never);
+    vi.spyOn(accountSettings, "get").mockResolvedValue({
+      byokDefault: { keyId, model: "gpt-4.1-mini" },
+    } as never);
+    vi.spyOn(byokKeysRepo, "get").mockResolvedValue({ id: keyId } as never);
+    vi.spyOn(messages, "append").mockResolvedValue({
+      id: messageId,
+      sessionId: sid,
+      role: "user",
+      content: "Continue in Studio",
+      createdAt: new Date(),
+    } as never);
+    vi.spyOn(attachments, "linkToMessage").mockResolvedValue(undefined as never);
+    vi.spyOn(runs, "create").mockResolvedValue({ id: runId, sessionId: sid } as never);
+    vi.spyOn(sessionState, "get").mockResolvedValue({
+      modelPin: null,
+      planMode: false,
+      pendingPlanMode: null,
+    } as never);
+    const statePatch = vi.spyOn(sessionState, "patch").mockResolvedValue(undefined as never);
+    const sessionUpdate = vi.spyOn(sessions, "update").mockResolvedValue({ id: sid } as never);
+    vi.spyOn(sessions, "touch").mockResolvedValue(undefined as never);
+
+    const { queues, adds } = stubQueues();
+    const app = buildGateway({
+      system: stubSystemBus(),
+      db: {} as Db,
+      queues,
+      verifier: stubVerifier(),
+      tickets: stubTickets(),
+      keys: stubKeys(),
+      mint: stubMint(),
+      events: noopEvents,
+    });
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: `/cloud/v1/sessions/${sid}/messages`,
+        headers: authHeaders(uid),
+        payload: { content: "Continue in Studio", mode: "studio" },
+      });
+      expect(res.statusCode).toBe(202);
+      expect(res.json()).toEqual({ runId, userMessageId: messageId, status: "queued", model: "auto" });
+      expect(adds).toHaveLength(1);
+      expect(adds[0]!.data).toMatchObject({ mode: "studio", sessionId: sid, userId: uid });
+      expect(statePatch).toHaveBeenCalledWith(expect.anything(), sid, { mode: "studio" });
+      expect(sessionUpdate).toHaveBeenCalledWith(expect.anything(), sid, uid, { mode: "studio" });
+    } finally {
+      await app.close();
+      vi.restoreAllMocks();
+    }
   });
 });

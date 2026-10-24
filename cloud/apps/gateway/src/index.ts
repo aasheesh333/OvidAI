@@ -35,6 +35,7 @@ import { createMintModelCatalog, createMintRedisKeyProvider } from "./keys.js";
 import { createInternalMintProvisioner } from "./internalMint.js";
 import { createTicketStore } from "./tickets.js";
 import { createWorkerClient } from "./workerClient.js";
+import { createStudioGitHttpTransport } from "./studioGitHttp.js";
 import { createRedisPtyBridge } from "./wsPty.js";
 import { createRedisApprovalPublisher, createWsSocketRegistry } from "./ws.js";
 import { createSystemHub } from "./systemChannel.js";
@@ -278,6 +279,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
     baseUrl: cfg.workerInternalUrl,
     token: cfg.internalToken,
   });
+  const studioGit = createStudioGitHttpTransport({
+    baseUrl: cfg.workerInternalUrl,
+    token: cfg.internalToken,
+  });
 
   // P10 Task 2: ONE server-level registry of live WS sockets, used by the
   // SIGTERM/SIGINT drain below to close them with 1001 "server restarting".
@@ -336,6 +341,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
         console.warn("[gateway] rate limit store degraded; request refused");
       },
       worker,
+      studioGit,
       inlineMaxBytes: cfg.fileInlineMaxBytes,
       putMaxBytes: cfg.putMaxBytes,
       presignTtlSeconds: cfg.presignTtlSeconds,

@@ -30,6 +30,7 @@ export type StudioGitErrorCode =
   | "sync_failed"
   | "stash_failed"
   | "switch_failed"
+  | "search_failed"
   | "token_unavailable"
   | "credential_leak";
 
@@ -79,6 +80,38 @@ export interface StudioSwitchResult {
   message: string;
 }
 
+export interface StudioRepoRequest {
+  userId: string;
+  sessionId: string;
+  /** Always read from the server-side session binding, never the client. */
+  repoDir: string;
+}
+
+export interface StudioGitStatus {
+  branch: string;
+  headSha: string;
+  upstream: string | null;
+  dirty: boolean;
+  ahead: number;
+  behind: number;
+  reason: "clean" | "dirty_worktree" | "diverged" | "no_upstream";
+  fetchedAt: string | null;
+}
+
+export interface StudioDiffResult {
+  patch: string;
+  truncated: boolean;
+}
+
+export interface StudioGitLogsResult {
+  items: Array<{ sha: string; subject: string; authoredAt: string }>;
+}
+
+export interface StudioPathSearchResult {
+  items: Array<{ path: string; name: string }>;
+  truncated: boolean;
+}
+
 /**
  * The worker git service, as the gateway calls it. `userId` is the verified
  * principal (the worker resolves that user's own token); `sessionId` is
@@ -108,4 +141,16 @@ export interface StudioGitTransport {
     repoDir: string;
     branch: string;
   }): Promise<StudioSwitchResult>;
+
+  /** Fetch-only preflight; distinct from the mutating sync/fast-forward path. */
+  inspect(req: StudioRepoRequest): Promise<StudioGitStatus>;
+  /** Local status only; never fetches or resolves a PAT. */
+  status(req: StudioRepoRequest): Promise<StudioGitStatus>;
+  diff(req: StudioRepoRequest & {
+    staged?: boolean;
+    path?: string;
+    maxBytes?: number;
+  }): Promise<StudioDiffResult>;
+  logs(req: StudioRepoRequest & { limit?: number }): Promise<StudioGitLogsResult>;
+  search(req: StudioRepoRequest & { query: string; limit?: number }): Promise<StudioPathSearchResult>;
 }

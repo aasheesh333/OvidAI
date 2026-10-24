@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createEnvelopeCrypto } from "@ovid/mcp";
-import { schema, type Db } from "@ovid/db";
+import { schema, sessions, studioRepos, type Db } from "@ovid/db";
 import { buildGateway } from "../app.js";
-import type { StudioGitTransport } from "../studioGit.js";
+import { StudioGitRefusal, type StudioGitTransport } from "../studioGit.js";
 import {
   authHeaders,
   noopEvents,
@@ -55,10 +55,10 @@ function githubRow(sealed: unknown): Record<string, unknown> {
   };
 }
 
-function sessionRow(): Record<string, unknown> {
+function sessionRow(userId = "u1"): Record<string, unknown> {
   return {
     id: SESSION_ID,
-    userId: "u1",
+    userId,
     title: "studio",
     mode: "studio",
     projectId: null,
@@ -74,6 +74,7 @@ function sessionRow(): Record<string, unknown> {
  * A Db stub that answers the four reads the routes make, keyed by drizzle
  * table identity. `.where()` is ignored — each table has at most one row in
  * a test — and the insert path records the binding so it can be read back.
+ * Ownership-specific tests replace the repo functions with UID-aware fakes.
  */
 function fakeDb(state: State): Db {
   const rowsFor = (table: unknown): Array<Record<string, unknown>> => {
@@ -136,6 +137,7 @@ function githubStub(
 
 function stubTransport(behavior: {
   cloneThrows?: unknown;
+  readThrows?: unknown;
   syncStatus?: "up_to_date" | "synced" | "needs_merge";
 } = {}) {
   const calls: Array<Record<string, unknown>> = [];
@@ -163,6 +165,58 @@ function stubTransport(behavior: {
         branch: req.branch,
         stashed: false,
         message: `Switched to ${req.branch}.`,
+      };
+    },
+    async inspect(req) {
+      calls.push({ op: "inspect", ...req });
+      if (behavior.readThrows !== undefined) throw behavior.readThrows;
+      return {
+        branch: "main",
+        headSha: "0123456789012345678901234567890123456789",
+        upstream: "origin/main",
+        dirty: true,
+        ahead: 0,
+        behind: 1,
+        reason: "dirty_worktree" as const,
+        fetchedAt: "2026-10-24T12:00:00.000Z",
+      };
+    },
+    async status(req) {
+      calls.push({ op: "status", ...req });
+      if (behavior.readThrows !== undefined) throw behavior.readThrows;
+      return {
+        branch: "main",
+        headSha: "0123456789012345678901234567890123456789",
+        upstream: "origin/main",
+        dirty: false,
+        ahead: 0,
+        behind: 0,
+        reason: "clean" as const,
+        fetchedAt: null,
+      };
+    },
+    async diff(req) {
+      calls.push({ op: "diff", ...req });
+      if (behavior.readThrows !== undefined) throw behavior.readThrows;
+      return { patch: "diff --git a/src/App.tsx b/src/App.tsx\n+changed\n", truncated: true };
+    },
+    async logs(req) {
+      calls.push({ op: "logs", ...req });
+      if (behavior.readThrows !== undefined) throw behavior.readThrows;
+      return {
+        items: [{
+          sha: "0123456789012345678901234567890123456789",
+          subject: "initial",
+          authoredAt: "2026-10-24T11:00:00.000Z",
+        }],
+      };
+    },
+    async search(req) {
+      calls.push({ op: "search", ...req });
+      if (behavior.readThrows !== undefined) throw behavior.readThrows;
+      return {
+        items: [{ path: "app/src/App.tsx", name: "App.tsx" }],
+        truncated: true,
       };
     },
   };
@@ -679,5 +733,395 @@ describe("POST /cloud/v1/studio/sessions/:id/git/sync", () => {
     });
     expect(res.statusCode).toBe(409);
     expect(res.json().error.code).toBe("no_repo");
+  });
+});
+
+describe("canonical Studio read and preflight routes", () => {
+  const bound = {
+    sessionId: SESSION_ID,
+    userId: "u1",
+    repo: "acme/app",
+    repoDir: "app",
+    branch: "main",
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+  const base = `/cloud/v1/studio/sessions/${SESSION_ID}`;
+  const requests = [
+    { name: "preflight", method: "POST", url: `${base}/git/preflight`, payload: {} },
+    { name: "status", method: "GET", url: `${base}/git/status` },
+    { name: "diff", method: "GET", url: `${base}/git/diff?staged=true&path=src%2FApp.tsx` },
+    { name: "logs", method: "GET", url: `${base}/git/logs?limit=10` },
+    { name: "search", method: "GET", url: `${base}/files/search?q=button&path=src&limit=10` },
+  ] as const;
+
+  function boundCompose(behavior: Parameters<typeof stubTransport>[0] = {}) {
+    const { transport, calls } = stubTransport(behavior);
+    const composed = compose({ studioGit: transport, state: { binding: bound } });
+    return { ...composed, transport, calls };
+  }
+
+  it("POST git/preflight inspects without calling mutating sync or changing the binding", async () => {
+    const { app, calls, state } = boundCompose();
+    const before = state.binding;
+    const res = await app.inject({
+      method: "POST",
+      url: `${base}/git/preflight`,
+      headers: auth(),
+      payload: {},
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      branch: "main",
+      behind: 1,
+      dirty: true,
+      fetchedAt: "2026-10-24T12:00:00.000Z",
+    });
+    expect(calls).toEqual([
+      { op: "inspect", userId: "u1", sessionId: SESSION_ID, repoDir: "app" },
+    ]);
+    expect(calls.some((call) => call.op === "sync")).toBe(false);
+    expect(state.binding).toBe(before);
+    expect(res.headers["cache-control"]).toBe("private, no-store");
+    expect(res.headers.pragma).toBe("no-cache");
+  });
+
+  it.each([
+    "repoDir=other",
+    "uid=other",
+    "host=evil.example",
+    "token=ghp_smuggled",
+    "repoDir=app&repoDir=other",
+    "other=unexpected",
+  ])("POST git/preflight rejects undocumented query %s before transport", async (query) => {
+    const { app, calls } = boundCompose();
+    const res = await app.inject({
+      method: "POST",
+      url: `${base}/git/preflight?${query}`,
+      headers: auth(),
+      payload: {},
+    });
+    expect(res.statusCode).toBe(400);
+    expect(calls).toEqual([]);
+  });
+
+  it("POST git/preflight rejects JSON null instead of treating it as an empty body", async () => {
+    const { app, calls } = boundCompose();
+    const res = await app.inject({
+      method: "POST",
+      url: `${base}/git/preflight`,
+      headers: { ...auth(), "content-type": "application/json" },
+      payload: "null",
+    });
+    expect(res.statusCode).toBe(400);
+    expect(calls).toEqual([]);
+  });
+
+  it("POST git/preflight accepts an absent body while keeping the no-query contract", async () => {
+    const { app, calls } = boundCompose();
+    const res = await app.inject({
+      method: "POST",
+      url: `${base}/git/preflight`,
+      headers: auth(),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(calls).toEqual([
+      { op: "inspect", userId: "u1", sessionId: SESSION_ID, repoDir: "app" },
+    ]);
+  });
+
+  it("GET git/status returns local status without an inspect/fetch", async () => {
+    const { app, calls } = boundCompose();
+    const res = await app.inject({ method: "GET", url: `${base}/git/status`, headers: auth() });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      branch: "main",
+      headSha: "0123456789012345678901234567890123456789",
+      upstream: "origin/main",
+      dirty: false,
+      behind: 0,
+      ahead: 0,
+      reason: "clean",
+      fetchedAt: null,
+    });
+    expect(calls).toEqual([
+      { op: "status", userId: "u1", sessionId: SESSION_ID, repoDir: "app" },
+    ]);
+    expect(res.headers["cache-control"]).toBe("private, no-store");
+  });
+
+  it("GET git/diff forwards only staged/path with the server byte cap and returns real truncation", async () => {
+    const { app, calls } = boundCompose();
+    const res = await app.inject({
+      method: "GET",
+      url: `${base}/git/diff?staged=true&path=src%2FApp.tsx`,
+      headers: auth(),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      patch: "diff --git a/src/App.tsx b/src/App.tsx\n+changed\n",
+      truncated: true,
+    });
+    expect(calls).toEqual([{
+      op: "diff",
+      userId: "u1",
+      sessionId: SESSION_ID,
+      repoDir: "app",
+      staged: true,
+      path: "src/App.tsx",
+      maxBytes: 256 * 1024,
+    }]);
+  });
+
+  it("GET git/logs clamps a high limit to 50 and defaults to 20", async () => {
+    const { app, calls } = boundCompose();
+    const clamped = await app.inject({
+      method: "GET",
+      url: `${base}/git/logs?limit=999`,
+      headers: auth(),
+    });
+    expect(clamped.statusCode).toBe(200);
+    expect(clamped.json().items).toHaveLength(1);
+    const defaulted = await app.inject({ method: "GET", url: `${base}/git/logs`, headers: auth() });
+    expect(defaulted.statusCode).toBe(200);
+    expect(calls).toEqual([
+      { op: "logs", userId: "u1", sessionId: SESSION_ID, repoDir: "app", limit: 50 },
+      { op: "logs", userId: "u1", sessionId: SESSION_ID, repoDir: "app", limit: 20 },
+    ]);
+  });
+
+  it("GET files/search resolves path below the binding and clamps/defaults its limit", async () => {
+    const { app, calls } = boundCompose();
+    const res = await app.inject({
+      method: "GET",
+      url: `${base}/files/search?q=button&path=src&limit=999`,
+      headers: auth(),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      items: [{ path: "app/src/App.tsx", name: "App.tsx" }],
+      truncated: true,
+    });
+    const defaulted = await app.inject({
+      method: "GET",
+      url: `${base}/files/search?q=readme`,
+      headers: auth(),
+    });
+    expect(defaulted.statusCode).toBe(200);
+    expect(calls).toEqual([
+      { op: "search", userId: "u1", sessionId: SESSION_ID, repoDir: "app/src", query: "button", limit: 100 },
+      { op: "search", userId: "u1", sessionId: SESSION_ID, repoDir: "app", query: "readme", limit: 50 },
+    ]);
+    expect(res.headers["cache-control"]).toBe("private, no-store");
+  });
+
+  it.each(requests)("$name returns 409 no_repo without a binding and never calls the worker", async (testCase) => {
+    const { transport, calls } = stubTransport();
+    const { app } = compose({ studioGit: transport });
+    const res = await app.inject({
+      method: testCase.method,
+      url: testCase.url,
+      headers: auth(),
+      ...("payload" in testCase ? { payload: testCase.payload } : {}),
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("no_repo");
+    expect(calls).toEqual([]);
+  });
+
+  it.each(requests)("$name gives an existing foreign session the same 404 as unknown with no worker call", async (testCase) => {
+    const foreignSession = sessionRow("other-user");
+    const foreignBinding = { ...bound, userId: "other-user" };
+    const ownershipCalls: Array<{ repo: "session" | "binding"; uid: string }> = [];
+    vi.spyOn(sessions, "get").mockImplementation(async (_db, id, uid) => {
+      ownershipCalls.push({ repo: "session", uid });
+      return id === SESSION_ID && uid === "other-user" ? foreignSession as never : null;
+    });
+    vi.spyOn(studioRepos, "get").mockImplementation(async (_db, uid, id) => {
+      ownershipCalls.push({ repo: "binding", uid });
+      return id === SESSION_ID && uid === "other-user" ? foreignBinding as never : null;
+    });
+    try {
+      const foreign = stubTransport();
+      const foreignApp = compose({
+        studioGit: foreign.transport,
+        state: { session: foreignSession, binding: foreignBinding },
+      });
+      const foreignRes = await foreignApp.app.inject({
+        method: testCase.method,
+        url: testCase.url,
+        headers: auth("u1"),
+        ...("payload" in testCase ? { payload: testCase.payload } : {}),
+      });
+
+      const unknown = stubTransport();
+      const unknownApp = compose({
+        studioGit: unknown.transport,
+        state: { session: null, binding: null },
+      });
+      const unknownRes = await unknownApp.app.inject({
+        method: testCase.method,
+        url: testCase.url,
+        headers: auth("u1"),
+        ...("payload" in testCase ? { payload: testCase.payload } : {}),
+      });
+
+      expect(foreignRes.statusCode).toBe(404);
+      expect(foreignRes.json()).toEqual(unknownRes.json());
+      expect(unknownRes.statusCode).toBe(404);
+      expect(foreign.calls).toEqual([]);
+      expect(unknown.calls).toEqual([]);
+      expect(ownershipCalls.length).toBeGreaterThanOrEqual(2);
+      expect(ownershipCalls.every((call) => call.uid === "u1")).toBe(true);
+      expect(ownershipCalls.every((call) => call.repo === "session")).toBe(true);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("UID-aware ownership fixture still allows the actual foreign session owner", async () => {
+    const foreignSession = sessionRow("other-user");
+    const foreignBinding = { ...bound, userId: "other-user" };
+    vi.spyOn(sessions, "get").mockImplementation(async (_db, id, uid) =>
+      id === SESSION_ID && uid === "other-user" ? foreignSession as never : null,
+    );
+    vi.spyOn(studioRepos, "get").mockImplementation(async (_db, uid, id) =>
+      id === SESSION_ID && uid === "other-user" ? foreignBinding as never : null,
+    );
+    try {
+      const { transport, calls } = stubTransport();
+      const { app } = compose({
+        studioGit: transport,
+        state: { session: foreignSession, binding: foreignBinding },
+      });
+      const res = await app.inject({
+        method: "POST",
+        url: `${base}/git/preflight`,
+        headers: auth("other-user"),
+        payload: {},
+      });
+      expect(res.statusCode).toBe(200);
+      expect(calls).toEqual([
+        { op: "inspect", userId: "other-user", sessionId: SESSION_ID, repoDir: "app" },
+      ]);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it.each(requests)("$name hides unknown sessions and malformed UUIDs with no worker call", async (testCase) => {
+    const { transport, calls } = stubTransport();
+    const wrong = compose({ studioGit: transport, state: { session: null } });
+    const wrongRes = await wrong.app.inject({
+      method: testCase.method,
+      url: testCase.url,
+      headers: auth("other-user"),
+      ...("payload" in testCase ? { payload: testCase.payload } : {}),
+    });
+    expect(wrongRes.statusCode).toBe(404);
+    const malformed = compose({ studioGit: transport, state: { binding: bound } });
+    const malformedRes = await malformed.app.inject({
+      method: testCase.method,
+      url: testCase.url.replace(SESSION_ID, "not-a-uuid"),
+      headers: auth(),
+      ...("payload" in testCase ? { payload: testCase.payload } : {}),
+    });
+    expect(malformedRes.statusCode).toBe(404);
+    expect(calls).toEqual([]);
+  });
+
+  it.each([
+    { method: "POST", url: `${base}/git/preflight`, payload: { repoDir: "other" } },
+    { method: "GET", url: `${base}/git/status?uid=other` },
+    { method: "GET", url: `${base}/git/diff?host=evil.example` },
+    { method: "GET", url: `${base}/git/logs?repoDir=other` },
+    { method: "GET", url: `${base}/files/search?q=x&token=ghp_smuggled` },
+  ] as const)("rejects client-selected identity/workspace fields: $url", async (testCase) => {
+    const { app, calls } = boundCompose();
+    const res = await app.inject({
+      method: testCase.method,
+      url: testCase.url,
+      headers: auth(),
+      ...("payload" in testCase ? { payload: testCase.payload } : {}),
+    });
+    expect(res.statusCode).toBe(400);
+    expect(calls).toEqual([]);
+  });
+
+  it.each([
+    `${base}/git/status`,
+    `${base}/git/diff`,
+    `${base}/git/logs`,
+    `${base}/files/search?q=x`,
+  ])("does not let a GET body select another workspace or credential: %s", async (url) => {
+    const { app, calls } = boundCompose();
+    const res = await app.inject({
+      method: "GET",
+      url,
+      headers: { ...auth(), "content-type": "application/json" },
+      payload: { repoDir: "other", token: GITHUB_TOKEN },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).not.toContain(GITHUB_TOKEN);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ userId: "u1", sessionId: SESSION_ID, repoDir: "app" });
+    expect(calls[0]).not.toHaveProperty("token");
+  });
+
+  it.each([
+    `${base}/git/logs?limit=0`,
+    `${base}/git/logs?limit=1.5`,
+    `${base}/git/logs?limit=nope`,
+    `${base}/git/diff?staged=yes`,
+    `${base}/git/diff?path=..%2Fsecret`,
+    `${base}/git/diff?path=.git%2Fconfig`,
+    `${base}/files/search?q=`,
+    `${base}/files/search?q=x&limit=0`,
+    `${base}/files/search?q=x&path=%2Fetc`,
+    `${base}/files/search?q=x&path=.git`,
+  ])("rejects malformed query/path input before the worker: %s", async (url) => {
+    const { app, calls } = boundCompose();
+    const res = await app.inject({ method: "GET", url, headers: auth() });
+    expect(res.statusCode).toBe(400);
+    expect(calls).toEqual([]);
+  });
+
+  it("returns 503 only when the bound operation has no transport", async () => {
+    const { app } = compose({ state: { binding: bound } });
+    const res = await app.inject({
+      method: "POST",
+      url: `${base}/git/preflight`,
+      headers: auth(),
+      payload: {},
+    });
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error.code).toBe("studio_git_unavailable");
+  });
+
+  it("maps preflight fetch refusal separately from sync and credential leaks to safe 500 internal", async () => {
+    const fetchFailure = boundCompose({
+      readThrows: new StudioGitRefusal("fetch_failed", "Could not reach the remote. Check your connection and try again."),
+    });
+    const fetchRes = await fetchFailure.app.inject({
+      method: "POST",
+      url: `${base}/git/preflight`,
+      headers: auth(),
+      payload: {},
+    });
+    expect(fetchRes.statusCode).toBe(502);
+    expect(fetchRes.json().error.code).toBe("fetch_failed");
+
+    const leak = boundCompose({
+      readThrows: new StudioGitRefusal("credential_leak", `sensitive ${GITHUB_TOKEN}`),
+    });
+    const leakRes = await leak.app.inject({
+      method: "POST",
+      url: `${base}/git/preflight`,
+      headers: auth(),
+      payload: {},
+    });
+    expect(leakRes.statusCode).toBe(500);
+    expect(leakRes.json()).toEqual({ error: { code: "internal", message: "Internal server error." } });
+    expect(leakRes.body).not.toContain(GITHUB_TOKEN);
   });
 });
