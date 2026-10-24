@@ -6,15 +6,15 @@ import 'package:flutter/foundation.dart';
 import '../background_notifications.dart';
 import '../diag.dart';
 import '../firebase_service.dart';
+import '../notification_permission.dart';
 import 'cloud_rest.dart';
+import 'push_payload_mapper.dart';
+import 'push_registration_coordinator.dart';
 
-/// FCM data payload (`RemoteMessage.data`).
+/// FCM data payload (`RemoteMessage.data`, plus foreground notification copy).
 typedef PushMessageData = Map<String, dynamic>;
 
 /// The seam between [PushService] and `firebase_messaging`.
-///
-/// Production wiring is [FirebaseMessagingDelegate]; tests inject a fake so
-/// token registration, refresh and routing are exercised without Firebase.
 abstract class PushMessagingDelegate {
   Future<bool> requestPermission();
   Future<String?> getToken();
@@ -33,6 +33,13 @@ class FirebaseMessagingDelegate implements PushMessagingDelegate {
   const FirebaseMessagingDelegate();
 
   FirebaseMessaging get _messaging => FirebaseMessaging.instance;
+
+  PushMessageData _payload(RemoteMessage message) => {
+    if (message.notification?.title != null)
+      'title': message.notification!.title,
+    if (message.notification?.body != null) 'body': message.notification!.body,
+    ...message.data,
+  };
 
   @override
   Future<bool> requestPermission() async {
@@ -53,42 +60,44 @@ class FirebaseMessagingDelegate implements PushMessagingDelegate {
 
   @override
   Stream<PushMessageData> get onMessage =>
-      FirebaseMessaging.onMessage.map((m) => m.data);
+      FirebaseMessaging.onMessage.map(_payload);
 
   @override
   Stream<PushMessageData> get onMessageOpenedApp =>
-      FirebaseMessaging.onMessageOpenedApp.map((m) => m.data);
+      FirebaseMessaging.onMessageOpenedApp.map(_payload);
 
   @override
-  Future<PushMessageData?> getInitialMessage() async =>
-      (await _messaging.getInitialMessage())?.data;
+  Future<PushMessageData?> getInitialMessage() async {
+    final message = await _messaging.getInitialMessage();
+    return message == null ? null : _payload(message);
+  }
 
   @override
   Future<void> deleteToken() => _messaging.deleteToken();
 }
 
-/// Cloud push: registers this device's FCM token for the signed-in account
-/// and turns FCM messages into in-app notifications / routes.
-///
-/// This is the thin-client replacement for the deleted foreground-service
-/// keep-alive: runs execute detached on the gateway, so the device only needs
-/// to be woken to show the result. Nothing here keeps the process alive.
-///
-/// Listening ([init]) is process-wide; registration is per account
-/// ([bindAccount] on every account that becomes ready, [unbindAccount] before
-/// every sign-out / reset), so a signed-out device or a second account never
-/// receives the previous account's notifications (SH-003, SE-002, CT-006).
-///
-/// Notification `data` routes (P4 payload, worker notify.ts):
-///   `{'route': '/c/<serverSessionId>'}` and
-///   `{'route': '/schedule/<serverSessionId>'}` — both carry the SERVER
-///   session id; the router resolves it to the local row (FE-011).
+/// Cloud push registration and FCM notification routing. Registration state is
+/// owned by one generation-fenced [PushRegistrationCoordinator]; token presence
+/// alone is never reported as a healthy gateway registration.
 class PushService {
   PushService({
     CloudRestClient? rest,
     PushMessagingDelegate? messaging,
-  })  : _rest = rest ?? CloudRestClient.I,
-        _messaging = messaging ?? const FirebaseMessagingDelegate();
+    String? Function()? currentUid,
+    Listenable? auth,
+    Future<bool> Function()? notificationInitializer,
+    Future<Object?> Function()? permissionReader,
+    PushRegistrationStore? registrationStore,
+  }) : _rest = rest ?? CloudRestClient.I,
+       _messaging = messaging ?? const FirebaseMessagingDelegate(),
+       _currentUid = currentUid ?? (() => FirebaseService.I.uid),
+       _auth = auth ?? FirebaseService.I,
+       _notificationInitializer =
+           notificationInitializer ?? BackgroundNotifier.I.init,
+       _permissionReader =
+           permissionReader ?? NotificationPermission.healthStatus,
+       // ignore: prefer_initializing_formals
+       _registrationStore = registrationStore;
 
   static PushService? _instance;
 
@@ -105,175 +114,349 @@ class PushService {
 
   final CloudRestClient _rest;
   final PushMessagingDelegate _messaging;
+  final String? Function() _currentUid;
+  final Listenable _auth;
+  final Future<bool> Function() _notificationInitializer;
+  final Future<Object?> Function() _permissionReader;
+  final PushRegistrationStore? _registrationStore;
 
-  /// Installed by main.dart: opens `/c/<id>`, `/schedule/<id>`, … on the app
-  /// router (the existing `_openRouteFromNotification`).
+  /// Installed by main.dart: opens validated in-app notification routes.
   void Function(String route)? onOpenRoute;
 
   bool _initialized = false;
+  Future<void>? _initializing;
   StreamSubscription<String>? _tokenSub;
   StreamSubscription<PushMessageData>? _messageSub;
   StreamSubscription<PushMessageData>? _openedSub;
+  PushRegistrationCoordinator? _coordinator;
+  int _tokenListenerEpoch = 0;
+  String? _lastAuthUid;
+  bool _authSignOutPending = false;
+  String? _authSignOutUid;
+  int? _authSignOutGeneration;
 
-  /// The account whose uid the current FCM token is registered to on the
-  /// gateway, or null when no account is bound (signed out / never bound).
-  String? _boundUid;
-  String? _boundToken;
+  PushHealthSnapshot get health =>
+      _coordinator?.health ?? const PushHealthSnapshot();
 
-  /// Serialises bind/unbind so a fast sign-out → sign-in can never interleave
-  /// the DELETE for A with the POST for B.
-  Future<void> _chain = Future<void>.value();
+  /// The desired uid only after its current FCM token has an actual 2xx ack.
+  String? get boundUid => health.registered ? health.desiredUid : null;
 
-  /// The uid this device's token is currently registered to.
-  String? get boundUid => _boundUid;
+  /// Configures channels before attaching listeners or reading the initial
+  /// message. Safe to call more than once; never requests permission or throws.
+  Future<void> init() {
+    if (_initialized) return Future<void>.value();
+    final existing = _initializing;
+    if (existing != null) return existing;
+    final attempt = _initialize();
+    _initializing = attempt;
+    return attempt;
+  }
 
-  /// Starts listening for token refreshes, foreground messages and taps.
-  /// Never requests the notification permission: the first-run onboarding
-  /// owns that prompt so prompts never stack (EM-005, EM-016). Safe to call
-  /// more than once; never throws.
-  Future<void> init() async {
-    if (_initialized) return;
-    _initialized = true;
+  Future<void> _initialize() async {
     try {
-      _tokenSub = _messaging.onTokenRefresh.listen((token) {
-        if (token.isEmpty) return;
-        // Signed out: there is nobody to register the new token for.
-        if (_boundUid == null) return;
-        _boundToken = token;
-        unawaited(_register(token));
-      });
+      _lastAuthUid = _currentUid();
+      _auth.removeListener(_onAuthChanged);
+      _auth.addListener(_onAuthChanged);
+      final channelsReady = await _notificationInitializer();
+      final permission = await _readPermission();
+      final coordinator = await PushRegistrationCoordinator.open(
+        register: _registerDevice,
+        unregister: _unregisterDevice,
+        getToken: _messaging.getToken,
+        deleteToken: _messaging.deleteToken,
+        store: _registrationStore,
+      );
+      coordinator.updateReadiness(
+        osPermissionGranted: permission,
+        channelsReady: channelsReady,
+      );
+      _coordinator = coordinator;
+      await _replaceTokenListener(coordinator, coordinator.health.generation);
       _messageSub = _messaging.onMessage.listen(_showInApp);
       _openedSub = _messaging.onMessageOpenedApp.listen(_openRoute);
-      final initial = await _messaging.getInitialMessage();
-      if (initial != null) _openRoute(initial);
+      _initialized = true;
+      _flushAuthSignOut();
+      try {
+        final initial = await _messaging.getInitialMessage();
+        if (initial != null) _openRoute(initial);
+      } catch (e) {
+        Diag.swallow('push.initial_message', e);
+      }
     } catch (e) {
+      _auth.removeListener(_onAuthChanged);
       Diag.swallow('push.init', e);
+    } finally {
+      _initializing = null;
     }
   }
 
-  /// Asks Android for POST_NOTIFICATIONS (API 33+). Called by the first-run
-  /// onboarding step and the Settings toggle, never implicitly.
-  Future<bool> requestPermission() async {
+  Future<bool?> _readPermission() async {
     try {
-      return await _messaging.requestPermission();
+      final value = await _permissionReader();
+      return value is bool ? value : null;
+    } catch (e) {
+      Diag.swallow('push.permission_status', e);
+      return null;
+    }
+  }
+
+  void _onAuthChanged() {
+    final previous = _lastAuthUid;
+    final current = _currentUid();
+    _lastAuthUid = current;
+    if (current != null) {
+      _authSignOutPending = false;
+      _authSignOutUid = null;
+      _authSignOutGeneration = null;
+    } else if (previous != null) {
+      _authSignOutPending = true;
+      _authSignOutUid = previous;
+      _authSignOutGeneration = _coordinator?.health.generation;
+    }
+    _flushAuthSignOut();
+  }
+
+  void _flushAuthSignOut() {
+    if (!_authSignOutPending || !_initialized) return;
+    if (_lastAuthUid != null) {
+      _authSignOutPending = false;
+      _authSignOutUid = null;
+      _authSignOutGeneration = null;
+      return;
+    }
+    final coordinator = _coordinator;
+    if (coordinator == null) return;
+    if (coordinator.health.desiredUid == null &&
+        coordinator.health.acknowledgedUid == null) {
+      _authSignOutPending = false;
+      _authSignOutUid = null;
+      _authSignOutGeneration = null;
+      return;
+    }
+    final outgoingUid = _authSignOutUid;
+    final outgoingGeneration = _authSignOutGeneration;
+    _authSignOutPending = false;
+    _authSignOutUid = null;
+    _authSignOutGeneration = null;
+    // SDK-originated sign-out has no before-sign-out wrapper. Capture A's
+    // identity before any await so a delayed teardown can never select B.
+    unawaited(
+      unbindAccount(
+        expectedUid: outgoingUid,
+        expectedGeneration: outgoingGeneration,
+      ),
+    );
+  }
+
+  Future<void> _detachTokenListener() async {
+    _tokenListenerEpoch++;
+    final subscription = _tokenSub;
+    _tokenSub = null;
+    await subscription?.cancel();
+  }
+
+  Future<void> _replaceTokenListener(
+    PushRegistrationCoordinator coordinator,
+    int generation, {
+    String? uid,
+  }) async {
+    await _detachTokenListener();
+    if (!identical(_coordinator, coordinator) ||
+        coordinator.health.generation != generation ||
+        (uid != null && coordinator.health.desiredUid != uid)) {
+      return;
+    }
+    final epoch = _tokenListenerEpoch;
+    late final StreamSubscription<String> subscription;
+    subscription = _messaging.onTokenRefresh.listen((token) {
+      // The callback belongs to the subscription's account generation, never
+      // to whichever account happens to be current when a delayed event lands.
+      if (epoch != _tokenListenerEpoch ||
+          !identical(_tokenSub, subscription) ||
+          !identical(_coordinator, coordinator) ||
+          coordinator.health.generation != generation ||
+          (uid != null && coordinator.health.desiredUid != uid) ||
+          token.trim().isEmpty) {
+        return;
+      }
+      unawaited(coordinator.refreshToken(token, generation: generation));
+    });
+    _tokenSub = subscription;
+  }
+
+  /// Asks Android for POST_NOTIFICATIONS (API 33+). Called only by explicit
+  /// onboarding/settings actions, never by [init].
+  Future<bool> requestPermission() async {
+    await init();
+    try {
+      final granted = await _messaging.requestPermission();
+      _coordinator?.updateReadiness(osPermissionGranted: granted);
+      return granted;
     } catch (e) {
       Diag.swallow('push.permission', e);
       return false;
     }
   }
 
-  /// Registers this device's token for [uid]. Runs for every account that
-  /// becomes ready (not once per process), so account B is registered after
-  /// A signs out in the same process. Idempotent per uid.
-  Future<void> bindAccount(String uid) => _serial(() async {
-        await init();
-        if (_boundUid == uid) return;
-        _boundUid = uid;
-        try {
-          final token = await _messaging.getToken();
-          if (_boundUid != uid) return;
-          if (token != null && token.isNotEmpty) {
-            _boundToken = token;
-            await _register(token);
-          }
-        } catch (e) {
-          Diag.swallow('push.bind', e);
-        }
-      });
-
-  /// Unregisters this device from the bound account (`DELETE /devices` with
-  /// the still-valid ID token), then invalidates the FCM token so pushes for
-  /// that account can never reach this device again. Call BEFORE the
-  /// Firebase sign-out. Best-effort, bounded by [timeout], never throws.
-  Future<void> unbindAccount({
-    Duration timeout = const Duration(seconds: 6),
-  }) => _serial(() async {
-        final uid = _boundUid;
-        final token = _boundToken;
-        _boundUid = null;
-        _boundToken = null;
-        if (uid == null) return;
-        if (token != null && token.isNotEmpty) {
-          try {
-            await _rest.unregisterDevice(fcmToken: token).timeout(timeout);
-          } catch (e) {
-            Diag.swallow('push.unregister_device', e);
-          }
-        }
-        try {
-          await _messaging.deleteToken().timeout(timeout);
-        } catch (e) {
-          Diag.swallow('push.delete_token', e);
-        }
-      });
-
-  Future<void> _serial(Future<void> Function() op) {
-    final next = _chain.then((_) => op());
-    _chain = next.catchError((Object _) {});
-    return next;
+  /// Registers every ready account. A different desired account uses the
+  /// serialized switch operation, which retires the outgoing token before a
+  /// replacement token can be bound.
+  Future<void> bindAccount(String uid) {
+    // Capture ownership before init's first await. A bind delayed by channel
+    // configuration must not restore A after the SDK has signed out.
+    final authUid = _currentUid();
+    final coordinatorGeneration = _coordinator?.health.generation;
+    return _bindAccount(uid, authUid, coordinatorGeneration);
   }
 
-  Future<void> _register(String token) async {
-    try {
-      await _rest.registerDevice(fcmToken: token, platform: 'android');
-    } catch (e) {
-      Diag.swallow('push.register_device', e);
+  Future<void> _bindAccount(
+    String uid,
+    String? authUid,
+    int? coordinatorGeneration,
+  ) async {
+    await init();
+    final coordinator = _coordinator;
+    if (coordinator == null ||
+        authUid != uid ||
+        _currentUid() != uid ||
+        (coordinatorGeneration != null &&
+            coordinator.health.generation != coordinatorGeneration)) {
+      return;
+    }
+    final previous = coordinator.health.desiredUid;
+    final previousGeneration = coordinator.health.generation;
+    await _detachTokenListener();
+    if (!identical(_coordinator, coordinator) ||
+        _currentUid() != uid ||
+        coordinator.health.generation != previousGeneration) {
+      return;
+    }
+    final int generation;
+    if (previous != null && previous != uid) {
+      final switching = coordinator.switchAccount(previous, uid);
+      generation = coordinator.health.generation;
+      await switching;
+    } else {
+      generation = await coordinator.bindAccount(uid);
+    }
+    await _replaceTokenListener(coordinator, generation, uid: uid);
+  }
+
+  /// Test/FCM seam carrying the generation captured by the token listener.
+  Future<void> refreshToken(String token, {required int generation}) async {
+    await _coordinator?.refreshToken(token, generation: generation);
+  }
+
+  /// Unregisters while the outgoing account's auth is still valid, then
+  /// invalidates the local FCM token. main.dart installs this before sign-out.
+  Future<void> unbindAccount({
+    Duration timeout = const Duration(seconds: 6),
+    String? expectedUid,
+    int? expectedGeneration,
+  }) {
+    final health = _coordinator?.health;
+    final outgoingUid =
+        expectedUid ??
+        health?.desiredUid ??
+        health?.acknowledgedUid ??
+        _lastAuthUid ??
+        _currentUid();
+    final outgoingGeneration = expectedGeneration ?? health?.generation;
+    return _unbindAccount(outgoingUid, outgoingGeneration, timeout);
+  }
+
+  Future<void> _unbindAccount(
+    String? outgoingUid,
+    int? outgoingGeneration,
+    Duration timeout,
+  ) async {
+    await init();
+    final coordinator = _coordinator;
+    if (coordinator == null ||
+        !_teardownIsCurrent(coordinator, outgoingUid, outgoingGeneration)) {
+      return;
+    }
+    await _detachTokenListener();
+    if (!identical(_coordinator, coordinator) ||
+        !_teardownIsCurrent(coordinator, outgoingUid, outgoingGeneration)) {
+      return;
+    }
+    await coordinator.unbindAccount(
+      timeout: timeout,
+      expectedUid: outgoingUid,
+      expectedGeneration: outgoingGeneration,
+    );
+  }
+
+  bool _teardownIsCurrent(
+    PushRegistrationCoordinator coordinator,
+    String? outgoingUid,
+    int? outgoingGeneration,
+  ) {
+    if (outgoingUid == null) return false;
+    final health = coordinator.health;
+    if (outgoingGeneration != null && health.generation != outgoingGeneration) {
+      return false;
+    }
+    if (health.desiredUid != outgoingUid &&
+        health.acknowledgedUid != outgoingUid) {
+      return false;
+    }
+    final currentAuth = _currentUid();
+    return currentAuth == null || currentAuth == outgoingUid;
+  }
+
+  Future<void> drain() async => _coordinator?.drain();
+
+  Future<void> _registerDevice(String uid, String token) async {
+    _requireCurrentAccount(uid);
+    await _rest.registerDevice(fcmToken: token, platform: 'android');
+  }
+
+  Future<void> _unregisterDevice(String uid, String token) async {
+    // Never use B's auth for A's owner-scoped DELETE. A→null is different:
+    // CloudHeaders may still hold A's valid credential during SDK teardown;
+    // when it does not, authorization fails before any request is sent.
+    final current = _currentUid();
+    if (current != null && current != uid) {
+      throw StateError('The signed-in account changed during push lifecycle.');
+    }
+    await _rest.unregisterDevice(fcmToken: token);
+  }
+
+  void _requireCurrentAccount(String uid) {
+    if (_currentUid() != uid) {
+      throw StateError('The signed-in account changed during push lifecycle.');
     }
   }
 
-  /// Foreground message: reuse [BackgroundNotifier]'s routing so the user's
-  /// notification settings and the visible-chat suppression still apply.
   void _showInApp(PushMessageData data) {
-    final route = _route(data);
-    final notification = OvidNotification(
-      kind: OvidNotificationKind.jobDone,
-      title: _text(data['title']) ?? 'Ovid Si',
-      body: _text(data['body']) ?? '',
-      route: route ?? NotificationRoutes.home,
-    );
+    final notification = PushPayloadMapper.fromData(data);
+    if (notification == null) return;
     unawaited(BackgroundNotifier.I.post(notification));
   }
 
   void _openRoute(PushMessageData data) {
-    final route = _route(data);
-    if (route == null) return;
+    final notification = PushPayloadMapper.fromData(data);
+    if (notification == null) return;
     try {
-      onOpenRoute?.call(route);
+      onOpenRoute?.call(notification.route);
     } catch (e) {
       Diag.swallow('push.open_route', e);
     }
   }
 
-  /// Only absolute in-app paths are accepted (same bound as the native
-  /// `routeNotificationIntent`: starts with `/`, at most 200 chars).
-  String? _route(PushMessageData data) {
-    final raw = data['route'];
-    if (raw is! String) return null;
-    final route = raw.trim();
-    if (route.isEmpty || route.length > 200 || !route.startsWith('/')) {
-      return null;
-    }
-    return route;
-  }
-
-  String? _text(Object? value) {
-    if (value is! String) return null;
-    final text = value.trim();
-    return text.isEmpty ? null : text;
-  }
-
-  /// Test teardown: cancels listeners. Production keeps them for the app's
-  /// lifetime (the process no longer outlives the UI).
+  /// Test teardown: cancels listeners and waits for queued registration work.
   @visibleForTesting
   Future<void> dispose() async {
-    await _tokenSub?.cancel();
+    _auth.removeListener(_onAuthChanged);
+    await _detachTokenListener();
     await _messageSub?.cancel();
     await _openedSub?.cancel();
     _tokenSub = null;
     _messageSub = null;
     _openedSub = null;
     _initialized = false;
-    _boundUid = null;
-    _boundToken = null;
+    await drain();
   }
 }

@@ -83,6 +83,38 @@ class NotificationPermission {
     }
   }
 
+  /// Strict OS permission fact for health reporting. Unlike [isEnabled], this
+  /// never converts malformed values or read failures into a grant.
+  static Future<bool?> healthStatus() async {
+    if (!_isAndroid) return null;
+    try {
+      final value = await _invoke('notificationsEnabled');
+      return value is bool ? value : null;
+    } on MissingPluginException {
+      return _permissionHandlerHealthStatus();
+    } on PlatformException {
+      return _permissionHandlerHealthStatus();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<bool?> _permissionHandlerHealthStatus() async {
+    try {
+      final status = await NotificationPermissionAccess.status();
+      return switch (status) {
+        PermissionStatus.granted ||
+        PermissionStatus.limited ||
+        PermissionStatus.provisional => true,
+        PermissionStatus.denied ||
+        PermissionStatus.restricted ||
+        PermissionStatus.permanentlyDenied => false,
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Whether the app may post notifications.
   static Future<bool> isEnabled() async {
     if (!_isAndroid) return true;

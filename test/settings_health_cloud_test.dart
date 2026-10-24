@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/cloud/account_settings_client.dart';
 import 'package:ovid_ai/core/cloud/cloud_rest.dart';
+import 'package:ovid_ai/core/cloud/push_registration_coordinator.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/settings_health_screen.dart';
 
@@ -27,6 +28,7 @@ ServiceStatusProbes _probes({
   Future<ServiceStatus> Function()? server,
   bool signedIn = true,
   bool accountOk = true,
+  PushHealthSnapshot? pushHealth,
 }) => ServiceStatusProbes(
   server: server ?? () async => _status('ok'),
   account: () async {
@@ -36,7 +38,14 @@ ServiceStatusProbes _probes({
   },
   live: () async {},
   signedIn: () => signedIn,
-  pushRegistered: () => true,
+  pushHealth: () =>
+      pushHealth ??
+      const PushHealthSnapshot(
+        osPermissionGranted: true,
+        channelsReady: true,
+        tokenAvailable: true,
+        registered: true,
+      ),
 );
 
 /// Pushed as a full route the way Settings does — no host Scaffold.
@@ -96,4 +105,60 @@ void main() {
     await _push(tester, _probes(accountOk: false));
     expect(find.text('Not working'), findsOneWidget);
   });
+
+  testWidgets('unknown OS permission prevents an all-good headline', (
+    tester,
+  ) async {
+    await _push(
+      tester,
+      _probes(
+        pushHealth: const PushHealthSnapshot(
+          channelsReady: true,
+          tokenAvailable: true,
+          registered: true,
+        ),
+      ),
+    );
+
+    expect(
+      find.text('Mostly working. Some things may be slow or unavailable.'),
+      findsOneWidget,
+    );
+    expect(find.text('Everything is working'), findsNothing);
+  });
+
+  testWidgets(
+    'push facts stay independent and token presence is not registration',
+    (tester) async {
+      await _push(
+        tester,
+        _probes(
+          pushHealth: const PushHealthSnapshot(
+            osPermissionGranted: true,
+            channelsReady: true,
+            tokenAvailable: true,
+            desiredUid: 'uid-a',
+            generation: 2,
+            registered: false,
+            lastError: 'HTTP 503',
+          ),
+        ),
+      );
+
+      expect(
+        find.text('Mostly working. Some things may be slow or unavailable.'),
+        findsOneWidget,
+      );
+      expect(find.text('Everything is working'), findsNothing);
+      expect(find.text('OS permission'), findsOneWidget);
+      expect(find.text('Notification channels'), findsOneWidget);
+      expect(find.text('Push token'), findsOneWidget);
+      expect(find.text('Available'), findsOneWidget);
+      expect(
+        find.textContaining('This device isn\'t registered for notifications'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('HTTP 503'), findsOneWidget);
+    },
+  );
 }

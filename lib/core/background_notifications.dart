@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'cloud/cloud_session_store.dart';
 import 'diag.dart';
 import 'state.dart';
 
@@ -72,7 +73,8 @@ enum OvidNotificationKind {
   agentNeedsApproval(OvidChannel.agentUpdates),
   jobDone(OvidChannel.agentUpdates),
   scheduleSucceeded(OvidChannel.schedulerResults),
-  scheduleFailed(OvidChannel.schedulerResults);
+  scheduleFailed(OvidChannel.schedulerResults),
+  backgroundStatus(OvidChannel.backgroundStatus);
 
   const OvidNotificationKind(this.channel);
   final OvidChannel channel;
@@ -266,11 +268,13 @@ NotificationDelivery decideDelivery({
   required bool channelEnabled,
   required bool appInForeground,
   required String? visibleSessionId,
+  String? visibleServerSessionId,
 }) {
   if (!masterEnabled || !channelEnabled) return NotificationDelivery.suppressed;
   if (!appInForeground) return NotificationDelivery.system;
   if (notification.sessionId != null &&
-      notification.sessionId == visibleSessionId) {
+      (notification.sessionId == visibleSessionId ||
+          notification.sessionId == visibleServerSessionId)) {
     return NotificationDelivery.suppressed;
   }
   return NotificationDelivery.inApp;
@@ -411,12 +415,34 @@ class BackgroundNotifier extends ChangeNotifier {
     inAppPresenter = null;
     postedForTest.clear();
     _loaded = false;
+    _channelsReady = false;
+    _initialization = null;
   }
 
   bool _loaded = false;
+  bool _channelsReady = false;
+  Future<bool>? _initialization;
 
-  /// Loads settings and (re)creates the channels natively. Safe to repeat.
-  Future<void> init() async {
+  /// Loads settings and (re)creates the channels natively. Concurrent boot and
+  /// push initialization share one configuration attempt. A true result means
+  /// the native side acknowledged channel configuration.
+  Future<bool> init() {
+    if (_channelsReady) return Future<bool>.value(true);
+    final existing = _initialization;
+    if (existing != null) return existing;
+    late final Future<bool> attempt;
+    attempt = _initialize().then((ready) {
+      _channelsReady = ready;
+      if (!ready && identical(_initialization, attempt)) {
+        _initialization = null;
+      }
+      return ready;
+    });
+    _initialization = attempt;
+    return attempt;
+  }
+
+  Future<bool> _initialize() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       settings = NotificationSettings.fromPrefs(prefs);
@@ -424,16 +450,19 @@ class BackgroundNotifier extends ChangeNotifier {
     } catch (e) {
       Diag.swallow('notify.prefs', e);
     }
-    await _configure();
+    return _configure();
   }
 
-  Future<void> _configure() async {
+  Future<bool> _configure() async {
     try {
-      await _invoke('notifyConfigure', settings.toPlatformArgs());
+      return await _invoke('notifyConfigure', settings.toPlatformArgs()) ==
+          true;
     } on MissingPluginException {
       // Desktop/tests: no Android notifications.
+      return false;
     } catch (e) {
       Diag.swallow('notify.configure', e);
+      return false;
     }
   }
 
@@ -497,13 +526,24 @@ class BackgroundNotifier extends ChangeNotifier {
       }
     }
     bool master;
-    String? visible;
     try {
       master = AppState.I.notificationsEnabled;
-      visible = AppState.I.activeSessionId;
     } catch (_) {
       master = true;
+    }
+    String? visible;
+    String? visibleServer;
+    try {
+      visible = AppState.I.activeSessionId;
+    } catch (_) {
       visible = null;
+    }
+    if (visible != null) {
+      try {
+        visibleServer = CloudSessionStore.I.resolveServerSessionId(visible);
+      } catch (_) {
+        visibleServer = null;
+      }
     }
     var delivery = decideDelivery(
       notification: n,
@@ -511,6 +551,7 @@ class BackgroundNotifier extends ChangeNotifier {
       channelEnabled: settings.enabled[n.channel] ?? true,
       appInForeground: appInForeground,
       visibleSessionId: visible,
+      visibleServerSessionId: visibleServer,
     );
     if (delivery == NotificationDelivery.system &&
         settings.inQuietHours(DateTime.now())) {

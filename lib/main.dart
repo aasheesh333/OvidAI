@@ -192,6 +192,11 @@ Future<void> _boot() async {
   installReleaseErrorWidget();
   // M7: no-op unless built with OVID_CERT_PINNING=true AND pins configured.
   installOvidCertificatePinning();
+  // Native channels must exist before FCM can repost a foreground/initial
+  // message. PushService.init also awaits this same coalesced configuration.
+  await _bounded('boot.notifications', () async {
+    await BackgroundNotifier.I.init();
+  }, const Duration(seconds: 5));
   AppState.I.registerProductionAccountFeatures();
   // Billing reads the account id through this seam so `play_billing.dart` does
   // not have to import Firebase (and therefore sqlite3) just for the uid.
@@ -295,8 +300,8 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     PushService.I.onOpenRoute = _openRouteFromNotification;
     NativeRouteChannel.install(_openRouteFromNotification);
     unawaited(_openPendingNativeRoute());
-    unawaited(PushService.I.init());
     BackgroundNotifier.I.inAppPresenter = _showInAppNotification;
+    unawaited(PushService.I.init());
     // The outgoing account's push token is unregistered while its ID token
     // still works, before every sign-out and reset (SE-002).
     FirebaseService.I.addBeforeSignOut(PushService.I.unbindAccount);
@@ -349,7 +354,9 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
 
   Future<void> _unbindCloudAccount(String previousUid) async {
     AppRouter.clearPending();
-    await PushService.I.unbindAccount();
+    // Sign-out/reset already unregisters A in FirebaseService's before-sign-out
+    // hook while A's auth is valid. On a direct A→B transition, bindAccount
+    // performs the generation-fenced switch instead of using B's auth for A.
     await WsMultiplexer.I.resetForAccountChange();
     CloudSessionStore.I.resetSyncState();
     PlayBillingService.I.resetForAccount();

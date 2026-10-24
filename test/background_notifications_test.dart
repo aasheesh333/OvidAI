@@ -1,9 +1,15 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:ovid_ai/core/background_notifications.dart';
+import 'package:ovid_ai/core/cloud/cloud_rest.dart';
+import 'package:ovid_ai/core/cloud/cloud_session_store.dart';
+import 'package:ovid_ai/core/cloud/push_payload_mapper.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -156,6 +162,78 @@ void main() {
       );
       expect(images.kind, OvidNotificationKind.jobDone);
       expect(images.title, '4 images ready');
+    });
+
+    test('push payloads preserve agent scheduler and background metadata', () {
+      final failed = PushPayloadMapper.fromData({
+        'kind': 'agentFailed',
+        'channel': 'agent_updates',
+        'sessionId': 'session-failed',
+        'route': '/c/session-failed',
+        'title': 'Ovid could not finish this run',
+        'body': 'The run stopped.',
+      });
+      expect(failed, isNotNull);
+      expect(failed!.kind, OvidNotificationKind.agentFailed);
+      expect(failed.channel, OvidChannel.agentUpdates);
+      expect(failed.sessionId, 'session-failed');
+      expect(failed.route, '/c/session-failed');
+
+      final scheduled = PushPayloadMapper.fromData({
+        'kind': 'scheduleSucceeded',
+        'channel': 'scheduler_results',
+        'sessionId': 'session-scheduled',
+        'route': '/schedule/session-scheduled',
+        'title': 'Scheduled task done',
+        'body': 'Tap to see the result.',
+      });
+      expect(scheduled, isNotNull);
+      expect(scheduled!.kind, OvidNotificationKind.scheduleSucceeded);
+      expect(scheduled.channel, OvidChannel.schedulerResults);
+      expect(scheduled.route, '/schedule/session-scheduled');
+
+      final status = PushPayloadMapper.fromData({
+        'kind': 'backgroundStatus',
+        'channel': 'background_status',
+        'route': '/settings',
+        'title': 'Ovid is active',
+        'body': 'Background work is running.',
+      });
+      expect(status, isNotNull);
+      expect(status!.kind, OvidNotificationKind.backgroundStatus);
+      expect(status.channel, OvidChannel.backgroundStatus);
+      expect(status.channel.defaultSound, NotificationSound.silent);
+      expect(status.route, '/settings');
+    });
+
+    test('push payloads without explicit consistent metadata are dropped', () {
+      expect(PushPayloadMapper.fromData({'route': '/c/session'}), isNull);
+      expect(
+        PushPayloadMapper.fromData({
+          'kind': 'agentFailed',
+          'channel': 'scheduler_results',
+          'sessionId': 'session-failed',
+          'route': '/c/session-failed',
+        }),
+        isNull,
+      );
+      expect(
+        PushPayloadMapper.fromData({
+          'kind': 'scheduleFailed',
+          'channel': 'scheduler_results',
+          'sessionId': 'session-scheduled',
+          'route': '/c/session-scheduled',
+        }),
+        isNull,
+      );
+      expect(
+        PushPayloadMapper.fromData({
+          'kind': 'agentFinished',
+          'channel': 'agent_updates',
+          'route': '/c/missing-session',
+        }),
+        isNull,
+      );
     });
 
     test('ids are stable, in range, and replace per session', () {
@@ -320,6 +398,39 @@ void main() {
       expect(shownInApp, hasLength(1));
     });
 
+    test('visible chat suppression resolves local and server session ids', () async {
+      CloudSessionStore.installForTest(
+        CloudSessionStore.forTest(
+          idMap: {'local-visible-chat': 'server-visible-chat'},
+          rest: CloudRestClient(
+            httpClient: MockClient((request) async => http.Response('{}', 200)),
+            headers: CloudHeaders.forTest(),
+            restBase: 'https://cloud.test',
+          ),
+        ),
+      );
+      addTearDown(CloudSessionStore.resetForTest);
+      AppState.I.activeSessionId = 'local-visible-chat';
+      addTearDown(() => AppState.I.activeSessionId = null);
+      notifier.foregroundOverrideForTest = () => true;
+
+      final visible = OvidNotification.agentFinished(
+        sessionId: 'server-visible-chat',
+        sessionTitle: '',
+        reply: 'Visible reply',
+      );
+      expect(await notifier.post(visible), NotificationDelivery.suppressed);
+      expect(shownInApp, isEmpty);
+
+      final other = OvidNotification.agentFinished(
+        sessionId: 'server-other-chat',
+        sessionTitle: '',
+        reply: 'Other reply',
+      );
+      expect(await notifier.post(other), NotificationDelivery.inApp);
+      expect(shownInApp, [other]);
+    });
+
     test('per-channel switch and the master switch are respected', () async {
       notifier.foregroundOverrideForTest = () => false;
       await notifier.setChannelEnabled(OvidChannel.schedulerResults, false);
@@ -356,6 +467,31 @@ void main() {
       await notifier.init();
       expect(calls.map((c) => c.$1), ['notifyConfigure']);
     });
+
+    test(
+      'boot init coalesces callers and completes after channel configuration',
+      () async {
+        final gate = Completer<void>();
+        notifier.invokeOverrideForTest = (method, args) async {
+          calls.add((method, args));
+          if (method == 'notifyConfigure') await gate.future;
+          return true;
+        };
+
+        var completed = false;
+        final first = notifier.init().then((_) => completed = true);
+        final second = notifier.init();
+        await Future<void>.delayed(Duration.zero);
+        expect(calls.map((c) => c.$1), ['notifyConfigure']);
+        expect(completed, isFalse);
+
+        gate.complete();
+        await first;
+        await second;
+        expect(completed, isTrue);
+        expect(calls.map((c) => c.$1), ['notifyConfigure']);
+      },
+    );
   });
 
   group('original notification sound', () {

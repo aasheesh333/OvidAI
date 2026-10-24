@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../core/app_info.dart';
 import '../core/cloud/account_settings_client.dart';
 import '../core/cloud/cloud_rest.dart';
+import '../core/cloud/push_registration_coordinator.dart';
 import '../core/cloud/push_service.dart';
 import '../core/diag.dart';
 import '../core/distribution.dart';
@@ -22,7 +23,7 @@ class ServiceStatusProbes {
     required this.account,
     required this.live,
     required this.signedIn,
-    required this.pushRegistered,
+    required this.pushHealth,
   });
 
   /// Production probes.
@@ -35,7 +36,7 @@ class ServiceStatusProbes {
       await CloudRestClient.I.mintTicket();
     },
     signedIn: () => FirebaseService.I.isSignedIn,
-    pushRegistered: () => PushService.I.boundUid != null,
+    pushHealth: () => PushService.I.health,
   );
 
   final Future<ServiceStatus> Function() server;
@@ -46,7 +47,7 @@ class ServiceStatusProbes {
   /// Live-updates ticket: the realtime channel would open.
   final Future<void> Function() live;
   final bool Function() signedIn;
-  final bool Function() pushRegistered;
+  final PushHealthSnapshot Function() pushHealth;
 }
 
 /// SE-013 / SE-014 / EM-014 — "Service status": a proper screen (Scaffold,
@@ -122,10 +123,15 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
   String _headline(AppLocalizations l) {
     if (_loading) return l.statusChecking;
     if (_serverFailed) return l.statusUnreachable;
+    final push = _probes.pushHealth();
     final rows = [
       _level(_server!.overall),
       _account,
       _live,
+      _factLevel(push.osPermissionGranted),
+      _factLevel(push.channelsReady),
+      _factLevel(push.tokenAvailable),
+      push.registered ? StatusLevel.ok : StatusLevel.warn,
     ];
     if (rows.contains(StatusLevel.down)) return l.statusProblem;
     if (rows.contains(StatusLevel.warn)) return l.statusPartial;
@@ -135,6 +141,7 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
   Future<void> _copyDiagnostics() async {
     final l = context.l10n;
     final s = _server;
+    final push = _probes.pushHealth();
     final lines = <String>[
       'Ovid Si $kAppVersionLabel',
       'Distribution: ${Distribution.play ? 'play' : 'sideload'}',
@@ -145,7 +152,12 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
       else
         'Cloud: unreachable',
       'Account: ${_account.name} Live: ${_live.name} '
-          'Push: ${_probes.pushRegistered() ? 'registered' : 'not registered'}',
+          'Push: ${push.registered ? 'registered' : 'not registered'}',
+      'Push facts: os=${_fact(push.osPermissionGranted)} '
+          'channels=${_fact(push.channelsReady)} '
+          'token=${push.tokenAvailable ? 'available' : 'unavailable'} '
+          'generation=${push.generation} retries=${push.retryCount}',
+      if (push.lastError != null) 'Push issue: ${_scrub(push.lastError!)}',
       'Recent issues:',
       for (final d in Diag.recent().reversed.take(20))
         '  ${d.at.toUtc().toIso8601String()} ${d.context}: ${_scrub(d.error)}',
@@ -158,6 +170,15 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
     }
   }
 
+  static String _fact(bool? value) =>
+      value == null ? 'unknown' : (value ? 'ready' : 'not ready');
+
+  static StatusLevel _factLevel(bool? value) => switch (value) {
+    true => StatusLevel.ok,
+    false => StatusLevel.warn,
+    null => StatusLevel.warn,
+  };
+
   /// Drops anything token- or address-shaped before it leaves the device.
   static String _scrub(String text) {
     var t = text.replaceAll(RegExp(r'[A-Za-z0-9_\-]{24,}'), '<redacted>');
@@ -169,6 +190,7 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
   Widget build(BuildContext context) {
     final l = context.l10n;
     final s = _server;
+    final push = _probes.pushHealth();
     StatusLevel serverRow(ServiceCheck Function(ServiceStatus) pick) =>
         _loading
             ? StatusLevel.checking
@@ -226,11 +248,39 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
                   ),
                   _row(l.statusLive, _loading ? StatusLevel.checking : _live),
                   _row(
+                    'OS permission',
+                    _factLevel(push.osPermissionGranted),
+                    detail: switch (push.osPermissionGranted) {
+                      true => 'Allowed',
+                      false => 'Not allowed',
+                      null => 'Unknown',
+                    },
+                  ),
+                  _row(
+                    'Notification channels',
+                    _factLevel(push.channelsReady),
+                    detail: switch (push.channelsReady) {
+                      true => 'Ready',
+                      false => 'Not ready',
+                      null => 'Unknown',
+                    },
+                  ),
+                  _row(
+                    'Push token',
+                    _factLevel(push.tokenAvailable),
+                    detail: push.tokenAvailable ? 'Available' : 'Unavailable',
+                  ),
+                  _row(
                     l.statusPush,
-                    _probes.pushRegistered() ? StatusLevel.ok : StatusLevel.warn,
-                    detail: _probes.pushRegistered()
+                    push.registered ? StatusLevel.ok : StatusLevel.warn,
+                    detail: push.registered
                         ? null
-                        : l.statusPushOff,
+                        : [
+                            l.statusPushOff,
+                            if (push.retryPending)
+                              'Retry ${push.retryCount} scheduled',
+                            if (push.lastError != null) _scrub(push.lastError!),
+                          ].join('\n'),
                   ),
                 ],
               ),
