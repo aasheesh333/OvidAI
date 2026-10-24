@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/connectors/connector_api.dart';
+import '../../../core/connectors/remote_connector_controller.dart';
 import 'catalog_data.dart';
 import 'connectors_page.dart';
 
@@ -66,26 +67,130 @@ Future<V2ConnectorsData> loadConnectorCatalog(ConnectorApi api) async {
   );
 }
 
+V2Connector _remoteRow(
+  ConnectorCatalogEntry entry,
+  ConnectorConnection? connection,
+) {
+  return V2Connector(
+    id: connection?.connectionId ?? entry.providerId,
+    providerId: entry.providerId,
+    connectionId: connection?.connectionId,
+    name: connection?.name ?? entry.displayName,
+    description: entry.description,
+    connected: connection != null && !connection.isDisconnected,
+    configured: entry.configured,
+    disconnectedHistory: connection?.isDisconnected ?? false,
+    category: 'Apps',
+    kind: V2ConnectorKind.app,
+    icon: connectorIconFor(entry.providerId),
+    enabled: connection?.enabled ?? false,
+    agentEnabled: connection?.agentEnabled ?? false,
+    builtIn: true,
+    tools: entry.toolNames,
+    auth: entry.credentialFields.isEmpty
+        ? V2CatalogAuth.none
+        : V2CatalogAuth.apiKey,
+    risk: V2CatalogRisk.medium,
+    authState: connection?.authState,
+    healthState: connection?.healthState,
+    lastCheckedAt: connection?.lastCheckedAt,
+    lastSuccessAt: connection?.lastSuccessAt,
+    credentialFields: entry.credentialFields,
+    operations: entry.operations,
+    supportsAgentActivation: entry.isSupported,
+  );
+}
+
+/// Maps the one remote cache without ever consulting legacy local connector
+/// state. Catalog configuration flags do not install or connect anything.
+List<V2Connector> remoteConnectorRows(ConnectorViewState state) {
+  final rows = <V2Connector>[];
+  final matched = <String>{};
+  for (final entry in state.catalog) {
+    if (!entry.isSupported) continue;
+    final connections = state.connections
+        .where((connection) => connection.providerId == entry.providerId)
+        .toList(growable: false);
+    if (connections.isEmpty) {
+      rows.add(_remoteRow(entry, null));
+      continue;
+    }
+    for (final connection in connections) {
+      matched.add(connection.connectionId);
+      rows.add(_remoteRow(entry, connection));
+    }
+  }
+  for (final connection in state.connections) {
+    if (matched.contains(connection.connectionId)) continue;
+    rows.add(
+      V2Connector(
+        id: connection.connectionId,
+        providerId: connection.providerId,
+        connectionId: connection.connectionId,
+        name: connection.name,
+        description: connection.approvedSourceId == null
+            ? 'Configured connector'
+            : 'Approved source ${connection.approvedSourceId}',
+        connected: !connection.isDisconnected,
+        disconnectedHistory: connection.isDisconnected,
+        category: 'Custom',
+        kind: V2ConnectorKind.mcp,
+        icon: connectorIconFor(connection.providerId),
+        enabled: connection.enabled,
+        agentEnabled: connection.agentEnabled,
+        auth: V2CatalogAuth.apiKey,
+        risk: V2CatalogRisk.high,
+        authState: connection.authState,
+        healthState: connection.healthState,
+        lastCheckedAt: connection.lastCheckedAt,
+        lastSuccessAt: connection.lastSuccessAt,
+        approvedSourceId: connection.approvedSourceId,
+        approvedDigest: connection.approvedDigest,
+      ),
+    );
+  }
+  return rows;
+}
+
+V2ConnectorsData connectorCatalogForState(ConnectorViewState state) {
+  return V2ConnectorsData(
+    connectors: remoteConnectorRows(state),
+    useBuiltInCatalog: false,
+    status: switch (state.status) {
+      ConnectorViewStatus.loading => V2ConnectorsStatus.loading,
+      ConnectorViewStatus.error => V2ConnectorsStatus.error,
+      ConnectorViewStatus.empty ||
+      ConnectorViewStatus.content => V2ConnectorsStatus.content,
+    },
+    errorMessage: state.errorMessage.isEmpty
+        ? RemoteConnectorController.loadError
+        : state.errorMessage,
+  );
+}
+
 /// The screen's error state, with copy the user can act on.
 V2ConnectorsData connectorCatalogError() => const V2ConnectorsData(
-      connectors: <V2Connector>[],
-      useBuiltInCatalog: false,
-      status: V2ConnectorsStatus.error,
-      errorMessage: 'Connectors did not load. Check your connection and retry.',
-    );
+  connectors: <V2Connector>[],
+  useBuiltInCatalog: false,
+  status: V2ConnectorsStatus.error,
+  errorMessage: 'Connectors did not load. Check your connection and retry.',
+);
 
 /// Icon for a curated id, so the list does not regress to a generic glyph.
 IconData connectorIconFor(String id) => switch (id) {
-      'github' || 'github-mcp' || 'gitlab' || 'bitbucket' => Icons.code_rounded,
-      'gmail' || 'outlook' || 'fastmail' => Icons.mail_outline_rounded,
-      'google-drive' || 'dropbox' || 'onedrive' || 'box' => Icons.cloud_outlined,
-      'slack' || 'discord' || 'telegram' => Icons.forum_outlined,
-      'notion' || 'confluence' || 'google-docs' => Icons.description_outlined,
-      'jira' || 'linear' || 'asana' || 'trello' => Icons.checklist_rounded,
-      'figma' || 'canva' => Icons.brush_outlined,
-      'sentry' => Icons.bug_report_outlined,
-      'postgres' || 'mysql' || 'mongodb' || 'redis' || 'supabase' =>
-        Icons.storage_rounded,
-      'fetch' || 'exa' || 'brave-search' => Icons.travel_explore_rounded,
-      _ => Icons.extension_outlined,
-    };
+  'github' || 'github-mcp' || 'gitlab' || 'bitbucket' => Icons.code_rounded,
+  'gmail' || 'outlook' || 'fastmail' => Icons.mail_outline_rounded,
+  'google-drive' || 'dropbox' || 'onedrive' || 'box' => Icons.cloud_outlined,
+  'slack' || 'discord' || 'telegram' => Icons.forum_outlined,
+  'notion' || 'confluence' || 'google-docs' => Icons.description_outlined,
+  'jira' || 'linear' || 'asana' || 'trello' => Icons.checklist_rounded,
+  'figma' || 'canva' => Icons.brush_outlined,
+  'sentry' => Icons.bug_report_outlined,
+  'postgres' ||
+  'mysql' ||
+  'mongodb' ||
+  'redis' ||
+  'supabase' => Icons.storage_rounded,
+  'fetch' || 'exa' || 'brave-search' => Icons.travel_explore_rounded,
+  _ => Icons.extension_outlined,
+};

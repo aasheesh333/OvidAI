@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/connectors/connector_api.dart';
+import '../../../core/connectors/remote_connector_controller.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_screen.dart';
@@ -95,6 +97,10 @@ class V2CustomConnectorDraft {
     this.category = 'Custom',
     this.description = '',
     this.kind = 'app',
+    this.secrets = const <String, String>{},
+    this.agentEnabled = false,
+    this.approvedSourceId,
+    this.approvedDigest,
   });
 
   final String name;
@@ -113,6 +119,12 @@ class V2CustomConnectorDraft {
   final String category;
   final String description;
   final String kind;
+
+  /// Gateway-bound credential values. They are never persisted in this draft.
+  final Map<String, String> secrets;
+  final bool agentEnabled;
+  final String? approvedSourceId;
+  final String? approvedDigest;
 
   String get endpoint => target == V2ConnectorTarget.command ? command : url;
 
@@ -169,6 +181,10 @@ class V2AddConnectorData {
     this.presetDescription = '',
     this.presetCategory = 'Custom',
     this.presetKind = 'app',
+    this.credentialFields = const <ConnectorCredentialField>[],
+    this.agentEnabled = false,
+    this.approvedSourceId,
+    this.approvedDigest,
     // ignore: prefer_initializing_formals
   }) : _planLimitReached = planLimitReached;
 
@@ -207,8 +223,15 @@ class V2AddConnectorData {
   final String presetDescription;
   final String presetCategory;
   final String presetKind;
+  final List<ConnectorCredentialField> credentialFields;
+  final bool agentEnabled;
+  final String? approvedSourceId;
+  final String? approvedDigest;
 
-  bool get isCatalogSetup => presetId != null;
+  bool get isApprovedCustom =>
+      presetId != null && approvedSourceId != null && approvedDigest != null;
+
+  bool get isCatalogSetup => presetId != null && !isApprovedCustom;
 
   int get customLimit => plan.connectorLimit;
 
@@ -245,6 +268,7 @@ class AddConnectorPage extends StatefulWidget {
     this.store,
     this.secrets,
     this.probe,
+    this.controller,
   });
 
   final V2AddConnectorData data;
@@ -260,8 +284,10 @@ class AddConnectorPage extends StatefulWidget {
   final V2ConnectorStore? store;
   final V2ConnectorSecrets? secrets;
 
-  /// Runs the real connection test. Defaults to the HTTP probe.
+  /// Optional legacy preview probe. Remote connections use server health only.
   final V2ConnectorProbe? probe;
+
+  final RemoteConnectorController? controller;
 
   @override
   State<AddConnectorPage> createState() => _AddConnectorPageState();
@@ -272,12 +298,15 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
   final TextEditingController _url = TextEditingController();
   final TextEditingController _command = TextEditingController();
   final TextEditingController _key = TextEditingController();
+  final Map<String, TextEditingController> _credentialControllers =
+      <String, TextEditingController>{};
 
   late V2ConnectorAuth _auth = widget.data.auth;
   late bool _read = widget.data.read;
   late bool _write = widget.data.write;
   late bool _execute = widget.data.execute;
   late V2ConnectorTarget _target = widget.data.target;
+  late bool _agentEnabled = widget.data.agentEnabled;
   bool _submitted = false;
 
   /// Result of the last real connection test run from this screen.
@@ -295,7 +324,12 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
     super.initState();
     if (widget.data.presetName.isNotEmpty) _name.text = widget.data.presetName;
     if (widget.data.presetId != null) _target = V2ConnectorTarget.url;
+    for (final field in widget.data.credentialFields) {
+      _credentialControllers[field.key] = TextEditingController();
+    }
   }
+
+  bool get _remote => widget.controller != null;
 
   String? get _endpointError =>
       V2ConnectorSafety.validateEndpoint(value: _endpoint, target: _target);
@@ -313,6 +347,19 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
         : null;
   }
 
+  String? get _credentialError {
+    for (final field in widget.data.credentialFields) {
+      final optional =
+          field.label.toLowerCase().contains('optional') ||
+          (field.hint?.toLowerCase().contains('empty means') ?? false);
+      if (optional) continue;
+      if ((_credentialControllers[field.key]?.text.trim() ?? '').isEmpty) {
+        return 'Enter ${field.label}.';
+      }
+    }
+    return null;
+  }
+
   /// Save is only disabled when nothing can be saved: the plan cap, or a save
   /// already in flight. Missing fields are explained inline by [_save].
   bool get _saveEnabled => !widget.data.planLimitReached && !_saving;
@@ -322,8 +369,7 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
   bool get _canTest => _endpointError == null && !_testing;
 
   V2ConnectorStore get _store => widget.store ?? v2ConnectorStore;
-  V2ConnectorSecrets get _secrets => widget.secrets ?? v2ConnectorSecrets;
-  V2ConnectorProbe get _probe => widget.probe ?? V2HttpConnectorProbe();
+  V2ConnectorSecrets? get _secrets => widget.secrets;
 
   void _openUpgrade() {
     final external = widget.onUpgrade;
@@ -348,6 +394,9 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
     if (oldWidget.data.target != widget.data.target) {
       _target = widget.data.target;
     }
+    if (oldWidget.data.agentEnabled != widget.data.agentEnabled) {
+      _agentEnabled = widget.data.agentEnabled;
+    }
   }
 
   @override
@@ -356,6 +405,9 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
     _url.dispose();
     _command.dispose();
     _key.dispose();
+    for (final controller in _credentialControllers.values) {
+      controller.dispose();
+    }
     super.dispose();
   }
 
@@ -364,6 +416,10 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
         ? _command.text.trim()
         : '';
     final url = _target == V2ConnectorTarget.url ? _url.text.trim() : '';
+    final credentials = <String, String>{
+      for (final field in widget.data.credentialFields)
+        field.key: _credentialControllers[field.key]?.text ?? '',
+    };
     return V2CustomConnectorDraft(
       name: _name.text.trim(),
       target: _target,
@@ -378,6 +434,10 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
       category: widget.data.presetCategory,
       description: widget.data.presetDescription,
       kind: widget.data.presetKind,
+      secrets: credentials,
+      agentEnabled: _agentEnabled,
+      approvedSourceId: widget.data.approvedSourceId,
+      approvedDigest: widget.data.approvedDigest,
     );
   }
 
@@ -387,7 +447,9 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
       _saveError = null;
     });
     if (!_saveEnabled) return;
-    if (_nameError != null || _endpointError != null || _keyError != null) {
+    if (_nameError != null ||
+        (!_remote && (_endpointError != null || _keyError != null)) ||
+        (_remote && _credentialError != null)) {
       return;
     }
     final draft = _draft();
@@ -397,10 +459,37 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
       return;
     }
     setState(() => _saving = true);
-    final connection = draft.toConnection();
     try {
-      await _secrets.write(connection.id, draft.apiKey);
-      await _store.save(connection);
+      if (_remote) {
+        final controller = widget.controller!;
+        final providerId = draft.catalogId;
+        if (providerId == null) throw StateError('Provider required.');
+        if (widget.data.isApprovedCustom) {
+          await controller.createCustomConnection(
+            providerId: providerId,
+            name: draft.name,
+            approvedSourceId: widget.data.approvedSourceId!,
+            approvedDigest: widget.data.approvedDigest!,
+            secrets: draft.secrets,
+            agentEnabled: draft.agentEnabled,
+          );
+        } else {
+          await controller.createConnection(
+            providerId: providerId,
+            name: draft.name,
+            secrets: draft.secrets,
+            agentEnabled: draft.agentEnabled,
+          );
+        }
+      } else {
+        final connection = draft.toConnection();
+        final secrets = _secrets;
+        if (draft.apiKey.isNotEmpty) {
+          if (secrets == null) throw StateError('Secret store unavailable.');
+          await secrets.write(connection.id, draft.apiKey);
+        }
+        await _store.save(connection);
+      }
     } catch (_) {
       if (!mounted) return;
       setState(() {
@@ -410,10 +499,12 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
       return;
     }
     if (!mounted) return;
-    // The secret now lives in the keystore; do not keep a copy in the field.
     _key.clear();
+    for (final controller in _credentialControllers.values) {
+      controller.clear();
+    }
     setState(() => _saving = false);
-    showOSnack(context, '${connection.name} saved.');
+    showOSnack(context, '${_name.text.trim()} saved.');
     Navigator.of(context).maybePop();
   }
 
@@ -430,10 +521,15 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
       return;
     }
     setState(() => _testing = true);
-    final report = await _probe.test(
-      draft.toConnection(),
-      apiKey: draft.apiKey,
-    );
+    final probe = widget.probe;
+    final report = probe == null
+        ? const V2ConnectorTestReport(
+            ok: false,
+            unsupported: true,
+            message:
+                'Health checks are available after saving through Ovid Cloud.',
+          )
+        : await probe.test(draft.toConnection(), apiKey: draft.apiKey);
     if (!mounted) return;
     setState(() {
       _testing = false;
@@ -470,12 +566,15 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
           ? 'Setting up ${widget.data.presetName}'
           : null,
       actions: [
-        OIconButton(
-          key: const Key('connector-save'),
-          icon: Icons.check_rounded,
-          semanticLabel: 'Save',
-          onPressed: _saveEnabled ? _save : null,
-        ),
+        if (!_remote ||
+            widget.data.isCatalogSetup ||
+            widget.data.isApprovedCustom)
+          OIconButton(
+            key: const Key('connector-save'),
+            icon: Icons.check_rounded,
+            semanticLabel: 'Save',
+            onPressed: _saveEnabled ? _save : null,
+          ),
       ],
       child: ODismissKeyboard(child: OFadeSlide(child: _body(context))),
     );
@@ -520,6 +619,7 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
   }
 
   Widget _content(BuildContext context) {
+    if (_remote) return _remoteContent(context);
     final c = OColors.of(context);
     final isCommand = _target == V2ConnectorTarget.command;
     final blocked = widget.data.planLimitReached;
@@ -639,6 +739,112 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
             message: widget.data.testDetail,
           ),
         ],
+        if (_saveError != null) ...[
+          const SizedBox(height: OSpace.m),
+          _FieldError(
+            key: const Key('connector-save-error'),
+            message: _saveError!,
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _remoteContent(BuildContext context) {
+    if (!widget.data.isCatalogSetup && !widget.data.isApprovedCustom) {
+      final close = _close;
+      return OEmptyState(
+        icon: Icons.verified_outlined,
+        title: 'Approved source required',
+        message: 'Custom connectors can only be added from an approved source.',
+        action: close == null
+            ? null
+            : OButton(
+                label: 'Back to connectors',
+                icon: Icons.arrow_back_rounded,
+                onPressed: close,
+              ),
+      );
+    }
+    final c = OColors.of(context);
+    return ListView(
+      padding: const EdgeInsets.only(top: OSpace.l, bottom: OSpace.xxl),
+      children: [
+        if (widget.data.planLimitReached) ...[
+          _CapLine(message: widget.data.capMessage, onUpgrade: _openUpgrade),
+          const SizedBox(height: OSpace.l),
+        ],
+        TextField(
+          key: const Key('add-connector-name'),
+          controller: _name,
+          textInputAction: TextInputAction.next,
+          style: OType.bodySm.copyWith(color: c.text),
+          decoration: InputDecoration(
+            labelText: 'Name',
+            errorText: _submitted ? _nameError : null,
+          ),
+        ),
+        if (widget.data.isApprovedCustom) ...[
+          const SizedBox(height: OSpace.m),
+          Text(
+            'Approved source ${widget.data.approvedSourceId}',
+            style: OType.caption.copyWith(color: c.textMuted),
+          ),
+          Text(
+            'Digest ${widget.data.approvedDigest}',
+            style: OType.caption.copyWith(color: c.textMuted),
+          ),
+        ],
+        for (final field in widget.data.credentialFields) ...[
+          const SizedBox(height: OSpace.m),
+          TextField(
+            key: Key('connector-credential-${field.key}'),
+            controller: _credentialControllers[field.key],
+            obscureText: field.secret,
+            enableSuggestions: !field.secret,
+            autocorrect: false,
+            onChanged: (_) => _fieldChanged(),
+            style: OType.bodySm.copyWith(color: c.text),
+            decoration: InputDecoration(
+              labelText: field.label,
+              hintText: field.hint,
+              errorText:
+                  _submitted &&
+                      (_credentialControllers[field.key]?.text.trim() ?? '')
+                          .isEmpty &&
+                      !field.label.toLowerCase().contains('optional')
+                  ? 'Enter ${field.label}.'
+                  : null,
+            ),
+          ),
+        ],
+        if (widget.controller!.capabilities.createAgentEnabled) ...[
+          const SizedBox(height: OSpace.l),
+          OCard(
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Use in agent runs',
+                    style: OType.bodyStrong.copyWith(color: c.text),
+                  ),
+                ),
+                Switch(
+                  key: const Key('connector-agent-opt-in'),
+                  value: _agentEnabled,
+                  onChanged: (value) => setState(() => _agentEnabled = value),
+                ),
+              ],
+            ),
+          ),
+        ],
+        const SizedBox(height: OSpace.s),
+        Text(
+          widget.controller!.capabilities.createAgentEnabled
+              ? 'Off by default. Credentials are sent only to Ovid Cloud.'
+              : 'Credentials are sent only to Ovid Cloud.',
+          style: OType.caption.copyWith(color: c.textMuted),
+        ),
         if (_saveError != null) ...[
           const SizedBox(height: OSpace.m),
           _FieldError(

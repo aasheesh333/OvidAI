@@ -9,6 +9,7 @@ import '../../../core/cloud/cloud_rest.dart';
 import '../../../core/cloud/cloud_session_store.dart';
 import '../../../core/cloud/studio_git_api.dart';
 import '../../../core/connectors/connector_api.dart';
+import '../../../core/connectors/remote_connector_controller.dart';
 import '../../../core/chat_integration_ports.dart';
 import '../../../core/firebase_service.dart';
 import '../../../core/revenuecat_billing.dart';
@@ -169,25 +170,29 @@ class V2WorkRoutes {
     BuildContext context,
     V2SettingsActions? actions,
   ) async {
-    V2ConnectorsData data;
-    try {
-      data = await loadConnectorCatalog(ConnectorApi());
-    } catch (_) {
-      data = connectorCatalogError();
-    }
-    if (!context.mounted) return;
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => ConnectorsPage(
-          data: data,
-          // The cap follows the server-confirmed plan, not the display cache.
-          plan: V2ConnectorPlan.forTier(
-            confirmedPlanTier ?? AppState.I.ovidCloudTier,
-          ),
-          onRetry: () => openConnectors(context, actions),
-        ),
-      ),
+    final controller = RemoteConnectorController(
+      api: ConnectorApi(),
+      accountId: () => artifactAccountId,
     );
+    try {
+      await controller.reload();
+      if (!context.mounted) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ConnectorsPage(
+            data: connectorCatalogForState(controller.value),
+            controller: controller,
+            // The cap follows the server-confirmed plan, not the display cache.
+            plan: V2ConnectorPlan.forTier(
+              confirmedPlanTier ?? AppState.I.ovidCloudTier,
+            ),
+            onRetry: controller.reload,
+          ),
+        ),
+      );
+    } finally {
+      controller.dispose();
+    }
   }
 
   static String _typeLabel(ArtifactKind kind) => switch (kind) {

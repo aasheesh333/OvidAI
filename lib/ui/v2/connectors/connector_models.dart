@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/connectors/connector_api.dart';
 import 'catalog_data.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the next wave.
@@ -97,6 +98,40 @@ enum V2ConnectorPlan {
   }
 }
 
+String remoteConnectorStatusLabel({
+  required bool enabled,
+  required String? authState,
+  required String? healthState,
+}) {
+  if (!enabled || healthState == 'disabled') return 'Disabled';
+  switch (healthState) {
+    case 'healthy':
+      return 'Healthy';
+    case 'checking':
+      return 'Checking';
+    case 'degraded':
+      return 'Degraded';
+    case 'needs_auth':
+      return 'Needs authentication';
+    case 'refreshing':
+      return 'Refreshing access';
+    case 'revoked':
+      return 'Access revoked';
+    case 'unavailable':
+      return 'Unavailable';
+    case 'never_checked':
+      return switch (authState) {
+        'authorized' => 'Authorized',
+        'needs_auth' => 'Needs authentication',
+        'revoked' => 'Access revoked',
+        'missing' => 'Credentials missing',
+        _ => 'Configured',
+      };
+    default:
+      return 'Unavailable';
+  }
+}
+
 /// One connector in the catalog. Matches the shared connector contract
 /// (`id, name, description, connected, category`) plus display hints.
 @immutable
@@ -116,6 +151,20 @@ class V2Connector {
     this.auth = V2CatalogAuth.none,
     this.risk = V2CatalogRisk.low,
     this.endpoint = '',
+    this.providerId,
+    this.connectionId,
+    this.configured = false,
+    this.disconnectedHistory = false,
+    this.agentEnabled = false,
+    this.authState,
+    this.healthState,
+    this.lastCheckedAt,
+    this.lastSuccessAt,
+    this.credentialFields = const <ConnectorCredentialField>[],
+    this.operations = const <ConnectorOperation>[],
+    this.approvedSourceId,
+    this.approvedDigest,
+    this.supportsAgentActivation = false,
   });
 
   final String id;
@@ -142,6 +191,38 @@ class V2Connector {
   /// row that has not been set up yet, so nothing pretends to be testable.
   final String endpoint;
 
+  /// Remote identity and lifecycle metadata. A catalog [providerId] is never a
+  /// substitute for the per-user server [connectionId].
+  final String? providerId;
+  final String? connectionId;
+  final bool configured;
+  final bool disconnectedHistory;
+  final bool agentEnabled;
+  final String? authState;
+  final String? healthState;
+  final DateTime? lastCheckedAt;
+  final DateTime? lastSuccessAt;
+  final List<ConnectorCredentialField> credentialFields;
+  final List<ConnectorOperation> operations;
+  final String? approvedSourceId;
+  final String? approvedDigest;
+  final bool supportsAgentActivation;
+
+  bool get isRemote => providerId != null;
+
+  /// Server health/authentication words only. In particular, `configured` is
+  /// not translated into a connectivity claim.
+  String get statusLabel {
+    if (!isRemote) return enabled ? 'Connected' : 'Paused';
+    if (disconnectedHistory) return 'Disconnected';
+    if (!connected) return 'Available';
+    return remoteConnectorStatusLabel(
+      enabled: enabled,
+      authState: authState,
+      healthState: healthState,
+    );
+  }
+
   bool get isMcp => kind == V2ConnectorKind.mcp;
 
   String get sectionTitle =>
@@ -150,6 +231,7 @@ class V2Connector {
   V2Connector copyWith({
     bool? connected,
     bool? enabled,
+    bool? agentEnabled,
     String? endpoint,
     String? description,
     String? category,
@@ -170,6 +252,20 @@ class V2Connector {
       auth: auth,
       risk: risk,
       endpoint: endpoint ?? this.endpoint,
+      providerId: providerId,
+      connectionId: connectionId,
+      configured: configured,
+      disconnectedHistory: disconnectedHistory,
+      agentEnabled: agentEnabled ?? this.agentEnabled,
+      authState: authState,
+      healthState: healthState,
+      lastCheckedAt: lastCheckedAt,
+      lastSuccessAt: lastSuccessAt,
+      credentialFields: credentialFields,
+      operations: operations,
+      approvedSourceId: approvedSourceId,
+      approvedDigest: approvedDigest,
+      supportsAgentActivation: supportsAgentActivation,
     );
   }
 }

@@ -1,11 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
+import '../../../core/connectors/remote_connector_controller.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'add_connector_page.dart';
 import 'catalog_data.dart';
+import 'connector_catalog_loader.dart';
 import 'connector_detail_page.dart';
 import 'connector_probe.dart';
 import 'connector_store.dart';
@@ -60,6 +64,7 @@ class ConnectorsPage extends StatefulWidget {
     this.secrets,
     this.probe,
     this.plan,
+    this.controller,
   });
 
   final V2ConnectorsData data;
@@ -82,6 +87,9 @@ class ConnectorsPage extends StatefulWidget {
   /// Server-confirmed allowance. Null reads the cached tier, which is the best
   /// answer this screen can get without the billing stack.
   final V2ConnectorPlan? plan;
+
+  /// Shared remote cache for this list and every page it opens.
+  final RemoteConnectorController? controller;
 
   @override
   State<ConnectorsPage> createState() => _ConnectorsPageState();
@@ -147,22 +155,57 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
   V2ConnectorPlan? _plan;
 
   V2ConnectorStore get _store => widget.store ?? v2ConnectorStore;
-  V2ConnectorSecrets get _secrets => widget.secrets ?? v2ConnectorSecrets;
+  V2ConnectorSecrets? get _secrets => widget.secrets;
+
+  bool get _remote => widget.controller != null;
+  V2ConnectorsData get _data => _remote
+      ? connectorCatalogForState(widget.controller!.value)
+      : widget.data;
+
+  void _remoteChanged() {
+    if (!mounted) return;
+    setState(() {
+      if (widget.controller!.value.status == ConnectorViewStatus.content &&
+          !_initialTabSettled) {
+        _settleInitialTab();
+      }
+    });
+  }
 
   @override
   void initState() {
     super.initState();
     _plan = widget.plan;
+    widget.controller?.addListener(_remoteChanged);
     // Pick the first tab from the injected rows right away, so the first frame
     // is already correct even if the store answers late (or never, in a
     // preview). The first store answer may still correct it below.
     _tab = _catalog.any((row) => row.connected)
         ? _Tab.installed
         : _Tab.available;
+    if (_remote) {
+      if (widget.controller!.value.status == ConnectorViewStatus.content) {
+        _settleInitialTab();
+      }
+      return;
+    }
     _reload();
   }
 
+  @override
+  void didUpdateWidget(covariant ConnectorsPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller?.removeListener(_remoteChanged);
+      widget.controller?.addListener(_remoteChanged);
+    }
+  }
+
   Future<void> _reload() async {
+    if (_remote) {
+      await widget.controller!.reload();
+      return;
+    }
     try {
       final saved = await _store.load();
       if (!mounted) return;
@@ -221,7 +264,7 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
   /// the person added. Rows only claim "connected" when a saved connection
   /// exists.
   List<V2Connector> get _catalog {
-    final base = widget.data.catalog;
+    final base = _data.catalog;
     final rows = <V2Connector>[];
     for (final row in base) {
       final saved = _connections[row.id];
@@ -274,24 +317,56 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
     }
     final row = _rowFor(id);
     if (row == null) return;
+    final controller = widget.controller;
+    final connectionId = row.connectionId;
+    if (controller != null && connectionId != null) {
+      unawaited(_refreshRemoteConnection(connectionId));
+    }
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => ConnectorDetailPage(
-          data: v2ConnectorDetailForRow(row, connection: _connections[id]),
-          store: _store,
+          data: v2ConnectorDetailForRow(
+            row,
+            connection: _remote ? null : _connections[id],
+            remoteConnection: controller?.connectionById(
+              row.connectionId ?? '',
+            ),
+          ),
+          store: _remote ? null : _store,
           secrets: _secrets,
           probe: widget.probe,
           plan: _plan,
+          controller: controller,
         ),
       ),
     );
-    await _reload();
+    if (!_remote) await _reload();
+  }
+
+  Future<void> _refreshRemoteConnection(String connectionId) async {
+    try {
+      await widget.controller!.getConnection(connectionId);
+    } catch (_) {
+      if (!mounted) return;
+      showOSnack(context, 'Could not refresh this connector.');
+    }
   }
 
   Future<void> _toggle(String id, bool enabled) async {
     final external = widget.onToggle;
     if (external != null) {
       external(id, enabled);
+      return;
+    }
+    if (_remote) {
+      final connectionId = _rowFor(id)?.connectionId;
+      if (connectionId == null) return;
+      try {
+        await widget.controller!.setEnabled(connectionId, enabled);
+      } catch (_) {
+        if (!mounted) return;
+        showOSnack(context, 'Could not save that change.');
+      }
       return;
     }
     final current = _connections[id];
@@ -330,6 +405,9 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
       presetName: row.name,
       presetDescription: row.description,
       presetCategory: row.category,
+      credentialFields: row.credentialFields,
+      approvedSourceId: row.approvedSourceId,
+      approvedDigest: row.approvedDigest,
       presetKind: switch (row.kind) {
         V2ConnectorKind.app => 'app',
         V2ConnectorKind.plugin => 'plugin',
@@ -360,13 +438,14 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
       MaterialPageRoute<void>(
         builder: (_) => AddConnectorPage(
           data: _setupDataFor(row, plan),
-          store: _store,
+          store: _remote ? null : _store,
           secrets: _secrets,
           probe: widget.probe,
+          controller: widget.controller,
         ),
       ),
     );
-    await _reload();
+    if (!_remote) await _reload();
   }
 
   Future<void> _openAddCustom() async {
@@ -375,6 +454,9 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
       external();
       return;
     }
+    // Arbitrary URL/command creation is not a remote production action. An
+    // approved-source host may supply its own real route above.
+    if (_remote) return;
     final plan = await _resolvePlan();
     if (!mounted) return;
     await Navigator.of(context).push(
@@ -395,6 +477,7 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
 
   @override
   void dispose() {
+    widget.controller?.removeListener(_remoteChanged);
     _search.dispose();
     super.dispose();
   }
@@ -424,21 +507,22 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
       title: 'Connectors',
       maxWidth: 640,
       actions: [
-        OIconButton(
-          icon: Icons.add_rounded,
-          semanticLabel: 'Add connector',
-          onPressed: _customCapReached ? null : _openAddCustom,
-        ),
+        if (!_remote || widget.onAddCustom != null)
+          OIconButton(
+            icon: Icons.add_rounded,
+            semanticLabel: 'Add connector',
+            onPressed: _customCapReached ? null : _openAddCustom,
+          ),
       ],
       child: OFadeSlide(child: _body(context)),
     );
   }
 
   Widget _body(BuildContext context) {
-    return switch (widget.data.status) {
+    return switch (_data.status) {
       V2ConnectorsStatus.loading => const OSkeletonList(rows: 6),
       V2ConnectorsStatus.error => OErrorState(
-        message: widget.data.errorMessage,
+        message: _data.errorMessage,
         // The screen owns a reload, so a retry is never a dead button.
         onRetry: widget.onRetry ?? _reload,
       ),
@@ -480,6 +564,7 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
                     const SizedBox(width: OSpace.s),
                     _FilterButton(
                       value: _filter,
+                      remote: _remote,
                       onSelected: (value) => setState(() => _filter = value),
                     ),
                   ],
@@ -524,7 +609,9 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
                       _AvailableRow(
                         connector: connector,
                         onTap: () => _openConnector(connector.id),
-                        onAdd: () => _connect(connector.id),
+                        onAdd: connector.disconnectedHistory
+                            ? null
+                            : () => _connect(connector.id),
                       ),
                   ],
                 );
@@ -549,6 +636,8 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
               icon: Icons.arrow_upward_rounded,
               onPressed: _openUpgrade,
             )
+          : _remote && widget.onAddCustom == null
+          ? null
           : OButton(
               label: 'Add connector',
               icon: Icons.add_rounded,
@@ -731,7 +820,7 @@ class _AvailableRow extends StatelessWidget {
 
   final V2Connector connector;
   final VoidCallback onTap;
-  final VoidCallback onAdd;
+  final VoidCallback? onAdd;
 
   @override
   Widget build(BuildContext context) {
@@ -743,7 +832,7 @@ class _AvailableRow extends StatelessWidget {
           Expanded(
             child: OPressable(
               onTap: onTap,
-              semanticLabel: '${connector.name}, available',
+              semanticLabel: '${connector.name}, ${connector.statusLabel}',
               child: ExcludeSemantics(
                 child: Row(
                   children: [
@@ -770,7 +859,9 @@ class _AvailableRow extends StatelessWidget {
                             style: OType.bodyStrong.copyWith(color: c.text),
                           ),
                           Text(
-                            connector.description,
+                            connector.disconnectedHistory
+                                ? connector.statusLabel
+                                : connector.description,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: OType.caption.copyWith(color: c.textMuted),
@@ -783,21 +874,23 @@ class _AvailableRow extends StatelessWidget {
               ),
             ),
           ),
-          const SizedBox(width: OSpace.s),
-          // "Add" alone would reach TalkBack as a bare verb; the name makes the
-          // action unambiguous when several rows are on screen.
-          Semantics(
-            label: 'Add ${connector.name}',
-            button: true,
-            enabled: true,
-            onTap: onAdd,
-            excludeSemantics: true,
-            child: OTextAction(
-              key: ValueKey('connector-add-${connector.id}'),
-              label: 'Add',
-              onPressed: onAdd,
+          if (onAdd != null) ...[
+            const SizedBox(width: OSpace.s),
+            // "Add" alone would reach TalkBack as a bare verb; the name makes
+            // the action unambiguous when several rows are on screen.
+            Semantics(
+              label: 'Add ${connector.name}',
+              button: true,
+              enabled: true,
+              onTap: onAdd,
+              excludeSemantics: true,
+              child: OTextAction(
+                key: ValueKey('connector-add-${connector.id}'),
+                label: 'Add',
+                onPressed: onAdd,
+              ),
             ),
-          ),
+          ],
         ],
       ),
     );
@@ -807,17 +900,25 @@ class _AvailableRow extends StatelessWidget {
 /// The single filter control: an icon that opens a menu, with a dot while a
 /// filter is on so the state is visible after the menu closes.
 class _FilterButton extends StatelessWidget {
-  const _FilterButton({required this.value, required this.onSelected});
+  const _FilterButton({
+    required this.value,
+    required this.remote,
+    required this.onSelected,
+  });
 
   final _Filter value;
+  final bool remote;
   final ValueChanged<_Filter> onSelected;
+
+  String _label(_Filter option) =>
+      remote && option == _Filter.connected ? 'Installed' : option.label;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     return PopupMenuButton<_Filter>(
       key: const Key('connector-filter'),
-      tooltip: 'Filter: ${value.label}',
+      tooltip: 'Filter: ${_label(value)}',
       onSelected: onSelected,
       color: c.surface,
       itemBuilder: (context) => [
@@ -826,13 +927,13 @@ class _FilterButton extends StatelessWidget {
             key: ValueKey('connector-filter-${option.name}'),
             value: option,
             checked: option == value,
-            child: Text(option.label),
+            child: Text(_label(option)),
           ),
       ],
       // A PopupMenuButton with a custom child emits a tap node with no label
       // and no enabled state, so TalkBack read an anonymous button.
       child: Semantics(
-        label: 'Filter: ${value.label}',
+        label: 'Filter: ${_label(value)}',
         button: true,
         enabled: true,
         child: SizedBox(
@@ -881,7 +982,7 @@ class _ConnectorRow extends StatelessWidget {
     // One status line, in the words the person would use: a saved connector is
     // connected, and one that is switched off is paused. "On" alone told them
     // nothing.
-    final status = connector.enabled ? 'Connected' : 'Paused';
+    final status = connector.statusLabel;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: OSpace.s),
       child: Row(

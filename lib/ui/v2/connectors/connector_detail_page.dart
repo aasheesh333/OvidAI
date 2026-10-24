@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/connectors/connector_api.dart';
+import '../../../core/connectors/remote_connector_controller.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_screen.dart';
@@ -148,6 +150,20 @@ class V2ConnectorDetailData {
     this.errorMessage = 'This connector did not load.',
     this.disconnectNote = '',
     this.disabledTools = const <String>{},
+    this.providerId,
+    this.connectionId,
+    this.disconnectedHistory = false,
+    this.agentEnabled = false,
+    this.authState,
+    this.healthState,
+    this.lastCheckedAt,
+    this.lastSuccessAt,
+    this.connectionStatusLabel = '',
+    this.operations = const <ConnectorOperation>[],
+    this.credentialFields = const <ConnectorCredentialField>[],
+    this.supportsAgentActivation = false,
+    this.approvedSourceId,
+    this.approvedDigest,
   });
 
   final String id;
@@ -189,6 +205,73 @@ class V2ConnectorDetailData {
 
   /// Tools the person turned off on the permissions screen.
   final Set<String> disabledTools;
+
+  final String? providerId;
+  final String? connectionId;
+  final bool disconnectedHistory;
+  final bool agentEnabled;
+  final String? authState;
+  final String? healthState;
+  final DateTime? lastCheckedAt;
+  final DateTime? lastSuccessAt;
+  final String connectionStatusLabel;
+  final List<ConnectorOperation> operations;
+  final List<ConnectorCredentialField> credentialFields;
+  final bool supportsAgentActivation;
+  final String? approvedSourceId;
+  final String? approvedDigest;
+
+  bool get isRemote => providerId != null;
+
+  V2ConnectorDetailData remoteUpdated(ConnectorConnection connection) {
+    return V2ConnectorDetailData(
+      id: id,
+      name: connection.name,
+      description: description,
+      icon: icon,
+      connected: !connection.isDisconnected,
+      disconnectedHistory: connection.isDisconnected,
+      enabled: connection.enabled,
+      endpoint: endpoint,
+      target: target,
+      accountLabel: accountLabel,
+      syncedLabel: syncedLabel,
+      accessLabel: accessLabel,
+      permissions: permissions,
+      tools: tools,
+      agents: agents,
+      usage: usage,
+      activity: activity,
+      autoSync: autoSync,
+      builtIn: builtIn,
+      safetyNote: safetyNote,
+      authLabel: authLabel,
+      risk: risk,
+      status: status,
+      errorMessage: errorMessage,
+      disconnectNote: disconnectNote,
+      disabledTools: disabledTools,
+      providerId: providerId,
+      connectionId: connection.connectionId,
+      agentEnabled: connection.agentEnabled,
+      authState: connection.authState,
+      healthState: connection.healthState,
+      lastCheckedAt: connection.lastCheckedAt,
+      lastSuccessAt: connection.lastSuccessAt,
+      connectionStatusLabel: connection.isDisconnected
+          ? 'Disconnected'
+          : remoteConnectorStatusLabel(
+              enabled: connection.enabled,
+              authState: connection.authState,
+              healthState: connection.healthState,
+            ),
+      operations: operations,
+      credentialFields: credentialFields,
+      supportsAgentActivation: supportsAgentActivation,
+      approvedSourceId: connection.approvedSourceId,
+      approvedDigest: connection.approvedDigest,
+    );
+  }
 }
 
 /// One connector: its status, its grants, and one way to disconnect it.
@@ -208,6 +291,7 @@ class ConnectorDetailPage extends StatefulWidget {
     this.secrets,
     this.probe,
     this.plan,
+    this.controller,
   });
 
   final V2ConnectorDetailData data;
@@ -232,36 +316,72 @@ class ConnectorDetailPage extends StatefulWidget {
 
   /// Plan used when the not-connected state opens the add flow.
   final V2ConnectorPlan? plan;
+  final RemoteConnectorController? controller;
 
   @override
   State<ConnectorDetailPage> createState() => _ConnectorDetailPageState();
 }
 
 class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
+  V2ConnectorDetailData get _data {
+    final controller = widget.controller;
+    final connectionId = widget.data.connectionId;
+    if (controller == null || connectionId == null) return widget.data;
+    final connection = controller.connectionById(connectionId);
+    return connection == null
+        ? widget.data
+        : widget.data.remoteUpdated(connection);
+  }
+
+  bool get _remote => widget.controller != null && _data.isRemote;
+
+  bool get _canCheckHealth =>
+      _remote && (widget.controller?.capabilities.itemHealthCheck ?? false);
+
+  void _remoteChanged() {
+    if (!mounted) return;
+    setState(() => _enabled = _data.enabled);
+  }
+
   late Map<String, bool> _granted = _initialGrants();
-  late bool _enabled = widget.data.enabled;
+  late bool _enabled = _data.enabled;
   V2ConnectorTestReport? _report;
   bool _testing = false;
   String? _actionError;
 
   V2ConnectorStore get _store => widget.store ?? v2ConnectorStore;
-  V2ConnectorSecrets get _secrets => widget.secrets ?? v2ConnectorSecrets;
-  V2ConnectorProbe get _probe => widget.probe ?? V2HttpConnectorProbe();
+  V2ConnectorSecrets? get _secrets => widget.secrets;
 
   Map<String, bool> _initialGrants() {
     return <String, bool>{
-      for (final permission in widget.data.permissions)
+      for (final permission in _data.permissions)
         permission.id: permission.granted,
     };
   }
 
   @override
+  void initState() {
+    super.initState();
+    widget.controller?.addListener(_remoteChanged);
+  }
+
+  @override
   void didUpdateWidget(covariant ConnectorDetailPage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.data != widget.data) {
-      _granted = _initialGrants();
-      _enabled = widget.data.enabled;
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller?.removeListener(_remoteChanged);
+      widget.controller?.addListener(_remoteChanged);
     }
+    if (oldWidget.data != _data) {
+      _granted = _initialGrants();
+      _enabled = _data.enabled;
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller?.removeListener(_remoteChanged);
+    super.dispose();
   }
 
   void _togglePermission(V2ConnectorPermission permission, bool value) {
@@ -293,7 +413,7 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
       return;
     }
     try {
-      await _store.setPermission(widget.data.id, kind, value);
+      await _store.setPermission(_data.id, kind, value);
     } catch (_) {
       if (!mounted) return;
       setState(() {
@@ -313,12 +433,42 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
       external(value);
       return;
     }
+    if (_remote) {
+      _persistRemoteEnabled(value);
+      return;
+    }
     _persistEnabled(value);
+  }
+
+  Future<void> _persistRemoteEnabled(bool value) async {
+    final connectionId = _data.connectionId;
+    if (connectionId == null) return;
+    try {
+      await widget.controller!.setEnabled(connectionId, value);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _enabled = _data.enabled;
+        _actionError = 'Could not save that change.';
+      });
+    }
+  }
+
+  Future<void> _toggleAgentEnabled(bool value) async {
+    final connectionId = _data.connectionId;
+    if (connectionId == null) return;
+    setState(() => _actionError = null);
+    try {
+      await widget.controller!.setAgentEnabled(connectionId, value);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _actionError = 'Could not save that change.');
+    }
   }
 
   Future<void> _persistEnabled(bool value) async {
     try {
-      await _store.setEnabled(widget.data.id, value);
+      await _store.setEnabled(_data.id, value);
     } catch (_) {
       if (!mounted) return;
       setState(() {
@@ -336,25 +486,44 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
       _report = null;
       _actionError = null;
     });
-    String? key;
-    if (widget.data.authLabel.toLowerCase().contains('key') ||
-        widget.data.authLabel.toLowerCase().contains('token')) {
+    if (_remote) {
+      final connectionId = _data.connectionId;
       try {
-        key = await _secrets.read(widget.data.id);
+        if (connectionId == null) throw StateError('Connection required.');
+        await widget.controller!.checkHealth(connectionId);
+      } catch (_) {
+        if (mounted) _actionError = 'Health check failed. Try again.';
+      } finally {
+        if (mounted) setState(() => _testing = false);
+      }
+      return;
+    }
+    String? key;
+    if (_data.authLabel.toLowerCase().contains('key') ||
+        _data.authLabel.toLowerCase().contains('token')) {
+      try {
+        key = await _secrets?.read(_data.id);
       } catch (_) {
         key = null;
       }
     }
     final connection = V2ConnectorConnection(
-      id: widget.data.id,
-      name: widget.data.name,
-      endpoint: widget.data.endpoint,
-      target: widget.data.target,
+      id: _data.id,
+      name: _data.name,
+      endpoint: _data.endpoint,
+      target: _data.target,
       auth: key == null || key.isEmpty
           ? V2ConnectorAuth.none
           : V2ConnectorAuth.apiKey,
     );
-    final report = await _probe.test(connection, apiKey: key);
+    final probe = widget.probe;
+    final report = probe == null
+        ? const V2ConnectorTestReport(
+            ok: false,
+            unsupported: true,
+            message: 'Server health is unavailable for this preview.',
+          )
+        : await probe.test(connection, apiKey: key);
     if (!mounted) return;
     setState(() {
       _testing = false;
@@ -387,26 +556,22 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
   };
 
   V2ConnectorPermissionRisk _effectiveRisk(V2ConnectorPermission permission) =>
-      permission.risk.index >= widget.data.risk.index
-      ? permission.risk
-      : widget.data.risk;
+      permission.risk.index >= _data.risk.index ? permission.risk : _data.risk;
 
   String? _permissionIdFor(V2ConnectorTool tool) {
     final wanted = tool.write
         ? V2ConnectorPermissionScope.write
         : V2ConnectorPermissionScope.read;
-    for (final permission in widget.data.permissions) {
+    for (final permission in _data.permissions) {
       if (permission.scope == wanted) return permission.id;
     }
-    return widget.data.permissions.isEmpty
-        ? null
-        : widget.data.permissions.first.id;
+    return _data.permissions.isEmpty ? null : _data.permissions.first.id;
   }
 
   /// The detail page owns the live switch state, so map it (plus the tool and
   /// agent wiring) into the standalone permissions screen when the menu opens.
   permissions.V2ConnectorPermissionsData _permissionsScreenData() {
-    final data = widget.data;
+    final data = _data;
     final granted = data.permissions.where(_isGranted).toList();
     final revoked = data.permissions
         .where((permission) => !_isGranted(permission))
@@ -482,7 +647,7 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
   }
 
   void _revokePermission(String permissionId) {
-    if (!widget.data.permissions.any((item) => item.id == permissionId)) {
+    if (!_data.permissions.any((item) => item.id == permissionId)) {
       return;
     }
     setState(() => _granted[permissionId] = false);
@@ -496,11 +661,11 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
 
   void _revokeAll() {
     setState(() {
-      for (final permission in widget.data.permissions) {
+      for (final permission in _data.permissions) {
         _granted[permission.id] = false;
       }
     });
-    for (final permission in widget.data.permissions) {
+    for (final permission in _data.permissions) {
       final external = widget.onPermissionChanged;
       if (external != null) {
         external(permission.id, false);
@@ -512,7 +677,7 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
 
   Future<void> _setToolEnabled(String toolId, bool enabled) async {
     try {
-      await _store.setToolEnabled(widget.data.id, toolId, enabled);
+      await _store.setToolEnabled(_data.id, toolId, enabled);
     } catch (_) {
       if (!mounted) return;
       setState(() => _actionError = 'Could not save that tool.');
@@ -520,7 +685,7 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
   }
 
   Future<void> _confirmDisconnect() async {
-    final data = widget.data;
+    final data = _data;
     final confirmed = await showOSheet<bool>(
       context,
       title: 'Disconnect ${data.name}?',
@@ -564,15 +729,21 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
       return;
     }
     try {
-      await _store.remove(widget.data.id);
-      await _secrets.delete(widget.data.id);
+      if (_remote) {
+        final connectionId = _data.connectionId;
+        if (connectionId == null) throw StateError('Connection required.');
+        await widget.controller!.disconnect(connectionId);
+      } else {
+        await _store.remove(_data.id);
+        await _secrets?.delete(_data.id);
+      }
     } catch (_) {
       if (!mounted) return;
       setState(() => _actionError = 'Could not disconnect.');
       return;
     }
     if (!mounted) return;
-    showOSnack(context, '${widget.data.name} disconnected.');
+    showOSnack(context, '${_data.name} disconnected.');
     Navigator.of(context).maybePop();
   }
 
@@ -608,6 +779,25 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
       external();
       return;
     }
+    if (_remote) {
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => AddConnectorPage(
+            data: V2AddConnectorData(
+              presetId: _data.providerId,
+              presetName: _data.name,
+              presetDescription: _data.description,
+              credentialFields: _data.credentialFields,
+              approvedSourceId: _data.approvedSourceId,
+              approvedDigest: _data.approvedDigest,
+            ),
+            controller: widget.controller,
+          ),
+        ),
+      );
+      if (mounted) Navigator.of(context).maybePop();
+      return;
+    }
     final plan = widget.plan ?? await v2LoadConnectorPlan();
     if (!mounted) return;
     await Navigator.of(context).push(
@@ -615,9 +805,9 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
         builder: (_) => AddConnectorPage(
           data: V2AddConnectorData(
             plan: plan,
-            presetId: widget.data.id,
-            presetName: widget.data.name,
-            presetDescription: widget.data.description,
+            presetId: _data.id,
+            presetName: _data.name,
+            presetDescription: _data.description,
             presetKind: 'app',
           ),
           store: _store,
@@ -627,7 +817,7 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
       ),
     );
     if (!mounted) return;
-    final saved = await _store.find(widget.data.id);
+    final saved = await _store.find(_data.id);
     if (!mounted || saved == null) return;
     showOSnack(context, '${saved.name} connected.');
     Navigator.of(context).maybePop();
@@ -636,7 +826,7 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
   @override
   Widget build(BuildContext context) {
     return OScreen(
-      title: widget.data.name,
+      title: _data.name,
       maxWidth: 640,
       leading: widget.onBack == null
           ? null
@@ -648,7 +838,7 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
       actions: [
         // The menu only leads to the permissions review, so it is absent when
         // there is nothing to review (a connector that was never set up).
-        if (widget.onMenu != null || widget.data.permissions.isNotEmpty)
+        if (widget.onMenu != null || _data.permissions.isNotEmpty)
           OIconButton(
             icon: Icons.more_vert_rounded,
             semanticLabel: 'Connector menu',
@@ -660,25 +850,33 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
   }
 
   Widget _body(BuildContext context) {
-    return switch (widget.data.status) {
+    return switch (_data.status) {
       V2ConnectorDetailStatus.loading => const OSkeletonList(rows: 5),
       V2ConnectorDetailStatus.error => OErrorState(
-        message: widget.data.errorMessage,
+        message: _data.errorMessage,
         onRetry: widget.onRetry,
       ),
       V2ConnectorDetailStatus.content =>
-        widget.data.connected ? _content(context) : _notConnected(context),
+        _data.connected ? _content(context) : _notConnected(context),
     };
   }
 
   Widget _notConnected(BuildContext context) {
+    if (_data.disconnectedHistory) {
+      return OEmptyState(
+        icon: Icons.link_off_rounded,
+        title: 'Disconnected',
+        message:
+            '${_data.name} is disconnected. Its server history is retained.',
+      );
+    }
     return OEmptyState(
       icon: Icons.link_off_rounded,
       title: 'Not connected',
-      message: 'Connect ${widget.data.name} to use it.',
+      message: 'Connect ${_data.name} to use it.',
       action: OButton(
         label: 'Connect',
-        semanticLabel: 'Connect ${widget.data.name}',
+        semanticLabel: 'Connect ${_data.name}',
         icon: Icons.link_rounded,
         onPressed: _connect,
       ),
@@ -687,7 +885,7 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
 
   Widget _content(BuildContext context) {
     final c = OColors.of(context);
-    final data = widget.data;
+    final data = _data;
     final permissions = data.permissions.take(3).toList();
     return ListView(
       padding: const EdgeInsets.only(top: OSpace.l, bottom: OSpace.xxl),
@@ -701,9 +899,22 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
               child: Align(
                 alignment: AlignmentDirectional.centerStart,
                 child: OPill(
-                  label: _enabled ? 'Connected' : 'Paused',
-                  tone: _enabled ? OPillTone.success : OPillTone.neutral,
-                  dot: _enabled,
+                  label: data.isRemote
+                      ? data.connectionStatusLabel
+                      : _enabled
+                      ? 'Connected'
+                      : 'Paused',
+                  tone: data.isRemote
+                      ? switch (data.healthState) {
+                          'healthy' => OPillTone.success,
+                          'degraded' || 'unavailable' => OPillTone.warn,
+                          'revoked' => OPillTone.danger,
+                          _ => OPillTone.neutral,
+                        }
+                      : _enabled
+                      ? OPillTone.success
+                      : OPillTone.neutral,
+                  dot: data.isRemote ? data.healthState == 'healthy' : _enabled,
                 ),
               ),
             ),
@@ -723,11 +934,57 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
             ),
           ],
         ),
-        if (data.endpoint.isNotEmpty) ...[
+        if (data.isRemote && data.supportsAgentActivation) ...[
+          const SizedBox(height: OSpace.m),
+          OCard(
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Use in agent runs',
+                    style: OType.bodyStrong.copyWith(color: c.text),
+                  ),
+                ),
+                Switch(
+                  key: const Key('connector-agent-enabled-switch'),
+                  value: data.agentEnabled,
+                  onChanged: _toggleAgentEnabled,
+                ),
+              ],
+            ),
+          ),
+        ],
+        if (data.isRemote) ...[
+          const SizedBox(height: OSpace.m),
+          Text(
+            'Authentication ${(data.authState ?? 'unavailable').replaceAll('_', ' ')}',
+            style: OType.caption.copyWith(color: c.textMuted),
+          ),
+          Text(
+            'Last checked ${data.lastCheckedAt?.toUtc().toIso8601String() ?? '—'}',
+            style: OType.caption.copyWith(color: c.textMuted),
+          ),
+          Text(
+            'Last successful check ${data.lastSuccessAt?.toUtc().toIso8601String() ?? '—'}',
+            style: OType.caption.copyWith(color: c.textMuted),
+          ),
+          if (data.approvedSourceId != null)
+            Text(
+              'Approved source ${data.approvedSourceId}',
+              style: OType.caption.copyWith(color: c.textMuted),
+            ),
+          if (data.approvedDigest != null)
+            Text(
+              'Digest ${data.approvedDigest}',
+              style: OType.caption.copyWith(color: c.textMuted),
+            ),
+        ],
+        if (_canCheckHealth ||
+            (!data.isRemote && data.endpoint.isNotEmpty)) ...[
           const SizedBox(height: OSpace.l),
           OButton(
             key: const Key('connector-test-card'),
-            label: 'Test connection',
+            label: data.isRemote ? 'Check health' : 'Test connection',
             icon: Icons.sync_rounded,
             variant: OButtonVariant.secondary,
             expand: true,
@@ -749,6 +1006,35 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
               style: OType.caption.copyWith(color: c.danger),
             ),
           ),
+        ],
+        if (data.operations.isNotEmpty) ...[
+          const SizedBox(height: OSpace.xl),
+          OSectionTitle(title: 'Operations'),
+          for (final operation in data.operations)
+            OCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    operation.name,
+                    style: OType.bodyStrong.copyWith(color: c.text),
+                  ),
+                  if (operation.description.isNotEmpty)
+                    Text(
+                      operation.description,
+                      style: OType.caption.copyWith(color: c.textMuted),
+                    ),
+                  Text(
+                    'Effect: ${operation.effect}',
+                    style: OType.caption.copyWith(color: c.textMuted),
+                  ),
+                  Text(
+                    'Approval: ${operation.approval}',
+                    style: OType.caption.copyWith(color: c.textMuted),
+                  ),
+                ],
+              ),
+            ),
         ],
         if (permissions.isNotEmpty) ...[
           const SizedBox(height: OSpace.xl),
@@ -899,8 +1185,10 @@ class _ReportLine extends StatelessWidget {
 V2ConnectorDetailData v2ConnectorDetailForRow(
   V2Connector row, {
   V2ConnectorConnection? connection,
+  ConnectorConnection? remoteConnection,
 }) {
   final saved = connection;
+  final remote = row.isRemote || remoteConnection != null;
   final risk = saved != null && saved.custom
       ? V2ConnectorPermissionRisk.high
       : switch (row.risk) {
@@ -913,16 +1201,20 @@ V2ConnectorDetailData v2ConnectorDetailForRow(
     name: row.name,
     description: row.description,
     icon: row.icon,
-    connected: saved != null,
-    enabled: saved?.enabled ?? false,
-    endpoint: saved?.endpoint ?? '',
+    connected: remote
+        ? remoteConnection != null && !remoteConnection.isDisconnected
+        : saved != null,
+    disconnectedHistory:
+        row.disconnectedHistory || (remoteConnection?.isDisconnected ?? false),
+    enabled: remoteConnection?.enabled ?? saved?.enabled ?? false,
+    endpoint: remote ? '' : saved?.endpoint ?? '',
     target: saved?.target ?? V2ConnectorTarget.url,
     builtIn: row.builtIn,
     authLabel: saved?.auth.label ?? row.auth.label,
     risk: risk,
     autoSync: saved?.autoSync ?? false,
     disabledTools: saved?.disabledTools ?? const <String>{},
-    permissions: saved == null
+    permissions: remote || saved == null
         ? const <V2ConnectorPermission>[]
         : [
             for (final kind in V2ConnectorPermissionKind.values)
@@ -941,5 +1233,27 @@ V2ConnectorDetailData v2ConnectorDetailForRow(
                 risk: risk,
               ),
           ],
+    providerId: row.providerId,
+    connectionId: remoteConnection?.connectionId ?? row.connectionId,
+    agentEnabled: remoteConnection?.agentEnabled ?? row.agentEnabled,
+    authState: remoteConnection?.authState ?? row.authState,
+    healthState: remoteConnection?.healthState ?? row.healthState,
+    lastCheckedAt: remoteConnection?.lastCheckedAt ?? row.lastCheckedAt,
+    lastSuccessAt: remoteConnection?.lastSuccessAt ?? row.lastSuccessAt,
+    connectionStatusLabel: remoteConnection == null
+        ? row.statusLabel
+        : remoteConnection.isDisconnected
+        ? 'Disconnected'
+        : remoteConnectorStatusLabel(
+            enabled: remoteConnection.enabled,
+            authState: remoteConnection.authState,
+            healthState: remoteConnection.healthState,
+          ),
+    operations: row.operations,
+    credentialFields: row.credentialFields,
+    supportsAgentActivation: row.supportsAgentActivation,
+    approvedSourceId:
+        remoteConnection?.approvedSourceId ?? row.approvedSourceId,
+    approvedDigest: remoteConnection?.approvedDigest ?? row.approvedDigest,
   );
 }

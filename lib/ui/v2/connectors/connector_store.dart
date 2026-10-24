@@ -3,10 +3,8 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' show Icons;
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../../../core/secure_store.dart';
 import 'connector_models.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the next wave.
@@ -364,33 +362,6 @@ class V2PrefsConnectorStore implements V2ConnectorStore {
   });
 }
 
-/// Keystore-backed connector secrets.
-class V2ConnectorSecretVault implements V2ConnectorSecrets {
-  V2ConnectorSecretVault({FlutterSecureStorage? storage})
-    : _storage = storage ?? ovidSecureStorage();
-
-  static const _prefix = 'v2.connector.secret.';
-
-  final FlutterSecureStorage _storage;
-
-  static String keyFor(String id) => '$_prefix$id';
-
-  @override
-  Future<void> write(String id, String secret) async {
-    if (secret.trim().isEmpty) {
-      await delete(id);
-      return;
-    }
-    await _storage.write(key: keyFor(id), value: secret);
-  }
-
-  @override
-  Future<String?> read(String id) => _storage.read(key: keyFor(id));
-
-  @override
-  Future<void> delete(String id) => _storage.delete(key: keyFor(id));
-}
-
 /// In-memory store for tests and previews.
 class V2MemoryConnectorStore implements V2ConnectorStore {
   V2MemoryConnectorStore([Iterable<V2ConnectorConnection> initial = const []])
@@ -484,14 +455,12 @@ class V2MemoryConnectorSecrets implements V2ConnectorSecrets {
   }
 }
 
-/// The process-wide stores. Screens take an optional store so tests and the
-/// preview can inject an in-memory one; production uses the persisted pair.
+/// Legacy preview store. Remote connector screens use their injected
+/// RemoteConnectorController instead; no process-wide secret vault exists.
 V2ConnectorStore v2ConnectorStore = V2PrefsConnectorStore();
-V2ConnectorSecrets v2ConnectorSecrets = V2ConnectorSecretVault();
 
-/// Restores the production stores after a test swapped them.
+/// Restores the legacy preview store after a test swapped it.
 @visibleForTesting
 void resetV2ConnectorStoresForTest() {
   v2ConnectorStore = V2PrefsConnectorStore();
-  v2ConnectorSecrets = V2ConnectorSecretVault();
 }
