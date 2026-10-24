@@ -29,6 +29,7 @@ import {
   type PushOutcome,
   type PushSender,
 } from "./notify.js";
+import type { WebPushSender } from "./webPush.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 
@@ -184,7 +185,7 @@ describe.skipIf(!TEST_DATABASE_URL)("createNotifier (real postgres)", () => {
       userId: uid, endpoint, p256dh: "client-key", auth: "client-auth",
     });
     const webPush = {
-      send: vi.fn(async () => ({ ok: false as const, code: "unregistered" as const })),
+      send: vi.fn<WebPushSender["send"]>(async () => ({ ok: false as const, code: "unregistered" as const })),
     };
     const notifier = createNotifier({ db, push: stubPush().push, webPush });
     await notifier.notifyAgentFinished({ userId: uid, runId: "run-web-1", sessionId: "ses-web" });

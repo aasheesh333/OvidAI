@@ -12,7 +12,7 @@ describe("web push delivery", () => {
   });
 
   it("sends the subscription keys and no private answer text", async () => {
-    const send = vi.fn(async () => {});
+    const send = vi.fn<NonNullable<Parameters<typeof createWebPushSender>[0]["send"]>>(async () => {});
     const sender = createWebPushSender({
       publicKey: PUBLIC_KEY,
       privateKey: PRIVATE_KEY,

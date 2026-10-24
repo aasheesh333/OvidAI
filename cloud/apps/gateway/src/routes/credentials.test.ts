@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { Db } from "@ovid/db";
 import { createEnvelopeCrypto } from "@ovid/escrow";
-import { browserCredentialRecordId } from "@ovid/shared";
+import { browserCredentialRecordId, type ApiError } from "@ovid/shared";
 
 import { buildGateway } from "../app.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
@@ -122,7 +122,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway credential routes (real postgres)",
     ]) {
       const result = await create(app, uid, { site });
       expect(result.statusCode).toBe(400);
-      expect(result.body.error.code).toBe("bad_request");
+      expect((result.body.error as ApiError["error"]).code).toBe("bad_request");
     }
     const valid = await create(app, uid, { site: "example.test/login" });
     expect(valid.statusCode).toBe(201);

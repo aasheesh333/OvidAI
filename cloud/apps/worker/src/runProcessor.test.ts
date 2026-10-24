@@ -1862,7 +1862,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
      */
     async function startTurnSse(
       turns: Array<Array<Record<string, unknown>>>,
-      chooseTurn?: (messages: ChatMessage[]) => number | undefined,
+      chooseTurn?: (messages: Array<ChatMessage & { tool_call_id?: string }>) => number | undefined,
     ): Promise<{
       url: string;
       requests: Array<{

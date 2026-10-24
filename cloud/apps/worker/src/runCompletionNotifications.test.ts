@@ -11,7 +11,7 @@ function eventLog(): EventLog & { appended: string[] } {
       return { sessionId: "s1", seq: "1", type, payload, ts: new Date().toISOString() };
     },
     readSince: async () => [],
-    subscribe: () => () => {},
+    subscribe: async () => async () => {},
   };
 }
 

@@ -159,7 +159,7 @@ describe("createIpAnomalyGuard", () => {
   it("records an empty IP when the peer cannot be identified (no evidence)", async () => {
     const store = createIpObservationStore(fakeRedis(), { windowMs: WINDOW });
     const guard = createIpAnomalyGuard({ store, now: () => NOW });
-    await guard.admit("uid-nopeer", { peerAddress: undefined });
+    await guard.admit("uid-nopeer", { peerAddress: undefined, forwardedFor: undefined });
     expect(await store.read("uid-nopeer", NOW)).toEqual<IpObservation[]>([
       { ip: "", asn: null, at: NOW },
     ]);
