@@ -56,7 +56,7 @@ command -v flutter >/dev/null 2>&1 || refuse 'flutter is not on PATH'
 # The restored launcher evaluates JVM option strings with eval. Never append to
 # inherited text: use fixed values at both boundaries so comments, separators,
 # substitutions, and earlier Play properties cannot reach that evaluation.
-fixed_gradle_opts='-Dorg.gradle.project.ovid.play=false'
+fixed_gradle_opts='-Dorg.gradle.project.ovid.play=false -Dorg.gradle.project.ovid.sideload.abi=x86_64'
 fixed_java_opts=''
 
 # Metadata-only input checks happen before Gradle reads signing properties.
@@ -70,7 +70,9 @@ python3 "$ROOT/tool/release_input_hygiene.py" verify --destination "$ROOT" \
   # GRADLE_USER_HOME/gradle.properties values for this signing gate.
   env JAVA_OPTS="$fixed_java_opts" GRADLE_OPTS="$fixed_gradle_opts" \
     ORG_GRADLE_PROJECT_ovid.play=false \
-    ./gradlew -Povid.play=false :app:validateProductionReleaseSigning --no-daemon
+    ORG_GRADLE_PROJECT_ovid.sideload.abi=x86_64 \
+    ./gradlew -Povid.play=false -Povid.sideload.abi=x86_64 \
+    :app:validateProductionReleaseSigning --no-daemon
 )
 
 build_command=(
@@ -85,7 +87,8 @@ build_command_text='flutter build apk --release --target-platform android-x64 --
   # Flutter does not expose -P; its Gradle launcher receives only the fixed
   # JVM options plus the higher-priority environment project property.
   env JAVA_OPTS="$fixed_java_opts" GRADLE_OPTS="$fixed_gradle_opts" \
-    ORG_GRADLE_PROJECT_ovid.play=false "${build_command[@]}"
+    ORG_GRADLE_PROJECT_ovid.play=false \
+    ORG_GRADLE_PROJECT_ovid.sideload.abi=x86_64 "${build_command[@]}"
 )
 
 apk_source="$ROOT/build/app/outputs/flutter-apk/app-release.apk"

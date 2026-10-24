@@ -137,6 +137,9 @@ class ReleaseInputHygieneTest(unittest.TestCase):
             'profile="$(printenv ORG_GRADLE_PROJECT_ovid.play 2>/dev/null || true)"\n'
             'printf "ORG_GRADLE_PROJECT_ovid.play=%s\\n" '
             '"$profile" > "$FIXTURE_FLUTTER_ENV"\n'
+            'abi="$(printenv ORG_GRADLE_PROJECT_ovid.sideload.abi 2>/dev/null || true)"\n'
+            'printf "ORG_GRADLE_PROJECT_ovid.sideload.abi=%s\\n" '
+            '"$abi" >> "$FIXTURE_FLUTTER_ENV"\n'
             'printf "GRADLE_OPTS=%s\\n" "${GRADLE_OPTS:-}" '
             '>> "$FIXTURE_FLUTTER_ENV"\n'
             'exit 97\n')
@@ -562,6 +565,72 @@ class ReleaseInputHygieneTest(unittest.TestCase):
                 self.assertEqual(
                     [arg for arg in args if 'org.gradle.project.ovid.play=' in arg],
                     ['<-Dorg.gradle.project.ovid.play=false>'])
+
+    def test_release_script_forces_sideload_x86_64_at_both_gradle_boundaries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, fake_bin = self.script_fixture(root)
+            result = self.run_sideload_fixture(repo, fake_bin, root)
+            self.assertEqual(result.returncode, 97, result.stderr)
+            gradle_args = (root / 'gradle-args').read_text()
+            self.assertIn('-Povid.sideload.abi=x86_64', gradle_args)
+            flutter_env = (root / 'flutter-env').read_text()
+            self.assertIn('ORG_GRADLE_PROJECT_ovid.sideload.abi=x86_64', flutter_env)
+            self.assertIn(
+                '-Dorg.gradle.project.ovid.sideload.abi=x86_64', flutter_env)
+
+    def test_sideload_property_controls_the_real_non_split_abi_packaging_model(self):
+        default_abis = ['arm64-v8a', 'armeabi-v7a', 'x86_64']
+        cases = (
+            ('release-sideload', False, True, ['x86_64']),
+            ('ordinary-sideload', False, False, default_abis),
+            ('play-is-not-narrowed', True, True, default_abis),
+        )
+        init_script = (
+            "gradle.projectsEvaluated {\n"
+            "    def app = rootProject.findProject(':app')\n"
+            "    if (app != null) {\n"
+            "        def android = app.extensions.getByName('android')\n"
+            "        def filters = android.defaultConfig.ndk.abiFilters.toSorted().join(',')\n"
+            "        def splits = android.splits.abi.enable\n"
+            "        println('OVID_ABI_MODEL=filters=' + filters + ';splits=' + splits)\n"
+            "    }\n"
+            "}\n"
+        )
+        for label, play, lane_property, expected_abis in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                probe = Path(directory) / 'abi-model.init.gradle'
+                probe.write_text(init_script)
+                env = os.environ.copy()
+                env.pop('ORG_GRADLE_PROJECT_ovid.play', None)
+                env.pop('ORG_GRADLE_PROJECT_ovid.sideload.abi', None)
+                env['JAVA_OPTS'] = ''
+                env['GRADLE_OPTS'] = ''
+                args = [
+                    str(ROOT / 'android/gradlew'), 'help', '--no-daemon',
+                    f'-Povid.play={str(play).lower()}',
+                    '-Ptarget-platform=android-x64',
+                    '--init-script', str(probe),
+                ]
+                if lane_property:
+                    args.append('-Povid.sideload.abi=x86_64')
+                result = subprocess.run(
+                    args, cwd=ROOT / 'android', env=env, text=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180)
+                self.assertEqual(result.returncode, 0, result.stdout[-4000:])
+                marker = 'OVID_ABI_MODEL='
+                lines = [line for line in result.stdout.splitlines() if marker in line]
+                self.assertEqual(len(lines), 1, result.stdout[-4000:])
+                fields = dict(field.split('=', 1) for field in
+                              lines[0].split(marker, 1)[1].split(';'))
+                actual = {
+                    'abis': list(filter(None, fields['filters'].split(','))),
+                    'split_per_abi': fields['splits'] == 'true',
+                }
+                self.assertEqual(actual, {
+                    'abis': expected_abis,
+                    'split_per_abi': False,
+                })
 
     def test_external_play_property_is_overridden_for_gradle_and_flutter(self):
         cases = (

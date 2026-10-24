@@ -31,6 +31,11 @@ val ovidPlayBuild: Boolean = run {
 // on-device sandbox could exec binaries from app data (blocked for API 29+).
 val ovidTargetSdk = 36
 
+// Set only by the signed x86_64 sideload lane. Flutter's target-platform
+// controls its generated JNI outputs, but its non-split setup independently
+// installs the default three-ABI filter for every native dependency.
+val ovidSideloadAbi = project.findProperty("ovid.sideload.abi")?.toString()
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
@@ -129,6 +134,12 @@ android {
         manifestPlaceholders["ovidShareHost"] =
             (project.findProperty("ovidShareHost") as String?) ?: "ovidsi.com"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        if (!ovidPlayBuild && ovidSideloadAbi == "x86_64") {
+            ndk {
+                abiFilters.clear()
+                abiFilters.add("x86_64")
+            }
+        }
     }
 
     signingConfigs {
