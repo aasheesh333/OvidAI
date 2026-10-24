@@ -21,6 +21,7 @@ import type {
   ScheduleRunStatus,
   ScheduleStatus,
   ScheduleTrigger,
+  StructuredSubagentReport,
   UiManifest,
   WorkspaceState,
 } from "@ovid/shared";
@@ -1137,3 +1138,315 @@ export const studioRepos = pgTable(
 );
 
 export type StudioRepoRow = typeof studioRepos.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// WS4 durable subagent admission, lineage, reports, and root finalization.
+// Messages/runs/session_event_mirror remain the transcript and event authority.
+// These rows contain only scheduling metadata and the temporary prompt copy
+// needed while a request is deferred and has no canonical child message yet.
+// ---------------------------------------------------------------------------
+
+export const subagentSessionAdmission = pgTable("subagent_session_admission", {
+  sessionId: char("session_id", { length: 36 })
+    .primaryKey()
+    .references(() => sessions.id, { onDelete: "cascade" }),
+  createdAt: timestamptz("created_at").notNull().defaultNow(),
+  updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+});
+
+export const subagentBatches = pgTable(
+  "subagent_batches",
+  {
+    id: char("id", { length: 36 }).primaryKey(),
+    sessionId: char("session_id", { length: 36 })
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    userId: text("user_id").notNull().references(() => users.uid),
+    rootTaskRunId: char("root_task_run_id", { length: 36 }).notNull().references(() => runs.id),
+    parentRunId: char("parent_run_id", { length: 36 }).notNull().references(() => runs.id),
+    requestedAt: timestamptz("requested_at").notNull(),
+    requestCount: integer("request_count").notNull(),
+    admittedCount: integer("admitted_count").notNull().default(0),
+    deferredCount: integer("deferred_count").notNull().default(0),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("subagent_batches_session_id_idx").on(t.sessionId, t.id),
+    index("subagent_batches_root_idx").on(t.rootTaskRunId),
+    check("subagent_batches_counts_check", sql`${t.requestCount} >= 0 AND ${t.admittedCount} >= 0 AND ${t.deferredCount} >= 0 AND ${t.admittedCount} + ${t.deferredCount} <= ${t.requestCount}`),
+  ],
+);
+
+export const subagentDispatches = pgTable(
+  "subagent_dispatches",
+  {
+    id: char("id", { length: 36 }).primaryKey(),
+    batchId: char("batch_id", { length: 36 })
+      .notNull()
+      .references(() => subagentBatches.id, { onDelete: "cascade" }),
+    requestIndex: integer("request_index").notNull(),
+    sessionId: char("session_id", { length: 36 })
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    userId: text("user_id").notNull().references(() => users.uid),
+    // The originating root is immutable. A later next-user root is recorded
+    // separately when this deferred request is actually admitted.
+    rootTaskRunId: char("root_task_run_id", { length: 36 }).notNull().references(() => runs.id),
+    admittedRootTaskRunId: char("admitted_root_task_run_id", { length: 36 }).references(() => runs.id),
+    parentRunId: char("parent_run_id", { length: 36 }).notNull().references(() => runs.id),
+    decisionActorRunId: char("decision_actor_run_id", { length: 36 }).references(() => runs.id),
+    // NULL after the first canonical child user message exists.
+    prompt: text("prompt"),
+    firstMessageId: char("first_message_id", { length: 36 }).references(() => messages.id),
+    agentType: text("agent_type").notNull().default("general-purpose"),
+    tools: jsonb("tools").$type<string[]>(),
+    disallowedTools: jsonb("disallowed_tools").$type<string[]>(),
+    provenance: text("provenance").notNull().$type<"web" | "android" | "server">(),
+    requestedAt: timestamptz("requested_at").notNull(),
+    userPriorityHint: integer("user_priority_hint"),
+    requestedModel: text("requested_model"),
+    byokKeyId: text("byok_key_id"),
+    byokModel: text("byok_model"),
+    actorUserId: text("actor_user_id").notNull().references(() => users.uid),
+    state: text("state")
+      .notNull()
+      .$type<"awaiting_next_user_task" | "admitted" | "cancelled">(),
+    deferReason: text("defer_reason"),
+    schedulingReason: text("scheduling_reason"),
+    requestedSequence: bigint("requested_sequence", { mode: "number" }),
+    deferredAt: timestamptz("deferred_at"),
+    admittedAt: timestamptz("admitted_at"),
+    cancelledAt: timestamptz("cancelled_at"),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("subagent_dispatches_batch_index_uq").on(t.batchId, t.requestIndex),
+    index("subagent_dispatches_session_state_idx").on(t.sessionId, t.state, t.requestedAt, t.id),
+    index("subagent_dispatches_root_idx").on(t.rootTaskRunId),
+    index("subagent_dispatches_parent_child_idx").on(t.parentRunId, t.firstMessageId),
+    check("subagent_dispatches_provenance_check", sql`${t.provenance} IN ('web','android','server')`),
+    check("subagent_dispatches_state_check", sql`${t.state} IN ('awaiting_next_user_task','admitted','cancelled')`),
+    check("subagent_dispatches_index_check", sql`${t.requestIndex} >= 0`),
+  ],
+);
+
+export const subagentLogicalWorkers = pgTable(
+  "subagent_logical_workers",
+  {
+    id: char("id", { length: 36 }).primaryKey(),
+    requestId: char("request_id", { length: 36 })
+      .notNull()
+      .unique()
+      .references(() => subagentDispatches.id),
+    sessionId: char("session_id", { length: 36 })
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    userId: text("user_id").notNull().references(() => users.uid),
+    currentRootTaskRunId: char("current_root_task_run_id", { length: 36 }).notNull().references(() => runs.id),
+    childSessionId: char("child_session_id", { length: 36 })
+      .notNull()
+      .unique()
+      .references(() => sessions.id),
+    agentType: text("agent_type").notNull(),
+    status: text("status")
+      .notNull()
+      .$type<"running" | "completed" | "failed" | "cancelled" | "timeout">(),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("subagent_workers_session_status_idx").on(t.sessionId, t.status),
+    index("subagent_workers_root_idx").on(t.currentRootTaskRunId),
+    check("subagent_workers_status_check", sql`${t.status} IN ('running','completed','failed','cancelled','timeout')`),
+  ],
+);
+
+export const subagentAttempts = pgTable(
+  "subagent_attempts",
+  {
+    id: char("id", { length: 36 }).primaryKey(),
+    logicalWorkerId: char("logical_worker_id", { length: 36 })
+      .notNull()
+      .references(() => subagentLogicalWorkers.id),
+    sessionId: char("session_id", { length: 36 })
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    rootTaskRunId: char("root_task_run_id", { length: 36 }).notNull().references(() => runs.id),
+    executionEpoch: integer("execution_epoch").notNull(),
+    attemptNumber: integer("attempt_number").notNull(),
+    childSessionId: char("child_session_id", { length: 36 })
+      .notNull()
+      .references(() => sessions.id),
+    childRunId: char("child_run_id", { length: 36 })
+      .notNull()
+      .unique()
+      .references(() => runs.id),
+    promptMessageId: char("prompt_message_id", { length: 36 })
+      .notNull()
+      .references(() => messages.id),
+    status: text("status")
+      .notNull()
+      .$type<"running" | "completed" | "failed" | "cancelled" | "timeout">(),
+    admittedAt: timestamptz("admitted_at").notNull(),
+    startedAt: timestamptz("started_at").notNull(),
+    endedAt: timestamptz("ended_at"),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("subagent_attempts_worker_number_uq").on(t.logicalWorkerId, t.attemptNumber),
+    uniqueIndex("subagent_attempts_one_active_worker_uq")
+      .on(t.logicalWorkerId)
+      .where(sql`${t.status} = 'running'`),
+    index("subagent_attempts_session_active_idx")
+      .on(t.sessionId, t.rootTaskRunId, t.id)
+      .where(sql`${t.status} = 'running'`),
+    index("subagent_attempts_root_epoch_idx").on(t.rootTaskRunId, t.executionEpoch, t.status),
+    check("subagent_attempts_status_check", sql`${t.status} IN ('running','completed','failed','cancelled','timeout')`),
+    check("subagent_attempts_number_check", sql`${t.attemptNumber} > 0 AND ${t.executionEpoch} > 0`),
+    check("subagent_attempts_times_check", sql`${t.startedAt} >= ${t.admittedAt} AND (${t.endedAt} IS NULL OR ${t.endedAt} >= ${t.startedAt})`),
+  ],
+);
+
+export const subagentReports = pgTable(
+  "subagent_reports",
+  {
+    id: char("id", { length: 36 }).primaryKey(),
+    sessionId: char("session_id", { length: 36 })
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    logicalWorkerId: char("logical_worker_id", { length: 36 })
+      .notNull()
+      .references(() => subagentLogicalWorkers.id),
+    attemptId: char("attempt_id", { length: 36 })
+      .notNull()
+      .unique()
+      .references(() => subagentAttempts.id),
+    childSessionId: char("child_session_id", { length: 36 }).notNull().references(() => sessions.id),
+    childRunId: char("child_run_id", { length: 36 }).notNull().references(() => runs.id),
+    agentType: text("agent_type").notNull(),
+    status: text("status")
+      .notNull()
+      .$type<"completed" | "failed" | "cancelled" | "timeout">(),
+    summary: text("summary").notNull(),
+    structuredReport: jsonb("structured_report").$type<StructuredSubagentReport>(),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("subagent_reports_session_cursor_idx").on(t.sessionId, t.id),
+    check("subagent_reports_status_check", sql`${t.status} IN ('completed','failed','cancelled','timeout')`),
+    check("subagent_reports_summary_bound_check", sql`length(${t.summary}) <= 4000`),
+  ],
+);
+
+export const subagentCheckpoints = pgTable(
+  "subagent_checkpoints",
+  {
+    id: char("id", { length: 36 }).primaryKey(),
+    sessionId: char("session_id", { length: 36 })
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    logicalWorkerId: char("logical_worker_id", { length: 36 })
+      .notNull()
+      .references(() => subagentLogicalWorkers.id),
+    attemptId: char("attempt_id", { length: 36 }).notNull().references(() => subagentAttempts.id),
+    rootTaskRunId: char("root_task_run_id", { length: 36 }).notNull().references(() => runs.id),
+    hash: text("hash").notNull(),
+    objectRef: text("object_ref"),
+    provenance: jsonb("provenance").$type<Record<string, unknown>>(),
+    verifiedAt: timestamptz("verified_at").notNull(),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("subagent_checkpoints_worker_created_idx").on(t.logicalWorkerId, t.createdAt, t.id),
+    index("subagent_checkpoints_attempt_idx").on(t.attemptId),
+  ],
+);
+
+export const subagentControlAudit = pgTable(
+  "subagent_control_audit",
+  {
+    id: char("id", { length: 36 }).primaryKey(),
+    sessionId: char("session_id", { length: 36 })
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    actorRunId: char("actor_run_id", { length: 36 }).notNull().references(() => runs.id),
+    rootTaskRunId: char("root_task_run_id", { length: 36 }).references(() => runs.id),
+    logicalWorkerId: char("logical_worker_id", { length: 36 }).references(() => subagentLogicalWorkers.id),
+    sourceAttemptId: char("source_attempt_id", { length: 36 }).references(() => subagentAttempts.id),
+    targetLogicalWorkerId: char("target_logical_worker_id", { length: 36 }).references(() => subagentLogicalWorkers.id),
+    checkpointId: char("checkpoint_id", { length: 36 }).references(() => subagentCheckpoints.id),
+    deferredRequestId: char("deferred_request_id", { length: 36 }).references(() => subagentDispatches.id),
+    action: text("action").notNull(),
+    userInstruction: text("user_instruction"),
+    decision: text("decision").notNull(),
+    reason: text("reason"),
+    requestedTransition: text("requested_transition"),
+    performedTransition: text("performed_transition"),
+    outcome: text("outcome"),
+    checkpointFreshness: text("checkpoint_freshness"),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("subagent_control_audit_session_created_idx").on(t.sessionId, t.createdAt, t.id),
+    index("subagent_control_audit_worker_idx").on(t.logicalWorkerId, t.createdAt),
+  ],
+);
+
+export const subagentRoots = pgTable(
+  "subagent_roots",
+  {
+    rootTaskRunId: char("root_task_run_id", { length: 36 })
+      .primaryKey()
+      .references(() => runs.id),
+    sessionId: char("session_id", { length: 36 })
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    executionEpoch: integer("execution_epoch").notNull().default(1),
+    activeWorkerCount: integer("active_worker_count").notNull().default(0),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("subagent_roots_session_idx").on(t.sessionId),
+    check("subagent_roots_state_check", sql`${t.executionEpoch} > 0 AND ${t.activeWorkerCount} >= 0`),
+  ],
+);
+
+export const subagentRootFinalizations = pgTable(
+  "subagent_root_finalizations",
+  {
+    id: char("id", { length: 36 }).primaryKey(),
+    rootTaskRunId: char("root_task_run_id", { length: 36 })
+      .notNull()
+      .references(() => subagentRoots.rootTaskRunId),
+    sessionId: char("session_id", { length: 36 })
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    executionEpoch: integer("execution_epoch").notNull(),
+    activeAttemptIds: jsonb("active_attempt_ids")
+      .notNull()
+      .default(sql`'[]'::jsonb`)
+      .$type<string[]>(),
+    wakeRequestedAt: timestamptz("wake_requested_at"),
+    finalizedAt: timestamptz("finalized_at"),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("subagent_root_finalizations_epoch_uq").on(t.rootTaskRunId, t.executionEpoch),
+    index("subagent_root_finalizations_session_idx").on(t.sessionId, t.createdAt),
+    check("subagent_root_finalizations_epoch_check", sql`${t.executionEpoch} > 0`),
+  ],
+);
+
+export type SubagentSessionAdmissionRow = typeof subagentSessionAdmission.$inferSelect;
+export type SubagentBatchRow = typeof subagentBatches.$inferSelect;
+export type SubagentDispatchRow = typeof subagentDispatches.$inferSelect;
+export type SubagentLogicalWorkerRow = typeof subagentLogicalWorkers.$inferSelect;
+export type SubagentAttemptRow = typeof subagentAttempts.$inferSelect;
+export type SubagentReportRow = typeof subagentReports.$inferSelect;
+export type SubagentCheckpointRow = typeof subagentCheckpoints.$inferSelect;
+export type SubagentControlAuditRow = typeof subagentControlAudit.$inferSelect;
+export type SubagentRootRow = typeof subagentRoots.$inferSelect;
+export type SubagentRootFinalizationRow = typeof subagentRootFinalizations.$inferSelect;
