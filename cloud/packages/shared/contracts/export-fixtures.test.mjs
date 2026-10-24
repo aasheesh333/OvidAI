@@ -155,6 +155,20 @@ describe("canonical fixture exporter", () => {
     expect(run("--check").status).toBe(0);
   });
 
+  it("leaves the separately exported system request fixture out of legacy mirrors", () => {
+    const dedicatedName = "system-requests-v1.json";
+    writeFileSync(pathFor("source", dedicatedName), '{"contractVersion":1}\n');
+    const exported = run();
+    expect(exported.status, exported.stderr || exported.stdout).toBe(0);
+    expect(jsonFiles("source")).toEqual(["alpha-v1.json", dedicatedName]);
+    expect(jsonFiles("web")).toEqual(["alpha-v1.json"]);
+    expect(jsonFiles("flutter")).toEqual(["alpha-v1.json"]);
+    expect(existsSync(pathFor("web", dedicatedName))).toBe(false);
+    expect(existsSync(pathFor("flutter", dedicatedName))).toBe(false);
+    expect(readFileSync(pathFor("source", dedicatedName), "utf8")).toBe('{"contractVersion":1}\n');
+    expect(run("--check").status).toBe(0);
+  });
+
   it("refuses an empty canonical source for both export and --check without erasing mirrors", () => {
     expect(run().status).toBe(0);
     const before = readFileSync(pathFor("web"));

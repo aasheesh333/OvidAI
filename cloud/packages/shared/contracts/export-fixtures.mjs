@@ -30,7 +30,10 @@ async function jsonNames(directory, allowMissing = false) {
   }
 }
 
-const canonicalNames = await jsonNames(sourceDir);
+// This fixture has its own hardened exporter and test-fixture mirror roots.
+const canonicalNames = (await jsonNames(sourceDir)).filter(
+  (name) => name !== "system-requests-v1.json",
+);
 if (canonicalNames.length === 0) {
   console.error("No canonical fixture JSON files found; refusing an empty canonical source.");
   process.exitCode = 1;
