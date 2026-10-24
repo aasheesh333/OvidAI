@@ -33,15 +33,19 @@ const lifecycleTables = [
 ] as const;
 
 describe("0034 subagent lifecycle migration metadata", () => {
-  it("allocates only journal entry 34 after the already-owned 0031 entry", () => {
+  it("preserves the journal-wide 0031 to 0033 to 0034 chain with increasing timestamps", () => {
     const journal = JSON.parse(readFileSync(JOURNAL_PATH, "utf8")) as {
       entries: Array<{ idx: number; tag: string; when: number }>;
     };
-    const entry = journal.entries.find((candidate) => candidate.idx === 34);
-    const previous = journal.entries.find((candidate) => candidate.idx === 31);
-    expect(entry?.tag).toBe("0034_subagent_lifecycle");
-    expect(previous?.tag).toBe("0031_attachment_provider_connections");
-    expect(entry!.when).toBeGreaterThan(previous!.when);
+    const lineage = journal.entries.filter((candidate) => [31, 33, 34].includes(candidate.idx));
+    expect(lineage.map((candidate) => candidate.tag)).toEqual([
+      "0031_attachment_provider_connections",
+      "0033_system_requests_outbox",
+      "0034_subagent_lifecycle",
+    ]);
+    for (let index = 1; index < lineage.length; index += 1) {
+      expect(lineage[index]!.when).toBeGreaterThan(lineage[index - 1]!.when);
+    }
     expect(journal.entries.filter((candidate) => candidate.idx === 34)).toHaveLength(1);
   });
 
@@ -51,10 +55,31 @@ describe("0034 subagent lifecycle migration metadata", () => {
       ? JSON.parse(readFileSync(SNAPSHOT_PATH, "utf8"))
       : { tables: {}, id: "", prevId: "" };
     const previous = JSON.parse(readFileSync(
-      fileURLToPath(new URL("../drizzle/meta/0031_snapshot.json", import.meta.url)),
+      fileURLToPath(new URL("../drizzle/meta/0033_snapshot.json", import.meta.url)),
       "utf8",
-    )) as { id: string };
+    )) as { id: string; tables: Record<string, unknown> };
     expect(snapshot.prevId).toBe(previous.id);
+    const columnCount = Object.values(snapshot.tables as Record<string, { columns: Record<string, unknown> }>)
+      .reduce((sum, table) => sum + Object.keys(table.columns).length, 0);
+    expect({ tables: Object.keys(snapshot.tables).length, columns: columnCount })
+      .toEqual({ tables: 56, columns: 537 });
+    expect(Object.keys(snapshot.tables).sort())
+      .toEqual(expect.arrayContaining(Object.keys(previous.tables).sort()));
+    for (const [table, definition] of Object.entries(previous.tables)) {
+      expect(snapshot.tables[table], `preserve entire 0033 table ${table}`).toEqual(definition);
+    }
+    expect(snapshot.tables["public.users"]?.columns.response_wait_seconds)
+      .toMatchObject({ type: "integer", notNull: true, default: 45 });
+    expect(snapshot.tables["public.billing_purchases"]?.columns.period)
+      .toMatchObject({ type: "text", notNull: false });
+    for (const table of [
+      "system_requests",
+      "system_request_responses",
+      "run_outbox",
+      "billing_entitlement_events",
+    ]) {
+      expect(snapshot.tables[`public.${table}`], `cumulative 0033 table ${table}`).toBeDefined();
+    }
     for (const table of lifecycleTables) {
       expect(snapshot.tables[`public.${table}`], table).toBeDefined();
     }

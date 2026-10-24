@@ -5,9 +5,11 @@ import {
   check,
   customType,
   doublePrecision,
+  foreignKey,
   index,
   integer,
   jsonb,
+  numeric,
   pgTable,
   primaryKey,
   text,
@@ -65,8 +67,13 @@ export const users = pgTable("users", {
   // Wave 1a (SE-005 / R1): per-user preferences the worker enforces
   // ({memoryEnabled?, shareSessionMemory?}; absent keys = shared defaults).
   preferences: jsonb("preferences").$type<Record<string, unknown>>().notNull().default({}),
+  // WS5/WS10: server-side interim-status wait. Existing JSON preferences are
+  // deliberately untouched; this additive scalar has its own bounded contract.
+  responseWaitSeconds: integer("response_wait_seconds").notNull().default(45),
   createdAt: timestamptz("created_at").notNull().defaultNow(),
-});
+}, (t) => [
+  check("users_response_wait_seconds_check", sql`${t.responseWaitSeconds} BETWEEN 15 AND 600`),
+]);
 
 // W1 Projects: a user-owned folder of chats with its own private memory.
 // Per-project file caps are plan-derived (owner spec §3 Screen 4); the rows
@@ -380,6 +387,8 @@ export const billingPurchases = pgTable(
     uid: text("uid"),
     productId: text("product_id").notNull(),
     tier: text("tier").notNull(),
+    // Verified purchase facts only. NULL means unknown, never a monthly fallback.
+    period: text("period").$type<"monthly" | "yearly" | null>(),
     status: text("status").notNull(), // active|pending|expired|revoked|replaced
     expiresAt: bigint("expires_at", { mode: "number" }),
     autoRenewing: boolean("auto_renewing").notNull().default(false),
@@ -387,7 +396,10 @@ export const billingPurchases = pgTable(
     accountHash: text("account_hash"),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
-  (t) => [index("billing_purchases_uid_idx").on(t.uid)],
+  (t) => [
+    index("billing_purchases_uid_idx").on(t.uid),
+    check("billing_purchases_period_check", sql`${t.period} IN ('monthly','yearly')`),
+  ],
 );
 
 // Images ledger rows (port of server/images image_jobs; the Task-12 ImageLedger
@@ -1090,11 +1102,27 @@ export const runUsage = pgTable(
     outputTokens: integer("output_tokens").notNull().default(0),
     cacheReadTokens: integer("cache_read_tokens").notNull().default(0),
     cacheWriteTokens: integer("cache_write_tokens").notNull().default(0),
+    // 0038: the legacy model column remains for old readers. New measured
+    // fields are independent and NULL when the provider did not report them.
+    quotaReservationId: char("quota_reservation_id", { length: 36 }),
+    quotaCallId: text("quota_call_id"),
+    attemptId: char("attempt_id", { length: 36 }),
+    requestedModel: text("requested_model"),
+    providerModel: text("provider_model"),
+    costUsd: numeric("cost_usd", { precision: 38, scale: 10 }),
+    costSource: text("cost_source").$type<"litellm" | "provider">(),
     createdAt: timestamptz("created_at").notNull().defaultNow(),
   },
   (t) => [
     index("run_usage_user_id_created_at_idx").on(t.userId, t.createdAt),
     index("run_usage_run_id_idx").on(t.runId),
+    index("run_usage_session_created_idx").on(t.sessionId, t.createdAt),
+    uniqueIndex("run_usage_quota_reservation_uq")
+      .on(t.quotaReservationId)
+      .where(sql`quota_reservation_id IS NOT NULL`),
+    uniqueIndex("run_usage_run_quota_call_uq")
+      .on(t.runId, t.quotaCallId)
+      .where(sql`quota_call_id IS NOT NULL`),
   ],
 );
 
@@ -1453,3 +1481,346 @@ export type SubagentCheckpointRow = typeof subagentCheckpoints.$inferSelect;
 export type SubagentControlAuditRow = typeof subagentControlAudit.$inferSelect;
 export type SubagentRootRow = typeof subagentRoots.$inferSelect;
 export type SubagentRootFinalizationRow = typeof subagentRootFinalizations.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// WS5 durable system requests and generic run admission outbox (0033).
+// Safe JSON columns never carry credentials. Sensitive response values are not
+// stored here: system_request_responses keeps only their SHA-256 digest.
+// ---------------------------------------------------------------------------
+
+export const systemRequests = pgTable(
+  "system_requests",
+  {
+    requestId: text("request_id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.uid, { onDelete: "cascade" }),
+    sessionId: char("session_id", { length: 36 })
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    runId: char("run_id", { length: 36 })
+      .notNull()
+      .references(() => runs.id),
+    kind: text("kind")
+      .notNull()
+      .$type<"approval" | "sampling" | "elicitation">(),
+    safePayload: jsonb("safe_payload").notNull().$type<Record<string, unknown>>(),
+    sensitive: boolean("sensitive").notNull(),
+    status: text("status")
+      .notNull()
+      .default("pending")
+      .$type<"pending" | "resolved" | "expired" | "cancelled">(),
+    expiresAt: timestamptz("expires_at").notNull(),
+    version: integer("version").notNull().default(1),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("system_requests_user_status_idx")
+      .on(t.userId, t.status, t.expiresAt, t.createdAt, t.requestId),
+    index("system_requests_session_status_idx")
+      .on(t.sessionId, t.status, t.expiresAt, t.createdAt, t.requestId),
+    index("system_requests_run_idx").on(t.runId),
+    check("system_requests_kind_check", sql`${t.kind} IN ('approval','sampling','elicitation')`),
+    check("system_requests_status_check", sql`${t.status} IN ('pending','resolved','expired','cancelled')`),
+    check("system_requests_version_check", sql`${t.version} > 0`),
+  ],
+);
+
+export const systemRequestResponses = pgTable(
+  "system_request_responses",
+  {
+    responseId: char("response_id", { length: 36 }).primaryKey(),
+    requestId: text("request_id")
+      .notNull()
+      .references(() => systemRequests.requestId, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.uid, { onDelete: "cascade" }),
+    requestVersion: integer("request_version").notNull(),
+    clientResponseId: text("client_response_id").notNull(),
+    // NULL for every sensitive response. The digest proves exact replay versus
+    // conflict without retaining the elicited secret in plaintext.
+    response: jsonb("response").$type<Record<string, unknown> | null>(),
+    responseDigest: text("response_digest").notNull(),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("system_request_responses_request_version_uq").on(t.requestId, t.requestVersion),
+    uniqueIndex("system_request_responses_client_response_uq").on(t.userId, t.clientResponseId),
+    check("system_request_responses_version_check", sql`${t.requestVersion} > 0`),
+    check("system_request_responses_digest_check", sql`${t.responseDigest} ~ '^[0-9a-f]{64}$'`),
+  ],
+);
+
+export const runOutbox = pgTable(
+  "run_outbox",
+  {
+    outboxId: char("outbox_id", { length: 36 }).primaryKey(),
+    actorUserId: text("actor_user_id")
+      .notNull()
+      .references(() => users.uid, { onDelete: "cascade" }),
+    sessionId: char("session_id", { length: 36 })
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    runId: char("run_id", { length: 36 })
+      .notNull()
+      .references(() => runs.id),
+    userMessageId: char("user_message_id", { length: 36 })
+      .notNull()
+      .references(() => messages.id),
+    idempotencyKey: text("idempotency_key").notNull(),
+    status: text("status")
+      .notNull()
+      .default("queued")
+      .$type<"queued" | "published" | "settled" | "failed">(),
+    requestPayload: jsonb("request_payload").notNull().$type<Record<string, unknown>>(),
+    bodyPayload: jsonb("body_payload").notNull().$type<Record<string, unknown>>(),
+    jobId: text("job_id").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    publishedAt: timestamptz("published_at"),
+    lastAttemptAt: timestamptz("last_attempt_at"),
+    settledAt: timestamptz("settled_at"),
+    lastError: text("last_error"),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("run_outbox_actor_idempotency_uq").on(t.actorUserId, t.idempotencyKey),
+    uniqueIndex("run_outbox_job_uq").on(t.jobId),
+    uniqueIndex("run_outbox_run_uq").on(t.runId),
+    uniqueIndex("run_outbox_message_uq").on(t.userMessageId),
+    index("run_outbox_status_idx").on(t.status, t.createdAt, t.outboxId),
+    index("run_outbox_status_attempt_idx").on(t.status, t.lastAttemptAt, t.createdAt, t.outboxId),
+    check("run_outbox_status_check", sql`${t.status} IN ('queued','published','settled','failed')`),
+    check("run_outbox_attempts_check", sql`${t.attempts} >= 0`),
+  ],
+);
+
+// RevenueCat/verified entitlement facts and webhook replay dedupe. No raw
+// webhook payload or purchase token is retained here. Unknown product/tier,
+// period, expiry, or event time stays NULL rather than gaining a default.
+export const billingEntitlementEvents = pgTable(
+  "billing_entitlement_events",
+  {
+    eventId: text("event_id").primaryKey(),
+    userId: text("user_id"),
+    productId: text("product_id"),
+    tier: text("tier"),
+    period: text("period").$type<"monthly" | "yearly" | null>(),
+    purchaseState: text("purchase_state").notNull(),
+    eventType: text("event_type").notNull(),
+    expiresAt: timestamptz("expires_at"),
+    occurredAt: timestamptz("occurred_at"),
+    receivedAt: timestamptz("received_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("billing_entitlement_events_user_received_idx").on(t.userId, t.receivedAt, t.eventId),
+    check("billing_entitlement_events_period_check", sql`${t.period} IN ('monthly','yearly')`),
+  ],
+);
+
+export type SystemRequestRow = typeof systemRequests.$inferSelect;
+export type SystemRequestResponseRow = typeof systemRequestResponses.$inferSelect;
+export type RunOutboxRow = typeof runOutbox.$inferSelect;
+export type BillingEntitlementEventRow = typeof billingEntitlementEvents.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// 0038 universal model-call quota and rolling upload/storage reservations.
+// UTC day/month counters include actual run_usage facts plus unsettled model
+// allowances. Reservation identity, not a process-local map, is authoritative.
+// Image facts are additive satellites: old image_jobs SELECT * readers retain
+// their exact row shape, and missing lineage/count/cost facts stay unknown.
+// ---------------------------------------------------------------------------
+
+export const imageUsageFacts = pgTable(
+  "image_usage_facts",
+  {
+    account: text("account").notNull(),
+    request: text("request").notNull(),
+    sessionId: char("session_id", { length: 36 }),
+    runId: char("run_id", { length: 36 }),
+    generateCount: integer("generate_count"),
+    editCount: integer("edit_count"),
+    costUsd: numeric("cost_usd", { precision: 38, scale: 10 }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.account, t.request] }),
+    foreignKey({
+      columns: [t.account, t.request],
+      foreignColumns: [imageJobs.account, imageJobs.request],
+      name: "image_usage_facts_account_request_image_jobs_account_request_fk",
+    }).onDelete("cascade"),
+    index("image_usage_facts_session_idx").on(t.sessionId),
+    index("image_usage_facts_run_idx").on(t.runId),
+    check("image_usage_facts_counts_check", sql`(${t.generateCount} IS NULL OR ${t.generateCount} >= 0) AND (${t.editCount} IS NULL OR ${t.editCount} >= 0)`),
+    check("image_usage_facts_cost_check", sql`${t.costUsd} IS NULL OR ${t.costUsd} >= 0`),
+  ],
+);
+
+export const usageQuotaCounters = pgTable(
+  "usage_quota_counters",
+  {
+    actorUserId: text("actor_user_id")
+      .notNull()
+      .references(() => users.uid, { onDelete: "cascade" }),
+    windowKind: text("window_kind").notNull().$type<"day" | "month">(),
+    windowStart: timestamptz("window_start").notNull(),
+    windowEnd: timestamptz("window_end").notNull(),
+    usedTokens: bigint("used_tokens", { mode: "number" }).notNull().default(0),
+    reservedTokens: bigint("reserved_tokens", { mode: "number" }).notNull().default(0),
+    usedUsd: numeric("used_usd", { precision: 38, scale: 10 }).notNull().default("0"),
+    reservedUsd: numeric("reserved_usd", { precision: 38, scale: 10 }).notNull().default("0"),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.actorUserId, t.windowKind, t.windowStart] }),
+    check("usage_quota_counters_window_check", sql`${t.windowKind} IN ('day','month') AND ${t.windowEnd} > ${t.windowStart}`),
+    check("usage_quota_counters_tokens_check", sql`${t.usedTokens} >= 0 AND ${t.reservedTokens} >= 0`),
+    check("usage_quota_counters_usd_check", sql`${t.usedUsd} >= 0 AND ${t.reservedUsd} >= 0`),
+  ],
+);
+
+export const usageRunAdmissions = pgTable(
+  "usage_run_admissions",
+  {
+    id: char("id", { length: 36 }).primaryKey(),
+    actorUserId: text("actor_user_id")
+      .notNull()
+      .references(() => users.uid, { onDelete: "cascade" }),
+    source: text("source").notNull(),
+    runId: char("run_id", { length: 36 }).notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("usage_run_admissions_actor_key_uq").on(t.actorUserId, t.idempotencyKey),
+    index("usage_run_admissions_run_idx").on(t.actorUserId, t.runId),
+    check("usage_run_admissions_source_check", sql`${t.source} IN ('interactive','schedule_create','schedule_run_now','schedule_tick','schedule_retry','parent_wake','subagent','collab')`),
+  ],
+);
+
+export const usageQuotaReservations = pgTable(
+  "usage_quota_reservations",
+  {
+    id: char("id", { length: 36 }).primaryKey(),
+    actorUserId: text("actor_user_id")
+      .notNull()
+      .references(() => users.uid, { onDelete: "cascade" }),
+    runId: char("run_id", { length: 36 }).notNull(),
+    attemptId: char("attempt_id", { length: 36 }),
+    sessionId: char("session_id", { length: 36 }),
+    runSource: text("run_source"),
+    reservationKey: text("reservation_key").notNull(),
+    state: text("state")
+      .notNull()
+      .default("reserved")
+      .$type<"reserved" | "settled" | "released">(),
+    inputTokens: bigint("input_tokens", { mode: "number" }).notNull(),
+    maxOutputTokens: bigint("max_output_tokens", { mode: "number" }).notNull(),
+    reservedCostUsd: numeric("reserved_cost_usd", { precision: 38, scale: 10 })
+      .notNull()
+      .default("0"),
+    requestedModel: text("requested_model"),
+    providerModel: text("provider_model"),
+    actualInputTokens: bigint("actual_input_tokens", { mode: "number" }),
+    actualOutputTokens: bigint("actual_output_tokens", { mode: "number" }),
+    actualCacheReadTokens: bigint("actual_cache_read_tokens", { mode: "number" }),
+    actualCacheWriteTokens: bigint("actual_cache_write_tokens", { mode: "number" }),
+    costUsd: numeric("cost_usd", { precision: 38, scale: 10 }),
+    costSource: text("cost_source").$type<"litellm" | "provider">(),
+    dayWindowStart: timestamptz("day_window_start").notNull(),
+    monthWindowStart: timestamptz("month_window_start").notNull(),
+    runUsageId: char("run_usage_id", { length: 36 }),
+    reservedAt: timestamptz("reserved_at").notNull().defaultNow(),
+    settledAt: timestamptz("settled_at"),
+    releasedAt: timestamptz("released_at"),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("usage_quota_reservations_actor_key_uq").on(t.actorUserId, t.reservationKey),
+    index("usage_quota_reservations_actor_window_idx")
+      .on(t.actorUserId, t.state, t.dayWindowStart, t.monthWindowStart),
+    index("usage_quota_reservations_run_attempt_idx").on(t.runId, t.attemptId),
+    check("usage_quota_reservations_state_check", sql`${t.state} IN ('reserved','settled','released')`),
+    check("usage_quota_reservations_tokens_check", sql`${t.inputTokens} >= 0 AND ${t.maxOutputTokens} >= 0 AND (${t.actualInputTokens} IS NULL OR ${t.actualInputTokens} >= 0) AND (${t.actualOutputTokens} IS NULL OR ${t.actualOutputTokens} >= 0)`),
+    check("usage_quota_reservations_usd_check", sql`${t.reservedCostUsd} >= 0 AND (${t.costUsd} IS NULL OR ${t.costUsd} >= 0)`),
+  ],
+);
+
+export const uploadWindowCounters = pgTable(
+  "upload_window_counters",
+  {
+    actorUserId: text("actor_user_id")
+      .notNull()
+      .references(() => users.uid, { onDelete: "cascade" }),
+    windowHours: integer("window_hours").notNull(),
+    windowStart: timestamptz("window_start").notNull(),
+    windowEnd: timestamptz("window_end").notNull(),
+    usedUploads: integer("used_uploads").notNull().default(0),
+    reservedUploads: integer("reserved_uploads").notNull().default(0),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.actorUserId, t.windowHours] }),
+    index("upload_window_counters_actor_window_idx").on(t.actorUserId, t.windowStart, t.windowEnd),
+    check("upload_window_counters_window_check", sql`${t.windowHours} > 0 AND ${t.windowEnd} > ${t.windowStart}`),
+    check("upload_window_counters_counts_check", sql`${t.usedUploads} >= 0 AND ${t.reservedUploads} >= 0`),
+  ],
+);
+
+export const storageUsageCounters = pgTable("storage_usage_counters", {
+  ownerUserId: text("owner_user_id")
+    .primaryKey()
+    .references(() => users.uid, { onDelete: "cascade" }),
+  usedBytes: bigint("used_bytes", { mode: "number" }).notNull().default(0),
+  reservedBytes: bigint("reserved_bytes", { mode: "number" }).notNull().default(0),
+  updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+}, (t) => [
+  check("storage_usage_counters_bytes_check", sql`${t.usedBytes} >= 0 AND ${t.reservedBytes} >= 0`),
+]);
+
+export const storageReservations = pgTable(
+  "storage_reservations",
+  {
+    id: text("id").primaryKey(),
+    actorUserId: text("actor_user_id")
+      .notNull()
+      .references(() => users.uid, { onDelete: "cascade" }),
+    ownerUserId: text("owner_user_id")
+      .notNull()
+      .references(() => users.uid, { onDelete: "cascade" }),
+    sessionId: char("session_id", { length: 36 }).notNull(),
+    objectId: text("object_id"),
+    state: text("state")
+      .notNull()
+      .default("reserved")
+      .$type<"reserved" | "finalized" | "released">(),
+    declaredBytes: bigint("declared_bytes", { mode: "number" }).notNull(),
+    actualBytes: bigint("actual_bytes", { mode: "number" }),
+    actualContentType: text("actual_content_type"),
+    etag: text("etag"),
+    reservedAt: timestamptz("reserved_at").notNull().defaultNow(),
+    finalizedAt: timestamptz("finalized_at"),
+    releasedAt: timestamptz("released_at"),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("storage_reservations_actor_state_window_idx").on(t.actorUserId, t.state, t.reservedAt),
+    index("storage_reservations_owner_state_idx").on(t.ownerUserId, t.state),
+    index("storage_reservations_session_idx").on(t.sessionId),
+    index("storage_reservations_object_idx").on(t.objectId),
+    check("storage_reservations_state_check", sql`${t.state} IN ('reserved','finalized','released')`),
+    check("storage_reservations_bytes_check", sql`${t.declaredBytes} >= 0 AND (${t.actualBytes} IS NULL OR ${t.actualBytes} >= 0)`),
+    check("storage_reservations_state_fields_check", sql`(${t.state} = 'reserved' AND ${t.actualBytes} IS NULL AND ${t.finalizedAt} IS NULL AND ${t.releasedAt} IS NULL) OR (${t.state} = 'finalized' AND ${t.actualBytes} IS NOT NULL AND ${t.finalizedAt} IS NOT NULL AND ${t.releasedAt} IS NULL) OR (${t.state} = 'released' AND ${t.actualBytes} IS NULL AND ${t.finalizedAt} IS NULL AND ${t.releasedAt} IS NOT NULL)`),
+  ],
+);
+
+export type ImageUsageFactRow = typeof imageUsageFacts.$inferSelect;
+export type UsageQuotaCounterRow = typeof usageQuotaCounters.$inferSelect;
+export type UsageRunAdmissionRow = typeof usageRunAdmissions.$inferSelect;
+export type UsageQuotaReservationRow = typeof usageQuotaReservations.$inferSelect;
+export type UploadWindowCounterRow = typeof uploadWindowCounters.$inferSelect;
+export type StorageUsageCounterRow = typeof storageUsageCounters.$inferSelect;
+export type StorageReservationRow = typeof storageReservations.$inferSelect;

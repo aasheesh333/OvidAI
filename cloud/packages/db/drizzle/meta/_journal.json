@@ -227,6 +227,13 @@
       "breakpoints": true
     },
     {
+      "idx": 33,
+      "version": "7",
+      "when": 1793550000000,
+      "tag": "0033_system_requests_outbox",
+      "breakpoints": true
+    },
+    {
       "idx": 34,
       "version": "7",
       "when": 1793600000000,
@@ -238,6 +245,13 @@
       "version": "7",
       "when": 1793700000000,
       "tag": "0035_attachment_declaration_presence",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1793900000000,
+      "tag": "0038_usage_billing_windows",
       "breakpoints": true
     }
   ]

@@ -1,6 +1,11 @@
-import { describe, expect, it } from "vitest";
-import type { Db } from "./client.js";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createDb, migrate, type Db } from "./client.js";
 import { dataControlRepo } from "./dataControlRepos.js";
+import { createMigrationScratch, type MigrationScratch } from "./migrationTestKit.js";
+import {
+  expectSessionCleanupFixtureGone,
+  seedSessionCleanupFixture,
+} from "../test/sessionCleanupFixtures.js";
 
 /**
  * The destructive SQL, pinned without a database.
@@ -90,6 +95,28 @@ describe("dataControlRepo", () => {
       statements.findIndex((statement) => statement.text.includes(needle));
     const sessionsAt = indexOf("DELETE FROM sessions");
     expect(sessionsAt).toBeGreaterThanOrEqual(0);
+    const messagesAt = indexOf("DELETE FROM messages");
+    const runsAt = indexOf("DELETE FROM runs");
+    for (const dependent of [
+      "DELETE FROM system_request_responses",
+      "DELETE FROM system_requests",
+      "DELETE FROM run_outbox",
+      "DELETE FROM subagent_control_audit",
+      "DELETE FROM subagent_reports",
+      "DELETE FROM subagent_checkpoints",
+      "DELETE FROM subagent_root_finalizations",
+      "DELETE FROM subagent_attempts",
+      "DELETE FROM subagent_logical_workers",
+      "DELETE FROM subagent_dispatches",
+      "DELETE FROM subagent_batches",
+      "DELETE FROM subagent_roots",
+    ]) {
+      expect(indexOf(dependent), `${dependent} precedes messages`).toBeLessThan(messagesAt);
+      expect(indexOf(dependent), `${dependent} precedes runs`).toBeLessThan(runsAt);
+    }
+    expect(indexOf("DELETE FROM system_request_responses"))
+      .toBeLessThan(indexOf("DELETE FROM system_requests"));
+
     for (const child of [
       "DELETE FROM schedule_runs",
       "DELETE FROM schedules",
@@ -97,6 +124,19 @@ describe("dataControlRepo", () => {
       "DELETE FROM attachments",
       "DELETE FROM session_event_mirror",
       "DELETE FROM session_agent_state",
+      "DELETE FROM system_request_responses",
+      "DELETE FROM system_requests",
+      "DELETE FROM run_outbox",
+      "DELETE FROM subagent_control_audit",
+      "DELETE FROM subagent_reports",
+      "DELETE FROM subagent_checkpoints",
+      "DELETE FROM subagent_root_finalizations",
+      "DELETE FROM subagent_attempts",
+      "DELETE FROM subagent_logical_workers",
+      "DELETE FROM subagent_dispatches",
+      "DELETE FROM subagent_batches",
+      "DELETE FROM subagent_roots",
+      "DELETE FROM subagent_session_admission",
       "DELETE FROM messages",
       "DELETE FROM runs",
       "DELETE FROM file_manifests",
@@ -128,4 +168,31 @@ describe("dataControlRepo", () => {
     );
     expect(statements[0]!.values).toEqual(["u1"]);
   });
+});
+
+const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
+
+describe.skipIf(!TEST_DATABASE_URL)("dataControlRepo 0033/0034 cleanup (isolated real Postgres)", () => {
+  let scratch: MigrationScratch;
+  let db: Db;
+
+  beforeAll(async () => {
+    scratch = await createMigrationScratch(TEST_DATABASE_URL!, "cleanup_0033_data");
+    await migrate(scratch.url);
+    db = createDb(scratch.url, { max: 8 });
+  }, 180_000);
+
+  afterAll(async () => {
+    await db?.$client.end({ timeout: 5 });
+    await scratch?.close();
+  }, 30_000);
+
+  it("deletes real 0033 rows and every 0034 descendant before messages/runs, then replays", async () => {
+    await seedSessionCleanupFixture(db, "data-control-0033-user");
+    const first = await dataControlRepo.deleteAllData(db, "data-control-0033-user");
+    expect(first.sessions).toBe(2);
+    await expectSessionCleanupFixtureGone(db);
+    await expect(dataControlRepo.deleteAllData(db, "data-control-0033-user"))
+      .resolves.toEqual({ sessions: 0, attachments: 0, artifacts: 0, workspaceFiles: 0 });
+  }, 60_000);
 });

@@ -398,6 +398,23 @@ export function createCloudCleanup(deps: CloudCleanupDeps): CloudCleanup {
     await db.$client`DELETE FROM attachments WHERE user_id = ${uid}`;
     await db.$client`DELETE FROM session_event_mirror WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
     await db.$client`DELETE FROM session_agent_state WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+    // Preserve the complete 0034 descendant cleanup before canonical runs and
+    // messages; these NO ACTION links otherwise wedge every deletion retry.
+    await db.$client`DELETE FROM subagent_control_audit WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+    await db.$client`DELETE FROM subagent_reports WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+    await db.$client`DELETE FROM subagent_checkpoints WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+    await db.$client`DELETE FROM subagent_root_finalizations WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+    await db.$client`DELETE FROM subagent_attempts WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+    await db.$client`DELETE FROM subagent_logical_workers WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+    await db.$client`DELETE FROM subagent_dispatches WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+    await db.$client`DELETE FROM subagent_batches WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+    await db.$client`DELETE FROM subagent_roots WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+    await db.$client`DELETE FROM subagent_session_admission WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+    // 0033 responses precede requests, and the outbox precedes its canonical
+    // message/run. This runs in both the sessions and terminal sql stages.
+    await db.$client`DELETE FROM system_request_responses WHERE request_id IN (SELECT request_id FROM system_requests WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid}))`;
+    await db.$client`DELETE FROM system_requests WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+    await db.$client`DELETE FROM run_outbox WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
     await db.$client`DELETE FROM messages WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
     await db.$client`DELETE FROM runs WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
     await db.$client`DELETE FROM file_manifests WHERE user_id = ${uid}`;

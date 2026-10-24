@@ -97,6 +97,23 @@ export const dataControlRepo = {
       );
       await tx`DELETE FROM session_event_mirror WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
       await tx`DELETE FROM session_agent_state WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+      // 0034 leaves reference other lineage rows as well as canonical runs and
+      // messages. Remove the whole descendant graph before either authority.
+      await tx`DELETE FROM subagent_control_audit WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+      await tx`DELETE FROM subagent_reports WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+      await tx`DELETE FROM subagent_checkpoints WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+      await tx`DELETE FROM subagent_root_finalizations WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+      await tx`DELETE FROM subagent_attempts WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+      await tx`DELETE FROM subagent_logical_workers WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+      await tx`DELETE FROM subagent_dispatches WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+      await tx`DELETE FROM subagent_batches WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+      await tx`DELETE FROM subagent_roots WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+      await tx`DELETE FROM subagent_session_admission WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+      // 0033 response/version CAS rows precede their request; outbox precedes
+      // the canonical message/run it links. All predicates remain uid-scoped.
+      await tx`DELETE FROM system_request_responses WHERE request_id IN (SELECT request_id FROM system_requests WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid}))`;
+      await tx`DELETE FROM system_requests WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+      await tx`DELETE FROM run_outbox WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
       await tx`DELETE FROM messages WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
       await tx`DELETE FROM runs WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
       await tx`DELETE FROM file_manifests WHERE user_id = ${uid}`;

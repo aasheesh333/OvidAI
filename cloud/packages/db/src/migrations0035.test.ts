@@ -20,15 +20,20 @@ const JOURNAL_PATH = fileURLToPath(new URL("../drizzle/meta/_journal.json", impo
 const migrationSql = existsSync(MIGRATION_PATH) ? readFileSync(MIGRATION_PATH, "utf8") : "";
 
 describe("0035 attachment declaration presence migration metadata", () => {
-  it("allocates exactly one 0035 entry after actual predecessor 0034", () => {
+  it("preserves the journal-wide 0031 to 0035 chain with increasing timestamps", () => {
     const journal = JSON.parse(readFileSync(JOURNAL_PATH, "utf8")) as {
       entries: Array<{ idx: number; tag: string; when: number }>;
     };
-    const entry = journal.entries.find((candidate) => candidate.idx === 35);
-    const previous = journal.entries.find((candidate) => candidate.idx === 34);
-    expect(entry?.tag).toBe("0035_attachment_declaration_presence");
-    expect(previous?.tag).toBe("0034_subagent_lifecycle");
-    expect(entry!.when).toBeGreaterThan(previous!.when);
+    const lineage = journal.entries.filter((candidate) => [31, 33, 34, 35].includes(candidate.idx));
+    expect(lineage.map((candidate) => candidate.tag)).toEqual([
+      "0031_attachment_provider_connections",
+      "0033_system_requests_outbox",
+      "0034_subagent_lifecycle",
+      "0035_attachment_declaration_presence",
+    ]);
+    for (let index = 1; index < lineage.length; index += 1) {
+      expect(lineage[index]!.when).toBeGreaterThan(lineage[index - 1]!.when);
+    }
     expect(journal.entries.filter((candidate) => candidate.idx === 35)).toHaveLength(1);
   });
 
@@ -40,8 +45,35 @@ describe("0035 attachment declaration presence migration metadata", () => {
     const previous = JSON.parse(readFileSync(
       fileURLToPath(new URL("../drizzle/meta/0034_snapshot.json", import.meta.url)),
       "utf8",
-    )) as { id: string };
+    )) as { id: string; tables: Record<string, unknown> };
     expect(snapshot.prevId).toBe(previous.id);
+    const columnCount = Object.values(snapshot.tables as Record<string, { columns: Record<string, unknown> }>)
+      .reduce((sum, table) => sum + Object.keys(table.columns).length, 0);
+    expect({ tables: Object.keys(snapshot.tables).length, columns: columnCount })
+      .toEqual({ tables: 56, columns: 538 });
+    expect(Object.keys(snapshot.tables).sort())
+      .toEqual(expect.arrayContaining(Object.keys(previous.tables).sort()));
+    for (const [table, definition] of Object.entries(previous.tables)) {
+      if (table === "public.attachments") continue;
+      expect(snapshot.tables[table], `preserve entire 0034 table ${table}`).toEqual(definition);
+    }
+    const actualAttachments = structuredClone(snapshot.tables["public.attachments"]);
+    const expectedAttachments = structuredClone(previous.tables["public.attachments"]);
+    delete actualAttachments.columns.content_type_declared;
+    expect(actualAttachments).toEqual(expectedAttachments);
+    expect(snapshot.tables["public.users"]?.columns.response_wait_seconds)
+      .toMatchObject({ type: "integer", notNull: true, default: 45 });
+    expect(snapshot.tables["public.billing_purchases"]?.columns.period)
+      .toMatchObject({ type: "text", notNull: false });
+    for (const table of [
+      "system_requests",
+      "system_request_responses",
+      "run_outbox",
+      "billing_entitlement_events",
+      "subagent_roots",
+    ]) {
+      expect(snapshot.tables[`public.${table}`], `cumulative table ${table}`).toBeDefined();
+    }
     expect(snapshot.tables["public.attachments"]?.columns.content_type_declared)
       .toMatchObject({
         name: "content_type_declared",

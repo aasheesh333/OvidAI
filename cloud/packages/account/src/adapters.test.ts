@@ -19,6 +19,11 @@ import {
   type KeyAdmin,
   type R2Deleter,
 } from "./adapters.js";
+import {
+  expectSessionCleanupFixtureGone,
+  seedSessionCleanupFixture,
+  SESSION_CLEANUP_TABLES,
+} from "../../db/test/sessionCleanupFixtures.js";
 
 // ---------------------------------------------------------------------------
 // Port of server/account/tests/test_adapters.py + the cleanup assertions from
@@ -444,6 +449,9 @@ describe.skipIf(!TEST_DATABASE_URL)("createCloudCleanup (real postgres)", () => 
     await db.$client`DELETE FROM attachments`;
     await db.$client`DELETE FROM session_event_mirror`;
     await db.$client`DELETE FROM session_agent_state`;
+    for (const table of SESSION_CLEANUP_TABLES) {
+      await db.$client.unsafe(`DELETE FROM ${table}`);
+    }
     await db.$client`DELETE FROM runs`;
     await db.$client`DELETE FROM messages`;
     await db.$client`DELETE FROM sessions`;
@@ -568,7 +576,7 @@ describe.skipIf(!TEST_DATABASE_URL)("createCloudCleanup (real postgres)", () => 
     }
   }
 
-  it("captures tokens/session ids, blocks keys, then deletes every uid-owned row idempotently", async () => {
+  it("captures tokens/session ids, blocks keys, then deletes real 0033/0034 and every uid-owned row idempotently", async () => {
     await seed();
     const ctx = await cleanup.prepare(UID);
     expect((ctx.tokens as string[]).sort()).toEqual(["tok-a", "tok-b"]);
@@ -577,7 +585,11 @@ describe.skipIf(!TEST_DATABASE_URL)("createCloudCleanup (real postgres)", () => 
     await cleanup.revokeKeys(UID, ctx);
     expect(keys.blocked.sort()).toEqual(["tok-a", "tok-b"]);
 
+    // A real post-prepare write includes 0033 responses/outbox and the full
+    // admitted/settled 0034 dependency graph. Terminal cleanup must re-assert it.
+    await seedSessionCleanupFixture(db, UID);
     await runAllSteps(ctx);
+    await expectSessionCleanupFixtureGone(db, { preserveCanonicalRows: true });
     expect(keys.deletedKeys.sort()).toEqual(["tok-a", "tok-b"]);
 
     // Auth-last ordering is the lifecycle's job; here assert all data stages
