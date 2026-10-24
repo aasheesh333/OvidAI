@@ -1,0 +1,65 @@
+{
+  "contractVersion": 1,
+  "messages": [
+    {
+      "notification": {
+        "title": "Ovid finished your task",
+        "body": "Tap to see the answer."
+      },
+      "data": {
+        "kind": "agentFinished",
+        "channel": "agent_updates",
+        "sessionId": "session-fixture-agent",
+        "route": "/c/session-fixture-agent",
+        "title": "Ovid finished your task",
+        "body": "Tap to see the answer.",
+        "futureMetadata": {
+          "additive": true
+        }
+      },
+      "sound": "chime",
+      "androidChannelId": "ovid_agent_updates.chime.v1"
+    },
+    {
+      "notification": {
+        "title": "Scheduled task finished",
+        "body": "Open the schedule result."
+      },
+      "data": {
+        "kind": "scheduleSucceeded",
+        "channel": "scheduler_results",
+        "sessionId": "session-fixture-scheduler",
+        "route": "/schedule/session-fixture-scheduler",
+        "title": "Scheduled task finished",
+        "body": "Open the schedule result."
+      },
+      "sound": "system",
+      "androidChannelId": "ovid_scheduler_results.system.v1"
+    },
+    {
+      "notification": {
+        "title": "Background status",
+        "body": "Background work is waiting."
+      },
+      "data": {
+        "kind": "backgroundStatus",
+        "channel": "background_status",
+        "sessionId": "session-fixture-background",
+        "route": "/c/session-fixture-background",
+        "title": "Background status",
+        "body": "Background work is waiting."
+      },
+      "sound": "silent",
+      "androidChannelId": "ovid_background_status.silent.v1"
+    }
+  ],
+  "quietHours": {
+    "enabled": true,
+    "startMinutes": 1320,
+    "endMinutes": 480,
+    "utcOffsetMinutes": 330
+  },
+  "additiveUnknownField": {
+    "ignoredBy": "v1"
+  }
+}

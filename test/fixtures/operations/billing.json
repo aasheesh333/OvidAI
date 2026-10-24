@@ -1,0 +1,17 @@
+{
+  "contractVersion": 1,
+  "entitlement": {
+    "tier": "plus",
+    "productId": "ovid_pro_yearly",
+    "period": "yearly",
+    "expiresAt": 1800000000000,
+    "autoRenewing": true,
+    "purchaseState": "active",
+    "futureEntitlementField": "additive-v2"
+  },
+  "unavailableYearly": {
+    "requestedProductId": "ovid_pro_yearly",
+    "selectedPackage": null,
+    "reason": "not_configured"
+  }
+}

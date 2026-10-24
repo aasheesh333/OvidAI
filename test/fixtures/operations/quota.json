@@ -1,0 +1,41 @@
+{
+  "contractVersion": 1,
+  "modelReservation": {
+    "reservationId": "quota-reservation-fixture-1",
+    "userId": "user-fixture",
+    "runId": "run-fixture-schedule-tick",
+    "quotaCallId": "run-fixture-schedule-tick:attempt-1:call-0",
+    "source": "schedule_tick",
+    "inputTokens": 1200,
+    "maxOutputTokens": 800,
+    "reservedTokens": 2000,
+    "status": "reserved",
+    "futureReservationField": {
+      "additive": true
+    }
+  },
+  "settlement": {
+    "reservationId": "quota-reservation-fixture-1",
+    "actualInputTokens": 1000,
+    "actualOutputTokens": 300,
+    "requestedModel": "auto",
+    "providerModel": "fixture-provider-model",
+    "costUsd": "0.0000000001",
+    "costSource": "provider"
+  },
+  "unknownUsage": {
+    "providerModel": null,
+    "costUsd": null
+  },
+  "uploadReservation": {
+    "reservationId": "upload-reservation-fixture-1",
+    "actorUserId": "actor-fixture",
+    "ownerUserId": "owner-fixture",
+    "sessionId": "session-fixture-upload",
+    "attachmentId": "attachment-fixture-upload",
+    "declaredBytes": 99,
+    "actualBytes": null,
+    "actualContentType": null,
+    "status": "reserved"
+  }
+}
