@@ -8,9 +8,9 @@
  * guarded fetch resolves the name and refuses when ANY returned address is
  * non-public, so a mixed record set cannot slip one internal target in.
  *
- * Remaining limit (documented, not solved here): the HTTP stack resolves
- * again when it connects, so a rebinding resolver with a near-zero TTL can
- * still swap answers between the check and the connect.
+ * This legacy Response-shaped guard still relies on its injected fetch for the
+ * connection. Privileged/provider traffic must use ProviderEgress, whose
+ * checked-address-only dispatcher closes that check/connect rebinding window.
  *
  * Loopback exemption: outside production (`NODE_ENV !== "production"`) the
  * guard allows a LITERAL loopback host only — tests and dev fixture servers
@@ -52,7 +52,7 @@ export type GuardedFetch = (url: string, init?: RequestInit) => Promise<Response
 
 
 /** Loopback only (127/8, ::1, and their IPv6-embedded forms) — the dev-mode exemption. */
-function isLoopbackAddress(ip: string): boolean {
+export function isLoopbackAddress(ip: string): boolean {
   const b = parseAddressBytes(ip);
   if (b === null) return false;
   if (b.length === 4) return b[0] === 127;
@@ -87,22 +87,21 @@ function isLoopbackAddress(ip: string): boolean {
 // The guarded fetch
 // ---------------------------------------------------------------------------
 
-const defaultResolver: HostResolver = async (host) => {
-  const [v4, v6] = await Promise.all([
-    resolve4(host).catch(() => [] as string[]),
-    resolve6(host).catch(() => [] as string[]),
-  ]);
+export const defaultHostResolver: HostResolver = async (host) => {
+  // Both families are mandatory and either error is fatal. Swallowing ENODATA
+  // or a resolver failure would turn an incomplete answer into an allow decision.
+  const [v4, v6] = await Promise.all([resolve4(host), resolve6(host)]);
   return [...v4, ...v6];
 };
 
 /**
  * A fetch that refuses to leave the public internet: https/http only,
  * allowed ports only, no loopback/local names, and EVERY resolved address
- * classified before the wire is touched. Resolution failures pass through —
- * a name that does not resolve cannot be connected to either.
+ * classified before the wire is touched. Resolution failure or an empty
+ * combined answer is a refusal, never an invitation to let fetch resolve again.
  */
 export function createGuardedFetch(opts: GuardedFetchOptions = {}): GuardedFetch {
-  const resolver = opts.resolver ?? defaultResolver;
+  const resolver = opts.resolver ?? defaultHostResolver;
   const allowedPorts = opts.allowedPorts ?? [443, 80];
   const fetchImpl = opts.fetchImpl ?? fetch;
   return async function guardedFetch(url: string, init?: RequestInit): Promise<Response> {
@@ -129,7 +128,14 @@ export function createGuardedFetch(opts: GuardedFetchOptions = {}): GuardedFetch
     if (isIP(host) !== 0) {
       addresses = [host]; // a literal resolves to itself
     } else {
-      addresses = await resolver(host);
+      try {
+        addresses = await resolver(host);
+      } catch {
+        throw new SsrfBlockedError("host resolution failed");
+      }
+      if (addresses.length === 0) {
+        throw new SsrfBlockedError("host resolution returned no addresses");
+      }
     }
     // loopback exemption: literal hosts only, and never in production
     const exemptLoopback = isIP(host) !== 0 && process.env.NODE_ENV !== "production";

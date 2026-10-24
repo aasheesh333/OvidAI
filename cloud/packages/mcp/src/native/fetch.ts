@@ -12,7 +12,7 @@
  * like the Dart original's per-hop _urlPolicyError.
  */
 
-import type { GuardedFetch } from "../ssrf.js";
+import { SsrfBlockedError, type GuardedFetch } from "../ssrf.js";
 import { trimToolResult, type McpToolDef, type McpToolCallResult } from "../client.js";
 import type { McpCallContext, NativeMcpHandler } from "../transports/native.js";
 
@@ -35,7 +35,21 @@ export class TooManyRedirectsError extends Error {
   }
 }
 
-const CREDENTIAL_HEADERS = new Set(["authorization", "cookie", "proxy-authorization"]);
+const CREDENTIAL_HEADERS = new Set([
+  "api-key",
+  "authorization",
+  "cookie",
+  "proxy-authorization",
+  "x-api-key",
+  "x-auth-token",
+]);
+
+export interface GuardedRedirectPolicy {
+  /** Privileged/provider callers must never cross an origin on redirect. */
+  privileged?: boolean;
+  /** Values which make a URL or body secret-bearing; never replay them. */
+  secretValues?: readonly string[];
+}
 
 /**
  * Return a copy of a HeadersInit with origin-bound credentials removed,
@@ -59,33 +73,91 @@ function stripCredentialHeaders(headers: HeadersInit | undefined): HeadersInit |
   return out;
 }
 
+function decodeUrlEncoded(value: string): string {
+  // URLSearchParams uses '+' for spaces. Decode percent octets as UTF-8 so
+  // escape hex case and encoded unreserved characters cannot hide a secret.
+  const plusDecoded = value.replace(/\+/g, " ");
+  try {
+    return decodeURIComponent(plusDecoded);
+  } catch {
+    // An unrelated malformed escape must not disable inspection of the valid
+    // runs around it. Invalid UTF-8 becomes U+FFFD; the raw value is checked too.
+    return plusDecoded.replace(/(?:%[0-9a-fA-F]{2})+/g, (run) =>
+      Buffer.from(run.replaceAll("%", ""), "hex").toString("utf8"),
+    );
+  }
+}
+
+function containsSecret(value: string, secrets: readonly string[]): boolean {
+  const decoded = decodeUrlEncoded(value);
+  return secrets.some((secret) =>
+    secret !== "" && (value.includes(secret) || decoded.includes(secret)),
+  );
+}
+
+function hasCredentialHeaders(headers: HeadersInit | undefined, secrets: readonly string[]): boolean {
+  if (headers === undefined) return false;
+  let found = false;
+  new Headers(headers).forEach((value, name) => {
+    if (CREDENTIAL_HEADERS.has(name.toLowerCase()) || containsSecret(value, secrets)) found = true;
+  });
+  return found;
+}
+
 /**
- * Fetch with manually-followed redirects: one fetchImpl call per hop
- * (each call re-guarded — the I1 fix), the stack itself never follows.
- * 303 always becomes GET; 301/302 demote non-GET/HEAD to GET (browser
- * behaviour); 307/308 preserve method and body.
+ * Fetch with manually-followed redirects: one fetchImpl call per hop, with the
+ * stack itself never following. Deprecated for privileged/provider callers:
+ * use ProviderEgress. This compatibility path is for public web fetch only.
  *
- * Credentials are ORIGIN-BOUND: on a cross-origin hop (including an
- * https→http downgrade) `authorization`, `cookie` and `proxy-authorization`
- * are stripped before the next request, matching the Fetch spec's
- * redirect behaviour. The previous redirect:"follow" stack did this for
- * free; a manual follower must reproduce it (T12 re-review NEW-1).
+ * A cross-origin hop is denied whenever the request is privileged, carries a
+ * credential header, or has a declared secret in its URL/body. It is never made
+ * safe by stripping credentials and replaying the request. HTTPS downgrade is
+ * denied unconditionally. 303 becomes GET; 301/302 demote non-GET/HEAD to GET;
+ * 307/308 preserve method and body only on an allowed hop.
  */
 export async function followGuardedRedirects(
   fetchImpl: GuardedFetch,
   url: string,
   init: RequestInit = {},
+  policy: GuardedRedirectPolicy = {},
 ): Promise<Response> {
   let current = url;
   let currentOrigin = new URL(current).origin;
   let method = init.method ?? "GET";
   let body = init.body;
   let headers = init.headers;
+  const secrets = policy.secretValues ?? [];
+  const credentialRequest = hasCredentialHeaders(headers, secrets);
   for (let hops = 0; ; hops++) {
     const res = await fetchImpl(current, { ...init, headers, method, body, redirect: "manual" });
     const location = res.headers.get("location");
     if (!REDIRECT_STATUSES.has(res.status) || location === null) return res;
-    if (hops >= MAX_REDIRECTS) throw new TooManyRedirectsError();
+    if (hops >= MAX_REDIRECTS) {
+      await res.body?.cancel().catch(() => {});
+      throw new TooManyRedirectsError();
+    }
+    let next: URL;
+    try {
+      next = new URL(location, current);
+    } catch (error) {
+      await res.body?.cancel().catch(() => {});
+      throw error;
+    }
+    if (new URL(current).protocol === "https:" && next.protocol !== "https:") {
+      await res.body?.cancel().catch(() => {});
+      throw new SsrfBlockedError("egress_redirect_downgrade");
+    }
+    if (next.origin !== currentOrigin) {
+      const secretUrl = containsSecret(current, secrets) || containsSecret(next.toString(), secrets);
+      // With declared secrets, any non-null body is conservatively treated as
+      // secret-bearing: stream bodies cannot be inspected without consuming them.
+      const secretBody = secrets.length > 0 && body !== undefined && body !== null;
+      if (policy.privileged === true || credentialRequest || secretUrl || secretBody) {
+        await res.body?.cancel().catch(() => {});
+        throw new SsrfBlockedError("egress_redirect_cross_origin");
+      }
+      headers = stripCredentialHeaders(headers);
+    }
     if (
       res.status === 303 ||
       ((res.status === 301 || res.status === 302) && method !== "GET" && method !== "HEAD")
@@ -93,10 +165,7 @@ export async function followGuardedRedirects(
       method = "GET";
       body = undefined;
     }
-    const next = new URL(location, current);
-    if (next.origin !== currentOrigin) {
-      headers = stripCredentialHeaders(headers);
-    }
+    await res.body?.cancel().catch(() => {});
     currentOrigin = next.origin;
     current = next.toString();
   }
@@ -248,7 +317,7 @@ export function createFetchHandler(): NativeMcpHandler {
         // every hop re-enters ctx.fetchImpl → re-guarded (I1)
         const res = await followGuardedRedirects(ctx.fetchImpl, urlStr, {
           headers: { "User-Agent": "Mozilla/5.0 (compatible; OvidAI/1.0)" },
-        });
+        }, { privileged: false });
 
         const body = await readCapped(res, MAX_RESPONSE_BYTES);
         if (res.status < 200 || res.status >= 300) {

@@ -7,6 +7,21 @@ export * from "./transport.js";
 export * from "./client.js";
 export * from "./backoff.js";
 export * from "./ssrf.js";
+export {
+  createProviderEgress,
+  ProviderEgressError,
+  type CreateProviderEgressOptions,
+  type EgressLimits,
+  type EgressMethod,
+  type EgressRequest,
+  type EgressResponse,
+  type PinnedDispatchRequest,
+  type PinnedDispatchResponse,
+  type PinnedDispatcher,
+  type PinnedDispatcherFactory,
+  type PinnedDispatcherOptions,
+  type ProviderEgress,
+} from "./egress/providerEgress.js";
 export * from "./transports/http.js"; // incl. McpAuthRequiredError / McpSessionExpiredError
 export * from "./transports/sse.js";
 export * from "./transports/stdio.js";

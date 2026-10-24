@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { parseMcpConfig } from "../configParse.js";
 import { followGuardedRedirects } from "../native/fetch.js";
-import { createGuardedFetch, type GuardedFetch } from "../ssrf.js";
+import { createGuardedFetch, SsrfBlockedError, type GuardedFetch } from "../ssrf.js";
 import { buildTar, buildZip } from "./__fixtures__/builders.js";
 import { pluginSourceInputSchema as sharedSchema } from "@ovid/shared";
 import { pluginSourceInputSchema } from "./input.js";
@@ -662,6 +662,7 @@ describe("followGuardedRedirects — credential forwarding", () => {
   async function runChain(
     from: string,
     to: string,
+    denialCode?: string,
   ): Promise<Array<Record<string, string>>> {
     const seen: Array<Record<string, string>> = [];
     const fetchImpl: GuardedFetch = async (url, init) => {
@@ -676,10 +677,16 @@ describe("followGuardedRedirects — credential forwarding", () => {
       }
       return new Response("ok", { status: 200 });
     };
-    const res = await followGuardedRedirects(fetchImpl, from, {
+    const request = followGuardedRedirects(fetchImpl, from, {
       headers: SECRET_HEADERS,
     });
-    expect(res.status).toBe(200);
+    if (denialCode === undefined) {
+      const res = await request;
+      expect(res.status).toBe(200);
+    } else {
+      await expect(request).rejects.toThrow(SsrfBlockedError);
+      await expect(request).rejects.toThrow(denialCode);
+    }
     return seen;
   }
 
@@ -693,25 +700,24 @@ describe("followGuardedRedirects — credential forwarding", () => {
     expect(seen[1]?.cookie).toBe("session=SECRET");
   });
 
-  it("strips credentials on a cross-origin hop", async () => {
+  it("denies a credential-bearing cross-origin hop without exfiltration or replay", async () => {
     const seen = await runChain(
       "https://api.github.com/repos/a/b/git/trees/main",
       "https://attacker.example/collect",
+      "egress_redirect_cross_origin",
     );
     expect(seen[0]?.authorization).toBe("Bearer SECRET");
-    expect(seen[1]).toEqual({
-      authorization: "",
-      cookie: "",
-      "proxy-authorization": "",
-    });
+    expect(seen).toHaveLength(1);
   });
 
-  it("strips credentials on an https→http downgrade (origin change)", async () => {
+  it("denies an https→http downgrade without exfiltration or replay", async () => {
     const seen = await runChain(
       "https://api.github.com/repos/a/b/git/trees/main",
       "http://api.github.com/repos/a/b/git/trees/main",
+      "egress_redirect_downgrade",
     );
-    expect(seen[1]?.authorization).toBe("");
+    expect(seen[0]).toEqual(SECRET_HEADERS);
+    expect(seen).toHaveLength(1);
   });
 
   it("does not mutate the caller's Headers object", async () => {
