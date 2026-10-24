@@ -193,9 +193,9 @@ class CloudRestClient {
   }
 
   Future<Map<String, dynamic>> postJson(String path,
-      {Object? body, Duration? timeout}) async {
-    return _decode(
-        await _authed('POST', _uri(path), body, timeout: timeout));
+      {Object? body, Duration? timeout, Map<String, String>? headers}) async {
+    return _decode(await _authed('POST', _uri(path), body,
+        timeout: timeout, extraHeaders: headers));
   }
 
   /// GET for endpoints that answer a bare JSON array (`GET /mcp/servers`).
@@ -264,15 +264,23 @@ class CloudRestClient {
     Uri uri,
     Object? body, {
     Duration? timeout,
+    Map<String, String>? extraHeaders,
   }) async {
     final http.Response response;
+    Map<String, String> authorized(Map<String, String> auth) =>
+        <String, String>{...auth, ...?extraHeaders};
     try {
-      final first = await _raw(method, uri, await _headers.authorize(),
+      final first = await _raw(
+          method, uri, authorized(await _headers.authorize()),
           jsonBody: body, timeout: timeout);
       response = first.statusCode != 401
           ? first
-          : await _raw(method, uri, await _headers.authorize(forceRefresh: true),
-              jsonBody: body, timeout: timeout);
+          : await _raw(
+              method,
+              uri,
+              authorized(await _headers.authorize(forceRefresh: true)),
+              jsonBody: body,
+              timeout: timeout);
     } on CloudApiException catch (e) {
       _issues.reportFailure(e);
       rethrow;

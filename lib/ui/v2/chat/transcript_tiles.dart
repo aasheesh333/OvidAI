@@ -119,7 +119,7 @@ class V2ThinkingTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     final canToggle = onToggle != null && details.isNotEmpty;
-    final labelStyle = OType.caption.copyWith(
+    final labelStyle = OType.bodyMd.copyWith(
       color: c.textMuted,
       fontWeight: FontWeight.w500,
     );
@@ -174,7 +174,7 @@ class V2ThinkingTile extends StatelessWidget {
                         padding: EdgeInsets.only(top: i == 0 ? 0 : OSpace.xs),
                         child: Text(
                           details[i],
-                          style: OType.caption.copyWith(color: c.textMuted),
+                          style: OType.bodyMd.copyWith(color: c.textMuted),
                         ),
                       ),
                   ],
@@ -313,7 +313,7 @@ class V2ToolTile extends StatelessWidget {
                           title,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: OType.bodySm.copyWith(color: c.text),
+                          style: OType.bodyMd.copyWith(color: c.text),
                         ),
                       ),
                       if (canToggle)
@@ -350,7 +350,7 @@ class V2ToolTile extends StatelessWidget {
                       ),
                       child: Text(
                         details[i],
-                        style: OType.caption.copyWith(color: c.textMuted),
+                        style: OType.bodyMd.copyWith(color: c.textMuted),
                       ),
                     ),
                 ],
@@ -541,7 +541,7 @@ class V2ArtifactTile extends StatelessWidget {
                       fileName,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: OType.bodySmStrong.copyWith(color: c.text),
+                      style: OType.bodyMdStrong.copyWith(color: c.text),
                     ),
                     const SizedBox(height: OSpace.xxs),
                     Row(

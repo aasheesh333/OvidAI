@@ -241,7 +241,7 @@ class _CredentialTile extends StatelessWidget {
         ].join(' · '),
         maxLines: 2,
         overflow: TextOverflow.ellipsis,
-        style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+        style: TextStyle(fontSize: 12.5, color: Aether.textFaint),
       ),
       trailing: Row(
         mainAxisSize: MainAxisSize.min,

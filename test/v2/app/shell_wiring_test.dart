@@ -173,6 +173,96 @@ void main() {
     expect(find.text('Link revoked'), findsNothing);
   });
 
+  testWidgets('a stored reasoning block renders as a thought row', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(400, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    final session = liveSession();
+    session.messages.add(
+      Message(
+        role: 'assistant',
+        content: 'The answer.',
+        reasoning: 'The private reasoning text.',
+        time: DateTime(2026, 10, 21, 10, 1),
+      ),
+    );
+    // The preference is on: the row opens with the transcript.
+    app.showReasoning = true;
+
+    await tester.pumpWidget(
+      MaterialApp(theme: OTheme.light(), home: const V2AppShell()),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.text('Thought for a moment'), findsOneWidget);
+    expect(find.text('The private reasoning text.'), findsOneWidget);
+    expect(find.text('The answer.'), findsOneWidget);
+  });
+
+  testWidgets('the reasoning preference folds the row instead of hiding it', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(400, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    final session = liveSession();
+    session.messages.add(
+      Message(
+        role: 'assistant',
+        content: 'The answer.',
+        reasoning: 'The private reasoning text.',
+        time: DateTime(2026, 10, 21, 10, 1),
+      ),
+    );
+    app.showReasoning = false;
+
+    await tester.pumpWidget(
+      MaterialApp(theme: OTheme.light(), home: const V2AppShell()),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    // The row stays as a collapsed disclosure; the reasoning is not shown
+    // until the reader asks for it.
+    expect(find.text('Thought for a moment'), findsOneWidget);
+    expect(find.text('The private reasoning text.'), findsNothing);
+
+    await tester.tap(find.text('Thought for a moment'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('The private reasoning text.'), findsOneWidget);
+  });
+
+  testWidgets('a message with no reasoning renders no thought row', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(400, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    final session = liveSession();
+    session.messages.add(
+      Message(
+        role: 'assistant',
+        content: 'The answer.',
+        time: DateTime(2026, 10, 21, 10, 1),
+      ),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(theme: OTheme.light(), home: const V2AppShell()),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.text('Thought for a moment'), findsNothing);
+    expect(find.text('The answer.'), findsOneWidget);
+  });
+
   testWidgets('the bottom bar is mounted and the Settings tab navigates', (
     tester,
   ) async {

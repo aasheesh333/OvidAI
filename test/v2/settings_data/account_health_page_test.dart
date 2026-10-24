@@ -69,6 +69,9 @@ V2AccountHealthPageData _data({
   double? todayUsageFraction = 0.16,
   String storageUsedLabel = '1.2 GB of 15 GB',
   double? storageFraction = 0.08,
+  String tokensUsedLabel = '4.2M',
+  String tokenCapLabel = '50M',
+  String tokensRemainingLabel = '45.8M',
   String deletionScheduledLabel = '',
   bool deletionKnown = false,
   bool loading = false,
@@ -86,6 +89,9 @@ V2AccountHealthPageData _data({
     todayUsageFraction: todayUsageFraction,
     storageUsedLabel: storageUsedLabel,
     storageFraction: storageFraction,
+    tokensUsedLabel: tokensUsedLabel,
+    tokenCapLabel: tokenCapLabel,
+    tokensRemainingLabel: tokensRemainingLabel,
     deletionScheduledLabel: deletionScheduledLabel,
     deletionKnown: deletionKnown,
     loading: loading,
@@ -119,6 +125,12 @@ void main() {
     expect(find.text('8.2K tokens'), findsOneWidget);
     expect(find.text('Storage'), findsOneWidget);
     expect(find.text('1.2 GB of 15 GB'), findsOneWidget);
+    expect(find.text('Tokens used'), findsOneWidget);
+    expect(find.text('4.2M'), findsOneWidget);
+    expect(find.text('Token cap'), findsOneWidget);
+    expect(find.text('50M'), findsOneWidget);
+    expect(find.text('Tokens left'), findsOneWidget);
+    expect(find.text('45.8M'), findsOneWidget);
     expect(find.text('Deletion'), findsOneWidget);
     expect(find.text('None'), findsOneWidget);
 
@@ -177,6 +189,9 @@ void main() {
             todayUsageFraction: null,
             storageUsedLabel: '',
             storageFraction: null,
+            tokensUsedLabel: '',
+            tokenCapLabel: '',
+            tokensRemainingLabel: '',
           ),
         ),
         theme: OTheme.light(),
@@ -187,7 +202,10 @@ void main() {
     // A missing status is attention, never a green "Healthy".
     expect(find.text('Attention needed · Status unknown'), findsOneWidget);
     expect(find.text('Healthy'), findsNothing);
-    expect(find.text('—'), findsNWidgets(4));
+    // Four facts plus the three token fields: every unknown is a dash, never
+    // a zero that would read as a real measurement.
+    expect(find.text('—'), findsNWidgets(7));
+    expect(find.text('0'), findsNothing);
   });
 
   testWidgets('deletion pending is the specific attention reason', (

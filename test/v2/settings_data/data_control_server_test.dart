@@ -253,8 +253,8 @@ void main() {
     expect(find.text('Delete failed'), findsOneWidget);
     expect(
       find.text(
-        'Files could not be removed, so nothing was deleted. '
-        'Try again shortly.',
+        'Your chats were not deleted. Stored-file removal may be '
+        'incomplete; try again to finish.',
       ),
       findsOneWidget,
     );
@@ -288,7 +288,7 @@ void main() {
     expect(find.text('Delete failed'), findsOneWidget);
     expect(
       find.text(
-        'Ovid could not complete that. Nothing was deleted; try again.',
+        'Ovid could not confirm the result. Check your data before trying again.',
       ),
       findsOneWidget,
     );

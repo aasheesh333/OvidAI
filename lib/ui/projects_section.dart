@@ -45,7 +45,7 @@ class ProjectsSection extends StatelessWidget {
                 child: Text(
                   'PROJECTS',
                   style: TextStyle(
-                    fontSize: 10,
+                    fontSize: 12,
                     fontWeight: FontWeight.w700,
                     letterSpacing: 1.4,
                     color: Aether.textFaint,
@@ -67,7 +67,7 @@ class ProjectsSection extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(20, 2, 16, 8),
             child: Text(
               'No projects yet',
-              style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+              style: TextStyle(fontSize: 12.5, color: Aether.textFaint),
             ),
           )
         else
@@ -86,7 +86,7 @@ class ProjectsSection extends StatelessWidget {
                   padding: const EdgeInsets.fromLTRB(44, 2, 16, 8),
                   child: Text(
                     'No sessions in this project',
-                    style: TextStyle(fontSize: 11, color: Aether.textFaint),
+                    style: TextStyle(fontSize: 12, color: Aether.textFaint),
                   ),
                 )
               else
@@ -158,7 +158,7 @@ class _ProjectRow extends StatelessWidget {
                                 : '$files · ${project.sessionCount} session${project.sessionCount == 1 ? '' : 's'}',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+                            style: TextStyle(fontSize: 12.5, color: Aether.textFaint),
                           ),
                         ],
                       ),
@@ -320,7 +320,7 @@ Future<ProjectSelection?> showAddToProjectSheet(
                 sessionTitle,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+                style: TextStyle(fontSize: 12.5, color: Aether.textFaint),
               ),
             ),
           ),
@@ -340,7 +340,7 @@ Future<ProjectSelection?> showAddToProjectSheet(
               title: Text(project.name, style: const TextStyle(fontSize: 13.5)),
               subtitle: Text(
                 '${project.fileCount}/${project.fileCap} files',
-                style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+                style: TextStyle(fontSize: 12.5, color: Aether.textFaint),
               ),
               trailing: currentProjectId == project.id
                   ? Icon(Icons.check, size: 18, color: Aether.accent)
@@ -355,7 +355,7 @@ Future<ProjectSelection?> showAddToProjectSheet(
               padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
               child: Text(
                 'Create a project from the sidebar first.',
-                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+                style: TextStyle(fontSize: 12.5, color: Aether.textFaint),
               ),
             ),
           const SizedBox(height: 8),

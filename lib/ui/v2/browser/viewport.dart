@@ -452,7 +452,7 @@ class _AgentCursor extends StatelessWidget {
                         ),
                         child: Icon(
                           Icons.auto_awesome_rounded,
-                          size: 10,
+                          size: 16,
                           color: c.onAccent,
                         ),
                       ),

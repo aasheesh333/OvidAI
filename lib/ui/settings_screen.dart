@@ -322,7 +322,7 @@ class _NavTile extends StatelessWidget {
           subtitle,
           maxLines: 2,
           overflow: TextOverflow.ellipsis,
-          style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+          style: TextStyle(fontSize: 12.5, color: Aether.textFaint),
         ),
         trailing: Icon(Icons.chevron_right, size: 18, color: Aether.textFaint),
         onTap: () =>
@@ -345,7 +345,7 @@ class _LinkTile extends StatelessWidget {
       title: Text(title, style: const TextStyle(fontSize: 14)),
       subtitle: Text(
         _displayUrl(url),
-        style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+        style: TextStyle(fontSize: 12.5, color: Aether.textFaint),
       ),
       trailing: Icon(Icons.open_in_new, size: 16, color: Aether.textFaint),
       onTap: () => openExternalLink(context, url),
@@ -531,7 +531,7 @@ class _DeviceIntegrityTile extends StatelessWidget {
           title: Text(l.integrityTitle, style: const TextStyle(fontSize: 14)),
           subtitle: Text(
             detail,
-            style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+            style: TextStyle(fontSize: 12.5, color: Aether.textFaint),
           ),
           onTap: () async {
             await app.refreshDeviceSecurity();
@@ -711,7 +711,7 @@ class _StorageScreenState extends State<_StorageScreen> {
       title: Text(title, style: const TextStyle(fontSize: 14)),
       subtitle: Text(
         subtitle,
-        style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+        style: TextStyle(fontSize: 12.5, color: Aether.textFaint),
       ),
       trailing: Text(_size(bytes), style: const TextStyle(fontSize: 13)),
     );
@@ -988,7 +988,7 @@ class _NotificationsTileState extends State<_NotificationsTile>
                 ),
                 subtitle: Text(
                   l.notificationsBlockedBody,
-                  style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+                  style: TextStyle(fontSize: 12.5, color: Aether.textFaint),
                 ),
                 trailing: TextButton(
                   onPressed: () async {
@@ -1205,7 +1205,7 @@ class _AboutScreen extends StatelessWidget {
           Center(
             child: Text(
               l.aboutCopyright(year),
-              style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+              style: TextStyle(fontSize: 12.5, color: Aether.textFaint),
             ),
           ),
         ],

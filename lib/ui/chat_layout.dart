@@ -221,7 +221,7 @@ class _ChatToolCallCardState extends State<ChatToolCallCard> {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  fontSize: 11.5,
+                  fontSize: 12.5,
                   color: Aether.textMuted,
                   fontFamily: Aether.mono,
                 ),

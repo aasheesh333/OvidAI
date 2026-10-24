@@ -127,13 +127,13 @@ class AetherType {
   );
 
   static TextStyle get caption => TextStyle(
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: FontWeight.w500,
     color: Aether.textFaint,
   );
 
   static TextStyle get mono => const TextStyle(
-    fontSize: 12,
+    fontSize: 14,
     fontFamily: 'JetBrainsMono',
   );
 }
@@ -922,13 +922,13 @@ class AetherPill extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           if (icon != null) ...[
-            Icon(icon, size: 12, color: c),
+            Icon(icon, size: 16, color: c),
             const SizedBox(width: 4),
           ],
           Text(
             label,
             style: TextStyle(
-              fontSize: 11,
+              fontSize: 12,
               fontWeight: FontWeight.w700,
               letterSpacing: 0.6,
               color: c,

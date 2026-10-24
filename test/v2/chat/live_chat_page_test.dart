@@ -248,6 +248,56 @@ void main() {
     expect(toggledId, 'think1');
   });
 
+  testWidgets('a stored thought follows the host preference on first paint', (
+    tester,
+  ) async {
+    const data = V2LiveChatData(
+      items: [
+        V2LiveThinking(
+          id: 'stored-thought',
+          label: 'Thought for a moment',
+          details: ['The private reasoning text.'],
+          defaultExpanded: true,
+        ),
+      ],
+    );
+    await tester.pumpWidget(_app(const V2LiveChatPage(data: data)));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    // The preference is on: the row is open without a tap.
+    expect(find.text('The private reasoning text.'), findsOneWidget);
+
+    // A tap still wins over the default, so the reader can fold it away.
+    await tester.tap(find.text('Thought for a moment'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('The private reasoning text.'), findsNothing);
+  });
+
+  testWidgets('a stored thought stays collapsed when the preference is off', (
+    tester,
+  ) async {
+    const data = V2LiveChatData(
+      items: [
+        V2LiveThinking(
+          id: 'stored-thought',
+          label: 'Thought for a moment',
+          details: ['The private reasoning text.'],
+        ),
+      ],
+    );
+    await tester.pumpWidget(_app(const V2LiveChatPage(data: data)));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.text('Thought for a moment'), findsOneWidget);
+    expect(find.text('The private reasoning text.'), findsNothing);
+
+    await tester.tap(find.text('Thought for a moment'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('The private reasoning text.'), findsOneWidget);
+  });
+
   testWidgets('artifact download reports its id', (tester) async {
     String? downloaded;
     await tester.pumpWidget(

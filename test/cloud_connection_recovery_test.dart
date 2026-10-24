@@ -527,12 +527,7 @@ void main() {
         CloudConnectionStatus.ready,
       );
       await OvidCloudService.I.ensureConnected(client: client);
-      expect(paths, [
-        '/mint',
-        '/v1/models',
-        '/cloud/v1/models',
-        '/upgrade',
-      ]);
+      expect(paths, ['/mint', '/v1/models', '/cloud/v1/models', '/upgrade']);
       client.close();
     },
   );

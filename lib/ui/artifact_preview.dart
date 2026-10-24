@@ -328,7 +328,7 @@ class ArtifactCard extends StatelessWidget {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          fontSize: 11.5,
+                          fontSize: 12.5,
                           color: Aether.textMuted,
                         ),
                       ),
@@ -587,7 +587,7 @@ class _ArtifactPreviewScreenState extends State<ArtifactPreviewScreen> {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                fontSize: 11,
+                fontSize: 12,
                 color: _state == _PreviewState.image
                     ? Colors.white70
                     : Aether.textMuted,

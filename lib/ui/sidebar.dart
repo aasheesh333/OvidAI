@@ -475,7 +475,7 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                         child: Text(
                           'SESSIONS',
                           style: TextStyle(
-                            fontSize: 10,
+                            fontSize: 12,
                             fontWeight: FontWeight.w700,
                             letterSpacing: 1.4,
                             color: Aether.textFaint,
@@ -871,7 +871,7 @@ class _RecencyHeader extends StatelessWidget {
         child: Text(
           label,
           style: TextStyle(
-            fontSize: 10.5,
+            fontSize: 12.5,
             fontWeight: FontWeight.w600,
             color: Aether.textFaint,
           ),
@@ -896,7 +896,7 @@ class _ContentHitTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final base = TextStyle(fontSize: 11.5, color: Aether.textMuted);
+    final base = TextStyle(fontSize: 12.5, color: Aether.textMuted);
     final spans = <TextSpan>[];
     final parts = hit.snippet
         .replaceAll('\n', ' ')
@@ -1062,7 +1062,7 @@ class _SidebarHeader extends StatelessWidget {
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(
-                                  fontSize: 11,
+                                  fontSize: 12,
                                   color: Aether.textFaint,
                                 ),
                               ),
@@ -1298,7 +1298,7 @@ class _SessionTileState extends State<_SessionTile> {
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       style: TextStyle(
-                                        fontSize: 10.5,
+                                        fontSize: 12.5,
                                         color: Aether.textFaint,
                                       ),
                                     ),
@@ -1481,7 +1481,7 @@ class _RunningBadge extends StatelessWidget {
             Text(
               'running',
               style: TextStyle(
-                fontSize: 9.5,
+                fontSize: 12.5,
                 color: Aether.accent,
                 fontWeight: FontWeight.w600,
               ),
@@ -1557,7 +1557,7 @@ class _ConnectionChip extends StatelessWidget {
                       Text(
                         label,
                         style: TextStyle(
-                          fontSize: 10.5,
+                          fontSize: 12.5,
                           fontWeight: FontWeight.w600,
                           color: color,
                         ),

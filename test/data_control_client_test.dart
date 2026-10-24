@@ -81,6 +81,8 @@ void main() {
         'confirmation': '  Person@Example.com ',
       });
       expect((jsonDecode(request.body) as Map).keys, hasLength(1));
+      expect(request.headers['x-ovid-client-capabilities'],
+          'data-control-partial-v1');
 
       expect(counts.sessions, 2);
       expect(counts.attachments, 1);
@@ -210,7 +212,7 @@ void main() {
     );
 
     test(
-      '503 storage_delete_failed says nothing was deleted and to retry',
+      '503 storage_delete_failed says chats remain but storage outcome is incomplete',
       () async {
         final gateway = _Gateway(
           (_) async => _error(
@@ -228,13 +230,56 @@ void main() {
                 .having(
                   (f) => f.message,
                   'message',
-                  'Files could not be removed, so nothing was deleted. '
-                      'Try again shortly.',
+                  'Your chats were not deleted. Stored-file removal may be '
+                      'incomplete; try again to finish.',
                 ),
           ),
         );
       },
     );
+
+    test('503 storage_delete_partial never says nothing was deleted', () async {
+      final gateway = _Gateway(
+        (_) async => _error(
+          'storage_delete_partial',
+          '1 stored file was removed before another file could not be removed.',
+          503,
+        ),
+      );
+      await expectLater(
+        gateway.client().deleteAll(confirmation: 'me@example.com'),
+        throwsA(
+          isA<DataControlFailure>()
+              .having((f) => f.code, 'code', 'storage_delete_partial')
+              .having(
+                (f) => f.message,
+                'message',
+                'Some stored files were removed before this failed. '
+                    'Your chats remain; try again to finish.',
+              ),
+        ),
+      );
+    });
+
+    test('an older app is asked to update before destructive deletion', () async {
+      final gateway = _Gateway(
+        (_) async => _error(
+          'client_upgrade_required',
+          'This app version cannot safely report storage deletion results.',
+          409,
+        ),
+      );
+      await expectLater(
+        gateway.client().deleteAll(confirmation: 'me@example.com'),
+        throwsA(
+          isA<DataControlFailure>().having(
+            (f) => f.message,
+            'message',
+            'Update Ovid Si before deleting your data. Nothing was deleted.',
+          ),
+        ),
+      );
+    });
 
     test('a signed-out call says to sign in', () async {
       final gateway = _Gateway(
@@ -268,7 +313,8 @@ void main() {
               .having(
                 (f) => f.message,
                 'message',
-                'Ovid Cloud did not answer. Nothing was deleted; try again.',
+                'Ovid Cloud did not answer, so the result is unknown. '
+                    'Check your data before retrying.',
               ),
         ),
       );
@@ -288,7 +334,7 @@ void main() {
           isA<DataControlFailure>().having(
             (f) => f.message,
             'message',
-            'Ovid could not complete that. Nothing was deleted; try again.',
+            'Ovid could not confirm the result. Check your data before trying again.',
           ),
         ),
       );
@@ -306,8 +352,8 @@ void main() {
               .having(
                 (f) => f.message,
                 'message',
-                'Ovid Cloud answered in an unexpected way. Nothing was '
-                    'deleted; try again.',
+                'Ovid Cloud answered unexpectedly, so the result is unknown. '
+                    'Check your data before retrying.',
               ),
         ),
       );
@@ -355,7 +401,7 @@ void main() {
     test('an unknown code falls back to one generic sentence', () {
       expect(
         dataControlFailureMessage(status: 500, code: 'some_new_code'),
-        'Ovid could not complete that. Nothing was deleted; try again.',
+        'Ovid could not confirm the result. Check your data before trying again.',
       );
       expect(
         dataControlFailureMessage(status: 500, code: 'some_new_code'),

@@ -751,7 +751,7 @@ class _BrowserScreenState extends State<BrowserScreen>
                               children: [
                                 Text(
                                   '${_zoom.toStringAsFixed(1)}×',
-                                  style: const TextStyle(fontSize: 11.5),
+                                  style: const TextStyle(fontSize: 12.5),
                                 ),
                                 const SizedBox(width: 4),
                                 const Icon(Icons.zoom_out_map, size: 13),
@@ -907,7 +907,7 @@ class _TabStrip extends StatelessWidget {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          fontSize: 11.5,
+                          fontSize: 12.5,
                           fontWeight: tab.active
                               ? FontWeight.w600
                               : FontWeight.w400,
@@ -988,7 +988,7 @@ class _AddressRow extends StatelessWidget {
                 Text(
                   'Not secure',
                   style: TextStyle(
-                    fontSize: 11.5,
+                    fontSize: 12.5,
                     fontWeight: FontWeight.w600,
                     color: Aether.warn,
                   ),

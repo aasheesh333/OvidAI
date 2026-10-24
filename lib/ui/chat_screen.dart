@@ -480,7 +480,7 @@ class _StatsLine extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+                    style: TextStyle(fontSize: 12, color: Aether.textFaint),
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -513,7 +513,7 @@ class _StatsLine extends StatelessWidget {
                         Text(
                           '${pct.toStringAsFixed(0)}%',
                           style: TextStyle(
-                            fontSize: 10.5,
+                            fontSize: 12,
                             fontFamily: Aether.mono,
                             color: ringColor,
                           ),
@@ -558,7 +558,7 @@ class _StatsLine extends StatelessWidget {
                 '${session.title} · ${ovidModelLabel(session.model)}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: TextStyle(color: Aether.textMuted, fontSize: 11),
+                style: TextStyle(color: Aether.textMuted, fontSize: 12),
               ),
               const SizedBox(height: 16),
               Wrap(
@@ -611,7 +611,7 @@ class _StatsLine extends StatelessWidget {
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label, style: TextStyle(color: Aether.textFaint, fontSize: 10)),
+        Text(label, style: TextStyle(color: Aether.textFaint, fontSize: 12)),
         const SizedBox(height: 2),
         Text(
           value,
@@ -707,7 +707,7 @@ class _StatsLine extends StatelessWidget {
                     'Cache-read: ${_fmtTok(cache)} tok (billed cheaper)',
                   'Compaction triggers automatically near the window limit.',
                 ].join('\n'),
-                style: TextStyle(fontSize: 11, color: Aether.textFaint),
+                style: TextStyle(fontSize: 12, color: Aether.textFaint),
               ),
             ],
           ),
@@ -740,7 +740,7 @@ class _MeterBreakdownBar extends StatelessWidget {
           width: 72,
           child: Text(
             label,
-            style: TextStyle(fontSize: 11, color: Aether.textFaint),
+            style: TextStyle(fontSize: 12, color: Aether.textFaint),
           ),
         ),
         Expanded(
@@ -761,7 +761,7 @@ class _MeterBreakdownBar extends StatelessWidget {
         Text(
           formatCompactCount(value),
           style: TextStyle(
-            fontSize: 10.5,
+            fontSize: 12,
             fontFamily: Aether.mono,
             color: Aether.textFaint,
           ),
@@ -944,6 +944,7 @@ class _ChatScreenState extends State<ChatScreen>
   /// When true the mic records, the final transcript is sent immediately,
   /// and the assistant's answer is spoken + shown as a summary card.
   bool _voiceFirst = false;
+
   /// Language id (`en`, `hi`, `hinglish`, `ta`) — the label is shown in the
   /// chip while the engine receives [VoiceReplyService.localeFor].
   String _voiceLanguage = 'en';
@@ -1002,13 +1003,21 @@ class _ChatScreenState extends State<ChatScreen>
     _input.clear();
     _restoringDraft = false;
     final owner = _draftOwner;
-    unawaited(ComposerDraftStore.I.load().then((_) {
-      if (mounted && identical(owner, _draftOwner)) _restorePersistedDraft();
-    }));
+    unawaited(
+      ComposerDraftStore.I.load().then((_) {
+        if (mounted && identical(owner, _draftOwner)) _restorePersistedDraft();
+      }),
+    );
   }
 
-  void _clearSubmittedDraft(String sid, String text, int version, Object owner) {
-    if (!mounted || !identical(owner, _draftOwner) ||
+  void _clearSubmittedDraft(
+    String sid,
+    String text,
+    int version,
+    Object owner,
+  ) {
+    if (!mounted ||
+        !identical(owner, _draftOwner) ||
         (_draftVersions[sid] ?? 0) != version) {
       return;
     }
@@ -1176,9 +1185,7 @@ class _ChatScreenState extends State<ChatScreen>
     _voiceSpokenMessageId = settled.privateSyncId;
     final spoken = _speechText(settled.content);
     if (spoken.isEmpty) return;
-    unawaited(
-      VoiceReplyService.I.speak(spoken, localeId: pending.localeId),
-    );
+    unawaited(VoiceReplyService.I.speak(spoken, localeId: pending.localeId));
     setState(() {
       _voiceSummary = _VoiceSummary(
         sessionId: sid,
@@ -1269,7 +1276,10 @@ class _ChatScreenState extends State<ChatScreen>
   /// write). Marked loaded only on success; a failure for a known server
   /// session is remembered and retried (Retry button, reconnect). A
   /// local-only session (never sent) has no server transcript.
-  Future<void> _loadCloudTranscript(String sessionId, {bool force = false}) async {
+  Future<void> _loadCloudTranscript(
+    String sessionId, {
+    bool force = false,
+  }) async {
     if (!mounted) return;
     if (!force && _cloudTranscriptsLoaded.contains(sessionId)) return;
     if (!_cloudTranscriptsLoading.add(sessionId)) return;
@@ -1353,7 +1363,9 @@ class _ChatScreenState extends State<ChatScreen>
     }
     final after =
         CloudAgentFacade.I.transcriptFor(serverId) ?? const <Message>[];
-    if (!failed && (after.isEmpty || CloudAgentFacade.I.oldestServerMessageId(serverId) == before)) {
+    if (!failed &&
+        (after.isEmpty ||
+            CloudAgentFacade.I.oldestServerMessageId(serverId) == before)) {
       // Nothing older came back: the server's beginning is loaded.
       _serverTranscriptComplete.add(sessionId);
     }
@@ -1561,7 +1573,7 @@ class _ChatScreenState extends State<ChatScreen>
                   : '$hiddenMessages earlier '
                         'message${hiddenMessages == 1 ? '' : 's'} '
                         '· scroll up',
-              style: TextStyle(fontSize: 11, color: Aether.textFaint),
+              style: TextStyle(fontSize: 12, color: Aether.textFaint),
             ),
           ],
         ),
@@ -2004,8 +2016,9 @@ class _ChatScreenState extends State<ChatScreen>
                                             child: AnimatedBuilder(
                                               animation: _agent,
                                               builder: (_, _) {
-                                                final typing =
-                                                    _agent.busyFor(s.id);
+                                                final typing = _agent.busyFor(
+                                                  s.id,
+                                                );
                                                 // Bounded, cached fold (Task 4): the
                                                 // folded window is reused across streaming
                                                 // tokens; only the message count / last
@@ -2042,10 +2055,10 @@ class _ChatScreenState extends State<ChatScreen>
                                                 // local-workspace concept and
                                                 // the thin client has none
                                                 // (P8 Task 19).
-                                                final produced = const <({
-                                                  String path,
-                                                  int size
-                                                })>[];
+                                                final produced =
+                                                    const <
+                                                      ({String path, int size})
+                                                    >[];
                                                 final showProduced =
                                                     !typing &&
                                                     produced.isNotEmpty;
@@ -2067,9 +2080,7 @@ class _ChatScreenState extends State<ChatScreen>
                                                     hiddenMessages > 0 ||
                                                     _loadingEarlier;
                                                 final count =
-                                                    (showAffordance
-                                                        ? 1
-                                                        : 0) +
+                                                    (showAffordance ? 1 : 0) +
                                                     items.length +
                                                     (typing ? 1 : 0) +
                                                     (showProduced ? 1 : 0);
@@ -2080,7 +2091,8 @@ class _ChatScreenState extends State<ChatScreen>
                                                   window,
                                                   typing,
                                                   showProduced,
-                                                  showAffordance: showAffordance,
+                                                  showAffordance:
+                                                      showAffordance,
                                                 );
                                                 _maybeFollowTip();
                                                 final list = ListView.builder(
@@ -2113,12 +2125,11 @@ class _ChatScreenState extends State<ChatScreen>
                                                         key: rowKey,
                                                         child:
                                                             _pagingAffordanceRow(
-                                                          hiddenMessages,
-                                                        ),
+                                                              hiddenMessages,
+                                                            ),
                                                       );
                                                     }
-                                                    final li =
-                                                        showAffordance
+                                                    final li = showAffordance
                                                         ? idx - 1
                                                         : idx;
                                                     if (li == items.length) {
@@ -2150,7 +2161,8 @@ class _ChatScreenState extends State<ChatScreen>
                                                                 AppState.I,
                                                                 _agent
                                                                     .liveBubbleTicksFor(
-                                                                        s.id),
+                                                                      s.id,
+                                                                    ),
                                                               ]),
                                                           builder: (_, _) {
                                                             // Streaming ticks rebuild only
@@ -2273,9 +2285,9 @@ class _ChatScreenState extends State<ChatScreen>
                                     // that chat, where the card renders).
                                     child:
                                         (_agent.pendingApproval != null ||
-                                                _agent
-                                                    .pendingApprovalsElsewhere
-                                                    .isNotEmpty)
+                                            _agent
+                                                .pendingApprovalsElsewhere
+                                                .isNotEmpty)
                                         ? const _ApprovalDock()
                                         : dockColumn,
                                   ),
@@ -2476,9 +2488,7 @@ class _ChatScreenState extends State<ChatScreen>
                                     // CH-044: stop the current run AND send
                                     // now — the server queues this run right
                                     // behind the one being cancelled.
-                                    _agent.stopRequested(
-                                      sessionId: s.id,
-                                    );
+                                    _agent.stopRequested(sessionId: s.id);
                                     interrupt = true;
                                   } else {
                                     if (_enqueuePrompt(s, t)) clearSubmitted();
@@ -2544,7 +2554,7 @@ class _ChatScreenState extends State<ChatScreen>
                 ),
                 subtitle: _accessModeSubtitle(
                   m,
-                  TextStyle(fontSize: 11, color: Aether.textMuted),
+                  TextStyle(fontSize: 12, color: Aether.textMuted),
                 ),
                 trailing: _agent.mode == m
                     ? Icon(Icons.check, size: 16, color: Aether.accent)
@@ -2564,7 +2574,7 @@ class _ChatScreenState extends State<ChatScreen>
               ),
               subtitle: Text(
                 'Tool rosters and personas (presets) for this chat',
-                style: TextStyle(fontSize: 11, color: Aether.textMuted),
+                style: TextStyle(fontSize: 12, color: Aether.textMuted),
               ),
               onTap: () {
                 Navigator.pop(context);
@@ -2605,7 +2615,7 @@ class _ChatScreenState extends State<ChatScreen>
                   title: Text(p.label, style: const TextStyle(fontSize: 13.5)),
                   subtitle: Text(
                     p.description,
-                    style: TextStyle(fontSize: 11, color: Aether.textMuted),
+                    style: TextStyle(fontSize: 12, color: Aether.textMuted),
                   ),
                   trailing: AppState.I.activeSession?.presetId == p.id
                       ? Icon(Icons.check, size: 16, color: Aether.accent)
@@ -2946,7 +2956,7 @@ class _ChatScreenState extends State<ChatScreen>
                                           '${j.state} · ${formatCompactDuration(Duration(seconds: j.elapsedSec))} · '
                                           '${j.outChars} chars',
                                           style: TextStyle(
-                                            fontSize: 11,
+                                            fontSize: 12,
                                             color: Aether.textMuted,
                                           ),
                                         ),
@@ -2963,8 +2973,8 @@ class _ChatScreenState extends State<ChatScreen>
                                         size: 18,
                                         color: Aether.danger,
                                       ),
-                                      onPressed: () => _agent
-                                          .killJobFor(sessionId, j.id),
+                                      onPressed: () =>
+                                          _agent.killJobFor(sessionId, j.id),
                                     ),
                                 ],
                               ),
@@ -3134,7 +3144,7 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
           final p = app.providerById(r.providerId);
           if (p == null) return false;
           if (p.id == AppState.ovidCloudProviderId &&
-              !cloudModels.contains(r.model.split('·').first.trim())) {
+              r.model.split('·').first.trim().toLowerCase() == 'auto') {
             return false;
           }
           if (q.isEmpty) return true;
@@ -3562,7 +3572,7 @@ class _ModelTile extends StatelessWidget {
         child: Text(
           'CURRENT',
           style: TextStyle(
-            fontSize: 9.5,
+            fontSize: 12,
             fontWeight: FontWeight.w700,
             color: Aether.accent,
           ),
@@ -3603,11 +3613,11 @@ class _ModelTile extends StatelessWidget {
             color: selected ? Aether.accent : Aether.textMuted,
           ),
           title: modelTitle(),
-          subtitle: isRecent
+          subtitle: isRecent && providerId != AppState.ovidCloudProviderId
               ? Text(
                   providerName,
                   style: TextStyle(
-                    fontSize: 11,
+                    fontSize: 12,
                     color: selected ? Aether.accent : Aether.textFaint,
                   ),
                 )
@@ -3642,23 +3652,20 @@ class _ModelTile extends StatelessWidget {
             color: selected ? Aether.accent : Aether.textMuted,
           ),
           title: modelTitle(),
-          subtitle: isRecent
+          subtitle: isRecent && providerId != AppState.ovidCloudProviderId
               ? Text(
                   effortVariant != null
                       ? '$providerName · $effortVariant'
                       : providerName,
                   style: TextStyle(
-                    fontSize: 11,
+                    fontSize: 12,
                     color: selected ? Aether.accent : Aether.textFaint,
                   ),
                 )
               : (effortVariant != null
                     ? Text(
                         effortVariant,
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Aether.accent,
-                        ),
+                        style: TextStyle(fontSize: 12, color: Aether.accent),
                       )
                     : null),
           children: [
@@ -4178,7 +4185,7 @@ class _ToolCardState extends State<_ToolCard>
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
-                                fontSize: 11.5,
+                                fontSize: 14,
                                 color: failed
                                     ? Aether.dangerC
                                     : Aether.textMuted,
@@ -4207,7 +4214,7 @@ class _ToolCardState extends State<_ToolCard>
                                 ],
                               ),
                               style: const TextStyle(
-                                fontSize: 10,
+                                fontSize: 12,
                                 fontFamily: Aether.mono,
                               ),
                             ),
@@ -4514,7 +4521,7 @@ class _SubagentCardState extends State<_SubagentCard> {
                               running
                                   ? _ShimmerText(
                                       meta,
-                                      style: const TextStyle(fontSize: 11),
+                                      style: const TextStyle(fontSize: 12),
                                     )
                                   : Text(
                                       meta,
@@ -4524,7 +4531,7 @@ class _SubagentCardState extends State<_SubagentCard> {
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       style: TextStyle(
-                                        fontSize: 11,
+                                        fontSize: 12,
                                         color: failed
                                             ? Aether.danger
                                             : Aether.textFaint,
@@ -4574,7 +4581,7 @@ class _SubagentCardState extends State<_SubagentCard> {
                                 tools.length - shown.length,
                               ),
                               style: TextStyle(
-                                fontSize: 11,
+                                fontSize: 12,
                                 color: Aether.textFaint,
                               ),
                             ),
@@ -4724,7 +4731,7 @@ class _DetailBodyState extends State<_DetailBody> {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         fontFamily: Aether.mono,
-                        fontSize: 11.5,
+                        fontSize: 14,
                         color: Aether.textMuted,
                       ),
                     ),
@@ -4752,7 +4759,7 @@ class _DetailBodyState extends State<_DetailBody> {
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   fontFamily: Aether.mono,
-                  fontSize: 11.5,
+                  fontSize: 14,
                   color: Aether.textMuted,
                 ),
               ),
@@ -4770,7 +4777,7 @@ class _DetailBodyState extends State<_DetailBody> {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         fontFamily: Aether.mono,
-                        fontSize: 11,
+                        fontSize: 12,
                         color: Aether.textFaint,
                       ),
                     ),
@@ -4783,7 +4790,7 @@ class _DetailBodyState extends State<_DetailBody> {
                     ),
                     child: Text(
                       'open full',
-                      style: TextStyle(fontSize: 11, color: Aether.accent),
+                      style: TextStyle(fontSize: 12, color: Aether.accent),
                     ),
                   ),
                 ],
@@ -4803,7 +4810,7 @@ class _DetailBodyState extends State<_DetailBody> {
                 padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
                 child: Text(
                   '… ${lines.length - _cap} more lines (tap to expand)',
-                  style: TextStyle(fontSize: 11, color: Aether.accent),
+                  style: TextStyle(fontSize: 12, color: Aether.accent),
                 ),
               ),
             ),
@@ -4817,7 +4824,7 @@ class _DetailBodyState extends State<_DetailBody> {
     child: Text(
       text.toUpperCase(),
       style: TextStyle(
-        fontSize: 10,
+        fontSize: 12,
         fontWeight: FontWeight.w700,
         letterSpacing: 0.6,
         color: Aether.textFaint,
@@ -4901,7 +4908,7 @@ class _DetailBodyState extends State<_DetailBody> {
           lang: lang,
           style: TextStyle(
             fontFamily: Aether.mono,
-            fontSize: 11.5,
+            fontSize: 14,
             height: 1.5,
             color: Aether.text,
           ),
@@ -5018,7 +5025,7 @@ class _RichToolResultState extends State<_RichToolResult> {
     text,
     style: TextStyle(
       fontFamily: Aether.mono,
-      fontSize: 11.5,
+      fontSize: 14,
       height: 1.45,
       color: color,
     ),
@@ -5038,7 +5045,7 @@ class _RichToolResultState extends State<_RichToolResult> {
               Text(
                 'JSON',
                 style: TextStyle(
-                  fontSize: 11,
+                  fontSize: 12,
                   fontWeight: FontWeight.w700,
                   color: Aether.accent,
                 ),
@@ -5066,7 +5073,7 @@ class _RichToolResultState extends State<_RichToolResult> {
               formatted,
               style: TextStyle(
                 fontFamily: Aether.mono,
-                fontSize: 11,
+                fontSize: 14,
                 height: 1.5,
                 color: Aether.text,
               ),
@@ -5091,7 +5098,7 @@ class _RichToolResultState extends State<_RichToolResult> {
               Text(
                 'Mermaid diagram',
                 style: TextStyle(
-                  fontSize: 11,
+                  fontSize: 12,
                   fontWeight: FontWeight.w700,
                   color: Aether.accent,
                 ),
@@ -5119,7 +5126,7 @@ class _RichToolResultState extends State<_RichToolResult> {
               source,
               style: TextStyle(
                 fontFamily: Aether.mono,
-                fontSize: 11,
+                fontSize: 14,
                 height: 1.5,
                 color: Aether.text,
               ),
@@ -5161,7 +5168,7 @@ class _RichToolResultState extends State<_RichToolResult> {
         line,
         style: TextStyle(
           fontFamily: Aether.mono,
-          fontSize: 11.5,
+          fontSize: 14,
           height: 1.45,
           color: baseColor,
         ),
@@ -5197,7 +5204,7 @@ class _RichToolResultState extends State<_RichToolResult> {
 
     final baseStyle = TextStyle(
       fontFamily: Aether.mono,
-      fontSize: 11.5,
+      fontSize: 14,
       height: 1.45,
       color: baseColor,
     );
@@ -5294,7 +5301,7 @@ class _ModelCompareViewState extends State<_ModelCompareView> {
     if (sections.isEmpty) {
       return SelectableText(
         widget.content,
-        style: TextStyle(fontFamily: Aether.mono, fontSize: 11.5),
+        style: TextStyle(fontFamily: Aether.mono, fontSize: 14),
       );
     }
 
@@ -5313,7 +5320,7 @@ class _ModelCompareViewState extends State<_ModelCompareView> {
                   label: Text(
                     sections[i].model,
                     style: TextStyle(
-                      fontSize: 11,
+                      fontSize: 12,
                       fontWeight: i == activeIdx
                           ? FontWeight.w700
                           : FontWeight.w500,
@@ -5369,7 +5376,7 @@ class _ColorPaletteView extends StatelessWidget {
           Text(
             'Palette Swatches',
             style: TextStyle(
-              fontSize: 11,
+              fontSize: 12,
               fontWeight: FontWeight.w700,
               color: Aether.textMuted,
             ),
@@ -5386,11 +5393,7 @@ class _ColorPaletteView extends StatelessWidget {
         ],
         SelectableText(
           content,
-          style: TextStyle(
-            fontFamily: Aether.mono,
-            fontSize: 11.5,
-            height: 1.45,
-          ),
+          style: TextStyle(fontFamily: Aether.mono, fontSize: 14, height: 1.45),
         ),
       ],
     );
@@ -5428,7 +5431,7 @@ class _ColorPaletteView extends StatelessWidget {
           const SizedBox(width: 6),
           Text(
             hex,
-            style: const TextStyle(fontFamily: Aether.mono, fontSize: 11),
+            style: const TextStyle(fontFamily: Aether.mono, fontSize: 12),
           ),
         ],
       ),
@@ -5461,7 +5464,7 @@ class _DiffLine extends StatelessWidget {
         line,
         style: TextStyle(
           fontFamily: Aether.mono,
-          fontSize: 11.5,
+          fontSize: 14,
           height: 1.45,
           color: color,
         ),
@@ -5563,7 +5566,7 @@ class _CompactionRowState extends State<_CompactionRow> {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        fontSize: 11.5,
+                        fontSize: 14,
                         color: Aether.textMuted,
                         fontWeight: FontWeight.w500,
                       ),
@@ -5572,7 +5575,7 @@ class _CompactionRowState extends State<_CompactionRow> {
                   if (hasSummary)
                     Text(
                       _open ? 'Hide' : 'What was kept',
-                      style: TextStyle(fontSize: 10.5, color: Aether.accent),
+                      style: TextStyle(fontSize: 14, color: Aether.accent),
                     ),
                 ],
               ),
@@ -5592,7 +5595,7 @@ class _CompactionRowState extends State<_CompactionRow> {
                 m.toolDetail!,
                 style: TextStyle(
                   fontFamily: Aether.mono,
-                  fontSize: 11,
+                  fontSize: 14,
                   height: 1.45,
                   color: Aether.textMuted,
                 ),
@@ -5658,7 +5661,7 @@ class _ProducedFilesCard extends StatelessWidget {
                 ),
                 subtitle: Text(
                   _fmtSize(f.size),
-                  style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+                  style: TextStyle(fontSize: 12, color: Aether.textFaint),
                 ),
                 // "Show in folder" handed Android a file:// URI (throws on
                 // API 24+, result ignored). Share the file through the
@@ -5716,14 +5719,14 @@ class _ProducedFilesCard extends StatelessWidget {
                 label,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 11.5, fontFamily: Aether.mono),
+                style: const TextStyle(fontSize: 12, fontFamily: Aether.mono),
               ),
             ),
             if (trailing != null) ...[
               const SizedBox(width: 6),
               Text(
                 trailing,
-                style: TextStyle(fontSize: 10, color: Aether.textFaint),
+                style: TextStyle(fontSize: 12, color: Aether.textFaint),
               ),
             ],
           ],
@@ -5783,7 +5786,7 @@ class _ProducedFilesCard extends StatelessWidget {
                   child: Text(
                     l10n.chatProducedFiles(files.length),
                     style: TextStyle(
-                      fontSize: 11.5,
+                      fontSize: 12,
                       fontWeight: FontWeight.w600,
                       color: Aether.textMuted,
                     ),
@@ -5824,12 +5827,12 @@ class _TurnTailRow extends StatelessWidget {
       padding: const EdgeInsets.only(top: 2, bottom: 8),
       child: Row(
         children: [
-          Icon(Icons.schedule, size: 11, color: Aether.textFaint),
+          Icon(Icons.schedule, size: 16, color: Aether.textFaint),
           const SizedBox(width: 4),
           Expanded(
             child: Text(
               m.content,
-              style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+              style: TextStyle(fontSize: 12, color: Aether.textFaint),
             ),
           ),
         ],
@@ -6010,27 +6013,26 @@ class _MessageView extends StatelessWidget {
                 if (m.toolName == kArtifactRowTool)
                   _ArtifactChips(message: m, sessionId: session.id as String)
                 else
-                switch (m.kind) {
-                  MsgKind.imageGen => _imageGen(context),
-                  MsgKind.htmlArtifact => HtmlArtifactView(
-                    key: ValueKey('${session.id}:${m.htmlArtifact?.id}'),
-                    artifact: m.htmlArtifact,
-                    sessionId: session.id as String,
-                  ),
-                  MsgKind.reasoning => _reasoning(),
-                  MsgKind.streaming => _streaming(),
-                  MsgKind.tool => _toolCard(),
-                  MsgKind.turnTail => _turnTail(),
-                  MsgKind.compact => _CompactionRow(m),
-                  _ => _answer(isUser),
-                },
+                  switch (m.kind) {
+                    MsgKind.imageGen => _imageGen(context),
+                    MsgKind.htmlArtifact => HtmlArtifactView(
+                      key: ValueKey('${session.id}:${m.htmlArtifact?.id}'),
+                      artifact: m.htmlArtifact,
+                      sessionId: session.id as String,
+                    ),
+                    MsgKind.reasoning => _reasoning(),
+                    MsgKind.streaming => _streaming(),
+                    MsgKind.tool => _toolCard(),
+                    MsgKind.turnTail => _turnTail(),
+                    MsgKind.compact => _CompactionRow(m),
+                    _ => _answer(isUser),
+                  },
                 // Attachment chips under the user bubble (in-chat display).
                 if (isUser && m.attachments.isNotEmpty)
                   _attachmentTiles(context),
                 // Delivery state of a prompt the server has not confirmed
                 // yet (CH-009 / CH-011).
-                if (isUser &&
-                    CloudAgentFacade.pendingClientMsgIdOf(m) != null)
+                if (isUser && CloudAgentFacade.pendingClientMsgIdOf(m) != null)
                   _PendingSendStatus(message: m),
               ],
             ),
@@ -6129,7 +6131,10 @@ class _MessageView extends StatelessWidget {
     // route yet, and a like that is never sent or kept would be a lie.
     // Branch into a new chat from this answer (server-side copy).
     if (CloudAgentFacade.I.canEditHistory(session.id as String) &&
-        !isUser && serverRow && !m.thinking && !session.isSubagent) {
+        !isUser &&
+        serverRow &&
+        !m.thinking &&
+        !session.isSubagent) {
       overflow.add((
         Icons.call_split,
         'Branch into a new chat',
@@ -6187,14 +6192,14 @@ class _MessageView extends StatelessWidget {
               padding: const EdgeInsets.only(top: 2),
               child: Text(
                 formatCompactDuration(Duration(milliseconds: m.elapsedMs!)),
-                style: TextStyle(fontSize: 10, color: Aether.textFaint),
+                style: TextStyle(fontSize: 12, color: Aether.textFaint),
               ),
             ),
           Padding(
             padding: const EdgeInsets.only(left: 4),
             child: Text(
               _formatTime(m.time),
-              style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+              style: TextStyle(fontSize: 12, color: Aether.textFaint),
             ),
           ),
         ],
@@ -6337,8 +6342,7 @@ class _MessageView extends StatelessWidget {
     _ThinkClock.observe(m);
     final hasBody = m.content.trim().isNotEmpty;
     final isUser = m.role == 'user';
-    final live =
-        hasBody && !m.thinking && _agent.busyFor(session.id as String);
+    final live = hasBody && !m.thinking && _agent.busyFor(session.id as String);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -6575,7 +6579,7 @@ class _MessageView extends StatelessWidget {
                         Text(
                           '${(size / 1024).toStringAsFixed(0)} KB',
                           style: TextStyle(
-                            fontSize: 11,
+                            fontSize: 12,
                             color: Aether.textFaint,
                           ),
                         ),
@@ -6583,7 +6587,7 @@ class _MessageView extends StatelessWidget {
                     ] else
                       Text(
                         'image file not in workspace',
-                        style: TextStyle(fontSize: 11, color: Aether.textFaint),
+                        style: TextStyle(fontSize: 12, color: Aether.textFaint),
                       ),
                   ],
                 ),
@@ -6624,7 +6628,7 @@ class _MessageView extends StatelessWidget {
                 const SizedBox(width: 4),
                 Text(
                   label,
-                  style: TextStyle(fontSize: 11, color: Aether.accent),
+                  style: TextStyle(fontSize: 14, color: Aether.accent),
                 ),
               ],
             ),
@@ -6885,7 +6889,7 @@ class _VoiceChip extends StatelessWidget {
                 subtitle: Text(
                   'The mic sends when you stop talking. Ovid answers with '
                   'voice and a summary card.',
-                  style: TextStyle(fontSize: 11, color: Aether.textMuted),
+                  style: TextStyle(fontSize: 14, color: Aether.textMuted),
                 ),
               ),
               Divider(height: 8, color: Aether.hairline),
@@ -6896,7 +6900,7 @@ class _VoiceChip extends StatelessWidget {
                   child: Text(
                     'LANGUAGE',
                     style: TextStyle(
-                      fontSize: 9.5,
+                      fontSize: 12,
                       fontWeight: FontWeight.w700,
                       letterSpacing: 1.1,
                       color: Aether.textFaint,
@@ -6955,7 +6959,7 @@ class _VoiceSummaryCard extends StatelessWidget {
                 child: Text(
                   'Voice reply · ${summary.languageLabel}',
                   style: TextStyle(
-                    fontSize: 11.5,
+                    fontSize: 12,
                     fontWeight: FontWeight.w600,
                     color: Aether.accent,
                   ),
@@ -7064,7 +7068,7 @@ class _SubagentActivityDock extends StatelessWidget {
                       '${running.length} subagent'
                       '${running.length == 1 ? '' : 's'} running',
                       style: TextStyle(
-                        fontSize: 11.5,
+                        fontSize: 14,
                         fontWeight: FontWeight.w600,
                         color: Aether.textMuted,
                       ),
@@ -7988,7 +7992,7 @@ class _InputBarState extends State<_InputBar> {
       title: Text(title, style: const TextStyle(fontSize: 14)),
       subtitle: Text(
         sub,
-        style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+        style: TextStyle(fontSize: 12, color: Aether.textFaint),
       ),
       onTap: onTap,
     );
@@ -8092,7 +8096,7 @@ class _InputBarState extends State<_InputBar> {
                                       child: Text(
                                         s.group.toUpperCase(),
                                         style: TextStyle(
-                                          fontSize: 9.5,
+                                          fontSize: 12,
                                           fontWeight: FontWeight.w700,
                                           letterSpacing: 1.1,
                                           color: Aether.textFaint,
@@ -8142,7 +8146,7 @@ class _InputBarState extends State<_InputBar> {
                                                     overflow:
                                                         TextOverflow.ellipsis,
                                                     style: TextStyle(
-                                                      fontSize: 11,
+                                                      fontSize: 12,
                                                       color: Aether.textFaint,
                                                     ),
                                                   ),
@@ -8154,7 +8158,7 @@ class _InputBarState extends State<_InputBar> {
                                             Text(
                                               s.hint,
                                               style: TextStyle(
-                                                fontSize: 10.5,
+                                                fontSize: 12,
                                                 color: Aether.textFaint,
                                               ),
                                             ),
@@ -8276,8 +8280,9 @@ class _InputBarState extends State<_InputBar> {
                       final runningNow =
                           hasSession && _agent.busyFor(sessionId);
                       final hasDraft = controller.text.trim().isNotEmpty;
-                      final isComposerCommand =
-                          controller.text.trimLeft().startsWith('/');
+                      final isComposerCommand = controller.text
+                          .trimLeft()
+                          .startsWith('/');
                       final hasQueued =
                           hasSession &&
                           _agent.queuedMessagesFor(sessionId).isNotEmpty;
@@ -8493,10 +8498,10 @@ class _TypingBubble extends StatelessWidget {
         final label = stalled
             ? 'Still working…'
             : (status != null && status.trim().isNotEmpty)
-                ? status.trim()
-                : activity != null
-                    ? '$activity…'
-                    : 'Thinking…';
+            ? status.trim()
+            : activity != null
+            ? '$activity…'
+            : 'Thinking…';
         return Padding(
           key: const ValueKey('chat-run-status'),
           padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 10),
@@ -8588,7 +8593,7 @@ class _GoalBar extends StatelessWidget {
                 child: Text(
                   'r$round · $status',
                   style: TextStyle(
-                    fontSize: 10.5,
+                    fontSize: 12,
                     fontWeight: FontWeight.w700,
                     color: color,
                   ),
@@ -8766,7 +8771,7 @@ class _TodoDockState extends State<_TodoDock> {
                       Text(
                         'Tasks · $done/${todos.length} done',
                         style: TextStyle(
-                          fontSize: 11,
+                          fontSize: 12,
                           color: Aether.textMuted,
                           fontWeight: FontWeight.w500,
                         ),
@@ -8784,10 +8789,7 @@ class _TodoDockState extends State<_TodoDock> {
                         const SizedBox(width: 4),
                         Text(
                           '$inProg active',
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: Aether.accent,
-                          ),
+                          style: TextStyle(fontSize: 12, color: Aether.accent),
                         ),
                       ],
                       const Spacer(),
@@ -8893,7 +8895,9 @@ class _CloudOutboxChip extends StatelessWidget {
             decoration: BoxDecoration(
               color: Aether.surface,
               borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: Aether.warnLight.withValues(alpha: 0.4)),
+              border: Border.all(
+                color: Aether.warnLight.withValues(alpha: 0.4),
+              ),
             ),
             child: Row(
               children: [
@@ -8907,10 +8911,10 @@ class _CloudOutboxChip extends StatelessWidget {
                   child: Text(
                     CloudSessionStore.I.offline
                         ? '${entries.length} message${entries.length == 1 ? '' : 's'} '
-                            'waiting · sends automatically when you are back online'
+                              'waiting · sends automatically when you are back online'
                         : '${entries.length} message${entries.length == 1 ? '' : 's'} '
-                            'waiting to send',
-                    style: TextStyle(fontSize: 11.5, color: Aether.textMuted),
+                              'waiting to send',
+                    style: TextStyle(fontSize: 14, color: Aether.textMuted),
                   ),
                 ),
               ],
@@ -9020,24 +9024,24 @@ class _CloudErrorRowState extends State<_CloudErrorRow> {
         final actions = <Widget>[
           switch (copy.action) {
             CloudErrorAction.retry when widget.onRetry != null => action(
-                'Retry',
-                () => unawaited(widget.onRetry!()),
-                key: const ValueKey('cloud-error-retry'),
-              ),
+              'Retry',
+              () => unawaited(widget.onRetry!()),
+              key: const ValueKey('cloud-error-retry'),
+            ),
             CloudErrorAction.signIn => action(
-                'Sign in',
-                () => Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const AuthScreen()),
-                ),
-                key: const ValueKey('cloud-error-sign-in'),
-              ),
+              'Sign in',
+              () => Navigator.of(
+                context,
+              ).push(MaterialPageRoute(builder: (_) => const AuthScreen())),
+              key: const ValueKey('cloud-error-sign-in'),
+            ),
             CloudErrorAction.openPlans => action(
-                'Plans',
-                () => Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const BillingScreen()),
-                ),
-                key: const ValueKey('cloud-error-plans'),
-              ),
+              'Plans',
+              () => Navigator.of(
+                context,
+              ).push(MaterialPageRoute(builder: (_) => const BillingScreen())),
+              key: const ValueKey('cloud-error-plans'),
+            ),
             CloudErrorAction.pickModel when widget.onPickModel != null =>
               action(
                 'Pick model',
@@ -9053,14 +9057,10 @@ class _CloudErrorRowState extends State<_CloudErrorRow> {
               key: const ValueKey('cloud-error-discard'),
             )
           else
-            action(
-              'Dismiss',
-              () {
-                if (code != null && sid != null) facade.clearErrorFor(sid);
-                CloudSessionStore.I.clearOutboxError();
-              },
-              key: const ValueKey('cloud-error-dismiss'),
-            ),
+            action('Dismiss', () {
+              if (code != null && sid != null) facade.clearErrorFor(sid);
+              CloudSessionStore.I.clearOutboxError();
+            }, key: const ValueKey('cloud-error-dismiss')),
         ];
         return Padding(
           key: const ValueKey('cloud-error-row'),
@@ -9085,10 +9085,11 @@ class _CloudErrorRowState extends State<_CloudErrorRow> {
                       child: GestureDetector(
                         onTap: copy.detail == null
                             ? null
-                            : () => setState(() => _showDetails = !_showDetails),
+                            : () =>
+                                  setState(() => _showDetails = !_showDetails),
                         child: Text(
                           copy.text,
-                          style: TextStyle(fontSize: 11.5, color: Aether.text),
+                          style: TextStyle(fontSize: 14, color: Aether.text),
                         ),
                       ),
                     ),
@@ -9099,10 +9100,7 @@ class _CloudErrorRowState extends State<_CloudErrorRow> {
                     padding: const EdgeInsets.fromLTRB(23, 4, 4, 0),
                     child: SelectableText(
                       copy.detail!,
-                      style: TextStyle(
-                        fontSize: 10.5,
-                        color: Aether.textMuted,
-                      ),
+                      style: TextStyle(fontSize: 12, color: Aether.textMuted),
                     ),
                   ),
                 Wrap(
@@ -9144,11 +9142,14 @@ class _PendingSendStatus extends StatelessWidget {
         final id = CloudAgentFacade.pendingClientMsgIdOf(message)!;
         final (label, color) = switch (state) {
           PendingSendState.sending => ('Sending…', Aether.textFaint),
-          PendingSendState.retrying =>
-            ('Retrying — Ovid is not answering yet…', Aether.warnLight),
-          PendingSendState.waitingForNetwork =>
-            ("Waiting for connection — sends when you're back online",
-                Aether.warnLight),
+          PendingSendState.retrying => (
+            'Retrying — Ovid is not answering yet…',
+            Aether.warnLight,
+          ),
+          PendingSendState.waitingForNetwork => (
+            "Waiting for connection — sends when you're back online",
+            Aether.warnLight,
+          ),
           PendingSendState.failed => ('Not sent', Aether.danger),
         };
         return Padding(
@@ -9158,14 +9159,14 @@ class _PendingSendStatus extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               if (state == PendingSendState.failed)
-                Icon(Icons.error_outline, size: 12, color: color)
+                Icon(Icons.error_outline, size: 16, color: color)
               else
-                Icon(Icons.schedule, size: 12, color: color),
+                Icon(Icons.schedule, size: 16, color: color),
               const SizedBox(width: 4),
               Flexible(
                 child: Text(
                   label,
-                  style: TextStyle(fontSize: 11, color: color),
+                  style: TextStyle(fontSize: 14, color: color),
                 ),
               ),
               if (state == PendingSendState.failed) ...[
@@ -9291,7 +9292,7 @@ class _QueueDock extends StatelessWidget {
                       child: Text(
                         '${queue.length} queued message${queue.length > 1 ? 's' : ''}',
                         style: TextStyle(
-                          fontSize: 11.5,
+                          fontSize: 14,
                           fontWeight: FontWeight.w600,
                           color: Aether.textMuted,
                         ),
@@ -9466,7 +9467,7 @@ class _QueueRowState extends State<_QueueRow> {
               child: Text(
                 'NEXT',
                 style: TextStyle(
-                  fontSize: 8.5,
+                  fontSize: 12,
                   fontWeight: FontWeight.w700,
                   letterSpacing: .6,
                   color: Aether.accent,
@@ -9582,7 +9583,7 @@ class _CopyButtonState extends State<_CopyButton> {
             Text(
               copied ? 'Copied' : 'Copy',
               style: TextStyle(
-                fontSize: 11,
+                fontSize: 14,
                 color: copied ? Aether.successLight : Aether.textFaint,
               ),
             ),
@@ -9844,9 +9845,7 @@ class _ApprovalDockState extends State<_ApprovalDock> {
                 Padding(
                   padding: const EdgeInsets.only(top: 1),
                   child: Icon(
-                    isPlan
-                        ? Icons.map_outlined
-                        : Icons.warning_amber_rounded,
+                    isPlan ? Icons.map_outlined : Icons.warning_amber_rounded,
                     size: 16,
                     color: Aether.warnLight,
                   ),
@@ -10127,7 +10126,7 @@ class _QuestionsCardState extends State<_QuestionsCard> {
                         child: Text(
                           q.header!,
                           style: TextStyle(
-                            fontSize: 10,
+                            fontSize: 12,
                             fontWeight: FontWeight.w600,
                             color: Aether.textFaint,
                           ),
@@ -10189,10 +10188,7 @@ class _QuestionsCardState extends State<_QuestionsCard> {
                 ),
                 onPressed: _allAnswered
                     ? () {
-                        if (!identical(
-                          _agent.pendingApproval,
-                          widget.req,
-                        )) {
+                        if (!identical(_agent.pendingApproval, widget.req)) {
                           return;
                         }
                         for (final q in widget.req.questions!) {
@@ -10227,7 +10223,7 @@ class _QuestionsCardState extends State<_QuestionsCard> {
       decoration: InputDecoration(
         isDense: true,
         hintText: 'Or type your own answer…',
-        hintStyle: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+        hintStyle: TextStyle(fontSize: 12, color: Aether.textFaint),
         contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(8),
@@ -10277,7 +10273,7 @@ class _QuestionsCardState extends State<_QuestionsCard> {
             Text(
               opt.label,
               style: TextStyle(
-                fontSize: 11,
+                fontSize: 12,
                 fontWeight: isSel ? FontWeight.w600 : FontWeight.normal,
                 color: isSel ? Aether.accent : Aether.text,
               ),
@@ -10285,7 +10281,7 @@ class _QuestionsCardState extends State<_QuestionsCard> {
             if (opt.description != null)
               Text(
                 opt.description!,
-                style: TextStyle(fontSize: 9, color: Aether.textFaint),
+                style: TextStyle(fontSize: 12, color: Aether.textFaint),
               ),
           ],
         ),
@@ -10578,7 +10574,7 @@ class _ModeChip extends StatelessWidget {
                   subtitle: _accessModeSubtitle(
                     m,
                     TextStyle(
-                      fontSize: 11,
+                      fontSize: 12,
                       color: Aether.textFaint,
                       height: 1.4,
                     ),
@@ -10602,7 +10598,7 @@ class _ModeChip extends StatelessWidget {
                 ),
                 subtitle: Text(
                   'Tool rosters and personas (presets) for this chat',
-                  style: TextStyle(fontSize: 11, color: Aether.textFaint),
+                  style: TextStyle(fontSize: 12, color: Aether.textFaint),
                 ),
                 onTap: () {
                   Navigator.pop(context);
@@ -10647,7 +10643,7 @@ class _ModeChip extends StatelessWidget {
                   title: Text(p.label, style: const TextStyle(fontSize: 13.5)),
                   subtitle: Text(
                     p.description,
-                    style: TextStyle(fontSize: 11, color: Aether.textMuted),
+                    style: TextStyle(fontSize: 12, color: Aether.textMuted),
                   ),
                   trailing: AppState.I.activeSession?.presetId == p.id
                       ? Icon(Icons.check, size: 16, color: Aether.accent)
@@ -11113,8 +11109,8 @@ class _OvidCodeBox extends StatelessWidget {
                 Text(
                   lang,
                   style: TextStyle(
-                    fontSize: 11,
-                    height: 18 / 11,
+                    fontSize: 12,
+                    height: 18 / 12,
                     fontFamily: Aether.mono,
                     color: Aether.textMuted,
                   ),
@@ -11137,8 +11133,8 @@ class _OvidCodeBox extends StatelessWidget {
                       lang: lang,
                       style: TextStyle(
                         fontFamily: Aether.mono,
-                        fontSize: 11,
-                        height: 19 / 11,
+                        fontSize: 14,
+                        height: 1.5,
                         color: Aether.text,
                       ),
                     ),

@@ -279,14 +279,14 @@ abstract final class OType {
   );
   static const h2 = TextStyle(
     fontFamily: _family,
-    fontSize: 20,
+    fontSize: 22,
     height: 1.4,
     fontWeight: FontWeight.w600,
     letterSpacing: -0.2,
   );
   static const h3 = TextStyle(
     fontFamily: _family,
-    fontSize: 17,
+    fontSize: 18,
     height: 1.4,
     fontWeight: FontWeight.w600,
   );
@@ -318,6 +318,22 @@ abstract final class OType {
     height: 1.45,
     fontWeight: FontWeight.w600,
   );
+
+  /// 15 sp — the transcript's secondary rung. An answer's supporting row
+  /// (a tool line, a table cell, an artifact name) sits above the 14 sp UI
+  /// label but below the 16 sp body copy the answer itself is set in.
+  static const bodyMd = TextStyle(
+    fontFamily: _family,
+    fontSize: 15,
+    height: 1.45,
+    fontWeight: FontWeight.w400,
+  );
+  static const bodyMdStrong = TextStyle(
+    fontFamily: _family,
+    fontSize: 15,
+    height: 1.45,
+    fontWeight: FontWeight.w600,
+  );
   static const label = TextStyle(
     fontFamily: _family,
     fontSize: 14,
@@ -332,16 +348,18 @@ abstract final class OType {
     fontWeight: FontWeight.w500,
     letterSpacing: 0.2,
   );
+  /// 12 sp — the smallest visible type. Nothing in the app may be set below
+  /// this: the caption floor is what keeps meta lines readable on a phone.
   static const overline = TextStyle(
     fontFamily: _family,
-    fontSize: 11,
+    fontSize: 12,
     height: 1.4,
     fontWeight: FontWeight.w600,
-    letterSpacing: 1.1,
+    letterSpacing: 1.0,
   );
   static const mono = TextStyle(
     fontFamily: 'JetBrainsMono',
-    fontSize: 13,
+    fontSize: 14,
     height: 1.5,
     fontWeight: FontWeight.w400,
   );
@@ -355,6 +373,8 @@ abstract final class OType {
     bodyStrong,
     bodySm,
     bodySmStrong,
+    bodyMd,
+    bodyMdStrong,
     label,
     caption,
     overline,

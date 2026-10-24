@@ -174,7 +174,9 @@ class _ArtifactsScreenState extends State<ArtifactsScreen> {
   /// The session scope: the chat this screen was opened from, unless the
   /// user widened it to every chat.
   String? _vaultSessionScope() =>
-      widget.sessionId != null && (_scopeAllChats ?? false) ? null : widget.sessionId;
+      widget.sessionId != null && (_scopeAllChats ?? false)
+      ? null
+      : widget.sessionId;
 
   Widget _buildVault(BuildContext context) {
     final l10n = context.l10n;
@@ -316,22 +318,21 @@ class _ArtifactsScreenState extends State<ArtifactsScreen> {
             // Rows, then the explicit load-more, then the account/link
             // policy note — inside the scroll so any text scale fits.
             itemCount: controller.items.length + (more ? 2 : 1),
-            separatorBuilder: (_, _) => Divider(
-              height: 1,
-              indent: 68,
-              color: Aether.hairline,
-            ),
+            separatorBuilder: (_, _) =>
+                Divider(height: 1, indent: 68, color: Aether.hairline),
             itemBuilder: (context, i) {
               if (i < controller.items.length) {
                 final artifact = controller.items[i];
                 return _ArtifactRow(
                   artifact: artifact,
-                  onTap: () => unawaited(openArtifactPreview(
-                    context,
-                    artifact,
-                    vaultClient: controller.client,
-                    accountChanges: _accountAdapter,
-                  )),
+                  onTap: () => unawaited(
+                    openArtifactPreview(
+                      context,
+                      artifact,
+                      vaultClient: controller.client,
+                      accountChanges: _accountAdapter,
+                    ),
+                  ),
                 );
               }
               if (i == controller.items.length && more) {
@@ -358,7 +359,7 @@ class _ArtifactsScreenState extends State<ArtifactsScreen> {
                 child: Text(
                   l10n.vaultPolicyNote,
                   textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 11, color: Aether.textFaint),
+                  style: TextStyle(fontSize: 12, color: Aether.textFaint),
                 ),
               );
             },
@@ -514,7 +515,7 @@ class _ArtifactsScreenState extends State<ArtifactsScreen> {
           padding: const EdgeInsets.fromLTRB(16, 2, 16, 2),
           child: Text(
             l10n.vaultLocalScope,
-            style: TextStyle(fontSize: 11, color: Aether.textFaint),
+            style: TextStyle(fontSize: 12, color: Aether.textFaint),
           ),
         ),
         Expanded(
@@ -668,10 +669,7 @@ class _ArtifactFilterDropdown extends StatelessWidget {
       onSelected: onChanged,
       itemBuilder: (context) => [
         for (final option in ArtifactFilter.values)
-          PopupMenuItem(
-            value: option,
-            child: Text(labels[option]!),
-          ),
+          PopupMenuItem(value: option, child: Text(labels[option]!)),
       ],
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
@@ -684,7 +682,11 @@ class _ArtifactFilterDropdown extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Flexible(
-              child: Text(labels[value]!, maxLines: 1, overflow: TextOverflow.ellipsis),
+              child: Text(
+                labels[value]!,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
             ),
             const SizedBox(width: 6),
             Icon(Icons.expand_more_rounded, size: 16, color: Aether.textMuted),
@@ -704,13 +706,13 @@ class _VaultTypeDropdown extends StatelessWidget {
   final ValueChanged<VaultTypeFilter> onChanged;
 
   String _label(BuildContext context, VaultTypeFilter v) => switch (v) {
-        VaultTypeFilter.all => context.l10n.vaultTypeAll,
-        VaultTypeFilter.image => context.l10n.artifactKindImage,
-        VaultTypeFilter.html => context.l10n.artifactKindHtml,
-        VaultTypeFilter.code => context.l10n.artifactKindCode,
-        VaultTypeFilter.document => context.l10n.artifactKindDocument,
-        VaultTypeFilter.other => context.l10n.artifactKindFile,
-      };
+    VaultTypeFilter.all => context.l10n.vaultTypeAll,
+    VaultTypeFilter.image => context.l10n.artifactKindImage,
+    VaultTypeFilter.html => context.l10n.artifactKindHtml,
+    VaultTypeFilter.code => context.l10n.artifactKindCode,
+    VaultTypeFilter.document => context.l10n.artifactKindDocument,
+    VaultTypeFilter.other => context.l10n.artifactKindFile,
+  };
 
   @override
   Widget build(BuildContext context) {
@@ -721,10 +723,7 @@ class _VaultTypeDropdown extends StatelessWidget {
       onSelected: onChanged,
       itemBuilder: (context) => [
         for (final v in VaultTypeFilter.values)
-          PopupMenuItem(
-            value: v,
-            child: Text(_label(context, v)),
-          ),
+          PopupMenuItem(value: v, child: Text(_label(context, v))),
       ],
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),

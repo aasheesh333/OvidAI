@@ -368,7 +368,7 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                Text('${e['ts'] ?? ''}', style: AetherType.mono.copyWith(fontSize: 11, color: Aether.textFaint)),
+                                Text('${e['ts'] ?? ''}', style: AetherType.mono.copyWith(fontSize: 12, color: Aether.textFaint)),
                                 const SizedBox(height: 2),
                                 Text('#${e['seq'] ?? index + 1} · ${_titleFor(e)}', style: AetherType.title.copyWith(fontSize: 13)),
                                 if (outcome != null) ...[

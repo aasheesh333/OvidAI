@@ -474,7 +474,7 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
           spacing: 8,
           runSpacing: 4,
           children: [
-            Icon(Icons.circle, size: 8, color: Aether.accent),
+            Icon(Icons.circle, size: 16, color: Aether.accent),
             Text('Preview status', style: AetherType.caption),
             Text(message, style: AetherType.caption),
           ],
@@ -577,7 +577,7 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
           child: Text(
             'OFFLINE SANDBOX',
             style: TextStyle(
-              fontSize: 11,
+              fontSize: 12,
               fontWeight: FontWeight.w700,
               letterSpacing: .6,
               color: Aether.textMuted,

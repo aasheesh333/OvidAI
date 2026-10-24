@@ -109,14 +109,20 @@ String dataControlFailureMessage({required int status, required String code}) {
       // until the operator configures storage, so do not tell them to.
       return 'Files cannot be removed right now, so nothing was deleted.';
     case 'storage_delete_failed':
-      return 'Files could not be removed, so nothing was deleted. '
-          'Try again shortly.';
+      return 'Your chats were not deleted. Stored-file removal may be '
+          'incomplete; try again to finish.';
+    case 'client_upgrade_required':
+      return 'Update Ovid Si before deleting your data. Nothing was deleted.';
+    case 'storage_delete_partial':
+      return 'Some stored files were removed before this failed. '
+          'Your chats remain; try again to finish.';
     case 'timeout':
     case 'unreachable':
-      return 'Ovid Cloud did not answer. Nothing was deleted; try again.';
+      return 'Ovid Cloud did not answer, so the result is unknown. '
+          'Check your data before retrying.';
     case 'invalid_response':
-      return 'Ovid Cloud answered in an unexpected way. Nothing was deleted; '
-          'try again.';
+      return 'Ovid Cloud answered unexpectedly, so the result is unknown. '
+          'Check your data before retrying.';
     case 'unauthenticated':
     case 'app_check_unavailable':
       return 'Sign in to Ovid Cloud first.';
@@ -126,7 +132,7 @@ String dataControlFailureMessage({required int status, required String code}) {
   if (status == 429) {
     return 'Too many attempts. Wait a moment and try again.';
   }
-  return 'Ovid could not complete that. Nothing was deleted; try again.';
+  return 'Ovid could not confirm the result. Check your data before trying again.';
 }
 
 /// Thin client over the two destructive routes.
@@ -181,7 +187,13 @@ class DataControlClient {
     try {
       // The one body field. The typed value goes verbatim; the server trims
       // and compares case-insensitively, and its refusal is the gate.
-      json = await _rest.postJson(path, body: {'confirmation': confirmation});
+      json = await _rest.postJson(
+        path,
+        body: {'confirmation': confirmation},
+        headers: const {
+          'x-ovid-client-capabilities': 'data-control-partial-v1',
+        },
+      );
     } on CloudApiException catch (e) {
       throw DataControlFailure(status: e.status, code: e.code);
     } catch (_) {

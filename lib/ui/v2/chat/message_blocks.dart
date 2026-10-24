@@ -907,7 +907,7 @@ class _TableView extends StatelessWidget {
               ),
               child: _InlineText(
                 text: i < cells.length ? cells[i] : '',
-                style: (header ? OType.bodySmStrong : OType.bodySm).copyWith(
+                style: (header ? OType.bodyMdStrong : OType.bodyMd).copyWith(
                   color: c.text,
                 ),
                 onOpenLink: onOpenLink,
@@ -1163,7 +1163,7 @@ class _ImageCard extends StatelessWidget {
                       alt,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: OType.bodySmStrong.copyWith(color: c.text),
+                      style: OType.bodyMdStrong.copyWith(color: c.text),
                     ),
                     if (url.isNotEmpty) ...[
                       const SizedBox(height: OSpace.xxs),
@@ -1241,7 +1241,7 @@ class _FileCard extends StatelessWidget {
                       block.fileName,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: OType.bodySmStrong.copyWith(color: c.text),
+                      style: OType.bodyMdStrong.copyWith(color: c.text),
                     ),
                     const SizedBox(height: OSpace.xxs),
                     Text(
@@ -1392,7 +1392,7 @@ class _DownloadLinkRow extends StatelessWidget {
                     link.label,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: OType.bodySm.copyWith(
+                    style: OType.bodyMd.copyWith(
                       color: c.text,
                       fontWeight: FontWeight.w500,
                     ),

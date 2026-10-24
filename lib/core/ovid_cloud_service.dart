@@ -1026,8 +1026,9 @@ class OvidCloudService extends ChangeNotifier {
             "Ovid couldn't load your plan for this session. Retry, or sign "
                 'out and back in.',
           429 => 'Too many requests. Wait a moment, then retry.',
-          _ => 'Your plan and usage are unavailable right now. Retry in a '
-              'moment.',
+          _ =>
+            'Your plan and usage are unavailable right now. Retry in a '
+                'moment.',
         });
       }
       final j = jsonDecode(res.body) as Map<String, dynamic>;
@@ -1443,10 +1444,13 @@ class OvidPlan {
       mult: number('mult', seed?.mult ?? ovidPlanMultipliers[tier] ?? 1),
       window: raw['window'] is String ? raw['window'] as String : null,
       features: [
-        for (final f in (raw['features'] is List ? raw['features'] as List : const []))
+        for (final f
+            in (raw['features'] is List ? raw['features'] as List : const []))
           if (f is String && f.trim().isNotEmpty && f.length <= 120) f,
       ].take(6).toList(),
-      productId: raw['product_id'] is String ? raw['product_id'] as String : null,
+      productId: raw['product_id'] is String
+          ? raw['product_id'] as String
+          : null,
     );
   }
 }

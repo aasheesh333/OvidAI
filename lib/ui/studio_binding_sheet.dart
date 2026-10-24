@@ -305,7 +305,7 @@ class _ListPane extends StatelessWidget {
           child: Text(
             title.toUpperCase(),
             style: TextStyle(
-              fontSize: 9.5,
+              fontSize: 12.5,
               fontWeight: FontWeight.w700,
               letterSpacing: 1.1,
               color: Aether.textFaint,

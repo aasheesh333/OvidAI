@@ -528,7 +528,7 @@ class _StatusDot extends StatelessWidget {
         shape: BoxShape.circle,
         border: Border.all(color: color.withValues(alpha: 0.35)),
       ),
-      child: Icon(icon, size: 12, color: color),
+      child: Icon(icon, size: 16, color: color),
     );
   }
 }

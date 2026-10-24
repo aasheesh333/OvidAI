@@ -26,7 +26,10 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: ConversationShareSheet(session: shareSession(), service: service),
+          body: ConversationShareSheet(
+            session: shareSession(),
+            service: service,
+          ),
         ),
       ),
     );
@@ -47,7 +50,9 @@ void main() {
     expect(find.text('Share this chat'), findsOneWidget);
   });
 
-  testWidgets('read-only viewer retries after a failure and labels roles', (tester) async {
+  testWidgets('read-only viewer retries after a failure and labels roles', (
+    tester,
+  ) async {
     var calls = 0;
     final service = ConversationShareService(
       baseUrl: 'https://share.example.test',
@@ -69,7 +74,9 @@ void main() {
       }),
     );
     await tester.pumpWidget(
-      MaterialApp(home: SharedConversationScreen(token: _token, service: service)),
+      MaterialApp(
+        home: SharedConversationScreen(token: _token, service: service),
+      ),
     );
     await tester.pumpAndSettle();
     expect(find.text('This link is unavailable or expired.'), findsOneWidget);
@@ -82,7 +89,9 @@ void main() {
   });
 
   testWidgets('joining a full session shows 50/50', (tester) async {
-    final root = await tester.runAsync(() => Directory.systemTemp.createTemp('join-'));
+    final root = await tester.runAsync(
+      () => Directory.systemTemp.createTemp('join-'),
+    );
     addTearDown(() => root!.delete(recursive: true));
     final controller = CollaborationProduction(
       endpoint: 'https://api.example.test',
@@ -93,7 +102,11 @@ void main() {
       appCheckToken: () async => 'app',
       httpClientFactory: () => MockClient(
         (_) async => http.Response(
-          jsonEncode({'schemaVersion': 1, 'code': 'session_full', 'message': 'Session is full'}),
+          jsonEncode({
+            'schemaVersion': 1,
+            'code': 'session_full',
+            'message': 'Session is full',
+          }),
           409,
           headers: {'cache-control': 'no-store'},
         ),
@@ -103,7 +116,11 @@ void main() {
     expect(controller.available, isTrue);
     await tester.pumpWidget(
       MaterialApp(
-        home: CollabJoinScreen(token: _token, invite: _code, controller: controller),
+        home: CollabJoinScreen(
+          token: _token,
+          invite: _code,
+          controller: controller,
+        ),
       ),
     );
     await tester.pump();
@@ -111,8 +128,14 @@ void main() {
     await tester.ensureVisible(join);
     await tester.tap(join);
     // Real file I/O (durable request keys) interleaves with fake-async pumps.
-    for (var i = 0; i < 40 && find.text('This session is full (50/50).').evaluate().isEmpty; i++) {
-      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 25)));
+    for (
+      var i = 0;
+      i < 40 && find.text('This session is full (50/50).').evaluate().isEmpty;
+      i++
+    ) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 25)),
+      );
       await tester.pump(const Duration(milliseconds: 10));
     }
     expect(find.text('This session is full (50/50).'), findsOneWidget);

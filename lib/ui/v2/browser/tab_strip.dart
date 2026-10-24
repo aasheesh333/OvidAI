@@ -263,7 +263,7 @@ class _HeadlessMark extends StatelessWidget {
           color: c.warn.withValues(alpha: 0.12),
           borderRadius: BorderRadius.circular(ORadius.pill),
         ),
-        child: Icon(Icons.timer_outlined, size: 12, color: c.warn),
+        child: Icon(Icons.timer_outlined, size: 16, color: c.warn),
       ),
     );
   }

@@ -414,7 +414,7 @@ class AttachmentFileCard extends StatelessWidget {
                     softWrap: false,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontSize: 11,
+                      fontSize: 12,
                       height: 1.2,
                       color: c.textMuted,
                     ),
@@ -650,7 +650,7 @@ class ComposerAttachmentRow extends StatelessWidget {
               Text(
                 context.l10n.attachmentCount(count, max),
                 style: TextStyle(
-                  fontSize: 11,
+                  fontSize: 12,
                   fontWeight: count >= max ? FontWeight.w600 : FontWeight.w500,
                   color: count >= max ? c.warn : c.textMuted,
                 ),

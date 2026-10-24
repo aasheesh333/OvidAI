@@ -628,7 +628,7 @@ class OCountBadge extends StatelessWidget {
         textScaler: TextScaler.noScaling,
         style: OType.overline.copyWith(
           color: active ? c.accent : c.textFaint,
-          fontSize: 11,
+          fontSize: 12,
           height: 1.2,
           letterSpacing: 0,
         ),
