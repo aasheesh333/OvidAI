@@ -1,19 +1,27 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { assertProjectFileCapacity, attachments, newId, ProjectFileLimitError, sessions, users } from "@ovid/db";
+import {
+  assertProjectFileCapacity,
+  AttachmentFinalizeError,
+  attachments,
+  newId,
+  ProjectFileLimitError,
+  sessions,
+  users,
+} from "@ovid/db";
 import {
   normalizeAttachmentContentType,
   sanitizeAttachmentName,
   type AttachmentUploadResponse,
 } from "@ovid/shared";
+import type { HeadResult } from "@ovid/storage";
 import type { GatewayDeps } from "../app.js";
 import { isUuid, notFound, sendError, zodBadRequest } from "./http.js";
 
 // Attachment routes (P8 Task 3) — mounted inside the authenticated /cloud/v1
-// scope. One endpoint: POST /sessions/:id/attachments → 201 with a presigned
-// R2 PUT URL. The client uploads the bytes there directly (they never transit
-// the gateway); the row records the intent, the object's presence is the
-// client's side of the contract.
+// scope. Create returns a presigned R2 PUT; finalize turns actual HEAD evidence
+// into a ready row. The bytes never transit the gateway, and a create ticket
+// alone is never treated as proof that an object exists.
 
 /**
  * The P8-Q3 presigner seam: structurally the StorageAdapter.presignPut
@@ -23,6 +31,15 @@ import { isUuid, notFound, sendError, zodBadRequest } from "./http.js";
  */
 export interface AttachmentPresigner {
   presignPut(input: { key: string; ttlSeconds: number; contentType?: string }): Promise<string>;
+  /** Optional only for legacy create-only test fakes; finalize refuses without it. */
+  head?(key: string): Promise<HeadResult | null>;
+}
+
+export interface AttachmentFinalizeResponse {
+  attachmentId: string;
+  status: "ready";
+  size: number;
+  contentType: string;
 }
 
 /** Hard size cap (brief): anything over 25 MB is refused before signing. */
@@ -57,6 +74,7 @@ const createAttachmentBody = z
     contentType: normalizedContentType.optional(),
   })
   .strict();
+const finalizeAttachmentBody = z.object({}).strict();
 
 export function registerAttachmentRoutes(app: FastifyInstance, deps: GatewayDeps): void {
   // Loud fallback (same mindset as the WS pty bridge): a gateway composed
@@ -110,7 +128,9 @@ export function registerAttachmentRoutes(app: FastifyInstance, deps: GatewayDeps
     // 4. Presign. The presigner is the injectable seam; when absent the route
     //    is loud, never a silent no-op. Signing happens BEFORE the insert, so
     //    a failing presigner leaves no attachment row behind.
-    const presigner = deps.presigner;
+    // The production composition wires the full adapter as `storage`; the
+    // narrower presigner seam remains for route tests and older compositions.
+    const presigner = deps.presigner ?? deps.storage;
     if (presigner === undefined) {
       if (!warnedNoPresigner) {
         warnedNoPresigner = true;
@@ -147,6 +167,7 @@ export function registerAttachmentRoutes(app: FastifyInstance, deps: GatewayDeps
         // creation time); the repo also re-checks the cap under its lock.
         projectId: session.projectId,
         contentType: storedContentType,
+        contentTypeDeclared: declaredContentType !== undefined,
       });
     } catch (err) {
       if (err instanceof ProjectFileLimitError) {
@@ -170,5 +191,73 @@ export function registerAttachmentRoutes(app: FastifyInstance, deps: GatewayDeps
         : { "Content-Type": declaredContentType },
     };
     return reply.code(201).send(body);
+  });
+
+  app.post("/sessions/:id/attachments/:attachmentId/finalize", async (request, reply) => {
+    const { id: sessionId, attachmentId } = request.params as {
+      id: string;
+      attachmentId: string;
+    };
+    const { uid } = request.principal;
+
+    // Ownership and attachment existence precede body validation and HEAD, so
+    // a stranger cannot probe either resource through timing or error shape.
+    if (!isUuid(sessionId) || !isUuid(attachmentId)) {
+      return notFound(reply, "Attachment not found.");
+    }
+    const session = await sessions.get(deps.db, sessionId, uid);
+    if (session === null) return notFound(reply, "Attachment not found.");
+    const [owned] = await attachments.getForSession(deps.db, sessionId, [attachmentId]);
+    if (owned === undefined || owned.userId !== uid) {
+      return notFound(reply, "Attachment not found.");
+    }
+
+    const parsed = finalizeAttachmentBody.safeParse(request.body === undefined ? {} : request.body);
+    if (!parsed.success) return zodBadRequest(reply, parsed.error);
+
+    const storage = deps.presigner ?? deps.storage;
+    if (storage?.head === undefined) {
+      return sendError(
+        reply,
+        503,
+        "attachments_not_configured",
+        "Attachment upload verification is not configured on this deployment.",
+      );
+    }
+    const head = await storage.head(owned.r2Key);
+    if (head === null) {
+      return sendError(
+        reply,
+        409,
+        "attachment_not_uploaded",
+        "The attachment object has not reached storage.",
+      );
+    }
+
+    try {
+      const row = await attachments.finalizeUpload(deps.db, {
+        id: attachmentId,
+        sessionId,
+        userId: uid,
+        actualBytes: head.bytes,
+        actualContentType: head.contentType ?? null,
+      });
+      const body: AttachmentFinalizeResponse = {
+        attachmentId: row.id,
+        status: "ready",
+        size: row.actualBytes!,
+        contentType: row.actualContentType ?? row.contentType,
+      };
+      return reply.send(body);
+    } catch (err) {
+      if (!(err instanceof AttachmentFinalizeError)) throw err;
+      if (err.code === "not_found") return notFound(reply, "Attachment not found.");
+      const code = err.code === "size_mismatch"
+        ? "attachment_size_mismatch"
+        : err.code === "type_mismatch"
+          ? "attachment_type_mismatch"
+          : "attachment_changed";
+      return sendError(reply, 409, code, err.message);
+    }
   });
 }

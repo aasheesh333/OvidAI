@@ -99,6 +99,12 @@ async function cleanup(adapter: StorageAdapter, config: R2Config, prefix: string
       }
       token = list.IsTruncated ? list.NextContinuationToken : undefined;
     } while (token !== undefined);
+    // Cleanup is part of live evidence, not a best-effort assumption. This is
+    // still scoped to this suite's unique users/_test-* prefix only.
+    const remaining = await client.send(
+      new ListObjectsV2Command({ Bucket: config.bucket, Prefix: prefix }),
+    );
+    expect(remaining.Contents ?? []).toEqual([]);
   } finally {
     await client.destroy();
   }
@@ -134,9 +140,7 @@ describe.skipIf(cfg === null)("r2-live — presign fetch, range reader, multipar
   };
 
   afterAll(async () => {
-    for (const key of keys) {
-      await adapter.delete(key);
-    }
+    await cleanup(adapter, cfg!, prefix, keys);
   });
 
   it("presigned GET is fetchable: 200 + identical bytes", async () => {
@@ -159,6 +163,34 @@ describe.skipIf(cfg === null)("r2-live — presign fetch, range reader, multipar
     const head = await adapter.head(key);
     expect(head).not.toBeNull();
     expect(head!.bytes).toBe(body.length);
+    expect((await adapter.getBuffer(key))!.equals(body)).toBe(true);
+  });
+
+  it("typed presigned PUT accepts the intended header, rejects a wrong Content-Type, and HEAD proves actual bytes/type", async () => {
+    const body = Buffer.from("signed-text-body-0123456789");
+    const key = full("typed-put.txt");
+    const url = await adapter.presignPut({ key, ttlSeconds: 300, contentType: "text/plain" });
+
+    const wrong = await fetch(url, {
+      method: "PUT",
+      headers: { "Content-Type": "application/pdf" },
+      body,
+    });
+    await wrong.arrayBuffer();
+    expect(wrong.status).toBe(403);
+    expect(await adapter.head(key)).toBeNull();
+
+    const intended = await fetch(url, {
+      method: "PUT",
+      headers: { "Content-Type": "text/plain" },
+      body,
+    });
+    await intended.arrayBuffer();
+    expect(intended.status).toBeLessThan(300);
+    const head = await adapter.head(key);
+    expect(head).not.toBeNull();
+    expect(head!.bytes).toBe(body.length);
+    expect(head!.contentType).toBe("text/plain");
     expect((await adapter.getBuffer(key))!.equals(body)).toBe(true);
   });
 

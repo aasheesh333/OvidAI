@@ -62,7 +62,12 @@ import {
 } from "./liteLlm.js";
 import { createSandboxPort } from "./sandboxAdapter.js";
 import { createAgentRunProcessor, type RunDeps } from "./runProcessor.js";
-import { createFullAgentRunProcessor, type FullRunDeps } from "./runProcessor.js";
+import {
+  createFullAgentRunProcessor,
+  type FullAgentRunProcessor,
+  type FullRunDeps,
+  type RunAttachmentStorage,
+} from "./runProcessor.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const TEST_REDIS_URL = process.env.TEST_REDIS_URL;
@@ -1159,6 +1164,14 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       return { id, r2Key, name };
     }
 
+    const legacyHead = (bytes = 16) => ({
+      bytes,
+      contentType: null,
+      sha256Hex: null,
+      etag: null,
+      metadata: {},
+    });
+
     it("job attachmentIds → one storage download per id into uploads/<sanitizedName> before streaming, then a normal completed run", async () => {
       const seeded = await seedRun();
       const sbx = makeFakeSandbox();
@@ -1170,6 +1183,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
 
       const downloads: string[] = [];
       const storage = {
+        async head() { return legacyHead(); },
         async getBuffer(key: string): Promise<Buffer | null> {
           downloads.push(key);
           return Buffer.from(`content-of-${key}`, "utf8");
@@ -1227,6 +1241,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
 
       const downloads: string[] = [];
       const storage = {
+        async head() { return legacyHead(); },
         async getBuffer(key: string): Promise<Buffer | null> {
           downloads.push(key);
           return Buffer.from("png-bytes", "utf8");
@@ -1292,6 +1307,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
 
       const downloads: string[] = [];
       const storage = {
+        async head() { return legacyHead(); },
         async getBuffer(key: string): Promise<Buffer | null> {
           downloads.push(key);
           return Buffer.from("png-bytes", "utf8");
@@ -1330,6 +1346,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       const sbx = makeFakeSandbox();
       const a1 = await seedAttachment(seeded.sessionId, seeded.uid, "gone.txt");
       const storage = {
+        async head() { return null; },
         async getBuffer(): Promise<Buffer | null> {
           return null; // object absent — the upload never completed
         },
@@ -1372,7 +1389,10 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         makeDeps(transport, {
           sandbox: sbx.manager,
           tools: createToolRegistry(),
-          storage: { async getBuffer() { return Buffer.from("x"); } },
+          storage: {
+            async head() { return legacyHead(1); },
+            async getBuffer() { return Buffer.from("x"); },
+          },
         }),
       )({
         data: {
@@ -2993,6 +3013,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
 
       const downloads: string[] = [];
       const storage = {
+        async head() { return legacyHead(); },
         async getBuffer(key: string): Promise<Buffer | null> {
           downloads.push(key);
           return Buffer.from("png-bytes", "utf8");
@@ -3044,6 +3065,65 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
           url: `data:image/png;base64,${Buffer.from("png-bytes", "utf8").toString("base64")}`,
         },
       });
+      rmWs(handleSbx.workspaceDir);
+    });
+
+    it("production composition: the real full processor HEADs and materializes through main's storage seam", async () => {
+      const seeded = await seedRun();
+      const handleSbx = makeFakeSandbox();
+      const port = makeFakePort();
+      const attachment = await seedAttachment(seeded.sessionId, seeded.uid, "production.txt");
+      const headCalls: string[] = [];
+      const downloads: string[] = [];
+      const storage: RunAttachmentStorage = {
+        async head(key) {
+          headCalls.push(key);
+          return legacyHead();
+        },
+        async getBuffer(key) {
+          downloads.push(key);
+          return Buffer.from("production-bytes", "utf8");
+        },
+      };
+      const sse = await startTurnSse([textTurn("done")]);
+      let processor: FullAgentRunProcessor | undefined;
+      try {
+        // Test the SAME production factory main() uses, not direct injection
+        // into createFullAgentRunProcessor. The factory owns the storage seam.
+        const composition = await import("./main.js") as unknown as {
+          createProductionAgentRunProcessor?: (
+            deps: Omit<FullRunDeps, "storage">,
+            storage: RunAttachmentStorage,
+          ) => FullAgentRunProcessor;
+        };
+        expect(composition.createProductionAgentRunProcessor).toBeTypeOf("function");
+        processor = composition.createProductionAgentRunProcessor!(
+          makeFullDeps(sse.url, port.port, {
+            sandboxHandleFor: async () => handleSbx.handle,
+          }),
+          storage,
+        );
+        await processor({
+          data: {
+            runId: seeded.runId,
+            sessionId: seeded.sessionId,
+            userId: seeded.uid,
+            prompt: "read the production attachment",
+            attachmentIds: [attachment.id],
+          },
+        });
+      } finally {
+        await processor?.close();
+        await sse.close();
+      }
+
+      expect(headCalls).toEqual([attachment.r2Key]);
+      expect(downloads).toEqual([attachment.r2Key]);
+      expect(
+        await readFile(join(handleSbx.workspaceDir, "uploads", "production.txt"), "utf8"),
+      ).toBe("production-bytes");
+      expect(sse.requests).toHaveLength(1);
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
       rmWs(handleSbx.workspaceDir);
     });
 
@@ -3104,6 +3184,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
 
       const downloads: string[] = [];
       const storage = {
+        async head() { return legacyHead(); },
         async getBuffer(key: string): Promise<Buffer | null> {
           downloads.push(key);
           return Buffer.from("png-bytes", "utf8");
@@ -3189,6 +3270,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       const a1 = await seedAttachment(seeded.sessionId, seeded.uid, "shot.png");
 
       const storage = {
+        async head() { return legacyHead(); },
         async getBuffer(): Promise<Buffer | null> {
           return Buffer.from("png-bytes", "utf8");
         },

@@ -261,6 +261,9 @@ export const attachments = pgTable(
     // Canonical declared type; octet-stream means the client did not declare
     // one. Actual object metadata stays nullable until HEAD proves it.
     contentType: text("content_type").notNull().default("application/octet-stream"),
+    // Presence is separate from the sentinel: an explicitly supplied
+    // application/octet-stream is declared; an omitted legacy type is unknown.
+    contentTypeDeclared: boolean("content_type_declared").notNull().default(false),
     uploadStatus: text("upload_status")
       .notNull()
       .default("pending")

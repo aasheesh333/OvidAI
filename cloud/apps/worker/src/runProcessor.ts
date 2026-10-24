@@ -1,7 +1,20 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { join } from "node:path";
-import { attachments, createPrivateMemoryStore, eventMirror, grantsRepo, messages, projectsRepo, runs, sessions, userPreferences, type Db } from "@ovid/db";
+import {
+  AttachmentFinalizeError,
+  attachments,
+  createPrivateMemoryStore,
+  eventMirror,
+  grantsRepo,
+  messages,
+  projectsRepo,
+  runs,
+  sessions,
+  userPreferences,
+  type AttachmentRow,
+  type Db,
+} from "@ovid/db";
 import type { EventLog } from "@ovid/events";
 import { withRunCompletionNotification } from "./runCompletionNotifications.js";
 import type { AgentRunJob } from "@ovid/queue";
@@ -28,7 +41,7 @@ import {
   type SessionEventType,
 } from "@ovid/shared";
 import type { AgentImage } from "@ovid/agent-core";
-import type { ActivityTracker } from "@ovid/storage";
+import type { ActivityTracker, HeadResult } from "@ovid/storage";
 import type { Redis } from "ioredis";
 import {
   APPROVAL_TIMEOUT_MS,
@@ -185,8 +198,37 @@ import type { AgentTool, ToolContext, ToolResult } from "./tools/types.js";
  * composition root wires it.
  */
 export interface RunAttachmentStorage {
+  /** Actual object metadata; null = missing (the upload never completed). */
+  head(key: string): Promise<HeadResult | null>;
   /** null = object missing (the client never completed the upload). */
   getBuffer(key: string): Promise<Buffer | null>;
+}
+
+/**
+ * The legacy send route deliberately accepts a pending row. Before either
+ * worker path materializes it, HEAD must prove the same size/type contract as
+ * the HTTP finalize route. A later linked run repeats this check idempotently.
+ */
+async function fenceRunAttachment(
+  db: Db,
+  storage: RunAttachmentStorage,
+  row: AttachmentRow,
+): Promise<string | null> {
+  const head = await storage.head(row.r2Key);
+  if (head === null) return `attachment object not found: ${row.r2Key}`;
+  try {
+    await attachments.finalizeUpload(db, {
+      id: row.id,
+      sessionId: row.sessionId,
+      userId: row.userId,
+      actualBytes: head.bytes,
+      actualContentType: head.contentType ?? null,
+    });
+    return null;
+  } catch (err) {
+    if (err instanceof AttachmentFinalizeError) return err.message;
+    throw err;
+  }
 }
 
 export interface RunDeps {
@@ -1180,6 +1222,11 @@ export function createAgentRunProcessor(
         const uploadsDir = join(handle.workspaceDir, "uploads");
         await mkdir(uploadsDir, { recursive: true });
         for (const row of rows) {
+          const fenceFailure = await fenceRunAttachment(deps.db, deps.storage, row);
+          if (fenceFailure !== null) {
+            await failAttachments(fenceFailure);
+            return;
+          }
           const buffer = await deps.storage.getBuffer(row.r2Key);
           if (buffer === null) {
             await failAttachments(`attachment object not found: ${row.r2Key}`);
@@ -1930,6 +1977,11 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       const uploadsDir = join(handle.workspaceDir, "uploads");
       await mkdir(uploadsDir, { recursive: true });
       for (const row of rows) {
+        const fenceFailure = await fenceRunAttachment(deps.db, deps.storage, row);
+        if (fenceFailure !== null) {
+          await fail(fenceFailure);
+          return;
+        }
         const buffer = await deps.storage.getBuffer(row.r2Key);
         if (buffer === null) {
           await fail(`attachment object not found: ${row.r2Key}`);

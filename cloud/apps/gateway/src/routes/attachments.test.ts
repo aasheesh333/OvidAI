@@ -157,6 +157,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway attachment routes (real postgres)",
       size: 1234,
       r2Key: expectedKey,
       contentType: "application/octet-stream",
+      contentTypeDeclared: false,
       uploadStatus: "pending",
       actualBytes: null,
       actualContentType: null,
@@ -188,7 +189,11 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway attachment routes (real postgres)",
     }]);
     const rows = await attachments.getForSession(db, sid);
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ contentType: canonical, uploadStatus: "pending" });
+    expect(rows[0]).toMatchObject({
+      contentType: canonical,
+      contentTypeDeclared: true,
+      uploadStatus: "pending",
+    });
   });
 
   it("size over the 25 MB cap → 400 attachment_too_large; exactly 25_000_000 is allowed; nothing written over the cap", async () => {

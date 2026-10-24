@@ -1006,6 +1006,20 @@ export const runs = {
 // attachments (P8 Task 3)
 // ---------------------------------------------------------------------------
 
+export type AttachmentFinalizeErrorCode =
+  | "not_found"
+  | "size_mismatch"
+  | "type_mismatch"
+  | "object_changed";
+
+/** A typed finalization refusal; the transaction has already preserved a safe row state. */
+export class AttachmentFinalizeError extends Error {
+  constructor(readonly code: AttachmentFinalizeErrorCode, message: string) {
+    super(message);
+    this.name = "AttachmentFinalizeError";
+  }
+}
+
 export const attachments = {
   /**
    * Insert an attachment row. The id (and r2Key built around it) are
@@ -1023,6 +1037,8 @@ export const attachments = {
       r2Key: string;
       /** Canonical declared type; omitted uses the database's unknown fallback. */
       contentType?: string;
+      /** Explicit presence evidence; legacy repo callers default to contentType presence. */
+      contentTypeDeclared?: boolean;
       /**
        * W1 follow-up (0022): optional explicit project attribution. The
        * SESSION is authoritative when it has one — new writes always stamp
@@ -1032,7 +1048,7 @@ export const attachments = {
       projectId?: string | null;
     },
   ): Promise<AttachmentRow> {
-    const { projectId: explicitProjectId, ...values } = a;
+    const { projectId: explicitProjectId, contentTypeDeclared, ...values } = a;
     return db.transaction(async (tx) => {
       const [session] = await tx
         .select({ projectId: sessionsTable.projectId })
@@ -1051,10 +1067,106 @@ export const attachments = {
       }
       const [row] = await tx
         .insert(attachmentsTable)
-        .values({ ...values, projectId })
+        .values({
+          ...values,
+          contentTypeDeclared: contentTypeDeclared ?? (a.contentType !== undefined),
+          projectId,
+        })
         .returning();
       return row!;
     });
+  },
+
+  /**
+   * Finalize one uploaded object from actual storage HEAD metadata. The row is
+   * locked so duplicate requests share one ready transition. Repeating the
+   * same HEAD is a no-op; a changed object or declaration mismatch is recorded
+   * as failed, never left with a stale ready claim. contentTypeDeclared keeps
+   * omitted legacy input distinct from an explicitly supplied octet-stream:
+   * unknown uploads record actual metadata without inventing a declaration;
+   * every supplied type, including octet-stream, requires exact HEAD equality.
+   */
+  async finalizeUpload(
+    db: Db,
+    input: {
+      id: string;
+      sessionId: string;
+      userId: string;
+      actualBytes: number;
+      actualContentType: string | null;
+    },
+  ): Promise<AttachmentRow> {
+    const outcome = await db.transaction(async (tx): Promise<{
+      row: AttachmentRow;
+      error?: AttachmentFinalizeError;
+    }> => {
+      const [current] = await tx
+        .select()
+        .from(attachmentsTable)
+        .where(and(
+          eq(attachmentsTable.id, input.id),
+          eq(attachmentsTable.sessionId, input.sessionId),
+          eq(attachmentsTable.userId, input.userId),
+        ))
+        .for("update")
+        .limit(1);
+      if (current === undefined) {
+        throw new AttachmentFinalizeError("not_found", "Attachment not found.");
+      }
+
+      if (
+        current.uploadStatus === "ready" &&
+        current.actualBytes === input.actualBytes &&
+        current.actualContentType === input.actualContentType
+      ) {
+        return { row: current };
+      }
+
+      let code: Exclude<AttachmentFinalizeErrorCode, "not_found"> | null = null;
+      if (current.uploadStatus === "ready") {
+        code = "object_changed";
+      } else if (current.size !== input.actualBytes) {
+        code = "size_mismatch";
+      } else if (
+        current.contentTypeDeclared &&
+        current.contentType !== input.actualContentType
+      ) {
+        code = "type_mismatch";
+      }
+
+      if (code !== null) {
+        const [failed] = await tx
+          .update(attachmentsTable)
+          .set({
+            uploadStatus: "failed",
+            actualBytes: input.actualBytes,
+            actualContentType: input.actualContentType,
+            finalizedAt: null,
+          })
+          .where(eq(attachmentsTable.id, current.id))
+          .returning();
+        const message = code === "object_changed"
+          ? "The uploaded object changed after finalization."
+          : code === "size_mismatch"
+            ? "The uploaded object size does not match the attachment declaration."
+            : "The uploaded object Content-Type does not match the attachment declaration.";
+        return { row: failed!, error: new AttachmentFinalizeError(code, message) };
+      }
+
+      const [ready] = await tx
+        .update(attachmentsTable)
+        .set({
+          uploadStatus: "ready",
+          actualBytes: input.actualBytes,
+          actualContentType: input.actualContentType,
+          finalizedAt: new Date(),
+        })
+        .where(eq(attachmentsTable.id, current.id))
+        .returning();
+      return { row: ready! };
+    });
+    if (outcome.error !== undefined) throw outcome.error;
+    return outcome.row;
   },
 
   /**

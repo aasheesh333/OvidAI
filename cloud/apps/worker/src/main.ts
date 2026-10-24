@@ -67,7 +67,12 @@ import {
 } from "@ovid/agent-core";
 import type { KeyResolver } from "@ovid/shared";
 import { createByokKeyProvider, createEnvelopeCrypto } from "@ovid/escrow";
-import { createFullAgentRunProcessor } from "./runProcessor.js";
+import {
+  createFullAgentRunProcessor,
+  type FullAgentRunProcessor,
+  type FullRunDeps,
+  type RunAttachmentStorage,
+} from "./runProcessor.js";
 import { createServerKeyResolver } from "./keyResolver.js";
 import { buildFileService } from "./fileService.js";
 import { createMcpRuntime } from "./mcpRuntime.js";
@@ -395,6 +400,18 @@ export function createGitHubApiPort(deps: {
       return entries;
     },
   };
+}
+
+/**
+ * The production full-processor composition seam. Keeping the existing storage
+ * adapter as a required argument makes attachment HEAD/materialization part of
+ * composition rather than an optional test-only injection.
+ */
+export function createProductionAgentRunProcessor(
+  deps: Omit<FullRunDeps, "storage">,
+  storage: RunAttachmentStorage,
+): FullAgentRunProcessor {
+  return createFullAgentRunProcessor({ ...deps, storage });
 }
 
 /**
@@ -853,7 +870,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     cfg.githubToken !== null
       ? createGitHubApiPort({ token: cfg.githubToken, egress })
       : null;
-  const processor = createFullAgentRunProcessor({
+  const processor = createProductionAgentRunProcessor({
     db,
     events,
     keys: createProductionKeyResolver({
@@ -946,7 +963,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
           ) => mcpRuntime.router.releaseRun(uid, runCtx),
         }
       : {}),
-  });
+  }, storage);
 
   // ---- P4 Task 10: the scheduler loop + schedules-mirror consumer. --------
   // Boot resync FIRST: rebuild the delayed mirror from Postgres (the row is
