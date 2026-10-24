@@ -84,7 +84,21 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 4 account settings routes (real postgr
     const uid = testUid("w4set");
     const get = await app.inject({ method: "GET", url: "/cloud/v1/settings", headers: authHeaders(uid) });
     expect(get.statusCode).toBe(200);
-    expect(get.json()).toEqual({ notificationsEnabled: true, byokDefault: null });
+    expect(get.json()).toEqual({
+      notificationsEnabled: true,
+      notificationPreferences: {
+        agentUpdates: { enabled: true, sound: "chime" },
+        schedulerResults: { enabled: true, sound: "chime" },
+        backgroundStatus: { enabled: true, sound: "silent" },
+        quietHours: {
+          enabled: false,
+          startMinutes: 22 * 60,
+          endMinutes: 8 * 60,
+          utcOffsetMinutes: 0,
+        },
+      },
+      byokDefault: null,
+    });
     const patch = await app.inject({
       method: "PATCH",
       url: "/cloud/v1/settings",

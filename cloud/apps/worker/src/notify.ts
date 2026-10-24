@@ -16,24 +16,37 @@ import { readFileSync } from "node:fs";
 import { accountSettings, devices, notificationDeliveryClaims, notifications, pushSubscriptionsRepo, type Db } from "@ovid/db";
 import type { WebPushSender } from "./webPush.js";
 import {
+  androidChannelIdFor,
   chatRoute,
   notificationChannelFor,
   notificationSummary,
   scheduleRoute,
+  type AccountSettings,
+  type NotificationChannelKey,
+  type NotificationChannelPreference,
   type NotificationKind,
+  type NotificationPreferences,
+  type NotificationQuietHours,
 } from "@ovid/shared";
 
 export interface PushMessage {
   token: string;
   notification: { title: string; body: string };
   data: Record<string, string>;
-  /** Dart `NotificationChannelIds` formula: `ovid_${channelKey}.chime.v1`. */
+  /** Dart `NotificationChannelIds` formula: `ovid_${channel}.${sound}.v1`. */
   androidChannelId: string;
 }
 
+type DeadFcmTokenCode = "registration-token-not-registered" | "invalid-registration-token";
+
 export type PushOutcome =
   | { ok: true }
-  | { ok: false; code: "unregistered" | "invalid" | "error"; error?: string };
+  | {
+      ok: false;
+      code: "unregistered" | "invalid" | "error";
+      error?: string;
+      deadToken?: DeadFcmTokenCode;
+    };
 
 export interface PushSender {
   send(msg: PushMessage): Promise<PushOutcome>;
@@ -42,10 +55,6 @@ export interface PushSender {
 /** Ledger Q5 pinned copy: unattended run without a minted key → open the app. */
 export const KEY_NOT_MINTED_PUSH_BODY =
   "Your account needs a one-time sign-in before scheduled tasks can run. Open Ovid once to fix this.";
-
-function androidChannelIdFor(channelKey: string): string {
-  return `ovid_${channelKey}.chime.v1`;
-}
 
 // The structural slice of firebase-admin the sender uses. The module is
 // loaded lazily INSIDE send() so the worker boots, tests run, and tsc builds
@@ -73,13 +82,14 @@ interface FcmMessagingModuleLike {
 const FIREBASE_APP_MODULE = "firebase-admin/app";
 const FIREBASE_MESSAGING_MODULE = "firebase-admin/messaging";
 
-/** FCM error codes that mean "this token is dead, prune it". */
-const UNREGISTERED_FCM_CODES = new Set([
-  "registration-token-not-registered",
-  "invalid-registration-token",
-]);
+/** Only these normalized FCM codes mean "this token is dead, prune it". */
+function deadFcmTokenCode(code: string | null | undefined): DeadFcmTokenCode | null {
+  return code === "registration-token-not-registered" || code === "invalid-registration-token"
+    ? code
+    : null;
+}
 
-function fcmErrorCode(err: unknown): string | null {
+export function normalizeFcmErrorCode(err: unknown): string | null {
   const e = err as { code?: unknown; errorInfo?: { code?: unknown } };
   const raw = e?.errorInfo?.code ?? e?.code;
   if (typeof raw !== "string") return null;
@@ -156,9 +166,10 @@ export function createFcmPushSender(): PushSender {
         });
         return { ok: true };
       } catch (err) {
-        const code = fcmErrorCode(err);
-        if (code !== null && UNREGISTERED_FCM_CODES.has(code)) {
-          return { ok: false, code: "unregistered", error: code };
+        const code = normalizeFcmErrorCode(err);
+        const deadToken = deadFcmTokenCode(code);
+        if (deadToken !== null) {
+          return { ok: false, code: "unregistered", error: deadToken, deadToken };
         }
         return { ok: false, code: "error", error: redactToken(describeError(err), msg.token) };
       }
@@ -202,6 +213,13 @@ export interface Notifier {
     summary: string;
     question: boolean;
   }): Promise<void>;
+  notifyBackgroundStatus(a: {
+    userId: string;
+    sessionId: string;
+    title: string;
+    body: string;
+    route: string;
+  }): Promise<void>;
   /**
    * A run failed for a reason the user must act on (owner directive
    * 2026-10-18). Delivered when the app is closed or backgrounded, so a
@@ -215,6 +233,31 @@ export interface Notifier {
     code: string;
     message: string;
   }): Promise<void>;
+}
+
+function notificationPreferenceFor(
+  preferences: NotificationPreferences,
+  channel: NotificationChannelKey,
+): NotificationChannelPreference {
+  switch (channel) {
+    case "agent_updates":
+      return preferences.agentUpdates;
+    case "scheduler_results":
+      return preferences.schedulerResults;
+    case "background_status":
+      return preferences.backgroundStatus;
+  }
+}
+
+function inQuietHours(quietHours: NotificationQuietHours, now: Date): boolean {
+  if (!quietHours.enabled) return false;
+  const utcMinute = now.getUTCHours() * 60 + now.getUTCMinutes();
+  const localMinute = ((utcMinute + quietHours.utcOffsetMinutes) % 1440 + 1440) % 1440;
+  const { startMinutes: start, endMinutes: end } = quietHours;
+  if (start === end) return false;
+  return start < end
+    ? localMinute >= start && localMinute < end
+    : localMinute >= start || localMinute < end;
 }
 
 export function createNotifier(deps: NotifierDeps): Notifier {
@@ -235,27 +278,33 @@ export function createNotifier(deps: NotifierDeps): Notifier {
     route: string;
     data: Record<string, string>;
   }): Promise<"delivered" | "retry"> {
-    // Wave 4 (SE-010): the user's Notifications switch. Off = no push to any
-    // device; the attempt is still kept in the inbox so nothing is lost. A
-    // settings read failure fails OPEN (push is the documented default).
-    let pushEnabled = true;
+    const channel = notificationChannelFor(args.kind);
+    // Authoritative metadata cannot be contradicted by a caller-provided field.
+    const data = { ...args.data, kind: args.kind, channel, route: args.route };
+    // Resolve settings once per fan-out. A read failure is retryable and never
+    // fails open into a push that a retry could duplicate.
+    let settings: AccountSettings;
     try {
-      pushEnabled = (await accountSettings.get(deps.db, args.userId)).notificationsEnabled;
-    } catch (err) {
-      console.error("[notify] settings read failed; sending", err);
+      settings = await accountSettings.get(deps.db, args.userId);
+    } catch {
+      console.error("[notify] settings read failed; retrying without sending");
+      return "retry";
     }
-    if (!pushEnabled) {
+    const preference = notificationPreferenceFor(settings.notificationPreferences, channel);
+    const disabled = !settings.notificationsEnabled || !preference.enabled;
+    const quiet = !disabled && inQuietHours(settings.notificationPreferences.quietHours, clock());
+    if (disabled || quiet) {
       try {
         await notifications.record(deps.db, {
           userId: args.userId,
           deviceToken: null,
           kind: args.kind,
-          channel: notificationChannelFor(args.kind),
+          channel,
           title: args.title,
           body: args.body,
           route: args.route,
-          data: args.data,
-          status: "skipped_disabled",
+          data,
+          status: disabled ? "skipped_disabled" : "skipped_quiet_hours",
         });
       } catch (err) {
         console.error("[notify] inbox record failed", err);
@@ -283,11 +332,11 @@ export function createNotifier(deps: NotifierDeps): Notifier {
           userId: args.userId,
           deviceToken: null,
           kind: args.kind,
-          channel: notificationChannelFor(args.kind),
+          channel,
           title: args.title,
           body: args.body,
           route: args.route,
-          data: args.data,
+          data,
           status: "skipped_no_devices",
         });
       } catch (err) {
@@ -297,7 +346,7 @@ export function createNotifier(deps: NotifierDeps): Notifier {
     }
 
     let delivered = false;
-    const androidChannelId = androidChannelIdFor(notificationChannelFor(args.kind));
+    const androidChannelId = androidChannelIdFor(channel, preference.sound);
     for (const device of userDevices) {
       try {
         let outcome: PushOutcome;
@@ -305,7 +354,7 @@ export function createNotifier(deps: NotifierDeps): Notifier {
           outcome = await deps.push.send({
             token: device.token,
             notification: { title: args.title, body: args.body },
-            data: args.data,
+            data,
             androidChannelId,
           });
         } catch (err) {
@@ -322,15 +371,15 @@ export function createNotifier(deps: NotifierDeps): Notifier {
             userId: args.userId,
             deviceToken: device.token,
             kind: args.kind,
-            channel: notificationChannelFor(args.kind),
+            channel,
             title: args.title,
             body: args.body,
             route: args.route,
-            data: args.data,
+            data,
             status: "sent",
           });
         } else {
-          if (outcome.code === "unregistered") {
+          if (deadFcmTokenCode(outcome.deadToken) !== null) {
             // Dead token: prune the registry row (owner-scoped) so it stops
             // consuming every future fan-out, and keep the failed attempt.
             try {
@@ -342,17 +391,20 @@ export function createNotifier(deps: NotifierDeps): Notifier {
               );
             }
           }
+          const error = outcome.code === "unregistered"
+            ? "unregistered"
+            : outcome.error ?? outcome.code;
           await notifications.record(deps.db, {
             userId: args.userId,
             deviceToken: device.token,
             kind: args.kind,
-            channel: notificationChannelFor(args.kind),
+            channel,
             title: args.title,
             body: args.body,
             route: args.route,
-            data: args.data,
+            data,
             status: "failed",
-            error: outcome.code === "unregistered" ? "unregistered" : outcome.error ?? outcome.code,
+            error: redactToken(error, device.token),
           });
         }
       } catch (err) {
@@ -374,7 +426,7 @@ export function createNotifier(deps: NotifierDeps): Notifier {
           title: args.title,
           body: args.body,
           route: args.route,
-          data: args.data,
+          data,
         });
         if (outcome.ok) {
           delivered = true;
@@ -382,11 +434,11 @@ export function createNotifier(deps: NotifierDeps): Notifier {
             userId: args.userId,
             deviceToken: subscription.endpoint,
             kind: args.kind,
-            channel: notificationChannelFor(args.kind),
+            channel,
             title: args.title,
             body: args.body,
             route: args.route,
-            data: args.data,
+            data,
             status: "sent",
           });
         } else {
@@ -397,11 +449,11 @@ export function createNotifier(deps: NotifierDeps): Notifier {
             userId: args.userId,
             deviceToken: subscription.endpoint,
             kind: args.kind,
-            channel: notificationChannelFor(args.kind),
+            channel,
             title: args.title,
             body: args.body,
             route: args.route,
-            data: args.data,
+            data,
             status: "failed",
             error: outcome.error ?? outcome.code,
           });
@@ -543,6 +595,25 @@ export function createNotifier(deps: NotifierDeps): Notifier {
         },
       });
     },
+
+    async notifyBackgroundStatus(a) {
+      const kind: NotificationKind = "backgroundStatus";
+      await fanOut({
+        userId: a.userId,
+        kind,
+        title: a.title,
+        body: notificationSummary(a.body, { max: 180 }),
+        route: a.route,
+        data: {
+          kind,
+          channel: notificationChannelFor(kind),
+          route: a.route,
+          sessionId: a.sessionId,
+          ts: clock().toISOString(),
+        },
+      });
+    },
+
     async notifyAgentFailed(a) {
       const kind: NotificationKind = "agentFailed";
       const title = a.sessionTitle === ""

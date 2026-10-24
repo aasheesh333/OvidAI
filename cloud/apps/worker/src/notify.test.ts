@@ -27,6 +27,7 @@ import {
   createFcmPushSender,
   createNotifier,
   KEY_NOT_MINTED_PUSH_BODY,
+  normalizeFcmErrorCode,
   type PushMessage,
   type PushOutcome,
   type PushSender,
@@ -50,6 +51,19 @@ const FCM_MESSAGE: PushMessage = {
   androidChannelId: "ovid_agent_updates.chime.v1",
 };
 const DEAD_FCM_CODES = ["registration-token-not-registered", "invalid-registration-token"] as const;
+const NON_DEAD_FCM_CODES = [
+  "messaging/sender-id-mismatch",
+  "messaging/mismatched-credential",
+  "messaging/authentication-error",
+  "messaging/third-party-auth-error",
+  "messaging/message-rate-exceeded",
+  "messaging/server-unavailable",
+  "messaging/internal-error",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "messaging/registration-token-not-registered-extra",
+  "messaging/messaging/registration-token-not-registered",
+] as const;
 
 function firebaseError(code: string, message: string): Error {
   return Object.assign(new Error(message), { code });
@@ -272,6 +286,205 @@ describe.skipIf(!TEST_DATABASE_URL)("createNotifier (real postgres)", () => {
     expect(sent).toHaveLength(1);
   });
 
+  it("agent_updates off suppresses agent push without disabling scheduler_results", async () => {
+    const uid = await newUser();
+    await devices.upsert(db, { token: "tok-agent-off", userId: uid, platform: "android" });
+    await accountSettings.patch(db, uid, {
+      notificationPreferences: { agentUpdates: { enabled: false } },
+    });
+    const { sent, push } = stubPush();
+    const notifier = createNotifier({ db, push });
+
+    await notifier.notifyAgentFailed({
+      userId: uid,
+      sessionId: "ses-agent-off",
+      sessionTitle: "Report",
+      code: "model_error",
+      message: "boom",
+    });
+    await notifier.notifyScheduleSucceeded({
+      userId: uid,
+      scheduleId: "sch-agent-off",
+      sessionId: "ses-agent-off-schedule",
+      title: "Report",
+      summary: "done",
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.data).toMatchObject({
+      kind: "scheduleSucceeded",
+      channel: "scheduler_results",
+      sessionId: "ses-agent-off-schedule",
+      route: "/schedule/ses-agent-off-schedule",
+    });
+    const rows = await inbox(uid);
+    expect(rows.find((row) => row.kind === "agentFailed")?.status).toBe("skipped_disabled");
+    expect(rows.find((row) => row.kind === "scheduleSucceeded")?.status).toBe("sent");
+  });
+
+  it("scheduler_results off suppresses scheduler push without disabling agent_updates", async () => {
+    const uid = await newUser();
+    await devices.upsert(db, { token: "tok-scheduler-off", userId: uid, platform: "android" });
+    await accountSettings.patch(db, uid, {
+      notificationPreferences: { schedulerResults: { enabled: false } },
+    });
+    const { sent, push } = stubPush();
+    const notifier = createNotifier({ db, push });
+
+    await notifier.notifyScheduleSucceeded({
+      userId: uid,
+      scheduleId: "sch-scheduler-off",
+      sessionId: "ses-scheduler-off",
+      title: "Report",
+      summary: "done",
+    });
+    await notifier.notifyAgentFailed({
+      userId: uid,
+      sessionId: "ses-scheduler-off-agent",
+      sessionTitle: "Report",
+      code: "model_error",
+      message: "boom",
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.data).toMatchObject({
+      kind: "agentFailed",
+      channel: "agent_updates",
+      sessionId: "ses-scheduler-off-agent",
+      route: "/c/ses-scheduler-off-agent",
+    });
+    const rows = await inbox(uid);
+    expect(rows.find((row) => row.kind === "scheduleSucceeded")?.status).toBe("skipped_disabled");
+    expect(rows.find((row) => row.kind === "agentFailed")?.status).toBe("sent");
+  });
+
+  it("selects the native channel from the configured channel sound", async () => {
+    const uid = await newUser();
+    await devices.upsert(db, { token: "tok-system-sound", userId: uid, platform: "android" });
+    await accountSettings.patch(db, uid, {
+      notificationPreferences: { agentUpdates: { sound: "system" } },
+    });
+    const { sent, push } = stubPush();
+    const notifier = createNotifier({ db, push });
+
+    await notifier.notifyAgentFailed({
+      userId: uid,
+      sessionId: "ses-system-sound",
+      sessionTitle: "Report",
+      code: "model_error",
+      message: "boom",
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.androidChannelId).toBe("ovid_agent_updates.system.v1");
+  });
+
+  it("background status is always silent and carries its actual metadata", async () => {
+    const uid = await newUser();
+    await devices.upsert(db, { token: "tok-background", userId: uid, platform: "android" });
+    await accountSettings.patch(db, uid, {
+      notificationPreferences: { backgroundStatus: { sound: "chime" } },
+    });
+    const { sent, push } = stubPush();
+    const notifier = createNotifier({ db, push });
+
+    await notifier.notifyBackgroundStatus({
+      userId: uid,
+      sessionId: "ses-background",
+      title: "Background sync",
+      body: "Still working",
+      route: "/c/ses-background",
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.androidChannelId).toBe("ovid_background_status.silent.v1");
+    expect(sent[0]!.data).toMatchObject({
+      kind: "backgroundStatus",
+      channel: "background_status",
+      sessionId: "ses-background",
+      route: "/c/ses-background",
+    });
+  });
+
+  it("quiet hours use the stored UTC offset, retain the inbox row, and suppress push", async () => {
+    const uid = await newUser();
+    await devices.upsert(db, { token: "tok-quiet", userId: uid, platform: "android" });
+    await accountSettings.patch(db, uid, {
+      notificationPreferences: {
+        quietHours: {
+          enabled: true,
+          startMinutes: 21 * 60,
+          endMinutes: 7 * 60,
+          utcOffsetMinutes: -300,
+        },
+      },
+    });
+    const { sent, push } = stubPush();
+    // 02:30 UTC is 21:30 local at UTC-05:00, inside the overnight window.
+    const notifier = createNotifier({
+      db,
+      push,
+      clock: () => new Date("2026-01-15T02:30:00.000Z"),
+    });
+
+    await notifier.notifyScheduleSucceeded({
+      userId: uid,
+      scheduleId: "sch-quiet",
+      sessionId: "ses-quiet",
+      title: "Report",
+      summary: "done",
+    });
+
+    expect(sent).toHaveLength(0);
+    const rows = await inbox(uid);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      kind: "scheduleSucceeded",
+      channel: "scheduler_results",
+      status: "skipped_quiet_hours",
+      route: "/schedule/ses-quiet",
+    });
+    expect(rows[0]!.data).toMatchObject({
+      kind: "scheduleSucceeded",
+      channel: "scheduler_results",
+      sessionId: "ses-quiet",
+      route: "/schedule/ses-quiet",
+    });
+  });
+
+  it("a settings read failure releases completion for retry without sending or duplicating", async () => {
+    const uid = await newUser();
+    await devices.upsert(db, { token: "tok-settings-retry", userId: uid, platform: "android" });
+    const { sent, push } = stubPush();
+    const original = accountSettings.get;
+    let failures = 1;
+    let reads = 0;
+    accountSettings.get = async (...args) => {
+      reads += 1;
+      if (failures > 0) {
+        failures -= 1;
+        throw new Error("temporary settings read failure");
+      }
+      return original(...args);
+    };
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const notifier = createNotifier({ db, push });
+      const args = { userId: uid, runId: "run-settings-retry", sessionId: "ses-settings-retry" };
+      await notifier.notifyAgentFinished(args);
+      expect(sent).toHaveLength(0);
+      expect(await inbox(uid)).toHaveLength(0);
+      await notifier.notifyAgentFinished(args);
+      expect(sent).toHaveLength(1);
+      await notifier.notifyAgentFinished(args);
+      expect(sent).toHaveLength(1);
+      expect(reads).toBe(2);
+    } finally {
+      accountSettings.get = original;
+      consoleError.mockRestore();
+    }
+  });
+
   it("(a) 48-cap title and markdown-stripped summary", async () => {
     const uid = await newUser();
     await devices.upsert(db, { token: "tok-cap", userId: uid, platform: "android" });
@@ -343,7 +556,12 @@ describe.skipIf(!TEST_DATABASE_URL)("createNotifier (real postgres)", () => {
     await devices.upsert(db, { token: "live-token", userId: uid, platform: "android" });
     const { sent, push } = stubPush((msg) =>
       msg.token === "dead-token"
-        ? Promise.resolve({ ok: false, code: "unregistered", error: "registration-token-not-registered" })
+        ? Promise.resolve({
+            ok: false,
+            code: "unregistered",
+            error: "registration-token-not-registered",
+            deadToken: "registration-token-not-registered",
+          })
         : Promise.resolve({ ok: true }),
     );
     const notifier = createNotifier({ db, push });
@@ -450,6 +668,35 @@ describe.skipIf(!TEST_DATABASE_URL)("createNotifier (real postgres)", () => {
     });
   });
 
+  it.each(NON_DEAD_FCM_CODES)("non-dead Firebase error %s never prunes the device", async (code) => {
+    const uid = await newUser();
+    const token = `live-${code.replace(/[^a-z0-9]/gi, "-")}`;
+    await devices.upsert(db, { token, userId: uid, platform: "android" });
+
+    await withFcmCredentials(async () => {
+      fcmSend.mockReset();
+      fcmSend.mockRejectedValueOnce(firebaseError(
+        code,
+        `Firebase registration-token-not-registered text must not drive pruning: ${token}`,
+      ));
+      const notifier = createNotifier({ db, push: createFcmPushSender() });
+      await notifier.notifyAgentFailed({
+        userId: uid,
+        sessionId: "ses-non-dead",
+        sessionTitle: "Report",
+        code: "model_error",
+        message: "boom",
+      });
+    });
+
+    expect(fcmSend).toHaveBeenCalledOnce();
+    expect((await devices.listForUser(db, uid)).map((device) => device.token)).toEqual([token]);
+    const rows = await inbox(uid);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.status).toBe("failed");
+    expect(rows[0]!.error).not.toContain(token);
+  });
+
   it("(d) zero devices: exactly one skipped_no_devices row with a null token, zero sends", async () => {
     const uid = await newUser();
     const { sent, push } = stubPush();
@@ -539,42 +786,58 @@ describe.skipIf(!TEST_DATABASE_URL)("createNotifier (real postgres)", () => {
   });
 });
 
+describe("normalizeFcmErrorCode", () => {
+  it("prefers errorInfo.code and strips exactly one messaging prefix", () => {
+    expect(normalizeFcmErrorCode({
+      errorInfo: { code: "messaging/internal-error" },
+      code: "messaging/invalid-registration-token",
+    })).toBe("internal-error");
+    expect(normalizeFcmErrorCode({ code: "messaging/invalid-registration-token" }))
+      .toBe("invalid-registration-token");
+    expect(normalizeFcmErrorCode({ code: "messaging/messaging/invalid-registration-token" }))
+      .toBe("messaging/invalid-registration-token");
+    expect(normalizeFcmErrorCode({ code: "ECONNRESET" })).toBe("ECONNRESET");
+    expect(normalizeFcmErrorCode({})).toBeNull();
+  });
+});
+
 describe("createFcmPushSender error classification", () => {
-  it.each(DEAD_FCM_CODES)("classifies Firebase public code messaging/%s as unregistered", async (code) => {
+  it.each(DEAD_FCM_CODES)("classifies Firebase public code messaging/%s as a dead token", async (code) => {
     const outcome = await sendFcmError(firebaseError(
       `messaging/${code}`,
       `Firebase rejected ${FCM_MESSAGE.token}`,
     ));
 
-    expect(outcome).toMatchObject({ ok: false, code: "unregistered" });
+    expect(outcome).toMatchObject({ ok: false, code: "unregistered", deadToken: code });
     expect(JSON.stringify(outcome)).not.toContain(FCM_MESSAGE.token);
   });
 
-  it.each(DEAD_FCM_CODES)("retains legacy bare errorInfo.code %s as unregistered", async (code) => {
+  it.each(DEAD_FCM_CODES)("normalizes errorInfo.code messaging/%s as a dead token", async (code) => {
+    const outcome = await sendFcmError({
+      errorInfo: { code: `messaging/${code}` },
+      code: "messaging/internal-error",
+      message: `Firebase rejected ${FCM_MESSAGE.token}`,
+    });
+
+    expect(outcome).toMatchObject({ ok: false, code: "unregistered", deadToken: code });
+    expect(JSON.stringify(outcome)).not.toContain(FCM_MESSAGE.token);
+  });
+
+  it.each(DEAD_FCM_CODES)("retains legacy bare errorInfo.code %s as a dead token", async (code) => {
     const outcome = await sendFcmError({
       errorInfo: { code },
       message: `Firebase rejected ${FCM_MESSAGE.token}`,
     });
 
-    expect(outcome).toMatchObject({ ok: false, code: "unregistered" });
+    expect(outcome).toMatchObject({ ok: false, code: "unregistered", deadToken: code });
     expect(JSON.stringify(outcome)).not.toContain(FCM_MESSAGE.token);
   });
 
-  it.each([
-    "messaging/mismatched-credential",
-    "messaging/authentication-error",
-    "messaging/third-party-auth-error",
-    "messaging/message-rate-exceeded",
-    "messaging/server-unavailable",
-    "messaging/internal-error",
-    "ECONNRESET",
-    "ETIMEDOUT",
-    "messaging/registration-token-not-registered-extra",
-    "messaging/messaging/registration-token-not-registered",
-  ])("does not classify non-dead error %s as unregistered", async (code) => {
+  it.each(NON_DEAD_FCM_CODES)("does not classify non-dead error %s as a dead token", async (code) => {
     const outcome = await sendFcmError(firebaseError(code, `Firebase rejected ${FCM_MESSAGE.token}`));
 
     expect(outcome).toMatchObject({ ok: false, code: "error" });
+    expect(outcome).not.toHaveProperty("deadToken");
     expect(JSON.stringify(outcome)).not.toContain(FCM_MESSAGE.token);
   });
 });

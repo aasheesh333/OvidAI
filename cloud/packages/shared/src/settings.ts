@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { NotificationSound } from "./notifications.js";
 
 // ---------------------------------------------------------------------------
 // Wave 4 (Settings truthfulness) — wire contracts for the account-level
@@ -18,21 +19,59 @@ export interface ByokDefault {
   model: string;
 }
 
+export interface NotificationChannelPreference {
+  enabled: boolean;
+  sound: NotificationSound;
+}
+
+export interface NotificationQuietHours {
+  enabled: boolean;
+  /** Local wall-clock minutes in [0, 1439]; an overnight window may wrap. */
+  startMinutes: number;
+  endMinutes: number;
+  /** Minutes east of UTC used to derive local wall-clock time. */
+  utcOffsetMinutes: number;
+}
+
+export interface NotificationPreferences {
+  agentUpdates: NotificationChannelPreference;
+  schedulerResults: NotificationChannelPreference;
+  backgroundStatus: NotificationChannelPreference;
+  quietHours: NotificationQuietHours;
+}
+
+export const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = Object.freeze({
+  agentUpdates: { enabled: true, sound: "chime" },
+  schedulerResults: { enabled: true, sound: "chime" },
+  backgroundStatus: { enabled: true, sound: "silent" },
+  quietHours: {
+    enabled: false,
+    startMinutes: 22 * 60,
+    endMinutes: 8 * 60,
+    utcOffsetMinutes: 0,
+  },
+}) as NotificationPreferences;
+
 /**
  * GET/PATCH /cloud/v1/settings.
  *  - notificationsEnabled=false: the worker sends no push to any of the
  *    user's devices (run finished / failed / needs approval).
+ *  - notificationPreferences: independent channel delivery/sound switches and
+ *    quiet hours. Missing persisted fields retain the backward-compatible
+ *    master-on/channel-on/chime defaults; background status is always silent.
  *  - byokDefault: when set, every run (chat and scheduled) is routed to the
  *    user's own provider key with this model instead of Ovid's models, so it
  *    is not metered against the Ovid allowance. null = Ovid models.
  */
 export interface AccountSettings {
   notificationsEnabled: boolean;
+  notificationPreferences: NotificationPreferences;
   byokDefault: ByokDefault | null;
 }
 
 export const DEFAULT_ACCOUNT_SETTINGS: AccountSettings = Object.freeze({
   notificationsEnabled: true,
+  notificationPreferences: DEFAULT_NOTIFICATION_PREFERENCES,
   byokDefault: null,
 }) as AccountSettings;
 
@@ -43,16 +82,49 @@ export const byokDefaultSchema = z
   })
   .strict();
 
+const notificationChannelPreferencePatchSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    sound: z.enum(["chime", "system", "silent"]).optional(),
+  })
+  .strict();
+
+const notificationQuietHoursPatchSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    startMinutes: z.number().int().min(0).max(1439).optional(),
+    endMinutes: z.number().int().min(0).max(1439).optional(),
+    utcOffsetMinutes: z.number().int().min(-14 * 60).max(14 * 60).optional(),
+  })
+  .strict();
+
+export const notificationPreferencesPatchSchema = z
+  .object({
+    agentUpdates: notificationChannelPreferencePatchSchema.optional(),
+    schedulerResults: notificationChannelPreferencePatchSchema.optional(),
+    backgroundStatus: notificationChannelPreferencePatchSchema.optional(),
+    quietHours: notificationQuietHoursPatchSchema.optional(),
+  })
+  .strict();
+
 export const accountSettingsPatchSchema = z
   .object({
     notificationsEnabled: z.boolean().optional(),
+    notificationPreferences: notificationPreferencesPatchSchema.optional(),
     byokDefault: byokDefaultSchema.nullable().optional(),
   })
   .strict()
-  .refine((b) => b.notificationsEnabled !== undefined || b.byokDefault !== undefined, {
-    message: "At least one of 'notificationsEnabled' or 'byokDefault' is required.",
-  });
+  .refine(
+    (b) =>
+      b.notificationsEnabled !== undefined ||
+      b.notificationPreferences !== undefined ||
+      b.byokDefault !== undefined,
+    {
+      message: "At least one of 'notificationsEnabled', 'notificationPreferences' or 'byokDefault' is required.",
+    },
+  );
 
+export type NotificationPreferencesPatch = z.infer<typeof notificationPreferencesPatchSchema>;
 export type AccountSettingsPatch = z.infer<typeof accountSettingsPatchSchema>;
 
 // ---------------------------------------------------------------------------

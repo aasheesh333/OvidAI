@@ -16,9 +16,20 @@ export type NotificationKind =
   | "agentNeedsApproval"
   | "jobDone"
   | "scheduleSucceeded"
-  | "scheduleFailed";
+  | "scheduleFailed"
+  | "backgroundStatus";
 
 export type NotificationChannelKey = "agent_updates" | "scheduler_results" | "background_status";
+export type NotificationSound = "chime" | "system" | "silent";
+
+/** Android channel sounds are immutable, so each channel/sound pair has an id. */
+export function androidChannelIdFor(
+  channel: NotificationChannelKey,
+  sound: NotificationSound,
+): string {
+  const effectiveSound = channel === "background_status" ? "silent" : sound;
+  return `ovid_${channel}.${effectiveSound}.v1`;
+}
 
 /** Scheduled-task results have their own channel; everything else is an agent
  *  update (Dart `OvidNotificationKind.channel`). */
@@ -27,6 +38,8 @@ export function notificationChannelFor(kind: NotificationKind): NotificationChan
     case "scheduleSucceeded":
     case "scheduleFailed":
       return "scheduler_results";
+    case "backgroundStatus":
+      return "background_status";
     case "agentFinished":
     case "agentFailed":
     case "agentNeedsInput":

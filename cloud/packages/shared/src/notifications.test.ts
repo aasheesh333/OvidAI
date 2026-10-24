@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  androidChannelIdFor,
   chatRoute,
   notificationChannelFor,
   notificationSummary,
@@ -56,7 +57,7 @@ describe("notificationSummary", () => {
 });
 
 describe("notificationChannelFor", () => {
-  const expected: Record<NotificationKind, "agent_updates" | "scheduler_results"> = {
+  const expected: Record<NotificationKind, "agent_updates" | "scheduler_results" | "background_status"> = {
     agentFinished: "agent_updates",
     agentFailed: "agent_updates",
     agentNeedsInput: "agent_updates",
@@ -64,12 +65,28 @@ describe("notificationChannelFor", () => {
     jobDone: "agent_updates",
     scheduleSucceeded: "scheduler_results",
     scheduleFailed: "scheduler_results",
+    backgroundStatus: "background_status",
   };
 
-  it("routes schedule kinds to scheduler_results and the rest to agent_updates", () => {
+  it("routes every kind to its actual channel", () => {
     for (const [kind, channel] of Object.entries(expected)) {
       expect(notificationChannelFor(kind as NotificationKind)).toBe(channel);
     }
+  });
+});
+
+describe("androidChannelIdFor", () => {
+  it.each([
+    ["agent_updates", "chime", "ovid_agent_updates.chime.v1"],
+    ["agent_updates", "system", "ovid_agent_updates.system.v1"],
+    ["scheduler_results", "silent", "ovid_scheduler_results.silent.v1"],
+    ["background_status", "silent", "ovid_background_status.silent.v1"],
+  ] as const)("maps %s/%s to the versioned native channel", (channel, sound, expected) => {
+    expect(androidChannelIdFor(channel, sound)).toBe(expected);
+  });
+
+  it("keeps background status silent even if a stale sound is supplied", () => {
+    expect(androidChannelIdFor("background_status", "chime")).toBe("ovid_background_status.silent.v1");
   });
 });
 

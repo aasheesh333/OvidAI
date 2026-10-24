@@ -12,8 +12,22 @@ import {
 const UUID = "0190a6b2-7c4e-7a10-8000-000000000001";
 
 describe("account settings (Wave 4)", () => {
-  it("defaults: push on, no BYOK routing", () => {
-    expect(DEFAULT_ACCOUNT_SETTINGS).toEqual({ notificationsEnabled: true, byokDefault: null });
+  it("defaults preserve master-on/channel-on/chime and add silent background status", () => {
+    expect(DEFAULT_ACCOUNT_SETTINGS).toEqual({
+      notificationsEnabled: true,
+      notificationPreferences: {
+        agentUpdates: { enabled: true, sound: "chime" },
+        schedulerResults: { enabled: true, sound: "chime" },
+        backgroundStatus: { enabled: true, sound: "silent" },
+        quietHours: {
+          enabled: false,
+          startMinutes: 22 * 60,
+          endMinutes: 8 * 60,
+          utcOffsetMinutes: 0,
+        },
+      },
+      byokDefault: null,
+    });
   });
 
   it("patch is strict, needs a field and validates the BYOK default", () => {
@@ -28,6 +42,41 @@ describe("account settings (Wave 4)", () => {
     expect(() => accountSettingsPatchSchema.parse({ other: 1, notificationsEnabled: true })).toThrow();
     expect(() => accountSettingsPatchSchema.parse({ byokDefault: { keyId: "x", model: "m" } })).toThrow();
     expect(() => accountSettingsPatchSchema.parse({ byokDefault: { keyId: UUID, model: "" } })).toThrow();
+  });
+
+  it("accepts independent channel and quiet-hours patches", () => {
+    const patch = {
+      notificationPreferences: {
+        agentUpdates: { enabled: false },
+        schedulerResults: { sound: "system" },
+        backgroundStatus: { enabled: false },
+        quietHours: {
+          enabled: true,
+          startMinutes: 21 * 60 + 30,
+          endMinutes: 7 * 60 + 15,
+          utcOffsetMinutes: -300,
+        },
+      },
+    };
+    expect(accountSettingsPatchSchema.parse(patch)).toEqual(patch);
+  });
+
+  it("rejects malformed channel sounds, quiet-hours times, offsets, and unknown keys", () => {
+    expect(() => accountSettingsPatchSchema.parse({
+      notificationPreferences: { agentUpdates: { sound: "loud" } },
+    })).toThrow();
+    expect(() => accountSettingsPatchSchema.parse({
+      notificationPreferences: { quietHours: { startMinutes: 1440 } },
+    })).toThrow();
+    expect(() => accountSettingsPatchSchema.parse({
+      notificationPreferences: { quietHours: { endMinutes: 1.5 } },
+    })).toThrow();
+    expect(() => accountSettingsPatchSchema.parse({
+      notificationPreferences: { quietHours: { utcOffsetMinutes: 841 } },
+    })).toThrow();
+    expect(() => accountSettingsPatchSchema.parse({
+      notificationPreferences: { otherChannel: { enabled: false } },
+    })).toThrow();
   });
 });
 
