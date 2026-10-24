@@ -59,6 +59,43 @@ void main() {
     });
   });
 
+  group('versioned MCP connection fixtures', () {
+    test('stable state and approved source metadata contain no secret or config payloads', () {
+      final connections = fixture('mcp-connections-v1');
+      expect(connections['contractVersion'], 1);
+      final items = maps(connections['items']);
+      expect(items, hasLength(2));
+      final configured = items[0];
+      expect(configured['connectionId'], '019a0000-0000-7000-8000-000000000001');
+      expect(configured['providerId'], 'google-drive');
+      expect(configured['userId'], 'fixture-user');
+      expect(configured['agentEnabled'], isFalse);
+      expect(configured['authState'], 'configured');
+      expect(configured['healthState'], 'never_checked');
+      expect(configured['configVersion'], 1);
+      expect(configured['disconnectGeneration'], 0);
+      final revoked = items[1];
+      expect(revoked['authState'], 'revoked');
+      expect(revoked['healthState'], 'revoked');
+      expect(revoked['approvedSourceId'], 'source-fixture');
+      expect(revoked['approvedDigest'], 'sha256:approved-fixture');
+      for (final item in items) {
+        for (final forbidden in [
+          'config',
+          'secrets',
+          'secretsSealed',
+          'secrets_sealed',
+          'authorization',
+          'refreshToken',
+          'id',
+          'curatedId',
+        ]) {
+          expect(item.containsKey(forbidden), isFalse, reason: 'forbidden $forbidden');
+        }
+      }
+    });
+  });
+
   group('shared subagent fixtures', () {
     test('all lifecycle examples and exactly six report keys are present', () {
       final subagents = fixture('subagents-v1');
