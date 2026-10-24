@@ -1,0 +1,94 @@
+{
+  "contractVersion": 1,
+  "requests": {
+    "pendingApproval": {
+      "requestId": "system-request-approval-v1",
+      "userId": "user-fixture-system-requests",
+      "sessionId": "019a0000-0000-7000-8000-000000000101",
+      "runId": "019a0000-0000-7000-8000-000000000102",
+      "kind": "approval",
+      "safePayload": {
+        "tool": "bash",
+        "preview": "pwd"
+      },
+      "sensitive": false,
+      "status": "pending",
+      "expiresAt": "2026-10-24T13:00:00.000Z",
+      "response": null,
+      "version": 3
+    },
+    "sensitiveElicitation": {
+      "requestId": "system-request-elicitation-v1",
+      "userId": "user-fixture-system-requests",
+      "sessionId": "019a0000-0000-7000-8000-000000000101",
+      "runId": "019a0000-0000-7000-8000-000000000103",
+      "kind": "elicitation",
+      "safePayload": {
+        "message": "Enter your password",
+        "fields": [
+          {
+            "name": "password",
+            "title": "Password",
+            "type": "string"
+          }
+        ],
+        "required": [
+          "password"
+        ]
+      },
+      "sensitive": true,
+      "status": "pending",
+      "expiresAt": "2026-10-24T12:45:00.000Z",
+      "response": null,
+      "version": 1
+    }
+  },
+  "responseReceipt": {
+    "requestId": "system-request-approval-v1",
+    "userId": "user-fixture-system-requests",
+    "version": 3,
+    "response": {
+      "approve": true,
+      "allowDependencyScripts": false
+    },
+    "clientResponseId": "client-response-approval-v1",
+    "createdAt": "2026-10-24T12:30:00.000Z"
+  },
+  "identicalReplay": {
+    "attempt": {
+      "requestId": "system-request-approval-v1",
+      "version": 3,
+      "response": {
+        "allowDependencyScripts": false,
+        "approve": true
+      },
+      "clientResponseId": "client-response-approval-v1"
+    },
+    "receipt": {
+      "requestId": "system-request-approval-v1",
+      "userId": "user-fixture-system-requests",
+      "version": 3,
+      "response": {
+        "approve": true,
+        "allowDependencyScripts": false
+      },
+      "clientResponseId": "client-response-approval-v1",
+      "createdAt": "2026-10-24T12:30:00.000Z"
+    }
+  },
+  "versionConflict": {
+    "attempt": {
+      "requestId": "system-request-approval-v1",
+      "version": 2,
+      "response": {
+        "approve": false
+      },
+      "clientResponseId": "client-response-stale-v1"
+    },
+    "currentVersion": 3,
+    "error": {
+      "code": "version_conflict",
+      "message": "The system request version is stale."
+    }
+  }
+}
