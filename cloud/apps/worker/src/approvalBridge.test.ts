@@ -4,8 +4,9 @@ import Redis from "ioredis";
 import { createRedisEventLog, type EventLog } from "@ovid/events";
 import { APPROVAL_RESPONSES_CHANNEL } from "@ovid/shared";
 import { createDb, migrate, sessions, users, type Db } from "@ovid/db";
-import { createRedisApprovalBridge } from "./approvalBridge.js";
-import type { ApprovalRequest } from "@ovid/agent-core";
+import { createProviderOperationAuthorizer, createRedisApprovalBridge } from "./approvalBridge.js";
+import type { ApprovalGate, ApprovalRequest, ToolContext } from "@ovid/agent-core";
+import type { ProviderOperation } from "@ovid/mcp";
 
 /**
  * Worker approval bridge (P3 Task 12) over REAL Redis + REAL Postgres
@@ -187,3 +188,79 @@ describe.skipIf(!TEST_REDIS_URL || !TEST_DATABASE_URL)(
     });
   },
 );
+
+describe("provider approval adapter", () => {
+  const operation: ProviderOperation = {
+    name: "send_message",
+    description: "Send one message.",
+    effect: "external_communication",
+    approval: "per_action",
+    requiredScopes: ["messages:write"],
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      maxProperties: 1,
+      properties: { text: { type: "string", minLength: 1, maxLength: 32 } },
+      required: ["text"],
+    },
+    outputPolicy: { kind: "redacted_json", maxBytes: 1_024 },
+    request: { originKey: "comms", method: "POST", pathTemplate: "/messages" },
+    limits: { timeoutMs: 1_000, responseBytes: 1_024, frameBytes: 1_024, pageBytes: 1_024 },
+  };
+
+  function ctx(): ToolContext & { connectionId: string; providerId: string } {
+    return {
+      sessionId: "session-1",
+      runId: "run-1",
+      userId: "user-1",
+      mode: "auto",
+      planMode: false,
+      unattended: false,
+      isSubagent: false,
+      depth: 0,
+      callKey: "call-1",
+      signal: new AbortController().signal,
+      connectionId: "connection-1",
+      providerId: "comms",
+    };
+  }
+
+  it("adapts the canonical SessionMode context into a non-reusable per-action request", async () => {
+    const requests: ApprovalRequest[] = [];
+    const contexts: unknown[] = [];
+    const gate: ApprovalGate = {
+      async approve(approvalCtx, req) {
+        contexts.push(approvalCtx);
+        requests.push(req);
+        return "allow";
+      },
+    };
+    const authorize = createProviderOperationAuthorizer({
+      approvals: gate,
+      now: () => new Date("2026-10-24T00:00:00.000Z"),
+    });
+    const result = await authorize(ctx(), operation, { text: "do-not-put-in-the-card" });
+    expect(result.kind).toBe("allow");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      kind: "tool",
+      tool: "provider:comms/send_message",
+      allowAlways: false,
+      pathTargets: [],
+      hostTargets: [],
+    });
+    expect(JSON.stringify(requests[0])).not.toContain("do-not-put-in-the-card");
+    expect(contexts[0]).toMatchObject({ mode: "auto", runId: "run-1", userId: "user-1" });
+  });
+
+  it("fails closed if the underlying gate attempts an always grant", async () => {
+    const authorize = createProviderOperationAuthorizer({
+      approvals: { approve: async () => "always" },
+      now: () => new Date("2026-10-24T00:00:00.000Z"),
+    });
+    expect(await authorize(ctx(), operation, { text: "hello" })).toEqual({
+      kind: "deny",
+      code: "approval_required",
+    });
+  });
+});

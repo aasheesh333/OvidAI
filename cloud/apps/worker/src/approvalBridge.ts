@@ -1,8 +1,15 @@
+import { randomUUID } from "node:crypto";
 import type { Redis } from "ioredis";
 import { sessions, type Db } from "@ovid/db";
 import type { EventLog } from "@ovid/events";
 import { APPROVAL_RESPONSES_CHANNEL } from "@ovid/shared";
-import type { ApprovalBridge, ApprovalDecision } from "@ovid/agent-core";
+import type { ApprovalBridge, ApprovalDecision, ApprovalGate, ToolContext } from "@ovid/agent-core";
+import {
+  authorizeProviderOperation,
+  type ProviderAuthorization,
+  type ProviderOperation,
+  type ToolContext as ProviderToolContext,
+} from "@ovid/mcp";
 
 /**
  * Worker-side approval bridge (P3 Task 12): the ApprovalGate's transport.
@@ -44,6 +51,42 @@ export interface RedisApprovalBridgeHandle extends ApprovalBridge {
    * "deny" (fail-closed: a wait-forever question can never hang shutdown).
    */
   close(): Promise<void>;
+}
+
+/** Adapt the canonical agent-core run context to MCP's structural RunPolicy. */
+export function createProviderOperationAuthorizer(deps: {
+  approvals: ApprovalGate;
+  now?: () => Date;
+}): (
+  ctx: ToolContext & { connectionId: string; providerId: string },
+  operation: ProviderOperation,
+  args: Record<string, unknown>,
+) => Promise<ProviderAuthorization> {
+  return async (ctx, operation, args) => {
+    const providerCtx: ProviderToolContext = {
+      ...ctx,
+      now: deps.now,
+      approveProvider: async (approval) => {
+        const decision = await deps.approvals.approve(ctx, {
+          approvalId: randomUUID(),
+          kind: "tool",
+          tool: `provider:${ctx.providerId}/${operation.name}`,
+          summary: `Approve ${operation.name} on ${ctx.providerId}`,
+          detail:
+            `Target: ${approval.safeTargetSummary}\n` +
+            "This one-time approval is bound to the connection, operation, arguments, run, user, and expiry.",
+          allowAlways: false,
+          pathTargets: [],
+          hostTargets: [],
+        });
+        // "always" is deliberately returned without the binding: MCP maps it
+        // to approval_required, so Full Access/grants cannot make a reusable
+        // high-risk provider grant.
+        return decision === "allow" ? { decision, approval } : { decision };
+      },
+    };
+    return authorizeProviderOperation(providerCtx, operation, args);
+  };
 }
 
 export function createRedisApprovalBridge(deps: {

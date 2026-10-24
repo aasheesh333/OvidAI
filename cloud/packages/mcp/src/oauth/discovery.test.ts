@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
+import type { ProviderEgress } from "../egress/responseLimits.js";
 import {
   McpOAuthError,
   OAUTH_CLIENT_NAME,
   discoverOAuthConfig,
   requireOAuthEndpoint,
+  requestOAuth,
 } from "./discovery.js";
 
 // Unit-level discovery: a fake GuardedFetch (never touches the wire). The
@@ -455,5 +457,148 @@ describe("discoverOAuthConfig", () => {
       "registration",
       /pre-registered OAuth client/,
     );
+  });
+
+  it("routes OAuth discovery through ProviderEgress instead of legacy fetch", async () => {
+    const requests: Parameters<ProviderEgress["request"]>[0][] = [];
+    const providerEgress: ProviderEgress = {
+      async request(req) {
+        requests.push(req);
+        const key = `${req.url.origin}${req.url.pathname}`;
+        const value = key === `${HOST}/.well-known/oauth-protected-resource`
+          ? PRM
+          : key === `${HOST}/.well-known/oauth-authorization-server/as`
+            ? ASM
+            : undefined;
+        const response = value === undefined
+          ? new Response("not found", { status: 404 })
+          : Response.json(value);
+        return {
+          status: response.status,
+          headers: response.headers,
+          body: response.body!,
+          origin: req.url,
+          remoteAddress: "192.0.2.20",
+        };
+      },
+      async close() {},
+    };
+    const cfg = await discoverOAuthConfig({
+      serverUrl: `${HOST}/api/mcp`,
+      providerEgress,
+      originKey: "oauth-test",
+      fetchImpl: async () => { throw new Error("legacy fetch must not run"); },
+      redirectUri: REDIRECT,
+      register: false,
+    });
+    expect(cfg.tokenUrl).toBe(`${HOST}/as/token`);
+    expect(requests.length).toBeGreaterThan(0);
+    expect(requests.every((req) => req.originKey === "oauth-test" && req.redirect === "deny")).toBe(true);
+  });
+
+  it("cancels OAuth response bodies when header validation fails in either transport mode", async () => {
+    for (const mode of ["legacy", "egress"] as const) {
+      let cancelled = 0;
+      const body = new ReadableStream<Uint8Array>({
+        pull() {},
+        cancel() { cancelled++; },
+      });
+      const response = new Response(body, {
+        status: 200,
+        headers: { "content-type": "application/json", "x-overflow": "x".repeat(200) },
+      });
+      const limits = {
+        connectMs: 100,
+        headersMs: 100,
+        idleMs: 100,
+        totalMs: 1_000,
+        maxRedirects: 0,
+        headerBytes: 32,
+        responseBytes: 1_024,
+        decompressedBytes: 1_024,
+      };
+      const providerEgress: ProviderEgress = {
+        async request(req) {
+          return {
+            status: response.status,
+            headers: response.headers,
+            body: response.body!,
+            origin: req.url,
+            remoteAddress: "192.0.2.30",
+          };
+        },
+        async close() {},
+      };
+      await expect(requestOAuth(
+        mode === "egress" ? { providerEgress, limits } : { fetchImpl: async () => response, limits },
+        new URL(`${HOST}/token`),
+        { method: "GET", headers: { accept: "application/json" } },
+      )).rejects.toThrow(/header_bytes/);
+      expect(cancelled, mode).toBe(1);
+    }
+  });
+
+  it("cancels discovery and registration bodies on header-cap failures", async () => {
+    for (const stage of ["discovery", "registration"] as const) {
+      let cancelled = 0;
+      const oversized = async (): Promise<Response> => new Response(
+        new ReadableStream<Uint8Array>({ pull() {}, cancel() { cancelled++; } }),
+        { status: 200, headers: { "content-type": "application/json", "x-overflow": "x".repeat(200) } },
+      );
+      const routes: Record<string, unknown> = {
+        [`${HOST}/.well-known/oauth-protected-resource`]: PRM,
+        [`${HOST}/.well-known/oauth-authorization-server/as`]: ASM,
+      };
+      const ordinary = fakeFetch(routes, []);
+      await expect(discoverOAuthConfig({
+        serverUrl: `${HOST}/api/mcp`,
+        fetchImpl: async (url, init) => {
+          const parsed = new URL(url);
+          if (stage === "discovery" || parsed.pathname === "/as/register") return oversized();
+          return ordinary(url, init);
+        },
+        redirectUri: REDIRECT,
+        register: true,
+        limits: {
+          connectMs: 100,
+          headersMs: 100,
+          idleMs: 100,
+          totalMs: 1_000,
+          maxRedirects: 0,
+          headerBytes: 64,
+          responseBytes: 1_024,
+          decompressedBytes: 1_024,
+        },
+      })).rejects.toThrow(McpOAuthError);
+      expect(cancelled, stage).toBe(1);
+    }
+  });
+
+  it("bounds metadata bytes before JSON parsing", async () => {
+    const log: Recorded[] = [];
+    const routes: Record<string, unknown> = {
+      [`${HOST}/.well-known/oauth-protected-resource`]: { ...PRM, padding: "x".repeat(2_000) },
+      [`${HOST}/.well-known/oauth-authorization-server/as`]: ASM,
+    };
+    await expect(
+      discoverOAuthConfig({
+        serverUrl: `${HOST}/api/mcp`,
+        fetchImpl: fakeFetch(routes, log),
+        redirectUri: REDIRECT,
+        register: false,
+        limits: {
+          connectMs: 100,
+          headersMs: 100,
+          idleMs: 100,
+          totalMs: 1_000,
+          maxRedirects: 0,
+          headerBytes: 1_024,
+          responseBytes: 64,
+          decompressedBytes: 64,
+        },
+      }),
+    ).rejects.toThrow(McpOAuthError);
+    expect(log).toHaveLength(2);
+    expect(log[1].url).toBe(`${HOST}/.well-known/oauth-protected-resource`);
   });
 });

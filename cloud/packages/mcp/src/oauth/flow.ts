@@ -34,8 +34,21 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import type { EncryptedEnvelope, EnvelopeCrypto } from "../crypto.js";
+import {
+  DEFAULT_EGRESS_LIMITS,
+  readBoundedBody,
+  type EgressLimits,
+  type ProviderEgress,
+} from "../egress/responseLimits.js";
 import { createGuardedFetch, type GuardedFetch } from "../ssrf.js";
-import { OAUTH_CLIENT_NAME, McpOAuthError, discoverOAuthConfig, requireOAuthEndpoint } from "./discovery.js";
+import {
+  OAUTH_CLIENT_NAME,
+  McpOAuthError,
+  discoverOAuthConfig,
+  requireOAuthEndpoint,
+  requestOAuth,
+  type OAuthNetworkOptions,
+} from "./discovery.js";
 import type { DiscoveredOAuthConfig } from "./discovery.js";
 
 export const OAUTH_FLOW_TTL_MS = 600_000; // ten-minute, one-use attempt (Dart parity)
@@ -279,27 +292,37 @@ function unseal<T>(crypto: EnvelopeCrypto, envelope: EncryptedEnvelope | null | 
 // ---------------------------------------------------------------------------
 
 async function postToken(
-  fetcher: GuardedFetch,
+  network: OAuthNetworkOptions,
   tokenUrl: string,
   fields: Record<string, string>,
 ): Promise<Record<string, unknown>> {
   const endpoint = requireOAuthEndpoint(tokenUrl.trim(), "Token endpoint");
-  const res = await fetcher(endpoint.toString(), {
+  const limits = network.limits ?? {
+    ...DEFAULT_EGRESS_LIMITS,
+    connectMs: TOKEN_TIMEOUT_MS,
+    headersMs: TOKEN_TIMEOUT_MS,
+    idleMs: TOKEN_TIMEOUT_MS,
+    totalMs: TOKEN_TIMEOUT_MS,
+  };
+  const scopedNetwork = { ...network, limits };
+  const response = await requestOAuth(scopedNetwork, endpoint, {
     method: "POST",
-    redirect: "manual", // never followed — a redirect IS the failure (Dart)
     headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
     body: new URLSearchParams(fields).toString(),
-    signal: AbortSignal.timeout(TOKEN_TIMEOUT_MS),
+    secretValues: Object.values(fields).filter((value) => value !== ""),
   });
-  if ([301, 302, 303, 307, 308].includes(res.status)) {
+  if ([301, 302, 303, 307, 308].includes(response.status)) {
+    await response.body.cancel().catch(() => {});
     throw new McpOAuthError("token", "OAuth token endpoint redirected");
   }
-  if (res.status < 200 || res.status >= 300) {
-    throw new McpOAuthError("token", `OAuth token exchange failed: HTTP ${res.status}`);
+  if (response.status < 200 || response.status >= 300) {
+    await response.body.cancel().catch(() => {});
+    throw new McpOAuthError("token", `OAuth token exchange failed: HTTP ${response.status}`);
   }
   let body: unknown;
   try {
-    body = await res.json();
+    const bytes = await readBoundedBody(response, limits);
+    body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   } catch {
     throw new McpOAuthError("token", "Malformed OAuth token response");
   }
@@ -346,6 +369,9 @@ export interface OAuthFlowDeps {
   crypto: EnvelopeCrypto;
   systemBus: SystemEventPublisher;
   fetchImpl?: GuardedFetch;
+  providerEgress?: ProviderEgress;
+  originKey?: string;
+  limits?: EgressLimits;
   redirectUri?: string;
 }
 
@@ -406,7 +432,13 @@ function sanitizeErrorCode(code: string): string {
 }
 
 export function createOAuthFlow(deps: OAuthFlowDeps): OAuthFlow {
-  const fetchImpl = deps.fetchImpl ?? createGuardedFetch();
+  const fetchImpl = deps.fetchImpl ?? (deps.providerEgress === undefined ? createGuardedFetch() : undefined);
+  const network: OAuthNetworkOptions = {
+    fetchImpl,
+    providerEgress: deps.providerEgress,
+    originKey: deps.originKey,
+    limits: deps.limits,
+  };
   const redirectUri = deps.redirectUri ?? DEFAULT_MCP_REDIRECT_URI;
   // Single-flight refreshes per (uid, serverId) — Dart's _oauthRefreshes map.
   const refreshes = new Map<string, Promise<string | null>>();
@@ -442,7 +474,7 @@ export function createOAuthFlow(deps: OAuthFlowDeps): OAuthFlow {
       // oauth block to reuse here; that is the import path's owner, Task 14).
       const cfg = await discoverOAuthConfig({
         serverUrl,
-        fetchImpl,
+        ...network,
         register: true,
         redirectUri,
         clientName: OAUTH_CLIENT_NAME,
@@ -532,7 +564,7 @@ export function createOAuthFlow(deps: OAuthFlowDeps): OAuthFlow {
             : {}),
           code_verifier: secrets.verifier,
         };
-        const response = await postToken(fetchImpl, stored.tokenUrl, fields);
+        const response = await postToken(network, stored.tokenUrl, fields);
         const parsed = parseTokenResponse(response);
 
         // Seal the token set WITH its refresh coordinates under
@@ -580,7 +612,7 @@ export function createOAuthFlow(deps: OAuthFlowDeps): OAuthFlow {
       if (inFlight !== undefined) return inFlight;
       const refresh = (async (): Promise<string | null> => {
         try {
-          const response = await postToken(fetchImpl, tokens.tokenUrl, {
+          const response = await postToken(network, tokens.tokenUrl, {
             grant_type: "refresh_token",
             refresh_token: refreshToken,
             client_id: tokens.clientId,

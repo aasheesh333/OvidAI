@@ -24,6 +24,15 @@
  * candidate counts as absent, a 3xx from registration is a failure.
  */
 
+import {
+  assertBoundedHeadersOrCancel,
+  DEFAULT_EGRESS_LIMITS,
+  egressResponseFromDecodedFetch,
+  readBoundedBody,
+  type EgressLimits,
+  type EgressResponse,
+  type ProviderEgress,
+} from "../egress/responseLimits.js";
 import { createGuardedFetch, type GuardedFetch } from "../ssrf.js";
 
 export interface DiscoveredOAuthConfig {
@@ -155,19 +164,79 @@ function wellKnown(base: URL, name: string, path: string): string {
 // Fetch helpers
 // ---------------------------------------------------------------------------
 
+export interface OAuthNetworkOptions {
+  fetchImpl?: GuardedFetch;
+  providerEgress?: ProviderEgress;
+  originKey?: string;
+  limits?: EgressLimits;
+}
+
+function oauthLimits(network: OAuthNetworkOptions): EgressLimits {
+  return network.limits ?? {
+    ...DEFAULT_EGRESS_LIMITS,
+    totalMs: REQUEST_TIMEOUT_MS,
+    idleMs: REQUEST_TIMEOUT_MS,
+    headersMs: REQUEST_TIMEOUT_MS,
+  };
+}
+
+export async function requestOAuth(
+  network: OAuthNetworkOptions,
+  url: URL,
+  init: {
+    method: "GET" | "POST";
+    headers: Record<string, string>;
+    body?: string;
+    secretValues?: readonly string[];
+  },
+): Promise<EgressResponse> {
+  const limits = oauthLimits(network);
+  const signal = AbortSignal.timeout(limits.totalMs);
+  let response: EgressResponse;
+  if (network.providerEgress !== undefined) {
+    response = await network.providerEgress.request({
+      originKey: network.originKey ?? "oauth",
+      url,
+      method: init.method,
+      headers: init.headers,
+      ...(init.body === undefined ? {} : { body: new TextEncoder().encode(init.body) }),
+      secretValues: init.secretValues ?? [],
+      privileged: true,
+      redirect: "deny",
+      limits,
+      signal,
+    });
+  } else {
+    const fetcher = network.fetchImpl ?? createGuardedFetch();
+    const legacy = await fetcher(url.toString(), {
+      method: init.method,
+      redirect: "manual",
+      headers: init.headers,
+      ...(init.body === undefined ? {} : { body: init.body }),
+      signal,
+    });
+    response = egressResponseFromDecodedFetch(legacy, url);
+  }
+  await assertBoundedHeadersOrCancel(response, limits);
+  return response;
+}
+
 async function getJson(
-  fetcher: GuardedFetch,
+  network: OAuthNetworkOptions,
   url: string,
 ): Promise<Record<string, unknown> | null> {
-  const res = await fetcher(url, {
+  const endpoint = requireOAuthEndpoint(url, "OAuth metadata URL");
+  const response = await requestOAuth(network, endpoint, {
     method: "GET",
-    redirect: "manual",
     headers: { accept: "application/json" },
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
-  if (res.status !== 200) return null; // absent (also 3xx — never followed)
+  if (response.status !== 200) {
+    await response.body.cancel().catch(() => {});
+    return null;
+  }
+  const bytes = await readBoundedBody(response, oauthLimits(network));
   try {
-    const decoded: unknown = await res.json();
+    const decoded: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
     return typeof decoded === "object" && decoded !== null && !Array.isArray(decoded)
       ? (decoded as Record<string, unknown>)
       : null;
@@ -183,30 +252,30 @@ interface RegistrationResult {
 
 /** RFC 7591 dynamic client registration as a PUBLIC client. */
 async function dynamicRegister(
-  fetcher: GuardedFetch,
+  network: OAuthNetworkOptions,
   endpoint: URL,
   opts: { redirectUri: string; scopes: string[]; clientName: string },
 ): Promise<RegistrationResult> {
-  const res = await fetcher(endpoint.toString(), {
+  const response = await requestOAuth(network, endpoint, {
     method: "POST",
-    redirect: "manual",
     headers: { "content-type": "application/json", accept: "application/json" },
     body: JSON.stringify({
       client_name: opts.clientName,
       redirect_uris: [opts.redirectUri],
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
-      token_endpoint_auth_method: "none", // public client — PKCE S256 only
+      token_endpoint_auth_method: "none",
       ...(opts.scopes.length > 0 ? { scope: opts.scopes.join(" ") } : {}),
     }),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
-  if (res.status < 200 || res.status >= 300) {
-    throw new McpOAuthError("registration", `Client registration failed (HTTP ${res.status})`);
+  if (response.status < 200 || response.status >= 300) {
+    await response.body.cancel().catch(() => {});
+    throw new McpOAuthError("registration", `Client registration failed (HTTP ${response.status})`);
   }
   let decoded: Record<string, unknown> | null = null;
   try {
-    const body: unknown = await res.json();
+    const bytes = await readBoundedBody(response, oauthLimits(network));
+    const body: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
     decoded = typeof body === "object" && body !== null && !Array.isArray(body)
       ? (body as Record<string, unknown>)
       : null;
@@ -228,12 +297,10 @@ async function dynamicRegister(
 // Discovery
 // ---------------------------------------------------------------------------
 
-export interface DiscoverOAuthOptions {
+export interface DiscoverOAuthOptions extends OAuthNetworkOptions {
   serverUrl: string;
   /** The 401's WWW-Authenticate header (its resource_metadata/scope hints). */
   wwwAuthenticate?: string | null;
-  /** Guarded egress; defaults to createGuardedFetch() — never raw fetch. */
-  fetchImpl?: GuardedFetch;
   /** Run RFC 7591 DCR (default true — Dart parity: discovery always registers). */
   register?: boolean;
   redirectUri?: string;
@@ -247,7 +314,12 @@ function isTimeout(e: unknown): boolean {
 export async function discoverOAuthConfig(
   opts: DiscoverOAuthOptions,
 ): Promise<DiscoveredOAuthConfig> {
-  const fetcher = opts.fetchImpl ?? createGuardedFetch();
+  const network: OAuthNetworkOptions = {
+    fetchImpl: opts.fetchImpl ?? (opts.providerEgress === undefined ? createGuardedFetch() : undefined),
+    providerEgress: opts.providerEgress,
+    originKey: opts.originKey,
+    limits: opts.limits,
+  };
   const clientName = opts.clientName ?? OAUTH_CLIENT_NAME;
   const doRegister = opts.register !== false;
 
@@ -269,7 +341,7 @@ export async function discoverOAuthConfig(
     }
     let prm: Record<string, unknown> | null = null;
     for (const candidate of prmCandidates) {
-      prm = await getJson(fetcher, candidate);
+      prm = await getJson(network, candidate);
       if (prm !== null) break;
     }
 
@@ -315,7 +387,7 @@ export async function discoverOAuthConfig(
     ];
     let asm: Record<string, unknown> | null = null;
     for (const candidate of asmCandidates) {
-      asm = await getJson(fetcher, candidate);
+      asm = await getJson(network, candidate);
       if (asm !== null) break;
     }
 
@@ -380,7 +452,7 @@ export async function discoverOAuthConfig(
         throw new McpOAuthError("registration", "redirectUri is required for dynamic client registration");
       }
       const registration = await dynamicRegister(
-        fetcher,
+        network,
         requireOAuthEndpoint(registrationEndpoint, "Registration endpoint"),
         {
           redirectUri: opts.redirectUri ?? "",

@@ -1,20 +1,28 @@
 /**
- * MCP legacy SSE transport (2024-11-05 spec): a long-lived GET event stream
- * whose first `endpoint` event names the POST target (resolved against the
- * GET URL when relative); all JSON-RPC flows over the two channels —
- * requests/notifications POSTed, responses and server pushes arriving as
- * `message` events on the stream. Deliberately NO setProtocolVersion: this
- * legacy variant has no MCP-Protocol-Version header; the router echoes the
- * negotiated version on Streamable HTTP only.
+ * MCP legacy SSE transport (2024-11-05): a bounded long-lived GET event
+ * stream plus bounded POSTs. ProviderEgress is the Task 2 consumer seam; the
+ * legacy guarded-fetch adapter remains only until composition is rewired.
  */
 
+import {
+  assertBoundedHeadersOrCancel,
+  DEFAULT_STREAM_LIMITS,
+  EgressLimitError,
+  egressResponseFromDecodedFetch,
+  readBoundedBody,
+  readBoundedSse,
+  type EgressResponse,
+  type StreamLimits,
+} from "../egress/responseLimits.js";
+import { createSecretRedactor } from "../egress/redactor.js";
 import type { JsonRpcMessage } from "../jsonrpc.js";
 import type { McpTransport } from "../transport.js";
-import { McpAuthRequiredError, type HttpTransportOptions } from "./http.js";
+import { McpAuthRequiredError, projectMcpRpcMessage, type HttpTransportOptions } from "./http.js";
 
 export function createSseTransport(opts: HttpTransportOptions): McpTransport {
-  const fetchImpl = opts.fetchImpl ?? fetch;
   const baseHeaders: Record<string, string> = opts.headers ?? {};
+  const limits: StreamLimits = opts.limits ?? DEFAULT_STREAM_LIMITS;
+  const redactor = opts.redactor ?? createSecretRedactor();
   let closed = false;
   let started = false;
   let postUrl: string | null = null;
@@ -23,15 +31,21 @@ export function createSseTransport(opts: HttpTransportOptions): McpTransport {
   let closeFired = false;
   const abort = new AbortController();
   let endpointResolve: (() => void) | undefined;
-  const endpointReady = new Promise<void>((resolve) => {
+  let endpointReject: ((error: Error) => void) | undefined;
+  const endpointReady = new Promise<void>((resolve, reject) => {
     endpointResolve = resolve;
+    endpointReject = reject;
   });
 
-  async function authHeaders(): Promise<Record<string, string>> {
+  async function auth(): Promise<{ headers: Record<string, string>; secrets: string[] }> {
     const headers: Record<string, string> = { ...baseHeaders };
+    const secrets = Object.values(baseHeaders).filter((value) => value !== "");
     const token = await opts.accessToken?.();
-    if (token != null) headers.authorization = `Bearer ${token}`;
-    return headers;
+    if (token != null) {
+      headers.authorization = `Bearer ${token}`;
+      secrets.push(token);
+    }
+    return { headers, secrets };
   }
 
   function fireClose(expected: boolean): void {
@@ -40,110 +54,142 @@ export function createSseTransport(opts: HttpTransportOptions): McpTransport {
     closeCb?.({ expected });
   }
 
-  function handleFrame(event: string, data: string): void {
-    if (event === "endpoint") {
-      postUrl = new URL(data, opts.url).toString();
+  async function request(
+    url: URL,
+    method: "GET" | "POST",
+    headers: Record<string, string>,
+    body: Uint8Array | undefined,
+    secrets: readonly string[],
+  ): Promise<EgressResponse> {
+    const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(limits.totalMs)]);
+    let response: EgressResponse;
+    if (opts.providerEgress !== undefined) {
+      response = await opts.providerEgress.request({
+        originKey: opts.originKey ?? "mcp-sse",
+        url,
+        method,
+        headers,
+        ...(body === undefined ? {} : { body }),
+        secretValues: secrets,
+        privileged: true,
+        redirect: "deny",
+        limits,
+        signal,
+      });
+    } else {
+      if (opts.fetchImpl === undefined) {
+        throw new Error("ProviderEgress or guarded fetchImpl is required (Task 2 wiring).");
+      }
+      const legacy = await opts.fetchImpl(url, {
+        method,
+        headers,
+        ...(body === undefined ? {} : { body: body as unknown as BodyInit }),
+        redirect: "manual",
+        signal,
+      });
+      response = egressResponseFromDecodedFetch(legacy, url);
+    }
+    await assertBoundedHeadersOrCancel(response, limits);
+    return response;
+  }
+
+  function handleData(data: string, secrets: readonly string[]): void {
+    if (postUrl === null) {
+      const endpoint = new URL(data, opts.url);
+      if (endpoint.origin !== new URL(opts.url).origin || endpoint.username !== "" || endpoint.password !== "") {
+        throw new Error("MCP SSE endpoint origin was refused");
+      }
+      postUrl = endpoint.toString();
       endpointResolve?.();
       return;
     }
-    if (event !== "" && event !== "message") return; // ping etc. — ignored
     let parsed: unknown;
     try {
       parsed = JSON.parse(data);
     } catch {
-      return; // a frame we cannot parse is dropped, not fatal
-    }
-    if (typeof parsed === "object" && parsed !== null) msgCb?.(parsed as JsonRpcMessage);
-  }
-
-  /**
-   * Pump the GET event stream: line-buffered across chunk boundaries (a data
-   * line may split across reads), `:` comments skipped, frames dispatched on
-   * blank lines. Stream end without a user close is an UNEXPECTED close.
-   */
-  async function readLoop(res: Response): Promise<void> {
-    const reader = res.body?.getReader();
-    if (reader === undefined) {
-      fireClose(false);
       return;
     }
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let eventName = "";
-    let dataLines: string[] = [];
+    const message = projectMcpRpcMessage(parsed, redactor, secrets);
+    if (message !== null) msgCb?.(message);
+  }
 
-    const handleLine = (line: string): void => {
-      if (line === "") {
-        if (dataLines.length > 0) handleFrame(eventName, dataLines.join("\n"));
-        eventName = "";
-        dataLines = [];
-        return;
-      }
-      if (line.startsWith(":")) return; // comment / keep-alive
-      const colon = line.indexOf(":");
-      const field = colon === -1 ? line : line.slice(0, colon);
-      let value = colon === -1 ? "" : line.slice(colon + 1);
-      if (value.startsWith(" ")) value = value.slice(1);
-      if (field === "event") eventName = value;
-      else if (field === "data") dataLines.push(value);
-    };
-
+  async function readLoop(response: EgressResponse, secrets: readonly string[]): Promise<void> {
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let nl: number;
-        while ((nl = buffer.indexOf("\n")) !== -1) {
-          const raw = buffer.slice(0, nl);
-          buffer = buffer.slice(nl + 1);
-          handleLine(raw.endsWith("\r") ? raw.slice(0, -1) : raw);
-        }
+      await readBoundedSse(response, limits, (data) => handleData(data, secrets));
+      if (postUrl === null) endpointReject?.(new Error("MCP SSE stream ended before its endpoint event"));
+      fireClose(closed);
+    } catch (error) {
+      if (postUrl === null) {
+        endpointReject?.(redactor.error(new Error("MCP SSE stream failed before its endpoint event"), secrets));
       }
-      buffer += decoder.decode();
-      if (buffer !== "") handleLine(buffer.replace(/\r$/, ""));
-      handleLine(""); // flush a trailing unterminated frame
-    } catch {
-      // aborted by close() (expected, already reported) or a dropped socket
-      // (unexpected, reported below)
+      fireClose(false);
     }
-    fireClose(closed);
   }
 
   async function start(): Promise<void> {
     if (closed) throw new Error("MCP SSE transport is closed");
     if (started) return;
     started = true;
-    const headers = await authHeaders();
-    headers.accept = "text/event-stream";
-    const res = await fetchImpl(opts.url, { headers, signal: abort.signal });
-    if (!res.ok) {
-      await res.body?.cancel().catch(() => {});
-      throw new Error(`MCP server refused the SSE stream with HTTP ${res.status}`);
+    try {
+      const { headers, secrets } = await auth();
+      headers.accept = "text/event-stream";
+      const response = await request(new URL(opts.url), "GET", headers, undefined, secrets);
+      if (response.status === 401) {
+        const challenge = response.headers.get("www-authenticate");
+        await response.body.cancel().catch(() => {});
+        throw new McpAuthRequiredError(401, challenge === null ? null : redactor.text(challenge, secrets));
+      }
+      if (response.status < 200 || response.status >= 300) {
+        await response.body.cancel().catch(() => {});
+        throw new Error(`MCP server refused the SSE stream with HTTP ${response.status}`);
+      }
+      void readLoop(response, secrets);
+      await endpointReady;
+    } catch (error) {
+      started = false;
+      if (error instanceof McpAuthRequiredError) throw error;
+      if (error instanceof EgressLimitError) throw redactor.error(error);
+      if (error instanceof Error && /^MCP server refused the SSE stream with HTTP \d+$/.test(error.message)) {
+        throw error;
+      }
+      throw redactor.error(new Error("MCP SSE transport failed to start."));
     }
-    void readLoop(res);
-    await endpointReady; // start() resolves once the POST target is known
   }
 
   async function send(msg: JsonRpcMessage): Promise<void> {
-    if (closed) throw new Error("MCP SSE transport is closed");
-    if (postUrl === null) throw new Error("MCP SSE transport has no POST endpoint yet");
-    const headers = await authHeaders();
-    headers["content-type"] = "application/json";
-    const res = await fetchImpl(postUrl, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(msg),
-    });
-    if (res.status === 401) {
-      await res.body?.cancel().catch(() => {});
-      throw new McpAuthRequiredError(res.status, res.headers.get("www-authenticate"));
+    const secrets = Object.values(baseHeaders).filter((value) => value !== "");
+    try {
+      if (closed) throw new Error("MCP SSE transport is closed");
+      if (postUrl === null) throw new Error("MCP SSE transport has no POST endpoint yet");
+      const { headers, secrets: authSecrets } = await auth();
+      secrets.push(...authSecrets);
+      headers["content-type"] = "application/json";
+      const response = await request(
+        new URL(postUrl),
+        "POST",
+        headers,
+        new TextEncoder().encode(JSON.stringify(msg)),
+        secrets,
+      );
+      if (response.status === 401) {
+        const challenge = response.headers.get("www-authenticate");
+        await response.body.cancel().catch(() => {});
+        throw new McpAuthRequiredError(401, challenge === null ? null : redactor.text(challenge, secrets));
+      }
+      if (response.status < 200 || response.status >= 300) {
+        await response.body.cancel().catch(() => {});
+        throw new Error(`MCP server returned HTTP ${response.status} for the POST endpoint`);
+      }
+      await readBoundedBody(response, limits);
+    } catch (error) {
+      if (error instanceof McpAuthRequiredError) throw error;
+      if (error instanceof EgressLimitError) throw redactor.error(error, secrets);
+      if (error instanceof Error && error.message.startsWith("MCP SSE transport")) throw error;
+      if (error instanceof Error && /^MCP server returned HTTP \d+ for the POST endpoint$/.test(error.message)) {
+        throw error;
+      }
+      throw redactor.error(new Error("MCP SSE POST failed."), secrets);
     }
-    if (!res.ok) {
-      await res.body?.cancel().catch(() => {});
-      throw new Error(`MCP server returned HTTP ${res.status} for the POST endpoint`);
-    }
-    await res.text(); // drain (202s carry no body)
   }
 
   const transport: McpTransport = {

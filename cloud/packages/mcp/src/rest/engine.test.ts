@@ -28,6 +28,8 @@ import {
 import { createGoogleDriveHandler, createS3Handler } from "./descriptors/data.js";
 import type { McpCallContext } from "../transports/native.js";
 import type { GuardedFetch } from "../ssrf.js";
+import type { ProviderEgress } from "../egress/responseLimits.js";
+import type { ProviderApproval } from "../providers/types.js";
 
 interface Call {
   url: string;
@@ -49,7 +51,30 @@ function makeCtx(
   fetchImpl: GuardedFetch,
   uid = "u1",
 ): McpCallContext {
-  return { uid, secrets, workspace: {}, fetchImpl };
+  return { uid, secrets, workspace: {}, fetchImpl, mode: "auto", planMode: false, unattended: false } as McpCallContext;
+}
+
+function approvalCtx(
+  secrets: Record<string, string>,
+  fetchImpl: GuardedFetch,
+  approve: (approval: ProviderApproval) => Promise<{
+    decision: "allow" | "deny" | "always";
+    approval?: ProviderApproval;
+  }>,
+): McpCallContext {
+  return {
+    ...makeCtx(secrets, fetchImpl),
+    sessionId: "session-1",
+    runId: "run-1",
+    userId: "u1",
+    connectionId: "connection-1",
+    providerId: "slack",
+    isSubagent: false,
+    depth: 0,
+    callKey: "call-1",
+    signal: new AbortController().signal,
+    approveProvider: approve,
+  } as McpCallContext;
 }
 
 const ALL_DESCRIPTORS = [...DEV_DESCRIPTORS, ...DATA_DESCRIPTORS, ...COMMS_DESCRIPTORS];
@@ -89,7 +114,7 @@ describe("rest engine", () => {
     expect(calls[0].url).toBe("https://git.example.com/api/v4/projects");
   });
 
-  it("injects bearer auth with prefix and posts the json body map (linear)", async () => {
+  it("rejects model-supplied GraphQL before reading credentials or fetching (linear)", async () => {
     const { calls, impl } = fakeFetch();
     const body = { query: "query { issues(first: 20) { nodes { id title } } }", variables: { x: 1 } };
     const r = await createRestHandler(byId("linear")).callTool(
@@ -97,12 +122,9 @@ describe("rest engine", () => {
       { body },
       makeCtx({ api_key: "lin_1" }, impl),
     );
-    expect(r.isError).toBe(false);
-    expect(calls[0].url).toBe("https://api.linear.app/graphql");
-    expect(calls[0].init?.method).toBe("POST");
-    expect(headersOf(calls[0]).Authorization).toBe("Bearer lin_1");
-    expect(calls[0].init?.body).toBe(JSON.stringify(body));
-    expect(headersOf(calls[0])["content-type"]).toBe("application/json");
+    expect(r.isError).toBe(true);
+    expect(r.text).toMatch(/unavailable|invalid/i);
+    expect(calls).toHaveLength(0);
   });
 
   it("injects apiKeyHeader by name (figma X-Figma-Token)", async () => {
@@ -154,7 +176,7 @@ describe("rest engine", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("form-encodes formBodyArg bodies (stripe-style)", async () => {
+  it("rejects arbitrary formBodyArg bodies instead of forwarding them", async () => {
     const stripeLike: RestServiceDescriptor = {
       curatedId: "stripe-like",
       displayName: "Stripe Test",
@@ -176,22 +198,21 @@ describe("rest engine", () => {
       ],
     };
     const { calls, impl } = fakeFetch();
-    await createRestHandler(stripeLike).callTool(
+    const r = await createRestHandler(stripeLike).callTool(
       "create_invoice",
       { body: { customer_id: "cus_1", amount: 100, metadata: { order: "o-9" }, items: ["a", "b"] } },
       makeCtx({ secret_key: "sk_1" }, impl),
     );
-    expect(headersOf(calls[0])["content-type"]).toBe("application/x-www-form-urlencoded");
-    expect(calls[0].init?.body).toBe(
-      "customer_id=cus_1&amount=100&metadata%5Border%5D=o-9&items%5B0%5D=a&items%5B1%5D=b",
-    );
+    expect(r.isError).toBe(true);
+    expect(r.text).toMatch(/unavailable|invalid/i);
+    expect(calls).toHaveLength(0);
   });
 
   it("missing credential returns the exact configure-first text without fetching", async () => {
     const { calls, impl } = fakeFetch();
-    const r = await createRestHandler(byId("linear")).callTool("list_issues", { body: {} }, makeCtx({}, impl));
+    const r = await createRestHandler(byId("gitlab")).callTool("list_projects", {}, makeCtx({}, impl));
     expect(r.isError).toBe(true);
-    expect(r.text).toBe("Configure Linear API key first: open the MCP settings for Linear Sync.");
+    expect(r.text).toBe("Configure GitLab personal access token first: open the MCP settings for GitLab MCP.");
     expect(calls).toHaveLength(0);
   });
 
@@ -212,7 +233,7 @@ describe("rest engine", () => {
     );
   });
 
-  it("invalid timeout_seconds surfaces as an isError result", async () => {
+  it("wrong-type timeout_seconds is rejected before fetching", async () => {
     const { calls, impl } = fakeFetch();
     const r = await createRestHandler(byId("slack")).callTool(
       "list_channels",
@@ -220,31 +241,34 @@ describe("rest engine", () => {
       makeCtx({ bot_token: "xoxb-1" }, impl),
     );
     expect(r.isError).toBe(true);
-    expect(r.text).toContain('Invalid timeout_seconds "abc": expected a number.');
+    expect(r.text).toBe("Invalid operation arguments.");
     expect(calls).toHaveLength(0);
   });
 
-  it("an oversized timeout clamps to 300 s and still sends with an abort signal", async () => {
+  it("an oversized timeout is rejected rather than clamped into a request", async () => {
     const { calls, impl } = fakeFetch();
     const r = await createRestHandler(byId("slack")).callTool(
       "list_channels",
-      { timeout_seconds: "999" },
+      { timeout_seconds: 999 },
       makeCtx({ bot_token: "xoxb-1" }, impl),
     );
-    expect(r.isError).toBe(false);
-    expect(calls).toHaveLength(1);
-    expect(calls[0].init?.signal).toBeInstanceOf(AbortSignal);
+    expect(r.isError).toBe(true);
+    expect(r.text).toBe("Invalid operation arguments.");
+    expect(calls).toHaveLength(0);
   });
 
-  it("non-2xx responses come back verbatim with the status line", async () => {
-    const { calls, impl } = fakeFetch(404, '{"ok":false,"error":"channel_not_found"}');
+  it("non-2xx responses expose only a bounded status error", async () => {
+    const { calls, impl } = fakeFetch(404, '{"ok":false,"error":"channel_not_found","echo":"xoxb-1"}');
     const r = await createRestHandler(byId("slack")).callTool(
       "history",
       { channel: "C1" },
       makeCtx({ bot_token: "xoxb-1" }, impl),
     );
     expect(r.isError).toBe(true);
-    expect(r.text).toBe('HTTP 404\n{"ok":false,"error":"channel_not_found"}');
+    expect(r.text).toBe("Provider request failed (HTTP 404).");
+    expect(r.text).not.toContain("channel_not_found");
+    expect(r.text).not.toContain("xoxb-1");
+    expect(calls).toHaveLength(1);
   });
 
   it("trims oversized results at 6000 chars", async () => {
@@ -262,11 +286,12 @@ describe("rest engine", () => {
     expect(r.text.endsWith("AAAA")).toBe(true);
   });
 
-  it("unknown tools error with the dart wording", async () => {
+  it("unknown tools fail closed without reflecting model-controlled text", async () => {
     const { calls, impl } = fakeFetch();
-    const r = await createRestHandler(byId("gitlab")).callTool("nope", {}, makeCtx({ token: "t" }, impl));
+    const r = await createRestHandler(byId("gitlab")).callTool("nope-secret-canary", {}, makeCtx({ token: "t" }, impl));
     expect(r.isError).toBe(true);
-    expect(r.text).toBe('Unknown tool: nope for plugin "GitLab MCP".');
+    expect(r.text).toBe("Unknown provider operation.");
+    expect(r.text).not.toContain("secret-canary");
     expect(calls).toHaveLength(0);
   });
 
@@ -281,19 +306,19 @@ describe("rest engine", () => {
     expect(headersOf(calls[0]).Authorization).toBeUndefined();
   });
 
-  it("expands query-map args and adds static headers (supabase select)", async () => {
+  it("rejects open query-map passthrough before fetching", async () => {
     const { calls, impl } = fakeFetch();
-    await createRestHandler(byId("supabase")).callTool(
+    const r = await createRestHandler(byId("supabase")).callTool(
       "select",
       { table: "tasks", query: { select: "*", status: "eq.done" } },
       makeCtx({ service_key: "sk", base_url: "https://xyz.supabase.co" }, impl),
     );
-    expect(calls[0].url).toBe("https://xyz.supabase.co/rest/v1/tasks?select=*&status=eq.done");
-    expect(headersOf(calls[0]).Authorization).toBe("Bearer sk");
-    expect(headersOf(calls[0]).apikey).toBe("sk");
+    expect(r.isError).toBe(true);
+    expect(r.text).toMatch(/unavailable|invalid/i);
+    expect(calls).toHaveLength(0);
   });
 
-  it("refuses unfiltered supabase writes", async () => {
+  it("quarantines supabase arbitrary-body writes, including unfiltered attempts", async () => {
     const { calls, impl } = fakeFetch();
     const r = await createRestHandler(byId("supabase")).callTool(
       "update",
@@ -301,15 +326,13 @@ describe("rest engine", () => {
       makeCtx({ service_key: "sk", base_url: "https://xyz.supabase.co" }, impl),
     );
     expect(r.isError).toBe(true);
-    expect(r.text).toBe(
-      'Tool "update" requires a non-empty "query" filter map (unfiltered writes are refused).',
-    );
+    expect(r.text).toMatch(/unavailable|invalid/i);
     expect(calls).toHaveLength(0);
   });
 
-  it("synthesizes data-api envelopes (mongodb find)", async () => {
+  it("rejects raw JSON strings and wrong scalar types in typed body fields", async () => {
     const { calls, impl } = fakeFetch();
-    await createRestHandler(byId("mongodb")).callTool(
+    const r = await createRestHandler(byId("mongodb")).callTool(
       "find",
       { db: "mydb", coll: "things", filter_json: '{"status":"open"}', limit: "7" },
       makeCtx(
@@ -321,18 +344,9 @@ describe("rest engine", () => {
         impl,
       ),
     );
-    expect(calls[0].url).toBe("https://data.mongodb-api.com/app/x/endpoint/data/v1/action/find");
-    expect(headersOf(calls[0])["api-key"]).toBe("K");
-    expect(headersOf(calls[0])["content-type"]).toBe("application/json");
-    expect(calls[0].init?.body).toBe(
-      JSON.stringify({
-        dataSource: "Cluster0",
-        database: "mydb",
-        collection: "things",
-        filter: { status: "open" },
-        limit: 7,
-      }),
-    );
+    expect(r.isError).toBe(true);
+    expect(r.text).toBe("Invalid operation arguments.");
+    expect(calls).toHaveLength(0);
   });
 
   it("builds nested notion create_page bodies and omits absent children", async () => {
@@ -426,6 +440,310 @@ describe("rest engine", () => {
     expect(r.isError).toBe(true);
     expect(r.text).toBe("Missing required argument: name");
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("typed provider execution boundaries", () => {
+  it("rejects unknown, wrong, oversized, transport-overriding, body, and GraphQL args before connection resolution", async () => {
+    const attempts: Record<string, unknown>[] = [
+      { unknown: true },
+      { search: 42 },
+      { search: "x".repeat(20_000) },
+      { baseUrl: "https://evil.example" },
+      { base_url: "https://evil.example" },
+      { host: "evil.example" },
+      { data_api_base: "https://evil.example" },
+      { proxy: "http://proxy.example" },
+      { headers: { authorization: "attacker" } },
+      { auth: "none" },
+      { body: { arbitrary: true } },
+      { query: "query { viewer { id } }" },
+      { variables: { arbitrary: true } },
+      { url: "https://evil.example" },
+      { method: "POST" },
+    ];
+    for (const args of attempts) {
+      let resolutions = 0;
+      const { calls, impl } = fakeFetch();
+      const result = await createRestHandler(byId("gitlab"), {
+        resolveConnectionConfig: async () => {
+          resolutions++;
+          return { token: "tok" };
+        },
+      }).callTool("list_projects", args, makeCtx({ token: "tok" }, impl));
+      expect(result.isError, JSON.stringify(args)).toBe(true);
+      expect(calls, JSON.stringify(args)).toHaveLength(0);
+      expect(resolutions, JSON.stringify(args)).toBe(0);
+    }
+  });
+
+  it("rejects an unsupported descriptor method before connection resolution", async () => {
+    const descriptor: RestServiceDescriptor = {
+      ...byId("gitlab"),
+      tools: [{ ...byId("gitlab").tools[0], method: "CONNECT" as "GET" }],
+    };
+    let resolutions = 0;
+    const { calls, impl } = fakeFetch();
+    const result = await createRestHandler(descriptor, {
+      resolveConnectionConfig: async () => {
+        resolutions++;
+        return { token: "tok" };
+      },
+    }).callTool("list_projects", {}, makeCtx({ token: "tok" }, impl));
+    expect(result.isError).toBe(true);
+    expect(calls).toHaveLength(0);
+    expect(resolutions).toBe(0);
+  });
+
+  it("requires an exactly bound per-action approval before an external communication", async () => {
+    let prompts = 0;
+    const { calls, impl } = fakeFetch(200, '{"ok":true}');
+    const result = await createRestHandler(byId("slack")).callTool(
+      "send_message",
+      { channel: "C1", text: "hello" },
+      approvalCtx({ bot_token: "xoxb-1" }, impl, async (approval) => {
+        prompts++;
+        expect(approval.operationId).toBe("send_message");
+        expect(approval.connectionId).toBe("connection-1");
+        expect(approval.userId).toBe("u1");
+        return { decision: "allow", approval };
+      }),
+    );
+    expect(result.isError).toBe(false);
+    expect(prompts).toBe(1);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("does not send a high-risk operation when approval is missing or denied", async () => {
+    for (const approve of [
+      undefined,
+      async () => ({ decision: "deny" as const }),
+    ]) {
+      const { calls, impl } = fakeFetch();
+      const base = makeCtx({ bot_token: "xoxb-1" }, impl);
+      const ctx = {
+        ...base,
+        sessionId: "session-1",
+        runId: "run-1",
+        userId: "u1",
+        connectionId: "connection-1",
+        providerId: "slack",
+        approveProvider: approve,
+      } as McpCallContext;
+      const result = await createRestHandler(byId("slack")).callTool(
+        "send_message",
+        { channel: "C1", text: "hello" },
+        ctx,
+      );
+      expect(result.isError).toBe(true);
+      expect(calls).toHaveLength(0);
+    }
+  });
+
+  it("redacts echoed credentials and secret-bearing URLs from successful output", async () => {
+    const { impl } = fakeFetch(200, '{"echo":"xoxb-1","url":"https://slack.com/api?token=xoxb-1"}');
+    const result = await createRestHandler(byId("slack")).callTool(
+      "history",
+      { channel: "C1" },
+      makeCtx({ bot_token: "xoxb-1" }, impl),
+    );
+    expect(result.isError).toBe(false);
+    expect(result.text).not.toContain("xoxb-1");
+    expect(result.text).toContain("[REDACTED]");
+  });
+
+  it("uses the narrow ProviderEgress consumer instead of the legacy fetch path", async () => {
+    const requests: Parameters<ProviderEgress["request"]>[0][] = [];
+    const providerEgress: ProviderEgress = {
+      async request(req) {
+        requests.push(req);
+        return {
+          status: 200,
+          headers: new Headers({ "content-type": "application/json" }),
+          body: new Response('{"ok":true}').body!,
+          origin: new URL("https://gitlab.com"),
+          remoteAddress: "192.0.2.10",
+        };
+      },
+      async close() {},
+    };
+    const legacy = fakeFetch();
+    const result = await createRestHandler(byId("gitlab"), { providerEgress }).callTool(
+      "list_projects",
+      { search: "typed" },
+      makeCtx({ token: "tok" }, legacy.impl),
+    );
+    expect(result.isError).toBe(false);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].originKey).toBe("gitlab");
+    expect(requests[0].redirect).toBe("deny");
+    expect(requests[0].secretValues).toContain("tok");
+    expect(legacy.calls).toHaveLength(0);
+  });
+
+  it("uses a server-owned Linear GraphQL document with typed variables", async () => {
+    const { calls, impl } = fakeFetch(200, '{"data":{"issues":{"nodes":[]}}}');
+    const result = await createRestHandler(byId("linear")).callTool(
+      "list_issues",
+      { first: 2 },
+      makeCtx({ api_key: "lin_1" }, impl),
+    );
+    expect(result.isError).toBe(false);
+    expect(calls).toHaveLength(1);
+    const body = JSON.parse(calls[0].init?.body as string) as { query: string; variables: unknown };
+    expect(body.query).toContain("issues(first: $first)");
+    expect(body.variables).toEqual({ first: 2 });
+    expect(body.query).not.toContain("viewer");
+    const tools = await createRestHandler(byId("linear")).listTools();
+    const list = tools.find((tool) => tool.name === "list_issues");
+    expect(list?.inputSchema).toMatchObject({ additionalProperties: false });
+    expect(JSON.stringify(list?.inputSchema)).not.toContain('"body"');
+    expect((list as { effect?: string } | undefined)?.effect).toBe("read");
+  });
+
+  it("constructs Exa search from typed fields instead of an arbitrary body", async () => {
+    const { calls, impl } = fakeFetch(200, '{"results":[]}');
+    const result = await createRestHandler(byId("exa")).callTool(
+      "search",
+      { query: "typed search", numResults: 3 },
+      makeCtx({ api_key: "exa_1" }, impl),
+    );
+    expect(result.isError).toBe(false);
+    expect(JSON.parse(calls[0].init?.body as string)).toEqual({ query: "typed search", numResults: 3 });
+    const tools = await createRestHandler(byId("exa")).listTools();
+    const search = tools.find((tool) => tool.name === "search");
+    expect(JSON.stringify(search?.inputSchema)).not.toContain('"body"');
+    expect((search as { effect?: string } | undefined)?.effect).toBe("read");
+  });
+
+  it("rejects empty and whitespace-only required legacy strings before writes", async () => {
+    for (const title of ["", " \t "]) {
+      const { calls, impl } = fakeFetch();
+      const result = await createRestHandler(byId("gitlab")).callTool(
+        "create_issue",
+        { project_id: "P", title },
+        makeCtx({ token: "tok" }, impl),
+      );
+      expect(result.isError, JSON.stringify(title)).toBe(true);
+      expect(calls, JSON.stringify(title)).toHaveLength(0);
+    }
+  });
+
+  it("executes the approval snapshot when caller args mutate after the approval await", async () => {
+    const { calls, impl } = fakeFetch(200, '{"ok":true}');
+    const args = { channel: "C-original", text: "before-approval" };
+    const pending = createRestHandler(byId("slack")).callTool(
+      "send_message",
+      args,
+      approvalCtx({ bot_token: "xoxb-1" }, impl, async (approval) => ({ decision: "allow", approval })),
+    );
+    args.channel = "C-attacker";
+    args.text = "after-approval";
+    const result = await pending;
+    expect(result.isError).toBe(false);
+    expect(calls).toHaveLength(1);
+    const url = new URL(calls[0].url);
+    expect(url.searchParams.get("channel")).toBe("C-original");
+    expect(url.searchParams.get("text")).toBe("before-approval");
+  });
+
+  it("uses the same deep args snapshot after connection resolution awaits", async () => {
+    let entered!: () => void;
+    const enteredResolver = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const resolverGate = new Promise<void>((resolve) => { release = resolve; });
+    const args = {
+      db: "mydb",
+      coll: "things",
+      filter_json: { status: "open", nested: { rank: 1 } },
+      limit: 7,
+    };
+    const descriptor: RestServiceDescriptor = {
+      ...byId("mongodb"),
+      tools: [{
+        ...byId("mongodb").tools[0],
+        inputSchema: {
+          type: "object",
+          properties: {
+            db: { type: "string" },
+            coll: { type: "string" },
+            filter_json: {
+              type: "object",
+              properties: {
+                status: { type: "string" },
+                nested: { type: "object", properties: { rank: { type: "number" } } },
+              },
+            },
+            limit: { type: "integer", minimum: 1, maximum: 100 },
+          },
+          required: ["db", "coll"],
+        },
+      }],
+    };
+    const { calls, impl } = fakeFetch(200, '{"documents":[]}');
+    const pending = createRestHandler(descriptor, {
+      resolveConnectionConfig: async () => {
+        entered();
+        await resolverGate;
+        return {
+          api_key: "K",
+          data_api_base: "https://data.mongodb-api.com/app/x/endpoint/data/v1",
+          data_source: "Cluster0",
+        };
+      },
+    }).callTool("find", args, makeCtx({}, impl));
+    await enteredResolver;
+    args.filter_json.status = "closed";
+    args.filter_json.nested.rank = 99;
+    args.limit = 99;
+    release();
+    const result = await pending;
+    expect(result.isError).toBe(false);
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0].init?.body as string)).toEqual({
+      dataSource: "Cluster0",
+      database: "mydb",
+      collection: "things",
+      filter: { status: "open", nested: { rank: 1 } },
+      limit: 7,
+    });
+  });
+
+  it("cancels the response body when REST header validation fails", async () => {
+    let cancelled = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull() {},
+      cancel() { cancelled++; },
+    });
+    const impl: GuardedFetch = async () => new Response(body, {
+      status: 200,
+      headers: { "x-overflow": "x".repeat(9_000) },
+    });
+    const result = await createRestHandler(byId("gitlab")).callTool(
+      "list_projects",
+      {},
+      makeCtx({ token: "tok" }, impl),
+    );
+    expect(result.isError).toBe(true);
+    expect(cancelled).toBe(1);
+  });
+
+  it("publishes closed schemas plus effect, approval, request, limits, and output metadata", async () => {
+    const tools = await createRestHandler(byId("slack")).listTools();
+    const send = tools.find((tool) => tool.name === "send_message") as typeof tools[number] & {
+      effect: string;
+      approval: string;
+      request: { originKey: string };
+      limits: { responseBytes: number };
+      outputPolicy: { kind: string };
+    };
+    expect(send.effect).toBe("external_communication");
+    expect(send.approval).toBe("per_action");
+    expect(send.request.originKey).toBe("slack");
+    expect(send.limits.responseBytes).toBeGreaterThan(0);
+    expect(send.outputPolicy.kind).toBe("redacted_text");
+    expect(send.inputSchema).toMatchObject({ additionalProperties: false });
+    expect(JSON.stringify(send.inputSchema)).toContain("maxLength");
   });
 });
 

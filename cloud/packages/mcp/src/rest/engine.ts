@@ -55,7 +55,50 @@
 import { createHash, createHmac } from "node:crypto";
 import { trimToolResult, type McpToolDef, type McpToolCallResult } from "../client.js";
 import type { McpCallContext, NativeMcpHandler } from "../transports/native.js";
-import { followGuardedRedirects } from "../native/fetch.js";
+import {
+  assertBoundedHeadersOrCancel,
+  egressResponseFromDecodedFetch,
+  readBoundedBody,
+  type EgressLimits,
+  type EgressResponse,
+  type ProviderEgress,
+  type StreamLimits,
+} from "../egress/responseLimits.js";
+import { createSecretRedactor, type SecretRedactor } from "../egress/redactor.js";
+import {
+  assertClosedProviderSchema,
+  authorizeProviderOperation,
+  normalizeConnectionConfig,
+  snapshotProviderArgs,
+  validateProviderArgs,
+  type ApprovalPolicy,
+  type Effect,
+  type ProviderOperation,
+  type ProviderOutputPolicy,
+  type ToolContext,
+} from "../providers/types.js";
+
+export { authorizeProviderOperation } from "../providers/types.js";
+export type {
+  ApprovalPolicy,
+  Effect,
+  ProviderApproval,
+  ProviderAuthorization,
+  ProviderDefinition,
+  ProviderOperation,
+  ProviderOutputPolicy,
+  RunPolicy,
+  ToolContext,
+} from "../providers/types.js";
+export type {
+  EgressLimits,
+  EgressRequest,
+  EgressResponse,
+  ProviderEgress,
+  StreamLimits,
+} from "../egress/responseLimits.js";
+export { createSecretRedactor } from "../egress/redactor.js";
+export type { SecretRedactor } from "../egress/redactor.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -66,7 +109,7 @@ export type RestAuthKind = "none" | "bearer" | "apiKeyHeader" | "basic" | "query
 export interface RestToolDef {
   name: string;
   description: string;
-  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD";
   path: string;
   inputSchema: Record<string, unknown>;
   queryArgs?: string[];
@@ -82,6 +125,14 @@ export interface RestToolDef {
   fixedQuery?: Record<string, string>;
   /** Args that must resolve to a non-empty map (unfiltered-write refusal). */
   requireQueryArgs?: string[];
+  /** Typed-provider metadata; legacy descriptors receive conservative defaults. */
+  effect?: Effect;
+  approval?: ApprovalPolicy;
+  requiredScopes?: readonly string[];
+  request?: ProviderOperation["request"];
+  limits?: ProviderOperation["limits"];
+  outputPolicy?: ProviderOutputPolicy;
+  custom?: boolean;
 }
 
 export interface CredentialField {
@@ -109,6 +160,24 @@ export interface RestServiceDescriptor {
   tools: RestToolDef[];
   /** Verbatim headers on every request; `{secret}` resolves to the credential. */
   staticHeaders?: Record<string, string>;
+  /** Authenticated config is validated separately from model operation args. */
+  connectionSchema?: Record<string, unknown>;
+}
+
+export interface RestHandlerOptions {
+  /** Task 2 supplies this pinned implementation; no DNS claims are made here. */
+  providerEgress?: ProviderEgress;
+  resolveConnectionConfig?: (ctx: McpCallContext) => Promise<Record<string, unknown>>;
+  redactor?: SecretRedactor;
+}
+
+export interface PublishedRestToolDef extends McpToolDef {
+  effect: Effect;
+  approval: ApprovalPolicy;
+  requiredScopes: readonly string[];
+  request: ProviderOperation["request"];
+  limits: ProviderOperation["limits"];
+  outputPolicy: ProviderOutputPolicy;
 }
 
 export const REST_DEFAULT_TIMEOUT_S = 30;
@@ -181,6 +250,35 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+function connectionSchemaFor(d: RestServiceDescriptor): Record<string, unknown> {
+  if (d.connectionSchema !== undefined) {
+    assertClosedProviderSchema(d.connectionSchema);
+    return d.connectionSchema;
+  }
+  const properties: Record<string, unknown> = {};
+  const fields = [
+    ...(d.credentialKey === "" ? [] : [{ key: d.credentialKey, secret: true }]),
+    ...(d.extraConfig ?? []),
+  ];
+  for (const field of fields) {
+    properties[field.key] = {
+      type: "string",
+      maxLength: field.secret ? 16_384 : /url|host|base/i.test(field.key) ? 2_048 : 1_024,
+    };
+  }
+  return {
+    type: "object",
+    properties,
+    required: [],
+    additionalProperties: false,
+    maxProperties: Object.keys(properties).length,
+  };
+}
+
+function allSecretValues(stored: Record<string, string>, base?: string): string[] {
+  return [...Object.values(stored), ...(base === undefined ? [] : [base])].filter((value) => value !== "");
+}
+
 // ---------------------------------------------------------------------------
 // Timeout (Dart parity: tolerant parse, default 30, clamped 5..300)
 // ---------------------------------------------------------------------------
@@ -237,9 +335,8 @@ function cleanBaseUrl(raw: string): string {
 
 type SubstituteMode = "wholeBase" | "hostPart" | "path";
 
-function substitute(
+function substituteConnection(
   template: string,
-  args: Record<string, unknown>,
   stored: Record<string, string>,
   encode: (v: string) => string,
 ): string {
@@ -247,12 +344,33 @@ function substitute(
     const eq = rawName.indexOf("=");
     const name = eq >= 0 ? rawName.slice(0, eq) : rawName;
     const fallback = eq >= 0 ? rawName.slice(eq + 1) : undefined;
-    const fromArgs = args[name];
-    if (fromArgs !== undefined && fromArgs !== null && String(fromArgs).trim() !== "") {
-      return encode(String(fromArgs));
-    }
     const fromStored = (stored[name] ?? "").trim();
     if (fromStored !== "") return encode(fromStored);
+    if (fallback !== undefined) return encode(fallback);
+    throw new MissingPlaceholderError(name);
+  });
+}
+
+function substituteOperation(
+  template: string,
+  args: Record<string, unknown>,
+  stored: Record<string, string>,
+  connectionKeys: ReadonlySet<string>,
+  encode: (v: string) => string,
+): string {
+  return template.replace(/\{([^{}]+)\}/g, (_m, rawName: string) => {
+    const eq = rawName.indexOf("=");
+    const name = eq >= 0 ? rawName.slice(0, eq) : rawName;
+    const fallback = eq >= 0 ? rawName.slice(eq + 1) : undefined;
+    if (connectionKeys.has(name)) {
+      const fromStored = (stored[name] ?? "").trim();
+      if (fromStored !== "") return encode(fromStored);
+    } else {
+      const fromArgs = args[name];
+      if (fromArgs !== undefined && fromArgs !== null && String(fromArgs).trim() !== "") {
+        return encode(String(fromArgs));
+      }
+    }
     if (fallback !== undefined) return encode(fallback);
     throw new MissingPlaceholderError(name);
   });
@@ -262,40 +380,11 @@ function substitute(
 // Body building
 // ---------------------------------------------------------------------------
 
-/** Dart `_bodyJson`: map/array verbatim, JSON string parsed, null → {}. */
+/** Typed object/array fields only; raw JSON documents are never parsed from model text. */
 function bodyJson(raw: unknown, key: string): unknown {
   if (raw === undefined || raw === null) return {};
   if (isPlainObject(raw) || Array.isArray(raw)) return raw;
-  if (typeof raw === "string") {
-    if (raw.trim() === "") return {};
-    try {
-      return JSON.parse(raw) as unknown;
-    } catch (err) {
-      throw new RestFormatException(`Invalid ${key} JSON: ${messageOf(err)}`);
-    }
-  }
-  throw new RestFormatException(`Invalid ${key}: expected a JSON object.`);
-}
-
-function bodyForm(raw: unknown, key: string): Record<string, unknown> {
-  if (isPlainObject(raw)) return raw;
-  throw new RestFormatException(`Invalid ${key}: expected an object of form fields.`);
-}
-
-/** Dart `_formEncode`: one-level bracket flattening (`metadata[k]`, `items[0]`). */
-function formEncode(fields: Record<string, unknown>): string {
-  const pairs: [string, string][] = [];
-  const add = (prefix: string, value: unknown): void => {
-    if (isPlainObject(value)) {
-      for (const [k, v] of Object.entries(value)) add(`${prefix}[${k}]`, v);
-    } else if (Array.isArray(value)) {
-      value.forEach((v, i) => add(`${prefix}[${i}]`, v));
-    } else {
-      pairs.push([prefix, value?.toString() ?? ""]);
-    }
-  };
-  for (const [k, v] of Object.entries(fields)) add(k, v);
-  return pairs.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
+  throw new RestFormatException(`Invalid ${key}: expected a typed JSON value.`);
 }
 
 /** Dart `_asInt`: tolerant integer parse with a fallback. */
@@ -439,28 +528,16 @@ interface BuiltBody {
 }
 
 function buildBody(
-  d: RestServiceDescriptor,
   def: RestToolDef,
   args: Record<string, unknown>,
   stored: Record<string, string>,
   secret: string,
   headers: Record<string, string>,
 ): BuiltBody {
-  if (def.method === "GET") return {};
-  if (def.jsonBodyArg !== undefined && def.formBodyArg !== undefined) {
-    throw new RestArgumentError(`Tool "${def.name}" declares both jsonBodyArg and formBodyArg.`);
-  }
+  if (def.method === "GET" || def.method === "HEAD") return {};
   if (def.bodyTemplate !== undefined) {
     headers["content-type"] = "application/json";
     return { body: JSON.stringify(buildTemplatedBody(def.bodyTemplate, args, stored, secret)) };
-  }
-  if (def.jsonBodyArg !== undefined) {
-    headers["content-type"] = "application/json";
-    return { body: JSON.stringify(bodyJson(args[def.jsonBodyArg], def.jsonBodyArg)) };
-  }
-  if (def.formBodyArg !== undefined) {
-    headers["content-type"] = "application/x-www-form-urlencoded";
-    return { body: formEncode(bodyForm(args[def.formBodyArg], def.formBodyArg)) };
   }
   return {};
 }
@@ -471,55 +548,312 @@ function buildBody(
 
 const TIMEOUT_SCHEMA = {
   type: "number",
-  description: "Request timeout in seconds (default 30, clamped 5..300).",
+  minimum: 5,
+  maximum: 300,
+  description: "Request timeout in seconds (default 30, maximum 300).",
 };
 
-/** The engine-injected tool defs for one descriptor (Dart parity: the
- * `timeout_seconds` property is added on top of the declared schema). */
-export function restToolDefs(d: RestServiceDescriptor): McpToolDef[] {
-  return d.tools.map((t) => {
-    const schema = { ...t.inputSchema } as Record<string, unknown>;
-    const properties = {
-      ...((t.inputSchema.properties as Record<string, unknown> | undefined) ?? {}),
-      timeout_seconds: { ...TIMEOUT_SCHEMA },
-    };
+const DEFAULT_OPERATION_LIMITS: ProviderOperation["limits"] = {
+  timeoutMs: 30_000,
+  responseBytes: 65_536,
+  frameBytes: 65_536,
+  pageBytes: 65_536,
+};
+
+const LEGACY_SCHEMA_KEYS = new Set([
+  "type", "description", "title", "default", "examples", "properties", "required",
+  "additionalProperties", "maxProperties", "minProperties", "items", "maxItems", "minItems",
+  "minLength", "maxLength", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "enum", "const",
+]);
+
+function normalizeLegacySchema(raw: unknown): Record<string, unknown> {
+  if (!isPlainObject(raw)) throw new RestArgumentError("Invalid provider schema.");
+  for (const key of Object.keys(raw)) {
+    if (!LEGACY_SCHEMA_KEYS.has(key)) throw new RestArgumentError("Unsupported provider schema.");
+  }
+  const schema: Record<string, unknown> = { ...raw };
+  const type = raw.type;
+  if (type === "object") {
+    const rawProperties = raw.properties ?? {};
+    if (!isPlainObject(rawProperties)) throw new RestArgumentError("Invalid provider schema properties.");
+    const properties = Object.fromEntries(
+      Object.entries(rawProperties).map(([key, value]) => [key, normalizeLegacySchema(value)]),
+    );
+    schema.properties = properties;
+    schema.additionalProperties = false;
+    schema.maxProperties = raw.maxProperties ?? Object.keys(properties).length;
+  } else if (type === "array") {
+    if (raw.items === undefined) throw new RestArgumentError("Provider arrays must declare typed items.");
+    schema.items = normalizeLegacySchema(raw.items);
+    schema.maxItems = raw.maxItems ?? 100;
+  } else if (type === "string") {
+    schema.maxLength = raw.maxLength ?? 8_192;
+  } else if (type === "number" || type === "integer") {
+    schema.minimum = raw.minimum ?? -1_000_000_000;
+    schema.maximum = raw.maximum ?? 1_000_000_000;
+  }
+  return schema;
+}
+
+interface RestOperation {
+  legacy: RestToolDef;
+  definition: ProviderOperation;
+  schema: Record<string, unknown>;
+  streamLimits: StreamLimits;
+}
+
+const LINEAR_LIST_ISSUES_QUERY =
+  "query OvidListIssues($first: Int) { issues(first: $first) { nodes { id identifier title state { name } } } }";
+const LINEAR_LIST_TEAMS_QUERY =
+  "query OvidListTeams { teams { nodes { id key name } } }";
+
+function typedObject(
+  properties: Record<string, unknown>,
+  required: readonly string[] = [],
+): Record<string, unknown> {
+  return {
+    type: "object",
+    properties,
+    required: [...required],
+    additionalProperties: false,
+    maxProperties: Object.keys(properties).length,
+  };
+}
+
+/** Convert the small set of official legacy reads whose bodies are known. */
+function typedLegacyOperation(d: RestServiceDescriptor, def: RestToolDef): RestToolDef {
+  const shared = { ...def, jsonBodyArg: undefined, formBodyArg: undefined };
+  if (d.curatedId === "linear" && def.name === "list_issues") {
     return {
-      name: t.name,
-      description: t.description,
-      inputSchema: { ...schema, properties },
+      ...shared,
+      description: "List issues with a server-owned GraphQL document and typed pagination.",
+      inputSchema: typedObject({
+        first: { type: "integer", minimum: 1, maximum: 100, default: 20 },
+      }),
+      required: [],
+      bodyTemplate: {
+        query: `const:${JSON.stringify(LINEAR_LIST_ISSUES_QUERY)}`,
+        "variables.first": "int:first:20",
+      },
     };
-  });
+  }
+  if (d.curatedId === "linear" && def.name === "list_teams") {
+    return {
+      ...shared,
+      description: "List teams with a server-owned GraphQL document.",
+      inputSchema: typedObject({}),
+      required: [],
+      bodyTemplate: { query: `const:${JSON.stringify(LINEAR_LIST_TEAMS_QUERY)}` },
+    };
+  }
+  if (d.curatedId === "exa" && def.name === "search") {
+    return {
+      ...shared,
+      description: "Search with typed query and result-count fields.",
+      inputSchema: typedObject({
+        query: { type: "string", minLength: 1, maxLength: 2_048 },
+        numResults: { type: "integer", minimum: 1, maximum: 20, default: 5 },
+      }, ["query"]),
+      required: ["query"],
+      bodyTemplate: { query: "arg:query", numResults: "int:numResults:5" },
+    };
+  }
+  if (d.curatedId === "exa" && def.name === "contents") {
+    return {
+      ...shared,
+      description: "Fetch contents for a bounded list of typed document identifiers.",
+      inputSchema: typedObject({
+        ids: {
+          type: "array",
+          minItems: 1,
+          maxItems: 20,
+          items: { type: "string", minLength: 1, maxLength: 2_048 },
+        },
+        text: { type: "boolean" },
+      }, ["ids"]),
+      required: ["ids"],
+      bodyTemplate: { ids: "arg:ids", text: "arg:text" },
+    };
+  }
+  return shared;
+}
+
+function effectFor(def: RestToolDef): Effect {
+  if (def.effect !== undefined) return def.effect;
+  const name = def.name.toLowerCase();
+  if (/^(list|get|search|history|download|query|find|contents)(_|$)/.test(name)) return "read";
+  if (/(^|_)(delete|destroy|remove)(_|$)/.test(name)) return "destructive";
+  if (/(^|_)(deploy|deployment|release|restart)(_|$)/.test(name)) return "deployment";
+  if (/(^|_)(invoice|payment|charge|refund|billing)(_|$)/.test(name)) return "financial";
+  if (/(^|_)(send|send_message|message|comment|notify|campaign)(_|$)/.test(name) || name.includes("comment")) {
+    return "external_communication";
+  }
+  if (/(^|_)(presign|credential)(_|$)/.test(name)) return "credential_use";
+  return def.method === "GET" || def.method === "HEAD" ? "read" : "write";
+}
+
+function approvalFor(def: RestToolDef, effect: Effect): ApprovalPolicy {
+  if (effect === "external_communication" || effect === "financial" || effect === "deployment" ||
+      effect === "destructive" || effect === "credential_use") {
+    return "per_action";
+  }
+  return def.approval ?? "mode";
+}
+
+function operationLimitsValid(limits: ProviderOperation["limits"]): boolean {
+  return Number.isInteger(limits.timeoutMs) && limits.timeoutMs > 0 && limits.timeoutMs <= 300_000 &&
+    Number.isInteger(limits.responseBytes) && limits.responseBytes > 0 && limits.responseBytes <= 16_777_216 &&
+    Number.isInteger(limits.frameBytes) && limits.frameBytes > 0 && limits.frameBytes <= 16_777_216 &&
+    Number.isInteger(limits.pageBytes) && limits.pageBytes > 0 && limits.pageBytes <= 16_777_216;
+}
+
+function streamLimitsFor(operation: ProviderOperation, timeoutMs = operation.limits.timeoutMs): StreamLimits {
+  const totalMs = Math.max(1, Math.min(operation.limits.timeoutMs, timeoutMs));
+  return {
+    connectMs: totalMs,
+    headersMs: totalMs,
+    idleMs: totalMs,
+    totalMs,
+    maxRedirects: 0,
+    headerBytes: 8_192,
+    responseBytes: Math.min(operation.limits.responseBytes, operation.outputPolicy.maxBytes),
+    decompressedBytes: Math.min(operation.limits.responseBytes * 4, 16_777_216),
+    sseEventBytes: operation.limits.frameBytes,
+    sseEventCount: 1_000,
+    jsonRpcFrameBytes: operation.limits.frameBytes,
+    aggregateStreamBytes: operation.limits.pageBytes,
+    toolResultBytes: 8_192,
+  };
+}
+
+function operationFor(d: RestServiceDescriptor, input: RestToolDef): RestOperation {
+  const def = typedLegacyOperation(d, input);
+  if (def.jsonBodyArg !== undefined || def.formBodyArg !== undefined) {
+    throw new RestArgumentError("Provider operation is unavailable: arbitrary request bodies are disabled.");
+  }
+  const request = def.request ?? { originKey: d.curatedId, method: def.method, pathTemplate: def.path };
+  if (!["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"].includes(request.method) || request.method !== def.method) {
+    throw new RestArgumentError("Provider operation uses an unsupported method.");
+  }
+  const schema = normalizeLegacySchema(def.inputSchema);
+  const properties = {
+    ...((schema.properties as Record<string, unknown> | undefined) ?? {}),
+    timeout_seconds: { ...TIMEOUT_SCHEMA },
+  };
+  const required = [...new Set([...((schema.required as string[] | undefined) ?? []), ...(def.required ?? [])])];
+  schema.properties = properties;
+  schema.required = required;
+  schema.additionalProperties = false;
+  schema.maxProperties = Object.keys(properties).length;
+  assertClosedProviderSchema(schema);
+
+  const limits = def.limits ?? { ...DEFAULT_OPERATION_LIMITS };
+  if (!operationLimitsValid(limits)) throw new RestArgumentError("Provider operation has invalid limits.");
+  const effect = effectFor(def);
+  const approval = approvalFor(def, effect);
+  const outputPolicy = def.outputPolicy ?? { kind: "redacted_text", maxBytes: limits.responseBytes };
+  if (outputPolicy.maxBytes <= 0 || outputPolicy.maxBytes > limits.responseBytes) {
+    throw new RestArgumentError("Provider operation has an invalid output policy.");
+  }
+  const definition: ProviderOperation = {
+    name: def.name,
+    description: def.description,
+    effect,
+    approval,
+    requiredScopes: def.requiredScopes ?? [],
+    inputSchema: schema,
+    outputPolicy,
+    request,
+    limits,
+    ...(def.custom !== undefined ? { custom: def.custom } : {}),
+  };
+  return { legacy: def, definition, schema, streamLimits: streamLimitsFor(definition) };
+}
+
+/** Published operations always carry closed schemas and execution metadata. */
+export function restToolDefs(d: RestServiceDescriptor): PublishedRestToolDef[] {
+  const published: PublishedRestToolDef[] = [];
+  for (const legacy of d.tools) {
+    try {
+      const operation = operationFor(d, legacy);
+      published.push({
+        name: operation.definition.name,
+        description: operation.definition.description,
+        inputSchema: operation.schema,
+        effect: operation.definition.effect,
+        approval: operation.definition.approval,
+        requiredScopes: operation.definition.requiredScopes,
+        request: operation.definition.request,
+        limits: operation.definition.limits,
+        outputPolicy: operation.definition.outputPolicy,
+      });
+    } catch {
+      // Unsafe legacy operations are quarantined, never published as callable.
+    }
+  }
+  return published;
 }
 
 // ---------------------------------------------------------------------------
 // The handler
 // ---------------------------------------------------------------------------
 
-export function createRestHandler(d: RestServiceDescriptor): NativeMcpHandler {
+export function createRestHandler(d: RestServiceDescriptor, options: RestHandlerOptions = {}): NativeMcpHandler {
   const labels = fieldLabels(d);
+  const redactor = options.redactor ?? createSecretRedactor();
+  const connectionSchema = connectionSchemaFor(d);
 
   async function send(
     ctx: McpCallContext,
-    urlStr: string,
-    init: RequestInit,
+    operation: RestOperation,
+    url: URL,
+    headers: Record<string, string>,
+    body: string | undefined,
+    stored: Record<string, string>,
+    base: string,
     timeoutSeconds: number,
-  ): Promise<{ text: string; status: number }> {
-    let res: Response;
+  ): Promise<{ body: Uint8Array; status: number }> {
+    const limits = streamLimitsFor(operation.definition, timeoutSeconds * 1_000);
+    const secretValues = allSecretValues(stored, base);
     try {
-      res = await followGuardedRedirects(ctx.fetchImpl, urlStr, init);
-    } catch (err) {
-      if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
-        throw new RestFormatException(`Request to ${urlStr} timed out after ${timeoutSeconds} seconds.`);
+      const response = options.providerEgress !== undefined
+        ? await options.providerEgress.request({
+            originKey: operation.definition.request.originKey,
+            url,
+            method: operation.definition.request.method,
+            headers,
+            ...(body === undefined ? {} : { body: new TextEncoder().encode(body) }),
+            secretValues,
+            privileged: true,
+            redirect: "deny",
+            limits,
+            signal: AbortSignal.timeout(limits.totalMs),
+          })
+        : await (async (): Promise<EgressResponse> => {
+            if (typeof ctx.fetchImpl !== "function") {
+              throw new Error("ProviderEgress or guarded fetchImpl is required.");
+            }
+            const legacy = await ctx.fetchImpl(url.toString(), {
+              method: operation.definition.request.method,
+              headers,
+              ...(body === undefined ? {} : { body }),
+              redirect: "manual",
+              signal: AbortSignal.timeout(limits.totalMs),
+            });
+            return egressResponseFromDecodedFetch(legacy, url);
+          })();
+      await assertBoundedHeadersOrCancel(response, limits);
+      if (response.status < 200 || response.status >= 300) {
+        await response.body.cancel().catch(() => {});
+        return { body: new Uint8Array(), status: response.status };
       }
-      throw new Error(`HTTP request failed: ${messageOf(err)}`);
-    }
-    try {
-      return { text: await res.text(), status: res.status };
-    } catch (err) {
-      if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
-        throw new RestFormatException(`Request to ${urlStr} timed out after ${timeoutSeconds} seconds.`);
+      return { body: await readBoundedBody(response, limits), status: response.status };
+    } catch (error) {
+      if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+        throw new RestFormatException("Provider request timed out.");
       }
-      throw new Error(`HTTP request failed: ${messageOf(err)}`);
+      if (error instanceof RestFormatException) throw error;
+      throw new RestFormatException("Provider request failed or exceeded its safety limits.");
     }
   }
 
@@ -528,45 +862,80 @@ export function createRestHandler(d: RestServiceDescriptor): NativeMcpHandler {
     args: Record<string, unknown>,
     ctx: McpCallContext,
   ): Promise<McpToolCallResult> {
+    // One frozen snapshot is authoritative across every await and all request
+    // construction; later caller mutations cannot change what was approved.
+    try {
+      args = snapshotProviderArgs(args);
+    } catch {
+      throw new RestArgumentError("Invalid operation arguments.");
+    }
+    // Definition and model-input validation precede config resolution,
+    // decryption, approval prompts, DNS, and every other side effect.
+    const operation = operationFor(d, def);
+    def = operation.legacy;
+    if (!validateProviderArgs(operation.schema, args).ok) {
+      throw new RestArgumentError("Invalid operation arguments.");
+    }
     for (const key of def.required ?? []) {
       const value = args[key];
-      if (value === undefined || value === null || String(value).trim() === "") {
+      if (typeof value === "string" && value.trim() === "") {
         throw new RestArgumentError(`Missing required argument: ${key}`);
       }
     }
     for (const argName of def.requireQueryArgs ?? []) {
       const value = args[argName];
-      const empty = !isPlainObject(value) || Object.keys(value).length === 0;
-      if (empty) {
-        throw new RestArgumentError(
-          `Tool "${def.name}" requires a non-empty "${argName}" filter map (unfiltered writes are refused).`,
-        );
+      if (!isPlainObject(value) || Object.keys(value).length === 0) {
+        throw new RestArgumentError("A non-empty typed filter is required for this operation.");
       }
     }
-
     const timeoutSeconds = resolveTimeoutSeconds(args);
-    const stored = ctx.secrets ?? {};
-    const secret = (stored[d.credentialKey] ?? "").trim();
+    const candidate = ctx as unknown as Partial<ToolContext>;
+    const authorizationContext = {
+      ...candidate,
+      sessionId: candidate.sessionId ?? "",
+      runId: candidate.runId ?? "",
+      userId: candidate.userId ?? ctx.uid,
+      connectionId: candidate.connectionId ?? "",
+      providerId: d.curatedId,
+      mode: candidate.mode ?? "safe",
+      planMode: candidate.planMode ?? false,
+      unattended: candidate.unattended ?? true,
+      isSubagent: candidate.isSubagent ?? false,
+      depth: candidate.depth ?? 0,
+      callKey: candidate.callKey ?? "",
+      signal: candidate.signal ?? new AbortController().signal,
+    } as ToolContext;
+    const authorization = await authorizeProviderOperation(authorizationContext, operation.definition, args);
+    if (authorization.kind === "deny") return toolResult(`Operation denied (${authorization.code}).`, true);
 
-    // Configure-first gate: any declared credential must be present before
-    // the tool runs. The message names the label but NEVER the value.
-    if (d.credentialKey !== "" && secret === "") {
-      return toolResult(configureFirstMessage(d.displayName, d.credentialLabel), true);
+    let stored: Record<string, string>;
+    try {
+      const unresolved = options.resolveConnectionConfig !== undefined
+        ? await options.resolveConnectionConfig(ctx)
+        : ctx.secrets ?? {};
+      stored = normalizeConnectionConfig(connectionSchema, unresolved);
+    } catch {
+      return toolResult("Invalid connection configuration.", true);
     }
-
-    const usernameKey = d.authParam ?? "username";
-    if (d.auth === "basic") {
-      const username = (stored[usernameKey] ?? "").trim();
-      if (username === "") {
-        return toolResult(
-          configureFirstMessage(d.displayName, labels.get(usernameKey) ?? usernameKey),
-          true,
-        );
+    const secrets = allSecretValues(stored);
+    const finish = (value: string, isError = false, trim = true): McpToolCallResult => {
+      const projected = redactor.text(value, secrets);
+      const bounded = trim ? trimToolResult(projected) : projected;
+      if (Buffer.byteLength(bounded, "utf8") > operation.streamLimits.toolResultBytes) {
+        return toolResult("Provider result exceeded the tool output limit.", true);
       }
+      return { text: bounded, isError, content: [{ type: "text", text: bounded }] };
+    };
+
+    const secret = (stored[d.credentialKey] ?? "").trim();
+    if (d.credentialKey !== "" && secret === "") {
+      return finish(configureFirstMessage(d.displayName, d.credentialLabel), true);
+    }
+    const usernameKey = d.authParam ?? "username";
+    if (d.auth === "basic" && (stored[usernameKey] ?? "").trim() === "") {
+      return finish(configureFirstMessage(d.displayName, labels.get(usernameKey) ?? usernameKey), true);
     }
 
-    // URL: baseUrl (trailing slashes stripped, Dart parity) + path, then
-    // query params merged in declared order (later wins).
     const baseUrlMode: SubstituteMode = /^\{[^{}]+\}$/.test(d.baseUrl)
       ? "wholeBase"
       : /^https?:\/\/\{[^{}]+\}/.test(d.baseUrl)
@@ -574,9 +943,30 @@ export function createRestHandler(d: RestServiceDescriptor): NativeMcpHandler {
         : "path";
     const baseEncoder =
       baseUrlMode === "wholeBase" ? cleanBaseUrl : baseUrlMode === "hostPart" ? cleanHost : encodePathValue;
-    const base = substitute(d.baseUrl, args, stored, baseEncoder).replace(/\/+$/, "");
-    const path = substitute(def.path, args, stored, encodePathValue);
-    const url = new URL(base + path);
+    const base = substituteConnection(d.baseUrl, stored, baseEncoder).replace(/\/+$/, "");
+    const connectionKeys = new Set([
+      ...(d.credentialKey === "" ? [] : [d.credentialKey]),
+      ...(d.extraConfig ?? []).map((field) => field.key),
+    ]);
+    const path = substituteOperation(
+      operation.definition.request.pathTemplate,
+      args,
+      stored,
+      connectionKeys,
+      encodePathValue,
+    );
+    let url: URL;
+    try {
+      url = new URL(base + path);
+    } catch {
+      return finish("Invalid connection configuration.", true);
+    }
+    const loopback = ["127.0.0.1", "::1", "localhost"].includes(url.hostname.replace(/^\[|\]$/g, ""));
+    if (url.username !== "" || url.password !== "" || url.hash !== "" ||
+        (url.protocol !== "https:" && !(url.protocol === "http:" && loopback))) {
+      return finish("Invalid connection configuration.", true);
+    }
+
     const params = new URLSearchParams(url.search);
     for (const [k, v] of Object.entries(def.fixedQuery ?? {})) params.set(k, v);
     if (d.auth === "queryKey") params.set(d.authParam ?? "api_key", secret);
@@ -584,6 +974,8 @@ export function createRestHandler(d: RestServiceDescriptor): NativeMcpHandler {
       const value = args[name];
       if (value === undefined || value === null) continue;
       if (isPlainObject(value)) {
+        // The strict schema has already closed this object; only its declared
+        // typed keys can become query parameters.
         for (const [entryKey, entryValue] of Object.entries(value)) {
           if (entryValue === undefined || entryValue === null) continue;
           params.set(entryKey, flattenQueryValue(entryValue));
@@ -605,7 +997,6 @@ export function createRestHandler(d: RestServiceDescriptor): NativeMcpHandler {
     }
     url.search = params.toString();
 
-    // Headers: auth injection first, then static extras.
     const headers: Record<string, string> = {};
     switch (d.auth) {
       case "none":
@@ -626,21 +1017,28 @@ export function createRestHandler(d: RestServiceDescriptor): NativeMcpHandler {
     for (const [k, v] of Object.entries(d.staticHeaders ?? {})) {
       headers[k] = v.replace(/\{secret\}/g, secret);
     }
+    const { body } = buildBody(def, args, stored, secret, headers);
+    const response = await send(ctx, operation, url, headers, body, stored, base, timeoutSeconds);
+    if (response.status < 200 || response.status >= 300) {
+      return finish(`Provider request failed (HTTP ${response.status}).`, true);
+    }
 
-    const { body } = buildBody(d, def, args, stored, secret, headers);
-
-    const urlStr = url.toString();
-    const { text, status } = await send(ctx, urlStr, {
-      method: def.method,
-      headers,
-      body,
-      signal: AbortSignal.timeout(timeoutSeconds * 1000),
-    }, timeoutSeconds);
-
-    if (status >= 200 && status < 300) return toolResult(text);
-    // Non-2xx bodies pass through verbatim (they carry the API's own error
-    // payload); the status line keeps success/failure unambiguous.
-    return toolResult(`HTTP ${status}\n${text}`, true);
+    const policy = operation.definition.outputPolicy;
+    if (policy.kind === "status_only") return finish(`Provider request succeeded (HTTP ${response.status}).`);
+    if (policy.kind === "binary_metadata") return finish(`Provider returned ${response.body.byteLength} bytes.`);
+    if (policy.kind === "redacted_json") {
+      try {
+        const parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(response.body)) as unknown;
+        return finish(JSON.stringify(redactor.json(parsed, secrets)), false, false);
+      } catch {
+        return finish("Provider returned an invalid JSON response.", true);
+      }
+    }
+    try {
+      return finish(new TextDecoder("utf-8", { fatal: true }).decode(response.body));
+    } catch {
+      return finish("Provider returned a non-text response.", true);
+    }
   }
 
   return {
@@ -662,9 +1060,7 @@ export function createRestHandler(d: RestServiceDescriptor): NativeMcpHandler {
       ctx: McpCallContext,
     ): Promise<McpToolCallResult> {
       const def = d.tools.find((t) => t.name === name);
-      if (def === undefined) {
-        return toolResult(`Unknown tool: ${name} for plugin "${d.displayName}".`, true);
-      }
+      if (def === undefined) return toolResult("Unknown provider operation.", true);
       try {
         return await runTool(def, args ?? {}, ctx);
       } catch (err) {
@@ -678,7 +1074,11 @@ export function createRestHandler(d: RestServiceDescriptor): NativeMcpHandler {
         if (err instanceof MissingConfigError) {
           return toolResult(configureFirstMessage(d.displayName, labels.get(err.key) ?? err.key), true);
         }
-        return toolResult(messageOf(err), true);
+        if (err instanceof RestArgumentError) return toolResult(err.message, true);
+        if (err instanceof RestFormatException) {
+          return toolResult("Invalid operation arguments or provider response.", true);
+        }
+        return toolResult("Provider operation failed.", true);
       }
     },
   };
