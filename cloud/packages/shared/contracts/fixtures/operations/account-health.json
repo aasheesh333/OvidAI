@@ -1,0 +1,81 @@
+{
+  "contractVersion": 1,
+  "accountHealth": {
+    "plan": {
+      "tier": "free",
+      "id": "free",
+      "name": "Free",
+      "expiresAt": null,
+      "limits": {
+        "storageBytes": 3221225472,
+        "customConnectors": 0,
+        "projectFiles": 80,
+        "manualModels": false,
+        "autoMultiplier": 1,
+        "uploads": {
+          "count": 50,
+          "windowHours": 24
+        }
+      }
+    },
+    "storage": {
+      "usedBytes": 1024,
+      "quotaBytes": 3221225472,
+      "remainingBytes": 3221224448
+    },
+    "usage": {
+      "today": {
+        "since": "2026-10-24T00:00:00.000Z",
+        "until": "2026-10-24T12:00:00.000Z",
+        "used": {
+          "inputTokens": 1000,
+          "outputTokens": 200,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0
+        },
+        "remainingUsd": null,
+        "tokensUsed": 1200,
+        "tokenCap": 50000000,
+        "tokensRemaining": 49998800
+      },
+      "month": {
+        "since": "2026-10-01T00:00:00.000Z",
+        "until": "2026-10-24T12:00:00.000Z",
+        "used": {
+          "inputTokens": 1000,
+          "outputTokens": 200,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0
+        },
+        "remainingUsd": null,
+        "tokensUsed": 1200,
+        "tokenCap": 1500000000,
+        "tokensRemaining": 1499998800
+      }
+    },
+    "standing": {
+      "banned": false,
+      "bannedAt": null,
+      "bannedReason": null,
+      "multiIpFlags": null,
+      "deletion": null
+    },
+    "uploadWindow": {
+      "used": null,
+      "cap": 50,
+      "remaining": null,
+      "windowHours": 24
+    },
+    "devices": [],
+    "security": {
+      "appCheck": null,
+      "anomaly": null,
+      "notificationOutcome": null,
+      "mailOutcome": null,
+      "privilegedActions": null
+    },
+    "futureHealthField": {
+      "additive": true
+    }
+  }
+}
