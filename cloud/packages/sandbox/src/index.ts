@@ -4,6 +4,7 @@ export * from "./config.js";
 export * from "./corpora.js";
 export * from "./etcFiles.js";
 export * from "./exec.js";
+export * from "./gitCredential.js";
 export * from "./hostGate.js";
 export * from "./invocation.js";
 export * from "./jobs.js";
