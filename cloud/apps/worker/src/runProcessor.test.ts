@@ -41,6 +41,15 @@ import {
   type SandboxManager,
 } from "@ovid/sandbox";
 import type { SandboxPort } from "@ovid/agent-core";
+import {
+  createActivationService,
+  createSecretRedactor,
+  type ActivationConnection,
+  type ActivationService,
+  type McpRouter,
+  type ProviderDefinition,
+  type RunMcpSnapshot,
+} from "@ovid/mcp";
 import type { KeyResolver, SessionEvent } from "@ovid/shared";
 import { createToolRegistry } from "./tools/registry.js";
 import type { ToolRegistry } from "./tools/registry.js";
@@ -1983,6 +1992,333 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       { choices: [{ delta: { content: text }, finish_reason: null }] },
       { choices: [{ delta: {}, finish_reason: "stop" }] },
     ];
+
+    const CONNECTOR_SECRET = "run-processor-provider-plaintext-canary";
+
+    function connectorDefinition(): ProviderDefinition {
+      return {
+        providerId: "acme",
+        catalogVersion: "2026-10-24",
+        displayName: "Acme",
+        description: "Typed Acme fixture",
+        officialDocs: [{ url: "https://docs.acme.test/api", verifiedAt: "2026-10-24" }],
+        authProfileId: "acme-key",
+        connectionSchema: {
+          type: "object",
+          properties: { api_key: { type: "string", maxLength: 256 } },
+          required: ["api_key"],
+          additionalProperties: false,
+          maxProperties: 1,
+        },
+        operations: [{
+          name: "search",
+          description: "Search with one typed query",
+          effect: "read",
+          approval: "mode",
+          requiredScopes: [],
+          inputSchema: {
+            type: "object",
+            properties: { query: { type: "string", minLength: 1, maxLength: 128 } },
+            required: ["query"],
+            additionalProperties: false,
+            maxProperties: 1,
+          },
+          outputPolicy: { kind: "redacted_json", maxBytes: 4096 },
+          request: { originKey: "acme", method: "GET", pathTemplate: "/search" },
+          limits: { timeoutMs: 1000, responseBytes: 4096, frameBytes: 4096, pageBytes: 4096 },
+        }],
+        readiness: "supported",
+      };
+    }
+
+    function connectorHarness(o: { staleOnFirstCall?: boolean } = {}) {
+      const rows: Array<ActivationConnection & { plaintext?: string }> = [
+        {
+          connectionId: "connection-active",
+          userId: "",
+          providerId: "acme",
+          enabled: true,
+          agentEnabled: true,
+          authState: "configured",
+          configVersion: 1,
+          disconnectGeneration: 0,
+          plaintext: CONNECTOR_SECRET,
+        },
+        {
+          connectionId: "connection-disabled",
+          userId: "",
+          providerId: "acme",
+          enabled: false,
+          agentEnabled: true,
+          authState: "configured",
+          configVersion: 1,
+          disconnectGeneration: 0,
+        },
+        {
+          connectionId: "connection-agent-off",
+          userId: "",
+          providerId: "acme",
+          enabled: true,
+          agentEnabled: false,
+          authState: "configured",
+          configVersion: 1,
+          disconnectGeneration: 0,
+        },
+        {
+          connectionId: "connection-needs-auth",
+          userId: "",
+          providerId: "acme",
+          enabled: true,
+          agentEnabled: true,
+          authState: "needs_auth",
+          configVersion: 1,
+          disconnectGeneration: 0,
+        },
+        {
+          connectionId: "connection-unsupported",
+          userId: "",
+          providerId: "unsupported",
+          enabled: true,
+          agentEnabled: true,
+          authState: "configured",
+          configVersion: 1,
+          disconnectGeneration: 0,
+        },
+      ];
+      const snapshots: Array<{
+        input: Parameters<ActivationService["snapshotForRun"]>[0];
+        snapshot: RunMcpSnapshot;
+      }> = [];
+      const listCalls: string[] = [];
+      const closeCalls: string[] = [];
+      let revalidations = 0;
+      const base = createActivationService({
+        definitions: [connectorDefinition()],
+        listConnections: async (userId) => {
+          listCalls.push(userId);
+          return rows.filter((row) => row.userId === userId);
+        },
+        revalidateConnection: async (call) => {
+          revalidations += 1;
+          const row = rows.find((candidate) =>
+            candidate.connectionId === call.connectionId && candidate.userId === call.userId
+          );
+          if (row === undefined || !row.enabled || !row.agentEnabled ||
+              (row.authState !== "configured" && row.authState !== "authorized")) return "denied";
+          if (o.staleOnFirstCall === true && revalidations === 1) row.configVersion += 1;
+          return row.configVersion === call.configVersion &&
+            row.disconnectGeneration === call.disconnectGeneration ? "current" : "stale";
+        },
+        closeRun: async (runId) => {
+          closeCalls.push(runId);
+        },
+      });
+      const activation: ActivationService = {
+        snapshotForRun: async (input) => {
+          const snapshot = await base.snapshotForRun(input);
+          snapshots.push({ input, snapshot });
+          return snapshot;
+        },
+        revalidate: (snapshot, call) => base.revalidate(snapshot, call),
+        closeRun: (runId) => base.closeRun(runId),
+      };
+      const calls: Array<{
+        uid: string;
+        name: string;
+        args: Record<string, unknown>;
+        runCtx: Record<string, unknown>;
+      }> = [];
+      const redactor = createSecretRedactor();
+      const router = {
+        listServers: async () => [{
+          id: "connection-active",
+          name: "Acme",
+          transport: "native",
+          curatedId: "acme",
+          enabled: true,
+          hasSecrets: true,
+          status: "connected",
+        }],
+        callTool: async (
+          uid: string,
+          name: string,
+          args: Record<string, unknown>,
+          runCtx: Record<string, unknown>,
+        ) => {
+          calls.push({ uid, name, args, runCtx });
+          return {
+            text: redactor.text(JSON.stringify({
+              results: [{ title: `safe-${args.query}` }],
+              echo: CONNECTOR_SECRET,
+            }), [CONNECTOR_SECRET]),
+            isError: false,
+          };
+        },
+      } as unknown as McpRouter;
+      return { rows, snapshots, listCalls, closeCalls, activation, router, calls };
+    }
+
+    it("composes only explicitly activated supported operations into root and child production registries", async () => {
+      const seeded = await seedRun();
+      const harness = connectorHarness();
+      for (const row of harness.rows) row.userId = seeded.uid;
+      const sbx = makeFakePort();
+      const childPrompt = "child connector task";
+      const hasTool = (messages: Array<ChatMessage & { tool_call_id?: string }>, id: string) =>
+        messages.some((message) => message.role === "tool" && message.tool_call_id === id);
+      const isChild = (messages: ChatMessage[]) => messages.some(
+        (message) => message.role === "user" && message.content === childPrompt,
+      );
+      const sse = await startTurnSse([
+        toolCallTurn("root-discover", "catalog_list_mcp", { scope: "all" }),
+        toolCallTurn("root-search", "mcp__acme__search", { query: "root" }),
+        toolCallTurn("root-dispatch", "dispatch_agent", { prompt: childPrompt, tools: ["*"] }),
+        toolCallTurn("child-discover", "catalog_list_mcp", { scope: "all" }),
+        toolCallTurn("child-search", "mcp__acme__search", { query: "child" }),
+        textTurn("child done"),
+        textTurn("parent done"),
+      ], (messages) => {
+        if (isChild(messages)) {
+          if (hasTool(messages, "child-search")) return 5;
+          if (hasTool(messages, "child-discover")) return 4;
+          return 3;
+        }
+        if (hasTool(messages, "root-dispatch")) return 6;
+        if (hasTool(messages, "root-search")) return 2;
+        if (hasTool(messages, "root-discover")) return 1;
+        return 0;
+      });
+      const releaseCalls: Array<{ sessionId: string; runId: string }> = [];
+      const processor = createFullAgentRunProcessor(makeFullDeps(sse.url, sbx.port, {
+        mcp: { activation: harness.activation, router: harness.router },
+        mcpReleaseRun: async (_uid, runCtx) => {
+          releaseCalls.push(runCtx);
+        },
+      }));
+      let childSessionId: string | undefined;
+      let childRunId: string | undefined;
+      try {
+        await processor(jobOf(seeded));
+        for (let attempt = 0; attempt < 500; attempt += 1) {
+          const parentEvents = await readEvents(seeded.sessionId);
+          const started = parentEvents.find((event) => event.type === "subagent_started");
+          childSessionId ??= started?.payload.childSessionId as string | undefined;
+          childRunId ??= started?.payload.childRunId as string | undefined;
+          if (childSessionId !== undefined && !createdSessions.includes(childSessionId)) {
+            createdSessions.push(childSessionId);
+          }
+          if (parentEvents.some((event) => event.type === "subagent_completed")) break;
+          if (attempt === 499) throw new Error("connector child completion timed out");
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+
+      const rootEvents = await readEvents(seeded.sessionId);
+      const childEvents = await readEvents(childSessionId!);
+      for (const events of [rootEvents, childEvents]) {
+        const discovery = events.find((event) =>
+          event.type === "tool_completed" && event.payload.name === "catalog_list_mcp"
+        );
+        const search = events.find((event) =>
+          event.type === "tool_completed" && event.payload.name === "mcp__acme__search"
+        );
+        expect(discovery?.payload.isError).toBe(false);
+        expect(String(discovery?.payload.content)).toContain("Acme");
+        expect(search?.payload).toMatchObject({ isError: false, ok: true });
+        expect(String(search?.payload.content)).toContain("safe-");
+        expect(String(search?.payload.content)).toContain("[REDACTED]");
+        expect(String(search?.payload.content)).not.toContain(CONNECTOR_SECRET);
+      }
+      expect(harness.calls).toHaveLength(2);
+      expect(harness.calls.map((call) => call.runCtx.isSubagent)).toEqual([false, true]);
+      expect(harness.calls.every((call) => typeof call.runCtx.approveProvider === "function")).toBe(true);
+      expect(harness.listCalls).toEqual([seeded.uid]);
+      expect(harness.snapshots).toHaveLength(2);
+      const root = harness.snapshots.find((entry) => !entry.input.isSubagent)!;
+      const child = harness.snapshots.find((entry) => entry.input.isSubagent)!;
+      expect(root.snapshot.operations.map((op) => [op.connectionId, op.operationId])).toEqual([
+        ["connection-active", "search"],
+      ]);
+      expect(child.input.parent).toBe(root.snapshot);
+      expect(child.input.allow).toEqual(["*"]);
+      expect(child.snapshot.operations).toEqual(root.snapshot.operations);
+      expect(JSON.stringify({ root, child })).not.toContain(CONNECTOR_SECRET);
+      expect(JSON.stringify(sse.requests)).not.toContain(CONNECTOR_SECRET);
+      expect(JSON.stringify(jobOf(seeded))).not.toContain(CONNECTOR_SECRET);
+
+      const rootTools = toolNames(sse.requests.find((request) => !isChild(request.messages))!);
+      expect(rootTools).toContain("catalog_list_mcp");
+      expect(rootTools).toContain("mcp__acme__search");
+      for (const absent of ["catalog_add_mcp", "agent_install_mcp", "agent_install_plugin"]) {
+        expect(rootTools).not.toContain(absent);
+      }
+      expect(harness.closeCalls).toEqual(expect.arrayContaining([seeded.runId, childRunId!]));
+      expect(releaseCalls).toEqual(expect.arrayContaining([
+        { sessionId: seeded.sessionId, runId: seeded.runId },
+        { sessionId: childSessionId!, runId: childRunId! },
+      ]));
+    }, 30_000);
+
+    it("denies stale-generation and unrostered direct MCP calls with allowUnrosteredTools false", async () => {
+      const staleSeed = await seedRun();
+      const stale = connectorHarness({ staleOnFirstCall: true });
+      for (const row of stale.rows) row.userId = staleSeed.uid;
+      const staleSse = await startTurnSse([
+        toolCallTurn("stale-search", "mcp__acme__search", { query: "stale" }),
+        textTurn("stale denied"),
+      ]);
+      const staleProcessor = createFullAgentRunProcessor(
+        makeFullDeps(staleSse.url, makeFakePort().port, {
+          mcp: { activation: stale.activation, router: stale.router },
+        }),
+      );
+      try {
+        await staleProcessor(jobOf(staleSeed));
+      } finally {
+        await staleProcessor.close();
+        await staleSse.close();
+      }
+      const staleEvent = (await readEvents(staleSeed.sessionId)).find((event) =>
+        event.type === "tool_completed" && event.payload.name === "mcp__acme__search"
+      );
+      expect(staleEvent?.payload).toMatchObject({ isError: true, ok: false });
+      expect(String(staleEvent?.payload.content)).toContain("stale");
+      expect(stale.calls).toEqual([]);
+
+      const directSeed = await seedRun();
+      const direct = connectorHarness();
+      for (const row of direct.rows) row.userId = directSeed.uid;
+      const emptyActivation: ActivationService = {
+        snapshotForRun: async () => ({ generation: "empty", operations: [] }),
+        revalidate: async () => "denied",
+        closeRun: async () => {},
+      };
+      const directSse = await startTurnSse([
+        toolCallTurn("direct-search", "mcp__acme__search", { query: "unrostered" }),
+        textTurn("direct denied"),
+      ]);
+      const directProcessor = createFullAgentRunProcessor(
+        makeFullDeps(directSse.url, makeFakePort().port, {
+          mcp: { activation: emptyActivation, router: direct.router },
+        }),
+      );
+      try {
+        await directProcessor(jobOf(directSeed));
+      } finally {
+        await directProcessor.close();
+        await directSse.close();
+      }
+      const directEvent = (await readEvents(directSeed.sessionId)).find((event) =>
+        event.type === "tool_completed" && event.payload.name === "mcp__acme__search"
+      );
+      expect(directEvent?.payload).toMatchObject({ isError: true, ok: false });
+      expect(String(directEvent?.payload.content)).toContain("DENIED");
+      expect(direct.calls).toEqual([]);
+      expect(toolNames(directSse.requests[0]!)).not.toContain("mcp__acme__search");
+    }, 30_000);
 
     it("full processor: run_shell round → sandbox.exec got the command + callKey → final text turn completes", async () => {
       const seeded = await seedRun();

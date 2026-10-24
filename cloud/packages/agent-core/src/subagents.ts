@@ -39,7 +39,11 @@ import type {
 } from "./ports.js";
 import { presetById, type AgentPreset } from "./presets.js";
 import { canonicalTools } from "./promptCache.js";
-import { CHILD_DENIED_TOOLS, computeToolRoster } from "./roster.js";
+import {
+  CHILD_DENIED_TOOLS,
+  computeToolRoster,
+  type ParentMcpProjection,
+} from "./roster.js";
 import type { ToolContext, ToolRegistry, ToolSpec } from "./types.js";
 
 /** Dart `_maxSubagentDepth` (AS:23048): root = 0, child = 1, grandchild = 2. */
@@ -234,6 +238,28 @@ export interface DispatchArgs {
   agentType?: string;
 }
 
+export interface SubagentMcpSnapshotInput<TSnapshot extends ParentMcpProjection> {
+  userId: string;
+  runId: string;
+  sessionId: string;
+  isSubagent: true;
+  parent: TSnapshot;
+  allow: readonly string[];
+  deny: readonly string[];
+  mode: ToolContext["mode"];
+  planMode: boolean;
+  unattended: boolean;
+}
+
+/** Parent snapshot + per-child-run activation/cleanup, supplied by the worker. */
+export interface SubagentMcpProjection<
+  TSnapshot extends ParentMcpProjection = ParentMcpProjection,
+> {
+  parent: TSnapshot;
+  snapshotForRun(input: SubagentMcpSnapshotInput<TSnapshot>): Promise<TSnapshot>;
+  closeRun(runId: string, sessionId: string): Promise<void>;
+}
+
 export interface SubagentSupervisor {
   dispatch(parent: ToolContext, args: DispatchArgs): Promise<ChildHandle>;
   childrenOf(sessionId: string): readonly ChildHandle[];
@@ -317,8 +343,15 @@ export function subagentPolicyAllows(
 export function projectChildRoster(
   available: readonly ToolSpec[],
   policy: { allow: readonly string[]; deny: readonly string[] },
+  parentMcp?: ParentMcpProjection,
 ): ToolSpec[] {
-  return canonicalTools(available.filter((spec) => subagentPolicyAllows(spec.name, policy)));
+  const activatedNames = parentMcp === undefined
+    ? null
+    : new Set(parentMcp.operations.map((operation) => operation.modelName));
+  return canonicalTools(available.filter((spec) =>
+    (activatedNames === null || !spec.name.startsWith("mcp__") || activatedNames.has(spec.name)) &&
+    subagentPolicyAllows(spec.name, policy)
+  ));
 }
 
 /** Build the persisted stored-list form from the dispatch args. */
@@ -484,7 +517,9 @@ export function createDbSubagentStore(db: Db): SubagentStore {
 
 // ── supervisor ──────────────────────────────────────────────────────────────
 
-export interface SubagentSupervisorDeps {
+export interface SubagentSupervisorDeps<
+  TSnapshot extends ParentMcpProjection = ParentMcpProjection,
+> {
   engine: AgentEngine;
   db: Db;
   state: SessionStateStore;
@@ -492,6 +527,8 @@ export interface SubagentSupervisorDeps {
   sinkFactory(sessionId: string): EventSink;
   /** The live registry — the source of the parent's available tools. */
   registry: ToolRegistry;
+  /** Exact activated parent provider projection; absent means no MCP snapshot. */
+  mcp?: SubagentMcpProjection<TSnapshot>;
   /** Test seam; defaults to the @ovid/db-backed store above. */
   store?: SubagentStore;
   /** Composition flags (T16) — the same defaults as the loop when absent. */
@@ -639,7 +676,9 @@ function clip(text: string, max: number): string {
 const DEFAULT_STOP_REASON =
   "[system] Continue working on the task; do not repeat your last message verbatim.";
 
-export function createSubagentSupervisor(deps: SubagentSupervisorDeps): SubagentSupervisor {
+export function createSubagentSupervisor<
+  TSnapshot extends ParentMcpProjection = ParentMcpProjection,
+>(deps: SubagentSupervisorDeps<TSnapshot>): SubagentSupervisor {
   /**
    * One wake attempt at a time, per parent session.
    *
@@ -785,7 +824,7 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
         },
         deps.registry.all().map((tool) => tool.spec),
       );
-      const roster = projectChildRoster(parentRoster, policy);
+      const roster = projectChildRoster(parentRoster, policy, deps.mcp?.parent);
 
       // ── child session + run row (durable BEFORE the start event) ──────
       const child = await store.createChild({
@@ -871,17 +910,44 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
               finalStatus = "cancelled";
               break;
             }
-            await deps.engine.run({
-              runId,
-              sessionId: child.sessionId,
-              userId: parent.userId,
-              prompt: currentPrompt,
-              mode: parent.mode,
-              isSubagent: true,
-              depth: depth + 1,
-              subagentBriefing: prompt,
-              roster,
-            });
+            try {
+              let turnRoster = roster;
+              if (deps.mcp !== undefined) {
+                const childSnapshot = await deps.mcp.snapshotForRun({
+                  userId: parent.userId,
+                  runId,
+                  sessionId: child.sessionId,
+                  isSubagent: true,
+                  parent: deps.mcp.parent,
+                  allow: policy.allow,
+                  deny: policy.deny,
+                  mode: parent.mode,
+                  planMode: false,
+                  unattended: parent.unattended,
+                });
+                const activatedNames = new Set(
+                  childSnapshot.operations.map((operation) => operation.modelName),
+                );
+                turnRoster = canonicalTools(roster.filter((spec) =>
+                  !spec.name.startsWith("mcp__") || activatedNames.has(spec.name)
+                ));
+              }
+              await deps.engine.run({
+                runId,
+                sessionId: child.sessionId,
+                userId: parent.userId,
+                prompt: currentPrompt,
+                mode: parent.mode,
+                isSubagent: true,
+                depth: depth + 1,
+                subagentBriefing: prompt,
+                roster: turnRoster,
+              });
+            } finally {
+              // Each child turn is its own run: close transports and forget its
+              // activation generation before a follow-up turn gets a snapshot.
+              await deps.mcp?.closeRun(runId, child.sessionId).catch(() => {});
+            }
 
             const runStatus = await store.runStatus(runId, parent.userId);
 

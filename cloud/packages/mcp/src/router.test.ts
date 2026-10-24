@@ -233,6 +233,14 @@ function jsonResponse(obj: unknown, status = 200): Response {
   });
 }
 
+function requestBodyText(body: BodyInit | null | undefined): string {
+  if (body === undefined || body === null) return "{}";
+  if (body instanceof Uint8Array || body instanceof ArrayBuffer) {
+    return new TextDecoder().decode(body);
+  }
+  return String(body);
+}
+
 /** Serves curated-fetch HTML GETs and scripted MCP JSON-RPC POSTs. */
 class FakeMcpFetch {
   calls: FetchCall[] = [];
@@ -254,7 +262,7 @@ class FakeMcpFetch {
         headers: { "www-authenticate": 'Bearer realm="mcp"' },
       });
     }
-    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    const body = JSON.parse(requestBodyText(init?.body)) as Record<string, unknown>;
     if (body.id === undefined) return new Response(null, { status: 202 });
     const tools = this.toolsByUrl.get(url) ?? [
       { name: "echo", description: "Echo." },
@@ -298,7 +306,7 @@ class FakeMcpFetch {
     return this.calls.filter((c) => {
       if (c.url !== url || (c.init?.method ?? "GET") !== "POST") return false;
       try {
-        return (JSON.parse(String(c.init?.body ?? "{}")) as { method?: string }).method === "initialize";
+        return (JSON.parse(requestBodyText(c.init?.body)) as { method?: string }).method === "initialize";
       } catch {
         return false;
       }

@@ -16,8 +16,15 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Redis } from "ioredis";
-import { createDb, migrate, schema, type Db } from "@ovid/db";
-import type { GuardedFetch, UserSystemBus } from "@ovid/mcp";
+import { createDb, migrate, newId, schema, type Db } from "@ovid/db";
+import {
+  createEnvelopeCrypto,
+  type EgressRequest,
+  type GuardedFetch,
+  type ProviderEgress,
+  type UserSystemBus,
+} from "@ovid/mcp";
+import { createMcpToolProvider } from "./mcpTools.js";
 import { createMcpRuntime } from "./mcpRuntime.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -64,6 +71,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)("McpRuntime", () => {
       masterKey: MASTER_KEY_HEX,
       sandbox: null,
       fetchImpl,
+      legacyProviderFetchForTest: true,
     });
     try {
       const id = await seedUser("free");
@@ -91,6 +99,132 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)("McpRuntime", () => {
     }
   });
 
+  it("activates only current rows and executes generic REST through pinned egress with redacted output", async () => {
+    const id = await seedUser("free");
+    const connectionId = newId();
+    const secret = "exa-plaintext-runtime-canary";
+    const crypto = createEnvelopeCrypto(MASTER_KEY_HEX);
+    await db.insert(schema.mcpServers).values({
+      id: connectionId,
+      userId: id,
+      name: "exa",
+      transport: "native",
+      curatedId: "exa",
+      providerId: "exa",
+      enabled: true,
+      agentEnabled: true,
+      authState: "configured",
+      healthState: "never_checked",
+      configVersion: 1,
+      disconnectGeneration: 0,
+      secretsSealed: crypto.encrypt(
+        JSON.stringify({ api_key: secret }),
+        `mcp_servers:${connectionId}`,
+      ),
+    });
+
+    const requests: EgressRequest[] = [];
+    let closed = 0;
+    const providerEgress: ProviderEgress = {
+      async request(request) {
+        requests.push(request);
+        return {
+          status: 200,
+          headers: new Headers({ "content-type": "application/json" }),
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(JSON.stringify({
+                results: [{ title: "sanitized" }],
+                echo: secret,
+              })));
+              controller.close();
+            },
+          }),
+          origin: new URL("https://api.exa.ai"),
+          remoteAddress: "203.0.113.10",
+        };
+      },
+      async close() {
+        closed += 1;
+      },
+    };
+    const runtime = createMcpRuntime({
+      db,
+      redisQ: redis,
+      masterKey: MASTER_KEY_HEX,
+      sandbox: null,
+      providerEgress,
+    });
+    try {
+      const root = await runtime.activation.snapshotForRun({
+        userId: id,
+        runId: "run-root",
+        sessionId: "session-root",
+        isSubagent: false,
+        allow: [],
+        deny: [],
+        mode: "auto",
+        planMode: false,
+        unattended: false,
+      });
+      expect(root.operations.some((operation) => operation.modelName === "mcp__exa__search")).toBe(true);
+      expect(JSON.stringify(root)).not.toContain(secret);
+      const provider = createMcpToolProvider(runtime.router, {
+        snapshotFor: async () => root,
+        revalidate: (snapshot, call) => runtime.activation.revalidate(snapshot, call),
+      });
+      const tools = await provider.tools(root);
+      expect(JSON.stringify(await provider.specs(root))).not.toContain(secret);
+      const search = tools.find((tool) => tool.name === "mcp__exa__search")!;
+      const result = await search.execute({ query: "typed search" }, {
+        uid: id,
+        sessionId: "session-root",
+        runId: "run-root",
+        mode: "auto",
+        planMode: false,
+        unattended: false,
+        isSubagent: false,
+        depth: 0,
+        callKey: "run-root:call-1",
+        signal: new AbortController().signal,
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.content).toContain("sanitized");
+      expect(result.content).not.toContain(secret);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).toMatchObject({
+        originKey: "exa",
+        method: "POST",
+        privileged: true,
+      });
+      expect(requests[0]!.url.origin).toBe("https://api.exa.ai");
+
+      await db.$client`
+        UPDATE mcp_servers
+        SET agent_enabled = false, config_version = config_version + 1
+        WHERE id = ${connectionId} AND user_id = ${id}`;
+      expect(await runtime.activation.revalidate(root, {
+        connectionId,
+        operationId: "search",
+      })).toBe("stale");
+      const afterDisable = await runtime.activation.snapshotForRun({
+        userId: id,
+        runId: "run-after-disable",
+        sessionId: "session-root",
+        isSubagent: false,
+        allow: [],
+        deny: [],
+        mode: "auto",
+        planMode: false,
+        unattended: false,
+      });
+      expect(afterDisable.operations).toEqual([]);
+    } finally {
+      await runtime.shutdown();
+    }
+    expect(closed).toBe(1);
+  });
+
   it("router, bus and installer are one runtime instance; shutdown closes the bus idempotently", async () => {
     let busClosed = 0;
     const bus: UserSystemBus = {
@@ -109,6 +243,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)("McpRuntime", () => {
       masterKey: MASTER_KEY_HEX,
       sandbox: null,
       fetchImpl,
+      legacyProviderFetchForTest: true,
       systemBus: bus,
     });
 

@@ -1,41 +1,43 @@
 /**
- * Worker MCP runtime (P5 Task 16) — the composition root for the P5 surface
- * inside the worker process:
- *
- *   db + masterKey ─► EnvelopeCrypto ─► sealed server/token rows
- *   redisQ ─────────► UserSystemBus (sys:{uid}:out / sys:{uid}:in)
- *   sandbox seam ───► curated catalog (workspace) + McpRouter (spawner)
- *                  └► plugin installer (files/spawner + source resolver)
- *   one ContributionRegistry shared by the installer and P3's roster.
- *
- * `sandbox: null` is a supported deployment state: the curated
- * fetch/REST/GitHub servers keep working; stdio/filesystem/memory tools and
- * plugin installs fail cleanly with `sandbox_unavailable`.
- *
- * The runtime deliberately does NOT start the plugin-installs queue worker:
- * `installer` is the transaction, and main.ts composes the consumer around
- * this SAME instance (`mcpRuntime.installer`) with
- * `createPluginInstallProcessor` + `createPluginInstallsWorker`. Keeping the
- * worker out of the runtime means there is exactly one installer (and one
- * ContributionRegistry) per worker process.
+ * Worker MCP runtime: one activation service, one pinned provider egress and
+ * one router/catalog/installer composition. Activated generic REST calls use
+ * ProviderEgress; legacy guarded fetch is confined to explicit compatibility
+ * tests and later OAuth/plugin/special-native integration gates.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Redis } from "ioredis";
-import type { Db } from "@ovid/db";
 import {
+  mcpServers,
+  revalidateConnection as revalidateProviderConnection,
+  toMcpConnectionRow,
+  type Db,
+} from "@ovid/db";
+import {
+  createActivationService,
   createContributionRegistry,
   createCuratedCatalog,
+  createCuratedProviderSupport,
   createEnvelopeCrypto,
-  createGuardedFetch,
   createMcpRouter,
   createOAuthFlow,
   createPluginInstaller,
+  createProviderEgress,
   createRedisSystemBus,
+  createSecretRedactor,
   createSourceResolver,
+  type ActivationProvider,
+  type ActivationService,
+  type CatalogEntry,
   type ContributionRegistry,
+  type CuratedCatalog,
   type EnvelopeCrypto,
   type GuardedFetch,
+  type McpCallContext,
   type McpRouter,
+  type NativeMcpHandler,
+  type ProviderEgress,
+  type RunContext,
   type SandboxFiles,
   type SandboxSpawner,
   type SourceResolver,
@@ -45,12 +47,9 @@ import { createUnavailableSandbox } from "./sandboxSeam.js";
 
 export interface McpRuntime {
   router: McpRouter;
+  activation: ActivationService;
   registry: ContributionRegistry;
   installer: ReturnType<typeof createPluginInstaller>;
-  /**
-   * The one source resolver (I3): P3's catalog tools need it to derive the
-   * canonical plugin id at enqueue, exactly as the installer will.
-   */
   resolver: SourceResolver;
   shutdown(): Promise<void>;
 }
@@ -59,47 +58,137 @@ export interface McpRuntimeDeps {
   db: Db;
   redisQ: Redis;
   masterKey: string;
-  /**
-   * The P2-backed pair (`createSandboxSeam(...)`), or null when the worker
-   * has no sandbox chain — the runtime substitutes
-   * `createUnavailableSandbox()`.
-   */
   sandbox: { spawner: SandboxSpawner; files: SandboxFiles } | null;
-  /** Defaults to @ovid/mcp's SSRF-guarded fetch. */
+  /** Later-gate OAuth/plugin compatibility. Production never uses this for activated REST. */
   fetchImpl?: GuardedFetch;
+  /** Explicit legacy-handler test seam; never set by production composition. */
+  legacyProviderFetchForTest?: boolean;
+  /** Test injection or the one production DNS-pinned provider transport. */
+  providerEgress?: ProviderEgress;
+  production?: boolean;
+  /** Supported-registry override for production-shaped fixtures. */
+  definitions?: readonly ActivationProvider[];
   githubApiBase?: string;
-  /**
-   * GitHub API token for plugin-source resolution (M6). Passed explicitly so
-   * an embedded/test `main(env)` keeps the token instead of silently falling
-   * back to `process.env.GITHUB_API_TOKEN` (unauthenticated rate limits).
-   */
   githubToken?: string;
-  /**
-   * Test seam (additive): inject the system bus instead of building the
-   * Redis one. Production leaves this undefined.
-   */
   systemBus?: UserSystemBus;
+}
+
+const legacyFetchDisabled: GuardedFetch = async () => {
+  throw new Error("legacy_provider_fetch_disabled");
+};
+
+function contextualCatalog(
+  base: CuratedCatalog,
+  storage: AsyncLocalStorage<Record<string, unknown>>,
+): CuratedCatalog {
+  const handlers = new Map<NativeMcpHandler, NativeMcpHandler>();
+  const wrapHandler = (handler: NativeMcpHandler): NativeMcpHandler => {
+    const existing = handlers.get(handler);
+    if (existing !== undefined) return existing;
+    const wrapped: NativeMcpHandler = {
+      initialize: (params) => handler.initialize(params),
+      listTools: () => handler.listTools(),
+      callTool: (name, args, ctx) => handler.callTool(name, args, {
+        ...ctx,
+        ...storage.getStore(),
+      } as McpCallContext),
+      ...(handler.dispose !== undefined ? { dispose: () => handler.dispose!() } : {}),
+    };
+    handlers.set(handler, wrapped);
+    return wrapped;
+  };
+  const wrapEntry = (entry: CatalogEntry): CatalogEntry => ({
+    ...entry,
+    handler: wrapHandler(entry.handler),
+  });
+  return {
+    entries: () => base.entries().map(wrapEntry),
+    get: (id) => {
+      const entry = base.get(id);
+      return entry === undefined ? undefined : wrapEntry(entry);
+    },
+  };
+}
+
+function contextualRouter(
+  base: McpRouter,
+  storage: AsyncLocalStorage<Record<string, unknown>>,
+): McpRouter {
+  const withRun = <T>(runCtx: RunContext | undefined, fn: () => Promise<T>): Promise<T> =>
+    runCtx === undefined
+      ? fn()
+      : storage.run(runCtx as unknown as Record<string, unknown>, fn);
+  return {
+    listServers: (uid) => base.listServers(uid),
+    addServer: (uid, input) => base.addServer(uid, input),
+    updateServer: (uid, id, patch) => base.updateServer(uid, id, patch),
+    removeServer: (uid, id) => base.removeServer(uid, id),
+    listTools: (uid, runCtx) => withRun(runCtx, () => base.listTools(uid, runCtx)),
+    resolveTool: (uid, name, runCtx) => withRun(runCtx, () => base.resolveTool(uid, name, runCtx)),
+    callTool: (uid, name, args, runCtx) =>
+      withRun(runCtx, () => base.callTool(uid, name, args, runCtx)),
+    connectForRun: (uid, runCtx) => withRun(runCtx, () => base.connectForRun(uid, runCtx)),
+    releaseRun: (uid, runCtx) => base.releaseRun(uid, runCtx),
+    shutdown: () => base.shutdown(),
+  };
 }
 
 export function createMcpRuntime(deps: McpRuntimeDeps): McpRuntime {
   const crypto: EnvelopeCrypto = createEnvelopeCrypto(deps.masterKey);
-  const fetchImpl = deps.fetchImpl ?? createGuardedFetch();
-  const systemBus =
-    deps.systemBus ??
-    createRedisSystemBus(
-      // ioredis's `off`/`on` listener types are `(...args: any[])`; the bus's
-      // structural SystemRedis mirror declares `never[]`. Same client, same
-      // methods — the cast is the documented wave-merger carry.
-      deps.redisQ as unknown as Parameters<typeof createRedisSystemBus>[0],
-    );
+  const redactor = createSecretRedactor();
+  const support = createCuratedProviderSupport();
+  const providerEgress = deps.providerEgress ??
+    (deps.legacyProviderFetchForTest === true
+      ? undefined
+      : createProviderEgress({
+          origins: support.origins,
+          redactor,
+          production: deps.production ?? true,
+        }));
+  const fetchImpl = deps.fetchImpl ?? legacyFetchDisabled;
+  const providerCalls = new AsyncLocalStorage<Record<string, unknown>>();
+  const systemBus = deps.systemBus ?? createRedisSystemBus(
+    deps.redisQ as unknown as Parameters<typeof createRedisSystemBus>[0],
+  );
   const sandbox = deps.sandbox ?? createUnavailableSandbox();
 
-  // ONE catalog instance: the curated handlers are process-wide singletons
-  // (the shared-singleton guarantee the router's per-uid clients rely on).
-  const catalog = createCuratedCatalog({
+  const baseCatalog = createCuratedCatalog({
     fetchImpl,
     workspace: sandbox.files,
     ...(deps.githubApiBase !== undefined ? { githubApiBase: deps.githubApiBase } : {}),
+    ...(providerEgress !== undefined
+      ? { handlerOverrides: support.handlerOverrides(providerEgress, redactor) }
+      : {}),
+  });
+  const catalog = contextualCatalog(baseCatalog, providerCalls);
+
+  const activation = createActivationService({
+    definitions: deps.definitions ?? support.definitions,
+    listConnections: async (userId) => {
+      const rows = await mcpServers.list(deps.db, userId);
+      return rows.map((raw) => {
+        const row = toMcpConnectionRow(raw);
+        return {
+          connectionId: row.connectionId,
+          userId: row.userId,
+          providerId: row.providerId,
+          enabled: row.enabled,
+          agentEnabled: row.agentEnabled,
+          authState: row.authState,
+          configVersion: row.configVersion,
+          disconnectGeneration: row.disconnectGeneration,
+        };
+      });
+    },
+    revalidateConnection: (call) => revalidateProviderConnection(
+      deps.db,
+      call.connectionId,
+      call.userId,
+      {
+        configVersion: call.configVersion,
+        disconnectGeneration: call.disconnectGeneration,
+      },
+    ),
   });
 
   const oauth = createOAuthFlow({
@@ -108,8 +197,7 @@ export function createMcpRuntime(deps: McpRuntimeDeps): McpRuntime {
     systemBus,
     fetchImpl,
   });
-
-  const router = createMcpRouter({
+  const baseRouter = createMcpRouter({
     db: deps.db,
     crypto,
     catalog,
@@ -119,6 +207,7 @@ export function createMcpRuntime(deps: McpRuntimeDeps): McpRuntime {
     fetchImpl,
     oauth,
   });
+  const router = contextualRouter(baseRouter, providerCalls);
 
   const registry = createContributionRegistry();
   const resolver = createSourceResolver({
@@ -126,7 +215,6 @@ export function createMcpRuntime(deps: McpRuntimeDeps): McpRuntime {
     ...(deps.githubApiBase !== undefined ? { githubApiBase: deps.githubApiBase } : {}),
     ...(deps.githubToken !== undefined ? { githubToken: deps.githubToken } : {}),
   });
-
   const installer = createPluginInstaller({
     db: deps.db,
     crypto,
@@ -139,13 +227,12 @@ export function createMcpRuntime(deps: McpRuntimeDeps): McpRuntime {
   let shuttingDown: Promise<void> | null = null;
   const shutdown = (): Promise<void> => {
     shuttingDown ??= (async () => {
-      // Stop accepting/using connections first, then release the bus's
-      // pending subscribers (they resolve null = deny).
       await router.shutdown();
+      await providerEgress?.close();
       await systemBus.close();
     })();
     return shuttingDown;
   };
 
-  return { router, registry, installer, resolver, shutdown };
+  return { router, activation, registry, installer, resolver, shutdown };
 }

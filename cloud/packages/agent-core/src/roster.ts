@@ -42,6 +42,24 @@ import { canonicalTools } from "./promptCache.js";
 import type { AgentPreset } from "./presets.js";
 import type { SessionMode, Tool, ToolContext, ToolSpec } from "./types.js";
 
+/**
+ * The non-secret parent snapshot port shared with the MCP activation service.
+ * The generic definition keeps agent-core independent of @ovid/mcp while the
+ * production RunMcpSnapshot remains structurally exact end to end.
+ */
+export interface ParentMcpProjection<TDefinition = unknown> {
+  generation: string;
+  operations: readonly {
+    connectionId: string;
+    providerId: string;
+    operationId: string;
+    modelName: string;
+    definition: TDefinition;
+    configVersion: number;
+    disconnectGeneration: number;
+  }[];
+}
+
 export interface RosterContext {
   mode: SessionMode;
   planMode: boolean;

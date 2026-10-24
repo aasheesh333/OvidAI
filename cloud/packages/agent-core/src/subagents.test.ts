@@ -37,6 +37,7 @@ import {
   subagentPolicyAllows,
   subagentToolPolicy,
   type RunStatus,
+  type SubagentMcpProjection,
   type SubagentReport,
   type SubagentStore,
 } from "./subagents.js";
@@ -282,6 +283,8 @@ function build(o: {
   lineages?: Record<string, string[]>;
   onRun?: (job: AgentRunJob) => Promise<void> | void;
   stops?: HookStopResult[];
+  available?: readonly ToolSpec[];
+  mcp?: SubagentMcpProjection;
 } = {}) {
   const fake = fakeStore(o.lineages);
   const { engine, jobs } = fakeEngine(fake, { onRun: o.onRun });
@@ -294,7 +297,7 @@ function build(o: {
     state,
     hooks,
     sinkFactory,
-    registry: createToolRegistry(AVAILABLE.map((s) => ({
+    registry: createToolRegistry((o.available ?? AVAILABLE).map((s) => ({
       spec: s,
       timeoutMs: 1000,
       async execute() {
@@ -302,6 +305,7 @@ function build(o: {
       },
     }))),
     store: fake.store,
+    ...(o.mcp !== undefined ? { mcp: o.mcp } : {}),
   });
   return { fake, jobs, stopCalls, events, supervisor };
 }
@@ -786,6 +790,30 @@ describe("projectChildRoster", () => {
       expect.arrayContaining(["send_message", "list_agents", "interrupt_agent", "report"]),
     );
   });
+
+  it("intersects MCP specs with the parent's exact activated projection before a wildcard policy", () => {
+    const available = [
+      ...AVAILABLE,
+      spec("mcp__acme__list_items"),
+      spec("mcp__acme__not_activated_in_parent"),
+    ];
+    const parent = {
+      generation: "parent-generation",
+      operations: [{
+        connectionId: "connection-1",
+        providerId: "acme",
+        operationId: "list_items",
+        modelName: "mcp__acme__list_items",
+        definition: { name: "list_items" },
+        configVersion: 1,
+        disconnectGeneration: 0,
+      }],
+    };
+    const names = projectChildRoster(available, { allow: ["*"], deny: [] }, parent)
+      .map((tool) => tool.name);
+    expect(names).toContain("mcp__acme__list_items");
+    expect(names).not.toContain("mcp__acme__not_activated_in_parent");
+  });
 });
 
 // ── dispatch: creation, events, roster, result ─────────────────────────────
@@ -847,6 +875,101 @@ describe("createSubagentSupervisor.dispatch", () => {
       expect.arrayContaining(["run_shell", "file_read", "fs_edit", "send_message", "report"]),
     );
     expect(names).not.toContain("dispatch_agent");
+  });
+
+  it("activates the exact parent MCP projection before the child engine run and closes that run", async () => {
+    const order: string[] = [];
+    const parent = {
+      generation: "parent-generation",
+      operations: [{
+        connectionId: "connection-1",
+        providerId: "acme",
+        operationId: "list_items",
+        modelName: "mcp__acme__list_items",
+        definition: { name: "list_items" },
+        configVersion: 1,
+        disconnectGeneration: 0,
+      }],
+    };
+    const mcp: SubagentMcpProjection = {
+      parent,
+      async snapshotForRun(input) {
+        order.push("snapshot");
+        expect(input.parent).toBe(parent);
+        expect(input).toMatchObject({
+          userId: "u1",
+          sessionId: "child-1",
+          isSubagent: true,
+          allow: ["mcp__acme__*"],
+          deny: [],
+          planMode: false,
+        });
+        return { ...parent, generation: "child-generation" };
+      },
+      async closeRun(runId) {
+        order.push(`close:${runId}`);
+      },
+    };
+    const available = [...AVAILABLE, spec("mcp__acme__list_items"), spec("mcp__acme__other")];
+    const { jobs, supervisor } = build({
+      available,
+      mcp,
+      onRun: () => {
+        order.push("engine");
+      },
+    });
+
+    const handle = await supervisor.dispatch(parentCtx(), {
+      prompt: "use only the parent provider",
+      tools: ["mcp__acme__*"],
+    });
+    await handle.settled;
+
+    expect(order).toEqual(["snapshot", "engine", `close:${handle.runId}`]);
+    expect(jobs[0]!.roster?.map((tool) => tool.name)).toContain("mcp__acme__list_items");
+    expect(jobs[0]!.roster?.map((tool) => tool.name)).not.toContain("mcp__acme__other");
+  });
+
+  it("removes newly revoked MCP operations from a later child turn roster", async () => {
+    const parent = {
+      generation: "parent-generation",
+      operations: [{
+        connectionId: "connection-1",
+        providerId: "acme",
+        operationId: "list_items",
+        modelName: "mcp__acme__list_items",
+        definition: { name: "list_items" },
+        configVersion: 1,
+        disconnectGeneration: 0,
+      }],
+    };
+    let snapshots = 0;
+    const mcp: SubagentMcpProjection = {
+      parent,
+      async snapshotForRun() {
+        snapshots += 1;
+        return snapshots === 1 ? parent : { generation: "child-empty", operations: [] };
+      },
+      async closeRun() {},
+    };
+    const available = [...AVAILABLE, spec("mcp__acme__list_items")];
+    const { fake, jobs, supervisor } = build({
+      available,
+      mcp,
+      onRun: async (job) => {
+        if (jobs.length === 1) {
+          const message = await fake.store.appendUserMessage(job.sessionId, "follow-up");
+          await fake.store.createRun({ sessionId: job.sessionId, promptMessageId: message.messageId });
+        }
+      },
+    });
+
+    const handle = await supervisor.dispatch(parentCtx(), { prompt: "initial" });
+    await handle.settled;
+
+    expect(jobs).toHaveLength(2);
+    expect(jobs[0]!.roster?.map((tool) => tool.name)).toContain("mcp__acme__list_items");
+    expect(jobs[1]!.roster?.map((tool) => tool.name)).not.toContain("mcp__acme__list_items");
   });
 
   it("rejects an empty prompt", async () => {
@@ -1137,6 +1260,9 @@ describe.skipIf(!TEST_DATABASE_URL)("createSubagentSupervisor (real postgres)", 
       { prompt: "real task", agentType: "CodeSubagent" },
     );
 
+    // Dispatch is non-blocking; terminal status is guaranteed by settled,
+    // not by the return of dispatch. Per-run MCP cleanup adds a legitimate await.
+    expect(await handle.settled).toBe("completed");
     expect(handle.status()).toBe("completed");
     // Wave 1b: the card names the agent, and the child never inherits the
     // parent's @-tag context (R1) — only the dispatch prompt crosses.

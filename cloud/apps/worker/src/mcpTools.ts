@@ -1,101 +1,64 @@
-/**
- * MCP/catalog agent tools (P5 Task 16) — THE P3 ROSTER SEAM.
- *
- * ## Seam contract (P3 consumes this)
- *
- * P3's roster builder calls `mcpToolProvider.tools(uid)` / `specs(uid)`
- * alongside the native tools when assembling the sorted tool list, and routes
- * any model tool-call whose name starts with `mcp__` (or resolves through
- * `router.resolveTool`) to that tool's canonical
- * `execute(args, ctx) → ToolResult` (ctx carries uid + session/run ids). The
- * provider closes over the active run's `RunContext`; its `sampler` is a
- * closure over the run's `ModelTransport` + the run's API key — ONE
- * completion call, NO retry layer (the processor owns retries; reword when
- * P9's `RunDeps.keys: KeyResolver` lands).
- *
- * Catalog agent tools (`catalog_list_mcp`, `catalog_add_mcp`,
- * `agent_install_mcp`, `agent_install_plugin`) register as ordinary roster
- * tools owned by P3 through the SAME canonical seam. Until P3 lands they are
- * exercised at router level by the Task 16 e2e.
- *
- * Tool rules:
- * - a GATED refusal is a normal tool result
- *   `{content: PRO_REQUIRED_MESSAGE, isError: true}` — the agent can adapt
- *   and tell the user; never a thrown error into the run loop;
- * - user/validation errors are `isError` results, never throws;
- * - `execute` validates its own arguments.
- */
+/** Snapshot-only MCP/provider adapters and read-only catalog discovery. */
 
-import { randomUUID } from "node:crypto";
-import { plugins as pluginsRepo, users as usersRepo, type Db } from "@ovid/db";
+import type { Db } from "@ovid/db";
 import {
-  ConfigParseError,
   PRO_REQUIRED_MESSAGE,
   ProRequiredError,
-  adaptPlugin,
-  isSafePluginVersion,
-  parseMcpConfig,
+  type ActivatedOperation,
   type McpRouter,
   type McpServerSummary,
-  type McpToolListing,
   type PluginInstallJob,
   type PluginSourceInput,
   type RunContext,
+  type RunMcpSnapshot,
+  type RunPolicy,
   type SamplingRequest,
   type SamplingResult,
   type SourceResolver,
+  type ToolContext as ProviderToolContext,
 } from "@ovid/mcp";
 import { pluginSourceInputSchema } from "@ovid/shared";
 import type { ModelToolSpec } from "./tools/types.js";
 
-// ---------------------------------------------------------------------------
-// Canonical tool seam (P2's AgentTool additively extended)
-// ---------------------------------------------------------------------------
-
-/** P2's landed `{content, isError}` + optional artifacts; omitted isError === false. */
 export interface ToolResult {
   content: string;
   isError?: boolean;
   artifacts?: unknown[];
 }
 
-/** The subset of P2's ToolContext the MCP surface needs (RunContext rides alongside). */
-export interface McpToolContext {
+/** Canonical ToolContext plus MCP's uid spelling and provider approval access. */
+export interface McpToolContext extends RunPolicy {
   uid: string;
   sessionId: string;
   runId: string;
-  /**
-   * MEDIUM-1: the active run's model sampler (ONE completion call, no retry
-   * layer). P3's roster passes it per call; `createMcpToolProvider`'s
-   * `samplerFor` option is the alternative when the provider closes over the
-   * run instead.
-   */
+  isSubagent: boolean;
+  depth: number;
+  callKey: string;
+  signal: AbortSignal;
+  approveProvider?: ProviderToolContext["approveProvider"];
   sampler?: (req: SamplingRequest) => Promise<SamplingResult | null>;
 }
 
 export interface McpAgentTool {
-  /** Published name: `mcp__<server>__<tool>` (or `catalog_*` / `agent_*`). */
   readonly name: string;
   readonly description: string;
-  /** JSON Schema object sent to the model. */
   readonly parameters: Record<string, unknown>;
-  /** Validates args itself; user errors → isError result, never a throw. */
   execute(args: Record<string, unknown>, ctx: McpToolContext): Promise<ToolResult>;
 }
 
 export interface McpToolProvider {
-  /** One tool per McpToolListing, sorted by name (prompt-cache-stable). */
-  tools(uid: string): Promise<McpAgentTool[]>;
-  /** [OI] function specs derived from tools(), same sort. */
-  specs(uid: string): Promise<ModelToolSpec[]>;
+  tools(snapshot: RunMcpSnapshot): Promise<McpAgentTool[]>;
+  specs(snapshot: RunMcpSnapshot): Promise<ModelToolSpec[]>;
 }
 
-/**
- * MEDIUM-1: optional run-binding. P3 may either pass `sampler` on the
- * per-call `McpToolContext` or have the provider close over the active run
- * (`samplerFor`); both are threaded into the router's `RunContext`.
- */
 export interface McpToolProviderOptions {
+  /** Resolves the exact root/child snapshot for THIS call, never a global roster. */
+  snapshotFor(ctx: McpToolContext): Promise<RunMcpSnapshot | null>;
+  /** Task 1's current-row/config/disconnect fence, invoked on every dispatch. */
+  revalidate(
+    snapshot: RunMcpSnapshot,
+    call: { connectionId: string; operationId: string },
+  ): Promise<"current" | "stale" | "denied">;
   samplerFor?: (
     ctx: McpToolContext,
   ) => ((req: SamplingRequest) => Promise<SamplingResult | null>) | undefined;
@@ -111,57 +74,82 @@ function toolResult(content: string, isError = false): ToolResult {
 
 function runContext(
   ctx: McpToolContext,
+  operation: ActivatedOperation,
   samplerFor?: McpToolProviderOptions["samplerFor"],
 ): RunContext {
-  // MEDIUM-1: the router's sampling handler reads `RunContext.sampler`.
-  // Without this the server's sampling/createMessage always returned null.
   const sampler = samplerFor?.(ctx) ?? ctx.sampler;
   return {
     sessionId: ctx.sessionId,
     runId: ctx.runId,
+    userId: ctx.uid,
+    connectionId: operation.connectionId,
+    providerId: operation.providerId,
+    mode: ctx.mode,
+    planMode: ctx.planMode,
+    unattended: ctx.unattended,
+    isSubagent: ctx.isSubagent,
+    depth: ctx.depth,
+    callKey: ctx.callKey,
+    signal: ctx.signal,
+    ...(ctx.approveProvider !== undefined ? { approveProvider: ctx.approveProvider } : {}),
     ...(sampler !== undefined ? { sampler } : {}),
-  };
+  } as RunContext;
 }
 
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
-/** ProRequiredError → the pinned upgrade copy (never a throw). */
 function gatedOrRethrow(err: unknown): ToolResult {
-  if (err instanceof ProRequiredError) {
-    return toolResult(PRO_REQUIRED_MESSAGE, true);
-  }
+  if (err instanceof ProRequiredError) return toolResult(PRO_REQUIRED_MESSAGE, true);
   const code = (err as { code?: unknown } | null)?.code;
   if (code === "sandbox_unavailable") {
-    return toolResult(errorMessage(err), true);
+    return toolResult(err instanceof Error ? err.message : String(err), true);
   }
   throw err;
 }
 
-function toolForListing(
+function toolForOperation(
   router: McpRouter,
-  uid: string,
-  listing: McpToolListing,
+  activated: ActivatedOperation,
   opts: McpToolProviderOptions,
 ): McpAgentTool {
   return {
-    name: listing.name,
-    description: listing.description ?? `MCP tool ${listing.name}`,
-    parameters: listing.inputSchema ?? { type: "object", properties: {} },
+    name: activated.modelName,
+    description: activated.definition.description,
+    parameters: activated.definition.inputSchema,
     async execute(args, ctx) {
-      const runCtx = runContext(ctx, opts.samplerFor);
       try {
-        // Never guess: resolve first, then dispatch through the router (the
-        // router re-reads the tier at every gate point).
-        const resolved = await router.resolveTool(uid, listing.name, runCtx);
-        if (resolved === null) {
-          return toolResult(`Unknown tool: ${listing.name}`, true);
+        const current = await opts.snapshotFor(ctx);
+        const operation = current?.operations.find(
+          (candidate) => candidate.modelName === activated.modelName &&
+            candidate.connectionId === activated.connectionId &&
+            candidate.operationId === activated.operationId,
+        );
+        if (current === null || current === undefined || operation === undefined) {
+          return toolResult(`DENIED: ${activated.modelName} is not available in this run.`, true);
         }
-        const result = await router.callTool(uid, listing.name, args, runCtx);
+        const verdict = await opts.revalidate(current, {
+          connectionId: operation.connectionId,
+          operationId: operation.operationId,
+        });
+        if (verdict !== "current") {
+          return toolResult(
+            verdict === "stale"
+              ? `DENIED: ${activated.modelName} is stale.`
+              : `DENIED: ${activated.modelName} is not available in this run.`,
+            true,
+          );
+        }
+        const result = await router.callTool(
+          ctx.uid,
+          operation.modelName,
+          args,
+          runContext(ctx, operation, opts.samplerFor),
+        );
         return toolResult(result.text, result.isError);
       } catch (err) {
-        return gatedOrRethrow(err);
+        if (err instanceof ProRequiredError ||
+            (err as { code?: unknown } | null)?.code === "sandbox_unavailable") {
+          return gatedOrRethrow(err);
+        }
+        return toolResult("Provider operation failed.", true);
       }
     },
   };
@@ -169,22 +157,16 @@ function toolForListing(
 
 export function createMcpToolProvider(
   router: McpRouter,
-  opts: McpToolProviderOptions = {},
+  opts: McpToolProviderOptions,
 ): McpToolProvider {
-  async function listTools(uid: string): Promise<McpAgentTool[]> {
-    const listings = await router.listTools(uid);
-    return [...listings]
-      .sort(byName)
-      .map((listing) => toolForListing(router, uid, listing, opts));
-  }
-
   const provider: McpToolProvider = {
-    tools: listTools,
-    async specs(uid: string): Promise<ModelToolSpec[]> {
-      // M3: derive from tools() (the one roster fetch), never a second
-      // router.listTools pass — that would re-spawn stdio servers just to
-      // produce the model-facing specs.
-      const tools = await provider.tools(uid);
+    async tools(snapshot) {
+      return [...snapshot.operations]
+        .sort((a, b) => byName({ name: a.modelName }, { name: b.modelName }))
+        .map((operation) => toolForOperation(router, operation, opts));
+    },
+    async specs(snapshot) {
+      const tools = await provider.tools(snapshot);
       return tools.map((tool) => ({
         type: "function" as const,
         function: {
@@ -198,15 +180,7 @@ export function createMcpToolProvider(
   return provider;
 }
 
-// ---------------------------------------------------------------------------
-// Catalog + install tools
-// ---------------------------------------------------------------------------
-
-/**
- * Structural BullMQ `Queue.add` subset — the worker must not declare a
- * direct bullmq dependency (only @ovid/queue does). The deferred
- * plugin-installs lane's concrete Queue<PluginInstallJob> satisfies this.
- */
+/** Kept as a structural export for the existing worker barrel; no model tool enqueues installs. */
 export interface PluginInstallQueue {
   add(
     name: string,
@@ -217,30 +191,18 @@ export interface PluginInstallQueue {
 
 export interface CatalogToolDeps {
   router: McpRouter;
-  db: Db;
-  queues: { pluginInstalls: PluginInstallQueue };
-  /**
-   * The runtime's source resolver (I3). REQUIRED: the enqueue path must write
-   * the SAME canonical `publisher/name` the installer derives from the
-   * adapted manifest. The old per-source heuristic (`paste/<label>`,
-   * package/URL slugs) produced ids the installer refuses with
-   * `plugin_id_mismatch`, so paste installs were guaranteed to fail.
-   *
-   * The source is staged once here to read the manifest id; the installer
-   * resolves it again at install time (T14 owns that transaction). A source
-   * that cannot be resolved/adapted is an isError result and is never
-   * enqueued.
-   */
-  resolver: Pick<SourceResolver, "resolve">;
+  /** Legacy caller fields are optional and unused by read-only discovery. */
+  db?: Db;
+  queues?: { pluginInstalls: PluginInstallQueue };
+  resolver?: Pick<SourceResolver, "resolve">;
 }
 
 const LIST_SCOPE = { type: "string", enum: ["curated", "custom", "all"] } as const;
-
 const CATALOG_DEFS: ReadonlyArray<Pick<McpAgentTool, "name" | "description" | "parameters">> = [
   {
     name: "catalog_list_mcp",
     description:
-      "List MCP servers available to this user. scope: curated (built-in), custom (user-added), or all.",
+      "List MCP servers available to this user. scope: curated (built-in), custom (user-added), or all. Read-only.",
     parameters: {
       type: "object",
       properties: {
@@ -249,63 +211,9 @@ const CATALOG_DEFS: ReadonlyArray<Pick<McpAgentTool, "name" | "description" | "p
       additionalProperties: false,
     },
   },
-  {
-    name: "catalog_add_mcp",
-    description:
-      "Add a custom MCP server from a pasted .mcp.json / Codex TOML config. Custom servers are a Pro feature.",
-    parameters: {
-      type: "object",
-      properties: {
-        config: { type: "string", description: "The pasted MCP configuration text." },
-      },
-      required: ["config"],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "agent_install_mcp",
-    description:
-      "Connect to an MCP server and report how many tools it exposes. Curated servers need no extra install.",
-    parameters: {
-      type: "object",
-      properties: {
-        server: {
-          type: "string",
-          description: "Server id, published name, or curated id (e.g. github).",
-        },
-      },
-      required: ["server"],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "agent_install_plugin",
-    description:
-      "Install a plugin from a source string: owner/repo (GitHub), npm:<package>, an http(s) archive URL, or a pasted config. Pro feature.",
-    parameters: {
-      type: "object",
-      properties: {
-        source: {
-          type: "string",
-          description: "owner/repo, npm:<pkg>, https://…zip, or pasted config text.",
-        },
-      },
-      required: ["source"],
-      additionalProperties: false,
-    },
-  },
 ];
 
-/**
- * M1: the exported catalog-tool METADATA (names/schemas are stable and safe
- * to render), deliberately WITHOUT `execute`. Execution requires runtime
- * deps (db/queues/resolver) and is bound by `createCatalogTools(deps)`; a
- * consumer that needs callable tools must go through that factory. Omitting
- * `execute` makes the unbound state a type error instead of a runtime
- * "not bound" result.
- */
 export type CatalogAgentToolDef = Pick<McpAgentTool, "name" | "description" | "parameters">;
-
 export const CATALOG_AGENT_TOOLS: readonly CatalogAgentToolDef[] = CATALOG_DEFS.map(
   (def) => ({ ...def }),
 );
@@ -327,11 +235,10 @@ function summaryItem(summary: McpServerSummary): Record<string, unknown> {
   };
 }
 
-/** Parse the agent-facing source string into the shared wire contract. */
+/** Public source parser retained for authenticated, non-model callers. */
 export function parsePluginSource(raw: string): PluginSourceInput {
   const text = raw.trim();
   if (text === "") throw new Error("invalid_input: source is empty");
-
   if (text.startsWith("npm:")) {
     const spec = text.slice("npm:".length).trim();
     const match = /^(@[^/]+\/[^@]+|[^@]+)(?:@(.+))?$/.exec(spec);
@@ -342,11 +249,9 @@ export function parsePluginSource(raw: string): PluginSourceInput {
       ...(match[2] !== undefined ? { version: match[2] } : {}),
     });
   }
-
   if (/^https?:\/\//i.test(text)) {
     return pluginSourceInputSchema.parse({ kind: "zip", url: text });
   }
-
   const github = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)(?:@([^\s]+))?$/.exec(text);
   if (github !== null) {
     return pluginSourceInputSchema.parse({
@@ -356,38 +261,16 @@ export function parsePluginSource(raw: string): PluginSourceInput {
       ...(github[3] !== undefined ? { ref: github[3] } : {}),
     });
   }
-
   return pluginSourceInputSchema.parse({ kind: "paste", label: "pasted", config: text });
 }
 
-/**
- * I3: derive the canonical plugin id the SAME way the installer will — stage
- * the source with the runtime's resolver and adapt its manifest (Task 13's
- * normalization). Enqueueing a heuristic id (`paste/<label>`, a package or
- * URL slug) made the installer refuse the job with `plugin_id_mismatch`.
- *
- * The staging tree is discarded immediately: this call only reads identity;
- * the install transaction resolves the source again.
- */
-async function canonicalPluginId(
-  resolver: Pick<SourceResolver, "resolve">,
-  source: PluginSourceInput,
-): Promise<{ pluginId: string; version: string }> {
-  const resolved = await resolver.resolve(source);
-  try {
-    const manifest = await adaptPlugin(resolved.stagingDir);
-    return { pluginId: manifest.pluginId, version: manifest.version };
-  } finally {
-    await resolved.discard().catch(() => {
-      // discard is idempotent/best-effort; identity was already read.
-    });
-  }
-}
-
 export function createCatalogTools(deps: CatalogToolDeps): McpAgentTool[] {
-  const { router, db, queues, resolver } = deps;
-
-  const listTool: McpAgentTool = {
+  // Referenced only to keep legacy structural consumers type-compatible; no
+  // database writes, queue operations or source resolution occur here.
+  void deps.db;
+  void deps.queues;
+  void deps.resolver;
+  return [{
     ...CATALOG_DEFS[0]!,
     async execute(args, ctx) {
       try {
@@ -395,7 +278,7 @@ export function createCatalogTools(deps: CatalogToolDeps): McpAgentTool[] {
         if (scope === null) {
           return toolResult('invalid_input: scope must be "curated", "custom" or "all"', true);
         }
-        const servers = await router.listServers(ctx.uid);
+        const servers = await deps.router.listServers(ctx.uid);
         const items = servers.filter((server) =>
           scope === "all"
             ? true
@@ -408,140 +291,5 @@ export function createCatalogTools(deps: CatalogToolDeps): McpAgentTool[] {
         return gatedOrRethrow(err);
       }
     },
-  };
-
-  const addTool: McpAgentTool = {
-    ...CATALOG_DEFS[1]!,
-    async execute(args, ctx) {
-      try {
-        const config = args.config;
-        if (typeof config !== "string" || config.trim() === "") {
-          return toolResult("invalid_input: config must be a non-empty string", true);
-        }
-        let imported;
-        try {
-          // Empty env: `${SECRET}` references stay literal for the
-          // credential gate; worker env values never leak into stored config.
-          imported = parseMcpConfig(config, { env: {} });
-        } catch (err) {
-          if (err instanceof ConfigParseError) {
-            return toolResult(`invalid_config: ${err.message}`, true);
-          }
-          throw err;
-        }
-        if (imported.length === 0) {
-          return toolResult("invalid_config: no MCP servers found in config", true);
-        }
-        const summary = await router.addServer(ctx.uid, { imported: imported[0]! });
-        return toolResult(`Added MCP server "${summary.name}" (${summary.transport}).`);
-      } catch (err) {
-        if (err instanceof ProRequiredError) {
-          return toolResult(PRO_REQUIRED_MESSAGE, true);
-        }
-        if (err instanceof Error && err.message === "server_exists") {
-          return toolResult("server_exists: an MCP server with that name already exists", true);
-        }
-        return toolResult(errorMessage(err), true);
-      }
-    },
-  };
-
-  const installMcpTool: McpAgentTool = {
-    ...CATALOG_DEFS[2]!,
-    async execute(args, ctx) {
-      try {
-        const name = args.server;
-        if (typeof name !== "string" || name.trim() === "") {
-          return toolResult("invalid_input: server must be a non-empty string", true);
-        }
-        const servers = await router.listServers(ctx.uid);
-        const summary = servers.find(
-          (server) =>
-            server.id === name || server.name === name || server.curatedId === name,
-        );
-        if (summary === undefined) {
-          return toolResult(`Unknown MCP server: ${name}`, true);
-        }
-        if (summary.curatedId === null) {
-          const tier = await usersRepo.getTier(db, ctx.uid);
-          if (tier === "free") return toolResult(PRO_REQUIRED_MESSAGE, true);
-        }
-        const listings = await router.listTools(ctx.uid);
-        const count = listings.filter((listing) => listing.serverId === summary.id).length;
-        return toolResult(
-          `Connected ${summary.name}: ${count} tool${count === 1 ? "" : "s"} available.`,
-        );
-      } catch (err) {
-        return gatedOrRethrow(err);
-      }
-    },
-  };
-
-  const installPluginTool: McpAgentTool = {
-    ...CATALOG_DEFS[3]!,
-    async execute(args, ctx) {
-      try {
-        const raw = args.source;
-        if (typeof raw !== "string" || raw.trim() === "") {
-          return toolResult("invalid_input: source must be a non-empty string", true);
-        }
-        let source: PluginSourceInput;
-        try {
-          source = parsePluginSource(raw);
-        } catch (err) {
-          return toolResult(errorMessage(err), true);
-        }
-
-        const tier = await usersRepo.getTier(db, ctx.uid);
-        if (tier === "free") return toolResult(PRO_REQUIRED_MESSAGE, true);
-
-        // I3: the row/job carry the manifest's canonical id, not a source
-        // heuristic — the installer refuses any mismatch. A source that
-        // cannot be resolved/adapted is a validation error (never enqueued).
-        let pluginId: string;
-        let version: string;
-        try {
-          const identity = await canonicalPluginId(resolver, source);
-          pluginId = identity.pluginId;
-          version = identity.version;
-        } catch (err) {
-          return toolResult(`invalid_source: ${errorMessage(err)}`, true);
-        }
-        // HIGH-1: the installer rejects an empty/path-unsafe version with
-        // `invalid_plugin`; refuse it here instead of enqueueing a doomed job.
-        if (!isSafePluginVersion(version)) {
-          return toolResult(
-            `invalid_source: the plugin manifest has no usable version ("${version}")`,
-            true,
-          );
-        }
-
-        const installId = randomUUID();
-        // Queue status vocabulary (T15): queued → installing by the worker.
-        await pluginsRepo.upsert(db, {
-          userId: ctx.uid,
-          pluginId,
-          version,
-          source: source as unknown as Record<string, unknown>,
-          status: "queued",
-        });
-        await queues.pluginInstalls.add(
-          "plugin-install",
-          {
-            installId,
-            userId: ctx.uid,
-            pluginId,
-            mode: "install",
-            source,
-          },
-          { priority: tier === "free" ? 2 : 1, jobId: installId },
-        );
-        return toolResult(`Queued plugin install: ${pluginId} (install ${installId}).`);
-      } catch (err) {
-        return gatedOrRethrow(err);
-      }
-    },
-  };
-
-  return [listTool, addTool, installMcpTool, installPluginTool];
+  }];
 }

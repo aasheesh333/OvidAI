@@ -96,6 +96,17 @@ import {
   type ToolContext as CoreToolContext,
   type ToolRegistry as CoreToolRegistry,
 } from "@ovid/agent-core";
+import type {
+  ActivationService,
+  McpRouter,
+  ProviderApproval,
+  RunMcpSnapshot,
+} from "@ovid/mcp";
+import {
+  createCatalogTools,
+  createMcpToolProvider,
+  type McpAgentTool,
+} from "./mcpTools.js";
 import { createRedisApprovalBridge } from "./approvalBridge.js";
 import { agentKeyFor } from "./keyResolver.js";
 import { loadRunAccountContext, runKeyAdapter } from "./runAccount.js";
@@ -450,6 +461,11 @@ export interface FullRunDeps {
    * the 15 s idle lease is the backstop.
    */
   browserReleaseSession?: (sessionId: string, userId: string, runId: string) => Promise<void>;
+  /** Activated provider runtime; absent keeps MCP/discovery out of the roster. */
+  mcp?: {
+    activation: ActivationService;
+    router: McpRouter;
+  };
   /**
    * P5 Task 11 I4: release this run's MCP connections when it ends. Custom
    * stdio (and legacy SSE) connections are per-run; without this they would
@@ -1661,6 +1677,8 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     /** The user's Share session memory preference (false → session-scoped search). */
     shareSessionMemory: boolean;
     referencedSessionIds: readonly string[];
+    /** Activated provider operations plus read-only discovery for this run. */
+    mcpTools?: readonly CoreTool[];
   }): CoreToolRegistry => {
     const adapterDeps = {
       sandboxFor: async (ctx: CoreToolContext) =>
@@ -1684,6 +1702,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       ...imageTools,
       ...(deps.extraTools ?? []),
       ...(deps.browserTools ?? []),
+      ...(o.mcpTools ?? []),
       ...createSandboxTools({ sandbox: o.sandbox }),
       withGrantHop(
         createFetchUrlTool({
@@ -2090,6 +2109,85 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       },
     });
 
+    // ---- Activated MCP/provider roster ------------------------------------
+    // One root snapshot feeds both buildRegistry and the supervisor's exact
+    // parent projection. Child snapshots live in the same run-id map so the
+    // shared Tool objects always execute against their own run's roster.
+    const runUnattended = job.data.unattended ?? job.data.schedule !== undefined;
+    const mcpSnapshots = new Map<string, RunMcpSnapshot>();
+    const rootPreset = presetFor(sessionState.presetId);
+    const rootMcpSnapshot = deps.mcp === undefined
+      ? { generation: "mcp-disabled", operations: [] } as RunMcpSnapshot
+      : await deps.mcp.activation.snapshotForRun({
+          userId,
+          runId,
+          sessionId,
+          isSubagent: false,
+          allow: rootPreset?.allowedTools ?? [],
+          deny: rootPreset?.deniedTools ?? [],
+          mode,
+          planMode: sessionState.planMode,
+          unattended: runUnattended,
+        });
+    if (deps.mcp !== undefined) mcpSnapshots.set(runId, rootMcpSnapshot);
+    const mcpProvider = deps.mcp === undefined
+      ? null
+      : createMcpToolProvider(deps.mcp.router, {
+          snapshotFor: async (ctx) => mcpSnapshots.get(ctx.runId) ?? null,
+          revalidate: (snapshot, call) => deps.mcp!.activation.revalidate(snapshot, call),
+        });
+    const toCoreMcpTool = (tool: McpAgentTool): CoreTool => ({
+      spec: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      },
+      timeoutMs: 300_000,
+      execute: (args, ctx) => tool.execute(args, {
+        uid: ctx.userId,
+        sessionId: ctx.sessionId,
+        runId: ctx.runId,
+        mode: ctx.mode,
+        planMode: ctx.planMode,
+        unattended: ctx.unattended,
+        isSubagent: ctx.isSubagent,
+        depth: ctx.depth,
+        callKey: ctx.callKey,
+        signal: ctx.signal,
+        approveProvider: async (approval: ProviderApproval) => {
+          const decision = await approvals.approve(ctx, {
+            approvalId: `${ctx.runId}:${ctx.callKey}:provider`,
+            kind: "tool",
+            tool: `provider:${approval.providerId}/${approval.operationId}`,
+            summary: `Approve ${approval.operationId} on ${approval.providerId}`,
+            detail:
+              `Target: ${approval.safeTargetSummary}\n` +
+              "This one-time approval is bound to the connection, operation, arguments, run, user, and expiry.",
+            allowAlways: false,
+            pathTargets: [],
+            hostTargets: [],
+          });
+          return decision === "allow" ? { decision, approval } : { decision };
+        },
+      }),
+    });
+    const mcpTools: CoreTool[] = deps.mcp === undefined || mcpProvider === null
+      ? []
+      : [
+          ...(await mcpProvider.tools(rootMcpSnapshot)),
+          ...createCatalogTools({ router: deps.mcp.router }),
+        ].map(toCoreMcpTool);
+    const releaseChildMcpRun = async (childRunId: string, childSessionId: string): Promise<void> => {
+      mcpSnapshots.delete(childRunId);
+      if (deps.mcp !== undefined) {
+        await deps.mcp.activation.closeRun(childRunId).catch(() => {});
+      }
+      await deps.mcpReleaseRun?.(userId, {
+        sessionId: childSessionId,
+        runId: childRunId,
+      }).catch(() => {});
+    };
+
     // Subagents (Task 20 / fix round I-1). The supervisor and its five tools
     // are part of every full-path registry. The engine is per-run and the
     // registry is built after this point, so both are reached through
@@ -2115,13 +2213,26 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
         return engineRef?.activeRun(sessionIdToInspect) ?? null;
       },
     };
-    const subagentSupervisor = createSubagentSupervisor({
+    const subagentSupervisor = createSubagentSupervisor<RunMcpSnapshot>({
       engine: lateEngine,
       db: deps.db,
       state,
       hooks,
       sinkFactory: sinkFor,
       registry: lateRegistry,
+      ...(deps.mcp !== undefined
+        ? {
+            mcp: {
+              parent: rootMcpSnapshot,
+              snapshotForRun: async (input: Parameters<ActivationService["snapshotForRun"]>[0]) => {
+                const snapshot = await deps.mcp!.activation.snapshotForRun(input);
+                mcpSnapshots.set(input.runId, snapshot);
+                return snapshot;
+              },
+              closeRun: releaseChildMcpRun,
+            },
+          }
+        : {}),
       memoryEnabled,
       githubConnected,
       presets: presetFor,
@@ -2221,6 +2332,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       memoryEnabled,
       shareSessionMemory: prefs.shareSessionMemory,
       referencedSessionIds,
+      mcpTools,
     });
     registryRef = registry;
 
@@ -2305,6 +2417,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       litellmBaseUrl: deps.litellmBaseUrl,
       defaultModel: deps.defaultModel,
       registry,
+      allowUnrosteredTools: false,
       approvals,
       hooks,
       compactor,
@@ -2344,7 +2457,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       // P4 Task 10: a scheduler-fired job carries `schedule`; that run has no
       // attending user, so it is unattended even though the scheduler's
       // enqueue payload predates the explicit flag.
-      unattended: job.data.unattended ?? job.data.schedule !== undefined,
+      unattended: runUnattended,
       ...(job.data.autonomy !== undefined ? { autonomy: job.data.autonomy } : {}),
       mode,
     });
@@ -2353,6 +2466,9 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       // not outlive the run. This finally covers every terminal path inside
       // the try (completion, run-level failure, prepass finish, cancel).
       // Best-effort: release must never turn a finished run into a job throw.
+      if (deps.mcp !== undefined) {
+        await deps.mcp.activation.closeRun(runId).catch(() => {});
+      }
       await deps.mcpReleaseRun?.(userId, { sessionId, runId }).catch(() => {});
       // P6: the browser context is per-run. Best-effort like the MCP release —
       // a finished run must never throw because teardown failed; the pool's

@@ -957,6 +957,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     // it; eager connect would spawn servers the run never uses.)
     ...(mcpRuntime !== null
       ? {
+          mcp: {
+            activation: mcpRuntime.activation,
+            router: mcpRuntime.router,
+          },
           mcpReleaseRun: (
             uid: string,
             runCtx: { sessionId: string; runId: string },
