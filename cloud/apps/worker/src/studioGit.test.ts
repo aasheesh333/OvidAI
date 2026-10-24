@@ -471,6 +471,9 @@ describe("Sync latest changes", () => {
           timedOut: false,
         };
       }
+      if (req.argv.includes("status")) {
+        return { code: 0, stdout: "", stderr: "", timedOut: false };
+      }
       return { code: 128, stdout: "", stderr: "fatal: no network in test", timedOut: false };
     };
     const gitJob = createStudioGit({
@@ -726,6 +729,433 @@ describe("Branch switch", () => {
     expect(() => safeRepoDirName("repos/app")).toThrow(/not allowed/);
     expect(() => safeRepoDirName("..")).toThrow(/not allowed/);
     expect(() => safeRepoDirName("")).toThrow(/not allowed/);
+  });
+});
+
+describe("read-only Studio inspection", () => {
+  async function headAndTree(repo: string) {
+    return {
+      head: (await git(repo, "rev-parse", "HEAD")).trim(),
+      status: await git(repo, "status", "--porcelain"),
+      stash: await git(repo, "stash", "list"),
+      readme: readFileSync(join(repo, "README.md"), "utf8"),
+    };
+  }
+
+  it("inspect fetches only remote metadata and preserves dirty HEAD/files/stash", async () => {
+    const fx = await fixture();
+    const { gitJob } = await cloneFixture(fx);
+    const repo = join(fx.workspace, "app");
+    writeFileSync(join(repo, "README.md"), "local edit\n");
+    writeFileSync(join(fx.seed, "next.txt"), "remote change\n");
+    await git(fx.seed, "add", ".");
+    await git(fx.seed, "commit", "-m", "remote change");
+    await git(fx.seed, "push", "origin", "main");
+    const before = await headAndTree(repo);
+
+    const result = await gitJob.inspect({ userId: "user-1", repoDir: "app", token: TOKEN });
+
+    expect(result).toMatchObject({
+      dirty: true,
+      behind: 1,
+      ahead: 0,
+      reason: "dirty_worktree",
+      fetchedAt: expect.any(String),
+    });
+    expect(await headAndTree(repo)).toEqual(before);
+    expect(existsSync(join(repo, "next.txt"))).toBe(false);
+  });
+
+  it("status never fetches and reports divergence without changing local history", async () => {
+    const fx = await fixture();
+    const { gitJob } = await cloneFixture(fx);
+    const repo = join(fx.workspace, "app");
+    writeFileSync(join(repo, "local.txt"), "local\n");
+    await git(repo, "add", ".");
+    await git(repo, "commit", "-m", "local commit");
+    const localHead = (await git(repo, "rev-parse", "HEAD")).trim();
+    writeFileSync(join(fx.seed, "remote.txt"), "remote\n");
+    await git(fx.seed, "add", ".");
+    await git(fx.seed, "commit", "-m", "remote commit");
+    await git(fx.seed, "push", "origin", "main");
+    const real = createSpawnGitRunner();
+    let fetchCalls = 0;
+    const runner: GitRunner = async (req) => {
+      if (req.argv.includes("fetch")) fetchCalls += 1;
+      return real(req);
+    };
+    const readOnly = createStudioGit({
+      manager: fx.manager,
+      allowLocalUrls: true,
+      credentialDir: fx.helperDir,
+      runner,
+      log: () => {},
+    });
+
+    const inspected = await readOnly.inspect({ userId: "user-1", repoDir: "app", token: TOKEN });
+    expect(inspected).toMatchObject({ reason: "diverged", ahead: 1, behind: 1, dirty: false });
+    expect((await git(repo, "rev-parse", "HEAD")).trim()).toBe(localHead);
+
+    const beforeStatusCalls = fetchCalls;
+    const status = await readOnly.status({ userId: "user-1", repoDir: "app" });
+    expect(status).toMatchObject({
+      reason: "diverged",
+      ahead: 1,
+      behind: 1,
+      dirty: false,
+      headSha: localHead,
+      fetchedAt: null,
+    });
+    expect(fetchCalls).toBe(beforeStatusCalls);
+  });
+
+  it("diff honors staged and path filters and caps large patches without mutating", async () => {
+    const fx = await fixture();
+    const { gitJob } = await cloneFixture(fx);
+    const repo = join(fx.workspace, "app");
+    writeFileSync(join(repo, "README.md"), "unstaged change\n");
+    writeFileSync(join(repo, "notes.txt"), "staged change\n");
+    await git(repo, "add", "notes.txt");
+
+    const unstaged = await gitJob.diff({ userId: "user-1", repoDir: "app", path: "README.md" });
+    expect(unstaged.patch).toContain("unstaged change");
+    expect(unstaged.patch).not.toContain("notes.txt");
+    expect(unstaged.truncated).toBe(false);
+
+    const staged = await gitJob.diff({ userId: "user-1", repoDir: "app", staged: true });
+    expect(staged.patch).toContain("notes.txt");
+    expect(staged.patch).not.toContain("unstaged change");
+
+    writeFileSync(join(repo, "README.md"), "A".repeat(300_000));
+    const headBefore = (await git(repo, "rev-parse", "HEAD")).trim();
+    const truncated = await gitJob.diff({ userId: "user-1", repoDir: "app", path: "README.md", maxBytes: 1024 });
+    expect(Buffer.byteLength(truncated.patch, "utf8")).toBeLessThanOrEqual(1024);
+    expect(truncated.truncated).toBe(true);
+    expect((await git(repo, "rev-parse", "HEAD")).trim()).toBe(headBefore);
+  });
+
+  it("logs return real commit records and clamp the limit to 50", async () => {
+    const fx = await fixture();
+    const { gitJob } = await cloneFixture(fx);
+    const repo = join(fx.workspace, "app");
+    for (let index = 1; index <= 51; index += 1) {
+      writeFileSync(join(repo, "history.txt"), `${index}\n`);
+      await git(repo, "add", "history.txt");
+      await git(repo, "commit", "-m", `history ${index}`);
+    }
+
+    const result = await gitJob.logs({ userId: "user-1", repoDir: "app", limit: 51 });
+    expect(result.items).toHaveLength(50);
+    expect(result.items[0]).toMatchObject({
+      sha: expect.stringMatching(/^[0-9a-f]{40}$/),
+      subject: "history 51",
+      authoredAt: expect.any(String),
+    });
+    expect(result.items.at(-1)?.subject).toBe("history 2");
+  });
+});
+
+interface RepoSentinel {
+  head: string;
+  branch: string;
+  status: string;
+  stash: string;
+  tree: Record<string, string>;
+}
+
+function fileTree(root: string, relative = ""): Record<string, string> {
+  const result: Record<string, string> = {};
+  const directory = join(root, relative);
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if (relative === "" && entry.name === ".git") continue;
+    const path = relative === "" ? entry.name : `${relative}/${entry.name}`;
+    if (entry.isDirectory()) Object.assign(result, fileTree(root, path));
+    else if (entry.isFile()) result[path] = readFileSync(join(root, path)).toString("base64");
+  }
+  return result;
+}
+
+async function headAndTree(repo: string): Promise<RepoSentinel> {
+  return {
+    head: (await git(repo, "rev-parse", "HEAD")).trim(),
+    branch: (await git(repo, "rev-parse", "--abbrev-ref", "HEAD")).trim(),
+    status: await git(repo, "status", "--porcelain=v1", "-z"),
+    stash: await git(repo, "stash", "list", "--format=%H"),
+    tree: fileTree(repo),
+  };
+}
+
+const repoRequest = { userId: "user-1", sessionId: "session-1", repoDir: "app" } as const;
+
+describe("read-only Studio inspection and status", () => {
+  it("fetch-inspects a dirty behind-by-one tree without changing HEAD, files, index state, or stash", async () => {
+    const fx = await fixture();
+    const rec = recordingRunner();
+    const { gitJob } = await cloneFixture(fx, { runner: rec.runner });
+    const repo = join(fx.workspace, "app");
+
+    writeFileSync(join(repo, "README.md"), "stash this first\n");
+    await git(repo, "stash", "push", "-m", "existing user stash");
+    writeFileSync(join(repo, "README.md"), "dirty local edit\n");
+    writeFileSync(join(fx.seed, "next.txt"), "remote change\n");
+    await git(fx.seed, "add", ".");
+    await git(fx.seed, "commit", "-m", "remote change");
+    await git(fx.seed, "push", "origin", "main");
+
+    const before = await headAndTree(repo);
+    const inspected = await gitJob.inspect({ ...repoRequest, token: TOKEN });
+    expect(inspected).toMatchObject({
+      branch: "main",
+      headSha: before.head,
+      upstream: "origin/main",
+      dirty: true,
+      ahead: 0,
+      behind: 1,
+      reason: "dirty_worktree",
+      fetchedAt: expect.any(String),
+    });
+    expect(await headAndTree(repo)).toEqual(before);
+    expect(rec.calls.slice(-10).filter((call) => call.argv.includes("fetch"))).toHaveLength(1);
+
+    const statusCalls = rec.calls.length;
+    const status = await gitJob.status(repoRequest);
+    expect(status).toEqual({ ...inspected, fetchedAt: null });
+    expect(rec.calls.slice(statusCalls).some((call) => call.argv.includes("fetch"))).toBe(false);
+    expect(await headAndTree(repo)).toEqual(before);
+  });
+
+  it("does not fast-forward a clean behind tree during inspect", async () => {
+    const fx = await fixture();
+    const { gitJob } = await cloneFixture(fx);
+    const repo = join(fx.workspace, "app");
+    writeFileSync(join(fx.seed, "next.txt"), "remote only\n");
+    await git(fx.seed, "add", ".");
+    await git(fx.seed, "commit", "-m", "remote change");
+    await git(fx.seed, "push", "origin", "main");
+
+    const before = await headAndTree(repo);
+    const inspected = await gitJob.inspect({ ...repoRequest, token: TOKEN });
+    expect(inspected).toMatchObject({
+      headSha: before.head,
+      behind: 1,
+      ahead: 0,
+      dirty: false,
+      reason: "clean",
+    });
+    expect(await headAndTree(repo)).toEqual(before);
+    expect(existsSync(join(repo, "next.txt"))).toBe(false);
+  });
+
+  it("reports divergence during inspect and preserves the same sentinel through needs_merge sync", async () => {
+    const fx = await fixture();
+    const { gitJob } = await cloneFixture(fx);
+    const repo = join(fx.workspace, "app");
+    writeFileSync(join(repo, "local.txt"), "local\n");
+    await git(repo, "add", ".");
+    await git(repo, "commit", "-m", "local commit");
+    writeFileSync(join(fx.seed, "remote.txt"), "remote\n");
+    await git(fx.seed, "add", ".");
+    await git(fx.seed, "commit", "-m", "remote commit");
+    await git(fx.seed, "push", "origin", "main");
+
+    const before = await headAndTree(repo);
+    const inspected = await gitJob.inspect({ ...repoRequest, token: TOKEN });
+    expect(inspected).toMatchObject({ ahead: 1, behind: 1, reason: "diverged" });
+    expect(await headAndTree(repo)).toEqual(before);
+
+    const synced = await gitJob.syncLatest({ ...repoRequest, token: TOKEN });
+    expect(synced).toMatchObject({
+      status: "needs_merge",
+      reason: "diverged",
+      ahead: 1,
+      behind: 1,
+    });
+    expect(await headAndTree(repo)).toEqual(before);
+  });
+
+  it("fails safely instead of converting a timed-out branch read into no_upstream", async () => {
+    const fx = await fixture();
+    const { gitJob } = await cloneFixture(fx);
+    const real = createSpawnGitRunner();
+    const runner: GitRunner = async (req) => {
+      if (req.argv.includes("--abbrev-ref") && req.argv.includes("HEAD")) {
+        return { code: null, stdout: "", stderr: "raw timeout detail", timedOut: true };
+      }
+      return real(req);
+    };
+    const readOnly = createStudioGit({
+      manager: fx.manager,
+      allowLocalUrls: true,
+      credentialDir: fx.helperDir,
+      runner,
+      log: () => {},
+    });
+
+    await expect(readOnly.status(repoRequest)).rejects.toMatchObject({
+      code: "sync_failed",
+      message: "Could not read repository metadata.",
+    });
+  });
+
+  it("returns no_upstream for a local-only inspect without fetching or changing HEAD", async () => {
+    const fx = await fixture();
+    const rec = recordingRunner();
+    const { gitJob } = await cloneFixture(fx, { runner: rec.runner });
+    const repo = join(fx.workspace, "app");
+    await git(repo, "checkout", "-b", "local-only");
+    const before = await headAndTree(repo);
+    const calls = rec.calls.length;
+
+    const result = await gitJob.inspect({ ...repoRequest, token: TOKEN });
+    expect(result).toMatchObject({
+      branch: "local-only",
+      upstream: null,
+      ahead: 0,
+      behind: 0,
+      reason: "no_upstream",
+      fetchedAt: null,
+    });
+    expect(rec.calls.slice(calls).some((call) => call.argv.includes("fetch"))).toBe(false);
+    expect(await headAndTree(repo)).toEqual(before);
+  });
+
+  it("computes clean and no-upstream status locally without fetching", async () => {
+    const fx = await fixture();
+    const rec = recordingRunner();
+    const { gitJob } = await cloneFixture(fx, { runner: rec.runner });
+    const repo = join(fx.workspace, "app");
+    const head = (await git(repo, "rev-parse", "HEAD")).trim();
+    const before = rec.calls.length;
+
+    const clean = await gitJob.status(repoRequest);
+    expect(clean).toEqual({
+      branch: "main",
+      headSha: head,
+      upstream: "origin/main",
+      dirty: false,
+      ahead: 0,
+      behind: 0,
+      reason: "clean",
+      fetchedAt: null,
+    });
+    expect(rec.calls.slice(before).some((call) => call.argv.includes("fetch"))).toBe(false);
+
+    await git(repo, "checkout", "-b", "local-only");
+    const localCalls = rec.calls.length;
+    const local = await gitJob.status(repoRequest);
+    expect(local).toMatchObject({
+      branch: "local-only",
+      headSha: head,
+      upstream: null,
+      ahead: 0,
+      behind: 0,
+      reason: "no_upstream",
+    });
+    expect(rec.calls.slice(localCalls).some((call) => call.argv.includes("fetch"))).toBe(false);
+  });
+});
+
+describe("bounded Studio diffs and real commit logs", () => {
+  it("returns distinct staged, unstaged, and literal path diffs", async () => {
+    const fx = await fixture();
+    const rec = recordingRunner();
+    const { gitJob } = await cloneFixture(fx, { runner: rec.runner });
+    const repo = join(fx.workspace, "app");
+    writeFileSync(join(repo, "one.txt"), "base one\n");
+    writeFileSync(join(repo, "two.txt"), "base two\n");
+    await git(repo, "add", ".");
+    await git(repo, "commit", "-m", "diff fixtures");
+    writeFileSync(join(repo, "one.txt"), "staged one\n");
+    await git(repo, "add", "one.txt");
+    writeFileSync(join(repo, "one.txt"), "working one\n");
+    writeFileSync(join(repo, "two.txt"), "working two\n");
+
+    const staged = await gitJob.diff({ ...repoRequest, staged: true, path: "one.txt" });
+    expect(staged.truncated).toBe(false);
+    expect(staged.patch).toContain("+staged one");
+    expect(staged.patch).not.toContain("working one");
+    expect(staged.patch).not.toContain("two.txt");
+
+    const unstaged = await gitJob.diff({ ...repoRequest, path: "one.txt" });
+    expect(unstaged.patch).toContain("+working one");
+    expect(unstaged.patch).toContain("-staged one");
+    expect(unstaged.patch).not.toContain("two.txt");
+
+    const other = await gitJob.diff({ ...repoRequest, path: "two.txt" });
+    expect(other.patch).toContain("+working two");
+    expect(other.patch).not.toContain("one.txt");
+    const pathCall = rec.calls[rec.calls.length - 1]!;
+    const separator = pathCall.argv.lastIndexOf("--");
+    expect(separator).toBeGreaterThan(-1);
+    expect(pathCall.argv[separator + 1]).toBe(":(literal)two.txt");
+  });
+
+  it("honors a small byte limit and the absolute 256 KiB diff cap", async () => {
+    const fx = await fixture();
+    const { gitJob } = await cloneFixture(fx);
+    const repo = join(fx.workspace, "app");
+    writeFileSync(join(repo, "README.md"), `${"é".repeat(200)}\n`);
+
+    const complete = await gitJob.diff(repoRequest);
+    expect(complete.truncated).toBe(false);
+    const shortened = await gitJob.diff({ ...repoRequest, maxBytes: 64 });
+    expect(shortened.truncated).toBe(true);
+    expect(Buffer.byteLength(shortened.patch, "utf8")).toBeLessThanOrEqual(64);
+    expect(shortened.patch).not.toContain("�");
+    const splitCharacter = Buffer.from(complete.patch, "utf8").indexOf(Buffer.from("é", "utf8")) + 1;
+    const split = await gitJob.diff({ ...repoRequest, maxBytes: splitCharacter });
+    expect(split.truncated).toBe(true);
+    expect(split.patch).not.toContain("�");
+    expect(Buffer.byteLength(split.patch, "utf8")).toBeLessThanOrEqual(splitCharacter);
+
+    writeFileSync(join(repo, "README.md"), `${"x".repeat(300 * 1024)}\n`);
+    const capped = await gitJob.diff({ ...repoRequest, maxBytes: 1024 * 1024 });
+    expect(capped.truncated).toBe(true);
+    expect(Buffer.byteLength(capped.patch, "utf8")).toBeLessThanOrEqual(256 * 1024);
+  });
+
+  it("rejects escaping or option-like diff paths before invoking git", async () => {
+    const fx = await fixture();
+    const rec = recordingRunner();
+    const { gitJob } = await cloneFixture(fx, { runner: rec.runner });
+    const before = rec.calls.length;
+
+    await expect(gitJob.diff({ ...repoRequest, path: "../outside" })).rejects.toMatchObject({
+      code: "invalid_path",
+    });
+    await expect(gitJob.diff({ ...repoRequest, path: "--cached" })).rejects.toMatchObject({
+      code: "invalid_path",
+    });
+    expect(rec.calls).toHaveLength(before);
+  });
+
+  it("clamps a 51-commit request to 50 real log records", async () => {
+    const fx = await fixture();
+    for (let index = 1; index <= 51; index += 1) {
+      writeFileSync(join(fx.seed, "history.txt"), `${index}\n`);
+      await git(fx.seed, "add", "history.txt");
+      await git(fx.seed, "commit", "-m", `commit ${index}`);
+    }
+    await git(fx.seed, "push", "origin", "main");
+    const { gitJob } = await cloneFixture(fx);
+    const repo = join(fx.workspace, "app");
+
+    const result = await gitJob.logs({ ...repoRequest, limit: 51 });
+    expect(result.items).toHaveLength(50);
+    expect(result.items[0]).toMatchObject({
+      sha: (await git(repo, "rev-parse", "HEAD")).trim(),
+      subject: "commit 51",
+      authoredAt: expect.any(String),
+    });
+    expect(result.items[49]?.subject).toBe("commit 2");
+    expect(new Set(result.items.map((item) => item.sha)).size).toBe(50);
+    for (const item of result.items) {
+      expect(item.sha).toMatch(/^[0-9a-f]{40}$/);
+      expect(Number.isNaN(Date.parse(item.authoredAt))).toBe(false);
+    }
+
+    const two = await gitJob.logs({ ...repoRequest, limit: 2 });
+    expect(two.items.map((item) => item.subject)).toEqual(["commit 51", "commit 50"]);
   });
 });
 

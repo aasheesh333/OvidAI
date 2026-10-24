@@ -43,6 +43,8 @@ export interface GitCommandResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
 }
 
 export type GitRunner = (req: GitCommandRequest) => Promise<GitCommandResult>;
@@ -77,11 +79,21 @@ export function createSpawnGitRunner(): GitRunner {
       const errOut: Buffer[] = [];
       let outBytes = 0;
       let errBytes = 0;
+      let outTruncated = false;
+      let errTruncated = false;
       let timedOut = false;
 
       const keep = (chunks: Buffer[], bytes: number, chunk: Buffer): number => {
-        if (bytes >= OUTPUT_CAP_BYTES) return bytes;
+        if (bytes >= OUTPUT_CAP_BYTES) {
+          if (chunks === out) outTruncated = true;
+          else errTruncated = true;
+          return bytes;
+        }
         const room = OUTPUT_CAP_BYTES - bytes;
+        if (chunk.length > room) {
+          if (chunks === out) outTruncated = true;
+          else errTruncated = true;
+        }
         chunks.push(chunk.length <= room ? chunk : chunk.subarray(0, room));
         return bytes + Math.min(chunk.length, room);
       };
@@ -129,6 +141,8 @@ export function createSpawnGitRunner(): GitRunner {
           stdout: Buffer.concat(out).toString("utf8"),
           stderr: Buffer.concat(errOut).toString("utf8"),
           timedOut,
+          ...(outTruncated ? { stdoutTruncated: true } : {}),
+          ...(errTruncated ? { stderrTruncated: true } : {}),
         });
       });
     });
@@ -145,6 +159,7 @@ export type StudioGitErrorCode =
   | "sync_failed"
   | "stash_failed"
   | "switch_failed"
+  | "search_failed"
   | "token_unavailable"
   | "credential_leak";
 
@@ -190,6 +205,48 @@ export interface StudioSwitchResult {
   message: string;
 }
 
+export interface StudioRepoRequest {
+  userId: string;
+  sessionId: string;
+  repoDir: string;
+}
+
+export interface StudioGitStatus {
+  branch: string;
+  headSha: string;
+  upstream: string | null;
+  dirty: boolean;
+  ahead: number;
+  behind: number;
+  reason: "clean" | "dirty_worktree" | "diverged" | "no_upstream";
+  fetchedAt: string | null;
+}
+
+export interface StudioDiffResult {
+  patch: string;
+  truncated: boolean;
+}
+
+export interface StudioLogItem {
+  sha: string;
+  subject: string;
+  authoredAt: string;
+}
+
+export interface StudioGitLogsResult {
+  items: StudioLogItem[];
+}
+
+export interface StudioPathSearchItem {
+  path: string;
+  name: string;
+}
+
+export interface StudioPathSearchResult {
+  items: StudioPathSearchItem[];
+  truncated: boolean;
+}
+
 export interface StudioGit {
   clone(req: {
     userId: string;
@@ -212,6 +269,14 @@ export interface StudioGit {
     branch: string;
     token: string;
   }): Promise<StudioSwitchResult>;
+  inspect(req: StudioRepoRequest & { token: string }): Promise<StudioGitStatus>;
+  status(req: StudioRepoRequest): Promise<StudioGitStatus>;
+  diff(req: StudioRepoRequest & {
+    staged?: boolean;
+    path?: string;
+    maxBytes?: number;
+  }): Promise<StudioDiffResult>;
+  logs(req: StudioRepoRequest & { limit?: number }): Promise<StudioGitLogsResult>;
 }
 
 export interface StudioGitDeps {
@@ -841,6 +906,140 @@ async function publishClone(
   }
 }
 
+type StudioCommand = (
+  args: string[],
+  cwd: string,
+  timeoutMs?: number,
+) => Promise<GitCommandResult>;
+
+const READ_ONLY_TIMEOUT_MS = 30_000;
+const MAX_LOG_ITEMS = 50;
+
+interface BranchState {
+  branch: string;
+  hasBranch: boolean;
+  trackingRef?: string;
+  dirty: boolean;
+}
+
+async function requireGitSuccess(
+  result: GitCommandResult,
+  message = "Could not read repository metadata.",
+): Promise<GitCommandResult> {
+  if (result.code !== 0 || result.timedOut) {
+    throw new StudioGitError("sync_failed", message);
+  }
+  return result;
+}
+
+/** Common read-only branch computation shared by inspect/status/sync. */
+async function readBranchState(run: StudioCommand, dir: string): Promise<BranchState> {
+  const status = await requireGitSuccess(await run(["status", "--porcelain"], dir, READ_ONLY_TIMEOUT_MS));
+  const branchRes = await run(["rev-parse", "--abbrev-ref", "HEAD"], dir, READ_ONLY_TIMEOUT_MS);
+  if (branchRes.timedOut) await requireGitSuccess(branchRes);
+  const branch = branchRes.code === 0 ? branchRes.stdout.trim() : "";
+  const hasBranch = branch !== "" && branch !== "HEAD";
+  return {
+    branch,
+    hasBranch,
+    ...(hasBranch ? { trackingRef: `refs/remotes/origin/${branch}` } : {}),
+    dirty: status.stdout.trim() !== "",
+  };
+}
+
+async function resolveUpstream(
+  run: StudioCommand,
+  dir: string,
+  state: BranchState,
+): Promise<string | null> {
+  if (state.hasBranch) {
+    const result = await run(
+      ["rev-parse", "--verify", "--quiet", state.trackingRef!],
+      dir,
+      READ_ONLY_TIMEOUT_MS,
+    );
+    if (result.timedOut) await requireGitSuccess(result);
+    return result.code === 0 ? `origin/${state.branch}` : null;
+  }
+  const result = await run(
+    ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+    dir,
+    READ_ONLY_TIMEOUT_MS,
+  );
+  if (result.timedOut) await requireGitSuccess(result);
+  const upstream = result.code === 0 ? firstLine(result.stdout) : "";
+  return upstream === "" ? null : upstream;
+}
+
+async function readAheadBehind(
+  run: StudioCommand,
+  dir: string,
+  upstream: string | null,
+): Promise<{ ahead: number; behind: number }> {
+  if (upstream === null) return { ahead: 0, behind: 0 };
+  const behindRes = await requireGitSuccess(
+    await run(["rev-list", "--count", `HEAD..${upstream}`], dir, READ_ONLY_TIMEOUT_MS),
+  );
+  const aheadRes = await requireGitSuccess(
+    await run(["rev-list", "--count", `${upstream}..HEAD`], dir, READ_ONLY_TIMEOUT_MS),
+  );
+  return {
+    ahead: Number.parseInt(aheadRes.stdout.trim(), 10) || 0,
+    behind: Number.parseInt(behindRes.stdout.trim(), 10) || 0,
+  };
+}
+
+async function readStudioStatus(run: StudioCommand, dir: string): Promise<StudioGitStatus> {
+  const state = await readBranchState(run, dir);
+  const upstream = await resolveUpstream(run, dir, state);
+  const { ahead, behind } = await readAheadBehind(run, dir, upstream);
+  const head = await requireGitSuccess(
+    await run(["rev-parse", "--verify", "HEAD"], dir, READ_ONLY_TIMEOUT_MS),
+  );
+  const reason = state.dirty
+    ? "dirty_worktree"
+    : upstream === null
+      ? "no_upstream"
+      : ahead > 0 && behind > 0
+        ? "diverged"
+        : "clean";
+  return {
+    branch: state.branch,
+    headSha: head.stdout.trim(),
+    upstream,
+    dirty: state.dirty,
+    ahead,
+    behind,
+    reason,
+    fetchedAt: null,
+  };
+}
+
+function clampInteger(value: number | undefined, fallback: number, max: number): number {
+  const candidate = value ?? fallback;
+  if (!Number.isFinite(candidate)) return fallback;
+  return Math.min(Math.max(Math.trunc(candidate), 1), max);
+}
+
+function boundedPatch(
+  text: string,
+  maxBytes: number,
+  alreadyTruncated: boolean,
+): StudioDiffResult {
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= maxBytes) return { patch: text, truncated: alreadyTruncated };
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  for (let end = maxBytes; end >= Math.max(0, maxBytes - 3); end -= 1) {
+    try {
+      return { patch: decoder.decode(bytes.subarray(0, end)), truncated: true };
+    } catch {
+      // The byte limit split a multibyte code point; move to its leading byte.
+    }
+  }
+  // A valid JS string needs at most three bytes of backoff for UTF-8.
+  return { patch: "", truncated: true };
+}
+
 export function createStudioGit(deps: StudioGitDeps): StudioGit {
   const runner = deps.runner ?? createSpawnGitRunner();
   const now = deps.now ?? (() => new Date());
@@ -1021,6 +1220,34 @@ export function createStudioGit(deps: StudioGitDeps): StudioGit {
     return outcome;
   };
 
+  /** Local read-only operations never install or receive a PAT. */
+  const withRepository = async <T>(
+    req: StudioRepoRequest,
+    fn: (ctx: { run: StudioCommand; dir: string }) => Promise<T>,
+  ): Promise<T> => {
+    const handle = await deps.manager.attach(req.userId);
+    const dir = resolveWorkspaceDir(handle.workspaceDir, req.repoDir);
+    const boundary = await openRepoBoundary(handle.workspaceDir, req.repoDir);
+    const env = { ...baseEnv(handle.homeDir), ...boundary.env };
+    const run: StudioCommand = async (args, cwd, timeoutMs = READ_ONLY_TIMEOUT_MS) => {
+      const result = await runner({
+        argv: gitArgv(args),
+        cwd: cwd === dir ? boundary.cwd : cwd,
+        env,
+        uid: handle.uid,
+        ...(boundary.fds !== undefined ? { fds: boundary.fds } : {}),
+        timeoutMs,
+      });
+      await boundary.assertCurrent();
+      return result;
+    };
+    try {
+      return await fn({ run, dir });
+    } finally {
+      await boundary.close();
+    }
+  };
+
   return {
     async clone(req) {
       const url = normalizeRepoUrl(req.repo, repoOpts);
@@ -1141,12 +1368,8 @@ export function createStudioGit(deps: StudioGitDeps): StudioGit {
         async ({ cred, run, logSafe, fail }) => {
           const canonicalUrl = await canonicalOrigin(run, dir, repoOpts);
           await pinCanonicalOrigin(cred, canonicalUrl);
-          const status = await run(["status", "--porcelain"], dir);
-          const dirty = status.stdout.trim() !== "";
-          const branchRes = await run(["rev-parse", "--abbrev-ref", "HEAD"], dir);
-          const branch = branchRes.code === 0 ? branchRes.stdout.trim() : "";
-          const hasBranch = branch !== "" && branch !== "HEAD";
-          const trackingRef = hasBranch ? `refs/remotes/origin/${branch}` : undefined;
+          const state = await readBranchState(run, dir);
+          const { branch, hasBranch, trackingRef, dirty } = state;
           if (trackingRef !== undefined) {
             const tracking = await run(["rev-parse", "--verify", "--quiet", trackingRef], dir);
             if (tracking.code !== 0) {
@@ -1383,6 +1606,111 @@ export function createStudioGit(deps: StudioGitDeps): StudioGit {
         { repoDir: dir, gitDir: boundary.gitDir },
         boundary,
       );
+    },
+
+    async inspect(req) {
+      const handle = await deps.manager.attach(req.userId);
+      const dir = resolveWorkspaceDir(handle.workspaceDir, req.repoDir);
+      const boundary = await openRepoBoundary(handle.workspaceDir, req.repoDir);
+      return withCredential(
+        handle,
+        req.token,
+        async ({ cred, run, logSafe, fail }) => {
+          const canonicalUrl = await canonicalOrigin(run, dir, repoOpts);
+          await pinCanonicalOrigin(cred, canonicalUrl);
+          const state = await readBranchState(run, dir);
+          // A local-only branch has no upstream to inspect. Do not invent one
+          // or perform an unmatched fetch; all other inspection fetches only
+          // remote-tracking metadata.
+          if (state.hasBranch && state.trackingRef !== undefined) {
+            const tracking = await run(
+              ["rev-parse", "--verify", "--quiet", state.trackingRef],
+              dir,
+              READ_ONLY_TIMEOUT_MS,
+            );
+            if (tracking.code !== 0) return readStudioStatus(run, dir);
+          }
+          const refspec = state.hasBranch
+            ? `+refs/heads/${state.branch}:${state.trackingRef}`
+            : "+refs/heads/*:refs/remotes/origin/*";
+          const fetched = await run(
+            [
+              ...hardenedRemoteArgs(canonicalUrl),
+              "fetch",
+              "--no-prune",
+              "--no-tags",
+              "--no-recurse-submodules",
+              canonicalUrl,
+              refspec,
+            ],
+            dir,
+          );
+          if (fetched.code !== 0) {
+            logSafe(`[studio-git] inspect fetch failed: ${firstLine(fetched.stderr)}`);
+            fail("fetch_failed", "Could not reach the remote. Check your connection and try again.");
+          }
+          return {
+            ...(await readStudioStatus(run, dir)),
+            fetchedAt: now().toISOString(),
+          };
+        },
+        { repoDir: dir, gitDir: boundary.gitDir },
+        boundary,
+      );
+    },
+
+    async status(req) {
+      return withRepository(req, async ({ run, dir }) => readStudioStatus(run, dir));
+    },
+
+    async diff(req) {
+      return withRepository(req, async ({ run, dir }) => {
+        const args = ["diff", "--no-ext-diff", "--no-textconv", "--no-color"];
+        if (req.staged === true) args.push("--cached");
+        if (req.path !== undefined) {
+          const value = req.path.trim();
+          if (value === "" || value === "." || safeRelDir(value) !== value) {
+            throw new StudioGitError("invalid_path", "That file path is not allowed.");
+          }
+          args.push("--", `:(literal)${value}`);
+        } else {
+          args.push("--");
+        }
+        const result = await requireGitSuccess(
+          await run(args, dir, READ_ONLY_TIMEOUT_MS),
+          "Could not read the repository diff.",
+        );
+        return boundedPatch(
+          result.stdout,
+          clampInteger(req.maxBytes, OUTPUT_CAP_BYTES, OUTPUT_CAP_BYTES),
+          result.stdoutTruncated === true,
+        );
+      });
+    },
+
+    async logs(req) {
+      return withRepository(req, async ({ run, dir }) => {
+        const limit = clampInteger(req.limit, 20, MAX_LOG_ITEMS);
+        const result = await requireGitSuccess(
+          await run(
+            ["log", "-n", String(limit), "--format=%H%x00%s%x00%aI", "HEAD", "--"],
+            dir,
+            READ_ONLY_TIMEOUT_MS,
+          ),
+          "Could not read repository history.",
+        );
+        const lines = result.stdout.split("\n").filter((line) => line !== "");
+        if (result.stdoutTruncated && !result.stdout.endsWith("\n")) lines.pop();
+        const items: StudioLogItem[] = [];
+        for (const line of lines) {
+          const fields = line.split("\0");
+          if (fields.length !== 3 || fields[0] === "" || fields[2] === "") {
+            throw new StudioGitError("sync_failed", "Could not read repository history.");
+          }
+          items.push({ sha: fields[0]!, subject: fields[1]!, authoredAt: fields[2]! });
+        }
+        return { items };
+      });
     },
   };
 }
