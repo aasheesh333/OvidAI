@@ -76,6 +76,10 @@ class V2UsageData {
     this.range = V2UsageRange.today,
     this.requestsLabel = '',
     this.imagesLabel = '',
+    this.costLabel = '',
+    this.sessionsLabel = '',
+    this.imagesGeneratedLabel = '',
+    this.imagesEditedLabel = '',
     this.storageLimitLabel = '',
     this.onRangeChanged,
     this.onStartChat,
@@ -105,6 +109,10 @@ class V2UsageData {
       monthlyUsedLabel.trim().isNotEmpty ||
       requestsLabel.trim().isNotEmpty ||
       imagesLabel.trim().isNotEmpty ||
+      costLabel.trim().isNotEmpty ||
+      sessionsLabel.trim().isNotEmpty ||
+      imagesGeneratedLabel.trim().isNotEmpty ||
+      imagesEditedLabel.trim().isNotEmpty ||
       days.isNotEmpty ||
       models.isNotEmpty;
 
@@ -147,6 +155,23 @@ class V2UsageData {
     return parts.isEmpty ? '' : '${parts.join(' · ')} today';
   }
 
+  /// Provider-reported measurements for the selected history window. Unknown
+  /// measurements are omitted by the caller rather than rendered as zero.
+  String get sessionsText {
+    final value = sessionsLabel.trim();
+    if (value.isEmpty) return '';
+    return value == unknownLabel ? unknownLabel : '$value sessions';
+  }
+
+  String get measurementsText => <String>[
+    if (costLabel.trim().isNotEmpty) costLabel.trim(),
+    if (sessionsText.isNotEmpty) sessionsText,
+    if (imagesGeneratedLabel.trim().isNotEmpty)
+      '${imagesGeneratedLabel.trim()} generated',
+    if (imagesEditedLabel.trim().isNotEmpty)
+      '${imagesEditedLabel.trim()} edited',
+  ].join(' · ');
+
   final double dailyFraction;
 
   /// Optional pre-formatted countdown. Live data should pass [resetsAt]
@@ -172,6 +197,10 @@ class V2UsageData {
   final V2UsageRange range;
   final String requestsLabel;
   final String imagesLabel;
+  final String costLabel;
+  final String sessionsLabel;
+  final String imagesGeneratedLabel;
+  final String imagesEditedLabel;
   final String storageLimitLabel;
   final ValueChanged<V2UsageRange>? onRangeChanged;
   final VoidCallback? onStartChat;
@@ -364,6 +393,15 @@ class _UsageHero extends StatelessWidget {
           const SizedBox(height: OSpace.xs),
           Text(
             data.countersText,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: OType.caption.copyWith(color: c.textMuted),
+          ),
+        ],
+        if (data.measurementsText.isNotEmpty) ...[
+          const SizedBox(height: OSpace.xs),
+          Text(
+            data.measurementsText,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: OType.caption.copyWith(color: c.textMuted),

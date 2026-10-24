@@ -109,6 +109,10 @@ RevenueCatBilling _billing(
   // is preferred and its purchases never appear in RevenueCat.
   playActive: () => false,
   applyTier: applyTier,
+  // These legacy cases exercise store behavior. Server-authority cases live in
+  // billing_entitlement_parity_test.dart with explicit server fixtures.
+  serverEntitlement: () async =>
+      throw StateError('server entitlement unavailable in store-only fixture'),
 );
 
 void main() {

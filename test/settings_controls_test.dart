@@ -135,9 +135,9 @@ void main() {
     expect(find.textContaining('Turn on Memory'), findsNothing);
   });
 
-  test('the "still working" hint is clamped to 30 s … 10 min', () async {
+  test('the "still working" hint is clamped to 15 s … 10 min', () async {
     await app.setResponseTimeout(5);
-    expect(app.responseTimeoutSec, 30);
+    expect(app.responseTimeoutSec, 15);
     await app.setResponseTimeout(3600);
     expect(app.responseTimeoutSec, 600);
     expect(AppState.timeoutPresets.last, 600);

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -360,4 +361,90 @@ void main() {
       expect(health.isEmpty, isTrue);
     },
   );
+
+  test('latest account health request wins out of order', () async {
+    final answers = [Completer<http.Response>(), Completer<http.Response>()];
+    var requests = 0;
+    var uid = 'u1';
+    final client = AccountHealthClient(
+      currentUid: () => uid,
+      rest: CloudRestClient(
+        restBase: 'https://cloud.test',
+        headers: CloudHeaders.forTest(),
+        httpClient: MockClient((_) => answers[requests++].future),
+      ),
+    );
+
+    final older = client.fetch();
+    final newer = client.fetch();
+    answers[1].complete(
+      http.Response(
+        jsonEncode({
+          'plan': {'id': 'plus'},
+        }),
+        200,
+      ),
+    );
+    expect((await newer).plan?.id, 'plus');
+
+    answers[0].complete(
+      http.Response(
+        jsonEncode({
+          'plan': {'id': 'free'},
+        }),
+        200,
+      ),
+    );
+    await expectLater(older, throwsStateError);
+  });
+
+  test(
+    'older account health failure cannot replace a newer response',
+    () async {
+      final answers = [Completer<http.Response>(), Completer<http.Response>()];
+      var requests = 0;
+      final client = AccountHealthClient(
+        currentUid: () => 'u1',
+        rest: CloudRestClient(
+          restBase: 'https://cloud.test',
+          headers: CloudHeaders.forTest(),
+          httpClient: MockClient((_) => answers[requests++].future),
+        ),
+      );
+
+      final older = client.fetch();
+      final newer = client.fetch();
+      answers[1].complete(
+        http.Response(
+          jsonEncode({
+            'plan': {'id': 'plus'},
+          }),
+          200,
+        ),
+      );
+      expect((await newer).plan?.id, 'plus');
+
+      answers[0].complete(http.Response('{"error":{}}', 500));
+      await expectLater(older, throwsStateError);
+    },
+  );
+
+  test('account health response is fenced to the request UID', () async {
+    final answer = Completer<http.Response>();
+    var uid = 'u1';
+    final client = AccountHealthClient(
+      currentUid: () => uid,
+      rest: CloudRestClient(
+        restBase: 'https://cloud.test',
+        headers: CloudHeaders.forTest(),
+        httpClient: MockClient((_) => answer.future),
+      ),
+    );
+
+    final pending = client.fetch();
+    uid = 'u2';
+    answer.complete(http.Response(jsonEncode(_full()), 200));
+
+    await expectLater(pending, throwsStateError);
+  });
 }

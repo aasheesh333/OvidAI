@@ -30,7 +30,10 @@ class ByokDefault {
     if (raw is! Map) return null;
     final keyId = raw['keyId'];
     final model = raw['model'];
-    if (keyId is! String || keyId.isEmpty || model is! String || model.isEmpty) {
+    if (keyId is! String ||
+        keyId.isEmpty ||
+        model is! String ||
+        model.isEmpty) {
       return null;
     }
     return ByokDefault(keyId: keyId, model: model);
@@ -42,17 +45,50 @@ class ByokDefault {
   Map<String, Object> toJson() => {'keyId': keyId, 'model': model};
 }
 
+const int minResponseWaitSeconds = 15;
+const int maxResponseWaitSeconds = 600;
+
+@immutable
+class ResponseWaitPreset {
+  const ResponseWaitPreset({
+    required this.id,
+    required this.label,
+    required this.seconds,
+  });
+
+  final String id;
+  final String label;
+  final int seconds;
+}
+
+const responseWaitPresets = <ResponseWaitPreset>[
+  ResponseWaitPreset(id: 'fast', label: 'Fast', seconds: 15),
+  ResponseWaitPreset(id: 'balanced', label: 'Balanced', seconds: 45),
+  ResponseWaitPreset(id: 'deep', label: 'Deep', seconds: 120),
+];
+
 @immutable
 class AccountSettings {
   const AccountSettings({
     required this.notificationsEnabled,
     required this.byokDefault,
+    this.responseWaitSeconds,
   });
 
-  factory AccountSettings.fromJson(Map<String, dynamic> j) => AccountSettings(
-    notificationsEnabled: j['notificationsEnabled'] as bool? ?? true,
-    byokDefault: ByokDefault.fromJson(j['byokDefault']),
-  );
+  factory AccountSettings.fromJson(Map<String, dynamic> j) {
+    final wait = j['responseWaitSeconds'];
+    return AccountSettings(
+      notificationsEnabled: j['notificationsEnabled'] as bool? ?? true,
+      byokDefault: ByokDefault.fromJson(j['byokDefault']),
+      responseWaitSeconds:
+          wait is num &&
+              wait.isFinite &&
+              wait >= minResponseWaitSeconds &&
+              wait <= maxResponseWaitSeconds
+          ? wait.toInt()
+          : null,
+    );
+  }
 
   static const defaults = AccountSettings(
     notificationsEnabled: true,
@@ -61,6 +97,9 @@ class AccountSettings {
 
   final bool notificationsEnabled;
   final ByokDefault? byokDefault;
+
+  /// Server-owned response wait. Null means an older server did not report it.
+  final int? responseWaitSeconds;
 }
 
 /// One family of tools a custom preset can switch off.
@@ -257,8 +296,9 @@ class ServiceStatus {
 /// Same rule as the server's `isValidMemoryName`.
 bool isValidMemoryName(String name) =>
     name.length <= 80 &&
-    RegExp(r'^[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*\.md$')
-        .hasMatch(name) &&
+    RegExp(
+      r'^[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*\.md$',
+    ).hasMatch(name) &&
     !(name.toLowerCase() == 'memory.md' && name != 'MEMORY.md');
 
 class AccountSettingsClient {
@@ -268,8 +308,7 @@ class AccountSettingsClient {
   final CloudRestClient _rest;
 
   static AccountSettingsClient? _instance;
-  static AccountSettingsClient get I =>
-      _instance ??= AccountSettingsClient();
+  static AccountSettingsClient get I => _instance ??= AccountSettingsClient();
 
   @visibleForTesting
   static void installForTest(AccountSettingsClient? client) =>
@@ -296,6 +335,29 @@ class AccountSettingsClient {
           body: {'byokDefault': value?.toJson()},
         ),
       );
+
+  /// Persists only the wait preference. This does not touch a run or its
+  /// cancellation endpoint; the server applies the setting to later waits.
+  Future<AccountSettings> setResponseWaitSeconds(int seconds) async {
+    if (seconds < minResponseWaitSeconds || seconds > maxResponseWaitSeconds) {
+      throw ArgumentError.value(
+        seconds,
+        'seconds',
+        'Must be between $minResponseWaitSeconds and '
+            '$maxResponseWaitSeconds seconds',
+      );
+    }
+    final saved = AccountSettings.fromJson(
+      await _rest.patchJson(
+        '/settings',
+        body: {'responseWaitSeconds': seconds},
+      ),
+    );
+    if (saved.responseWaitSeconds != seconds) {
+      throw StateError('The server did not confirm the response wait');
+    }
+    return saved;
+  }
 
   // -- /presets -------------------------------------------------------------
 
@@ -324,7 +386,9 @@ class AccountSettingsClient {
   // -- /memory --------------------------------------------------------------
 
   Future<MemoryListing> memoryFiles(String sessionId) async {
-    final json = await _rest.getJson('/memory?sessionId=${Uri.encodeComponent(sessionId)}');
+    final json = await _rest.getJson(
+      '/memory?sessionId=${Uri.encodeComponent(sessionId)}',
+    );
     final files = [
       for (final item in (json['items'] as List? ?? const <dynamic>[]))
         if (item is Map && item['name'] is String)
@@ -336,8 +400,13 @@ class AccountSettingsClient {
     return MemoryListing(files, shared: json['scope'] == 'shared');
   }
 
-  Future<MemoryFile> readMemory(String sessionId, String name) async => MemoryFile.fromJson(
-    await _rest.getJson('/memory/${Uri.encodeComponent(name)}?sessionId=${Uri.encodeComponent(sessionId)}'),
+  Future<MemoryFile> readMemory(
+    String sessionId,
+    String name,
+  ) async => MemoryFile.fromJson(
+    await _rest.getJson(
+      '/memory/${Uri.encodeComponent(name)}?sessionId=${Uri.encodeComponent(sessionId)}',
+    ),
   );
 
   Future<MemoryFile> writeMemory(
@@ -352,8 +421,9 @@ class AccountSettingsClient {
     ),
   );
 
-  Future<void> deleteMemory(String sessionId, String name) =>
-      _rest.delete('/memory/${Uri.encodeComponent(name)}?sessionId=${Uri.encodeComponent(sessionId)}');
+  Future<void> deleteMemory(String sessionId, String name) => _rest.delete(
+    '/memory/${Uri.encodeComponent(name)}?sessionId=${Uri.encodeComponent(sessionId)}',
+  );
 
   // -- /health/status -------------------------------------------------------
 

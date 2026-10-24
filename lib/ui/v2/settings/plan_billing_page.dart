@@ -518,6 +518,7 @@ class V2PlanBillingData {
     this.onPeriodChanged,
     this.onPurchase,
     this.onRestorePurchases,
+    this.onManageBilling,
     this.onHistoryTap,
     this.onRetry,
     this.checkoutBlockedReason,
@@ -547,6 +548,9 @@ class V2PlanBillingData {
   /// outcome (restored, found but unconfirmed, or the store's error) because
   /// only it can see the result; this page only supplies the entry point.
   final VoidCallback? onRestorePurchases;
+
+  /// Opens Play subscription management only for an active server entitlement.
+  final VoidCallback? onManageBilling;
   final ValueChanged<V2BillingHistoryEntry>? onHistoryTap;
   final VoidCallback? onRetry;
 
@@ -697,6 +701,7 @@ class PlanBillingPage extends StatelessWidget {
                         period: data.period,
                         current: _isCurrent(plan),
                         onPurchase: data.onPurchase,
+                        onManageBilling: data.onManageBilling,
                         checkoutBlockedReason: data.checkoutBlockedReason,
                       ),
                     ),
@@ -876,6 +881,7 @@ class _PlanCard extends StatelessWidget {
     required this.period,
     required this.current,
     required this.onPurchase,
+    this.onManageBilling,
     this.checkoutBlockedReason,
   });
 
@@ -884,6 +890,7 @@ class _PlanCard extends StatelessWidget {
   final V2BillingPeriod period;
   final bool current;
   final ValueChanged<V2PlanPurchase>? onPurchase;
+  final VoidCallback? onManageBilling;
 
   /// Set when no paid plan can be bought at all in this build.
   final String? checkoutBlockedReason;
@@ -915,7 +922,10 @@ class _PlanCard extends StatelessWidget {
     final checkoutBlocked = !current && !free && checkoutBlockedReason != null;
     final unavailable =
         checkoutBlocked || missingProduct || missingPrice || storeMissing;
-    final canBuy = !current && onPurchase != null && !unavailable;
+    final canBuy =
+        !current &&
+        (free ? onManageBilling != null : onPurchase != null) &&
+        !unavailable;
     final periodWord = period == V2BillingPeriod.yearly ? 'yearly' : 'monthly';
     final reason = checkoutBlocked
         ? checkoutBlockedReason
@@ -1012,25 +1022,30 @@ class _PlanCard extends StatelessWidget {
               ),
             ],
             const SizedBox(height: OSpace.l),
-            OButton(
-              key: ValueKey<String>('plan-cta-${plan.id}'),
-              label: current
-                  ? 'Current plan'
-                  : unavailable
-                  ? 'Not available'
-                  : plan.actionLabel,
-              variant: plan.popular
-                  ? OButtonVariant.primary
-                  : OButtonVariant.secondary,
-              expand: true,
-              // The current plan can never be bought again. A disabled CTA is
-              // the honest state: tapping it would only re-purchase a plan the
-              // account already owns.
-              onPressed: canBuy
-                  ? () =>
-                        onPurchase!(V2PlanPurchase(plan: plan, period: period))
-                  : null,
-            ),
+            if (!free || current || onManageBilling != null)
+              OButton(
+                key: ValueKey<String>('plan-cta-${plan.id}'),
+                label: current
+                    ? 'Current plan'
+                    : unavailable
+                    ? 'Not available'
+                    : plan.actionLabel,
+                variant: plan.popular
+                    ? OButtonVariant.primary
+                    : OButtonVariant.secondary,
+                expand: true,
+                onPressed: canBuy
+                    ? () {
+                        if (free) {
+                          onManageBilling!();
+                        } else {
+                          onPurchase!(
+                            V2PlanPurchase(plan: plan, period: period),
+                          );
+                        }
+                      }
+                    : null,
+              ),
             if (reason != null) ...[
               const SizedBox(height: OSpace.xs),
               Text(

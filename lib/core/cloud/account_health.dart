@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 
+import '../firebase_service.dart';
 import 'cloud_rest.dart';
 
 /// `GET /cloud/v1/account/health` — one honest aggregate for the Account
@@ -108,6 +109,7 @@ class AccountHealthUploads {
   final int? windowHours;
 
   bool get isEmpty => count == null && windowHours == null;
+  bool get isComplete => count != null && windowHours != null;
 
   static AccountHealthUploads? tryParse(Object? raw) {
     final json = _map(raw);
@@ -410,51 +412,163 @@ class AccountHealthStanding {
   }
 }
 
+/// Device facts reported by the account service. Missing counts stay unknown.
+@immutable
+class AccountHealthDevices {
+  const AccountHealthDevices({this.total, this.active, this.currentRegistered});
+
+  final int? total;
+  final int? active;
+  final bool? currentRegistered;
+
+  bool get isEmpty =>
+      total == null && active == null && currentRegistered == null;
+
+  bool get isComplete =>
+      total != null && active != null && currentRegistered != null;
+
+  static AccountHealthDevices? tryParse(Object? raw) {
+    final json = _map(raw);
+    if (json == null) return null;
+    final devices = AccountHealthDevices(
+      total: _int(json['total'] ?? json['count']),
+      active: _int(json['active']),
+      currentRegistered: _bool(json['currentRegistered']),
+    );
+    return devices.isEmpty ? null : devices;
+  }
+}
+
+/// Security checks the server actually performed. An absent status/check is
+/// unknown, not a clean bill of health.
+@immutable
+class AccountHealthSecurity {
+  const AccountHealthSecurity({
+    this.status,
+    this.multiIpFlags,
+    this.lastCheckedAt,
+  });
+
+  final String? status;
+  final int? multiIpFlags;
+  final DateTime? lastCheckedAt;
+
+  bool get isEmpty =>
+      status == null && multiIpFlags == null && lastCheckedAt == null;
+
+  bool get isComplete =>
+      const {
+        'ok',
+        'healthy',
+        'attention',
+        'degraded',
+      }.contains(status?.toLowerCase()) &&
+      multiIpFlags != null &&
+      lastCheckedAt != null;
+
+  static AccountHealthSecurity? tryParse(Object? raw) {
+    final json = _map(raw);
+    if (json == null) return null;
+    final security = AccountHealthSecurity(
+      status: _text(json['status']),
+      multiIpFlags: _int(json['multiIpFlags']),
+      lastCheckedAt: _date(json['lastCheckedAt']),
+    );
+    return security.isEmpty ? null : security;
+  }
+}
+
 /// The whole answer. An envelope with no readable section is [isEmpty] — the
 /// screen then shows its empty state instead of four dashes that look like a
 /// failed read.
 @immutable
 class AccountHealth {
-  const AccountHealth({this.plan, this.storage, this.usage, this.standing});
+  const AccountHealth({
+    this.plan,
+    this.storage,
+    this.usage,
+    this.standing,
+    this.devices,
+    this.security,
+  });
 
   final AccountHealthPlan? plan;
   final AccountHealthStorage? storage;
   final AccountHealthUsageSummary? usage;
   final AccountHealthStanding? standing;
+  final AccountHealthDevices? devices;
+  final AccountHealthSecurity? security;
 
   bool get isEmpty =>
-      plan == null && storage == null && usage == null && standing == null;
+      plan == null &&
+      storage == null &&
+      usage == null &&
+      standing == null &&
+      devices == null &&
+      security == null;
+
+  /// Healthy requires a complete current device/security/upload projection,
+  /// not merely one recognizable field in each section.
+  bool get hasCompleteSupplementalFacts =>
+      devices?.isComplete == true &&
+      security?.isComplete == true &&
+      plan?.limits?.uploads?.isComplete == true;
 
   factory AccountHealth.fromJson(Map<String, dynamic> json) => AccountHealth(
     plan: AccountHealthPlan.tryParse(json['plan']),
     storage: AccountHealthStorage.tryParse(json['storage']),
     usage: AccountHealthUsageSummary.tryParse(json['usage']),
     standing: AccountHealthStanding.tryParse(json['standing']),
+    devices: AccountHealthDevices.tryParse(json['devices']),
+    security: AccountHealthSecurity.tryParse(json['security']),
   );
+}
+
+class AccountHealthStaleResponse extends StateError {
+  AccountHealthStaleResponse()
+    : super('Account health response was superseded');
 }
 
 /// Reads `GET /account/health` through the shared [CloudRestClient] (auth
 /// headers, one 401 retry, typed errors and the request ceiling).
 class AccountHealthClient {
-  AccountHealthClient({CloudRestClient? rest, int Function()? utcOffsetMinutes})
-    : _rest = rest ?? CloudRestClient.I,
-      _offset =
-          utcOffsetMinutes ?? (() => DateTime.now().timeZoneOffset.inMinutes);
+  AccountHealthClient({
+    CloudRestClient? rest,
+    int Function()? utcOffsetMinutes,
+    String? Function()? currentUid,
+  }) : _rest = rest ?? CloudRestClient.I,
+       _currentUid = currentUid ?? (() => FirebaseService.I.uid),
+       _offset =
+           utcOffsetMinutes ?? (() => DateTime.now().timeZoneOffset.inMinutes);
 
   /// The gateway's accepted range; anything else is a 400.
   static const int maxOffsetMinutes = 840;
 
   final CloudRestClient _rest;
   final int Function() _offset;
+  final String? Function() _currentUid;
+  int _requestGeneration = 0;
 
   /// "Today" and "this month" are the caller's calendar, so the offset goes
   /// with the request. The gateway rejects anything outside ±840 minutes.
   Future<AccountHealth> fetch() async {
+    final generation = ++_requestGeneration;
+    final uid = _currentUid();
     final offset = _offset().clamp(-maxOffsetMinutes, maxOffsetMinutes);
-    final json = await _rest.getJson(
-      '/account/health',
-      query: <String, String>{'utcOffsetMinutes': '$offset'},
-    );
-    return AccountHealth.fromJson(json);
+    try {
+      final json = await _rest.getJson(
+        '/account/health',
+        query: <String, String>{'utcOffsetMinutes': '$offset'},
+      );
+      if (generation != _requestGeneration || uid != _currentUid()) {
+        throw AccountHealthStaleResponse();
+      }
+      return AccountHealth.fromJson(json);
+    } catch (error) {
+      if (generation != _requestGeneration || uid != _currentUid()) {
+        throw AccountHealthStaleResponse();
+      }
+      rethrow;
+    }
   }
 }

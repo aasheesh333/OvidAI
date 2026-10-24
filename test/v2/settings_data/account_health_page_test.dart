@@ -74,6 +74,11 @@ V2AccountHealthPageData _data({
   String tokensRemainingLabel = '45.8M',
   String deletionScheduledLabel = '',
   bool deletionKnown = false,
+  String devicesLabel = '1 active of 2',
+  String securityLabel = 'No issues reported',
+  bool securityVerifiedGood = true,
+  String uploadWindowLabel = '80 files / 3 h',
+  bool supplementalHealthKnown = true,
   bool loading = false,
   V2AccountHealthStatus status = V2AccountHealthStatus.ready,
   String? errorMessage,
@@ -94,6 +99,11 @@ V2AccountHealthPageData _data({
     tokensRemainingLabel: tokensRemainingLabel,
     deletionScheduledLabel: deletionScheduledLabel,
     deletionKnown: deletionKnown,
+    devicesLabel: devicesLabel,
+    securityLabel: securityLabel,
+    securityVerifiedGood: securityVerifiedGood,
+    uploadWindowLabel: uploadWindowLabel,
+    supplementalHealthKnown: supplementalHealthKnown,
     loading: loading,
     status: status,
     errorMessage: errorMessage,
@@ -125,9 +135,9 @@ void main() {
     expect(find.text('8.2K tokens'), findsOneWidget);
     expect(find.text('Storage'), findsOneWidget);
     expect(find.text('1.2 GB of 15 GB'), findsOneWidget);
-    expect(find.text('Tokens used'), findsOneWidget);
+    expect(find.text('Used'), findsOneWidget);
     expect(find.text('4.2M'), findsOneWidget);
-    expect(find.text('Token cap'), findsOneWidget);
+    expect(find.text('Cap'), findsOneWidget);
     expect(find.text('50M'), findsOneWidget);
     expect(find.text('Tokens left'), findsOneWidget);
     expect(find.text('45.8M'), findsOneWidget);
@@ -192,6 +202,11 @@ void main() {
             tokensUsedLabel: '',
             tokenCapLabel: '',
             tokensRemainingLabel: '',
+            devicesLabel: '',
+            securityLabel: '',
+            securityVerifiedGood: false,
+            uploadWindowLabel: '',
+            supplementalHealthKnown: false,
           ),
         ),
         theme: OTheme.light(),
@@ -202,9 +217,9 @@ void main() {
     // A missing status is attention, never a green "Healthy".
     expect(find.text('Attention needed · Status unknown'), findsOneWidget);
     expect(find.text('Healthy'), findsNothing);
-    // Four facts plus the three token fields: every unknown is a dash, never
-    // a zero that would read as a real measurement.
-    expect(find.text('—'), findsNWidgets(7));
+    // Four original facts, three token fields, and the three added
+    // device/security/upload facts: every unknown is a dash, never zero.
+    expect(find.text('—'), findsNWidgets(10));
     expect(find.text('0'), findsNothing);
   });
 

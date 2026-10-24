@@ -1,8 +1,6 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
 
+import '../../../core/mobile_cache_service.dart';
 import '../../design/o_components.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
@@ -94,6 +92,7 @@ class V2StoragePageData {
     this.onClearPreviews,
     this.onClearCache,
     this.onClearCacheAndReport,
+    this.onClearCacheMeasured,
     this.onDeleteOldChats,
     this.onEmptyTrash,
     this.onLargestItemTap,
@@ -140,6 +139,9 @@ class V2StoragePageData {
   /// null the page measures and clears the temporary directory itself, so the
   /// row still works on a screen whose owner only supplied display data.
   final Future<int> Function()? onClearCacheAndReport;
+
+  /// Full before/after/residual measurement from [MobileCacheService].
+  final Future<CacheClearReport> Function()? onClearCacheMeasured;
   final VoidCallback? onDeleteOldChats;
   final VoidCallback? onEmptyTrash;
   final ValueChanged<String>? onLargestItemTap;
@@ -249,7 +251,7 @@ class _StoragePageState extends State<StoragePage> {
       return OEmptyState(
         icon: Icons.cloud_off_outlined,
         title: 'Storage is empty',
-        message: 'Chats, artifacts and memory appear here.',
+        message: 'No usage.',
         action: data.onGoUpgrade == null
             ? null
             : OButton(
@@ -454,10 +456,15 @@ class _StoragePageState extends State<StoragePage> {
 
     var freed = 0;
     var measured = true;
+    CacheClearReport? report;
     Object? failure;
     try {
+      final measuredReporter = data.onClearCacheMeasured;
       final reporter = data.onClearCacheAndReport;
-      if (reporter != null) {
+      if (measuredReporter != null) {
+        report = await measuredReporter();
+        freed = report.freedBytes ?? 0;
+      } else if (reporter != null) {
         freed = await reporter();
       } else if (data.onClearCache != null) {
         data.onClearCache!();
@@ -465,37 +472,53 @@ class _StoragePageState extends State<StoragePage> {
         // instead of pretending the cache is empty.
         measured = false;
       } else {
-        freed = await clearTemporaryCache();
+        report = await MobileCacheService().clear();
+        freed = report.freedBytes ?? 0;
       }
     } catch (error) {
       failure = error;
     }
 
+    final residualUnknown =
+        report != null &&
+        (report.residualBytes == null || report.freedBytes == null);
     if (!mounted) return;
     setState(() {
       _clearing = false;
-      if (failure == null && measured) {
-        final remaining = _cacheBytes - freed;
+      if (failure == null && measured && !residualUnknown) {
+        final remaining = report?.residualBytes ?? _cacheBytes - freed;
         _cacheAfterClear = remaining > 0 ? remaining : 0;
       }
     });
 
     if (!context.mounted) return;
     if (failure != null) {
-      _snack(context, 'Could not clear the cache. Try again.');
+      _snack(context, 'Clear failed. Retry.');
+    } else if (residualUnknown) {
+      _snack(context, 'Size unknown.');
     } else if (!measured) {
       _snack(context, 'Cache cleared.');
     } else {
-      _snackFreed(context, freed);
+      _snackFreed(context, freed, residual: report?.residualBytes);
     }
   }
 
-  void _snackFreed(BuildContext context, int freed) {
+  void _snackFreed(BuildContext context, int freed, {int? residual}) {
+    if (residual != null && residual > 0) {
+      _snack(
+        context,
+        freed > 0
+            ? 'Freed ${formatStorageBytes(freed)}; '
+                  '${formatStorageBytes(residual)} left.'
+            : '${formatStorageBytes(residual)} left.',
+      );
+      return;
+    }
     _snack(
       context,
       freed > 0
           ? 'Freed ${formatStorageBytes(freed)} of cache.'
-          : 'Cache is already empty.',
+          : 'Cache is empty.',
     );
   }
 
@@ -553,44 +576,12 @@ String _formatCacheBytes(int bytes) =>
 
 int _toBytes(double gb) => (gb <= 0 ? 0 : gb * _bytesPerGb).round();
 
-/// Deletes everything inside the app's temporary directory and returns the
-/// bytes actually freed. Shared by the Storage and Data control clean-up
-/// rows, and visible so a test can drive the row without a platform plugin.
+/// Clears only cache-safe entries and returns the measured byte difference.
+/// Account credentials, settings and server text are never candidates.
 Future<int> clearTemporaryCache() async {
-  final dir = await getTemporaryDirectory();
-  if (!await dir.exists()) return 0;
-  final before = await _dirBytes(dir);
-  await for (final entity in dir.list(followLinks: false)) {
-    try {
-      await entity.delete(recursive: true);
-    } catch (_) {
-      // A file in use is skipped; the byte difference reports what went.
-    }
+  final freed = (await MobileCacheService().clear()).freedBytes;
+  if (freed == null) {
+    throw StateError('Cache residue could not be measured');
   }
-  final after = await _dirBytes(dir);
-  return (before - after).clamp(0, before);
-}
-
-Future<int> _dirBytes(Directory dir) async {
-  var bytes = 0;
-  final stack = <Directory>[dir];
-  while (stack.isNotEmpty) {
-    final current = stack.removeLast();
-    try {
-      await for (final entity in current.list(followLinks: false)) {
-        if (entity is File) {
-          try {
-            bytes += await entity.length();
-          } catch (_) {
-            // Skip unreadable entries; they are not part of the report.
-          }
-        } else if (entity is Directory) {
-          stack.add(entity);
-        }
-      }
-    } catch (_) {
-      // Skip unreadable directories.
-    }
-  }
-  return bytes;
+  return freed;
 }

@@ -3,6 +3,30 @@ import 'package:flutter/foundation.dart';
 import '../diag.dart';
 import 'cloud_rest.dart';
 
+int? _measurement(Object? value) {
+  if (value is! num || !value.isFinite || value < 0) return null;
+  return value.toInt();
+}
+
+/// Formats a nullable measured count without turning an unknown into zero.
+String formatUsageValue(int? value) => value == null ? '—' : '$value';
+
+/// Explicit empty sessions are a real zero; missing/malformed aggregates are
+/// unknown and must never be rendered as zero sessions.
+String formatUsageSessionCount(UsageHistory history) =>
+    history.sessionsKnown ? '${history.sessions.length}' : '—';
+
+/// Formats provider-reported USD micros. No currency conversion or inference
+/// is performed: an unknown value stays a dash and a recorded zero stays zero.
+String formatUsageCostMicros(int? micros) {
+  if (micros == null || micros < 0) return '—';
+  final whole = micros ~/ 1000000;
+  final fractional = (micros % 1000000).toString().padLeft(6, '0');
+  final trimmed = fractional.replaceFirst(RegExp(r'0+$'), '');
+  final decimals = trimmed.length < 2 ? trimmed.padRight(2, '0') : trimmed;
+  return '\$$whole.$decimals';
+}
+
 /// Token counters shared by every bucket of `GET /usage/history`.
 class UsageCounts {
   const UsageCounts({
@@ -12,6 +36,9 @@ class UsageCounts {
     this.outputTokens = 0,
     this.cacheReadTokens = 0,
     this.cacheWriteTokens = 0,
+    this.costMicros,
+    this.imagesGenerated,
+    this.imagesEdited,
   });
 
   final int runs;
@@ -20,6 +47,12 @@ class UsageCounts {
   final int outputTokens;
   final int cacheReadTokens;
   final int cacheWriteTokens;
+
+  /// Measured provider cost and image operations. Null means the provider did
+  /// not report them; zero is reserved for a real recorded zero.
+  final int? costMicros;
+  final int? imagesGenerated;
+  final int? imagesEdited;
 
   int get totalTokens => inputTokens + outputTokens;
 
@@ -35,6 +68,9 @@ class UsageCounts {
     outputTokens: _n(j, 'outputTokens'),
     cacheReadTokens: _n(j, 'cacheReadTokens'),
     cacheWriteTokens: _n(j, 'cacheWriteTokens'),
+    costMicros: _measurement(j['costMicros']),
+    imagesGenerated: _measurement(j['imagesGenerated']),
+    imagesEdited: _measurement(j['imagesEdited']),
   );
 }
 
@@ -72,6 +108,10 @@ class UsageSessionRow {
   final String? title;
   final UsageCounts counts;
   final DateTime? lastAt;
+
+  int? get costMicros => counts.costMicros;
+  int? get imagesGenerated => counts.imagesGenerated;
+  int? get imagesEdited => counts.imagesEdited;
 }
 
 class UsageRunRow {
@@ -84,6 +124,11 @@ class UsageRunRow {
     required this.finishedAt,
     required this.models,
     required this.counts,
+    this.requestedModels,
+    this.providerModels,
+    this.costMicros,
+    this.imagesGenerated,
+    this.imagesEdited,
   });
 
   final String runId;
@@ -94,6 +139,44 @@ class UsageRunRow {
   final DateTime? finishedAt;
   final List<String> models;
   final UsageCounts counts;
+
+  /// Models asked for and models the provider actually reported using. Both
+  /// are nullable: `auto` is not evidence of the provider's concrete model.
+  final List<String>? requestedModels;
+  final List<String>? providerModels;
+  final int? costMicros;
+  final int? imagesGenerated;
+  final int? imagesEdited;
+
+  factory UsageRunRow.fromJson(Map<String, dynamic> json) {
+    final requested = _modelList(json['requestedModels'] ?? json['models']);
+    final counts = UsageCounts.fromJson(json);
+    return UsageRunRow(
+      runId: '${json['runId'] ?? ''}',
+      sessionId: '${json['sessionId'] ?? ''}',
+      sessionTitle: json['sessionTitle'] is String
+          ? json['sessionTitle'] as String
+          : null,
+      status: json['status'] is String ? json['status'] as String : null,
+      startedAt: UsageHistory._t(json['startedAt']),
+      finishedAt: UsageHistory._t(json['finishedAt']),
+      models: requested ?? const [],
+      requestedModels: requested,
+      providerModels: _modelList(json['providerModels']),
+      counts: counts,
+      costMicros: counts.costMicros,
+      imagesGenerated: counts.imagesGenerated,
+      imagesEdited: counts.imagesEdited,
+    );
+  }
+
+  static List<String>? _modelList(Object? raw) {
+    if (raw is! List) return null;
+    return [
+      for (final model in raw)
+        if (model is String) model,
+    ];
+  }
 }
 
 /// `GET /cloud/v1/usage/history` — the per-day / per-model / per-chat /
@@ -109,6 +192,7 @@ class UsageHistory {
     required this.sessions,
     required this.runs,
     required this.nextBefore,
+    this.sessionsKnown = true,
   });
 
   final DateTime? since;
@@ -122,6 +206,11 @@ class UsageHistory {
   final List<UsageRunRow> runs;
   final String? nextBefore;
 
+  /// Whether the server supplied a valid sessions array. The list remains
+  /// convenient for callers, but only this flag distinguishes empty from
+  /// unknown.
+  final bool sessionsKnown;
+
   static DateTime? _t(Object? v) =>
       v is String ? DateTime.tryParse(v)?.toUtc() : null;
 
@@ -130,52 +219,58 @@ class UsageHistory {
       if (e is Map) Map<String, dynamic>.from(e),
   ];
 
-  static UsageRunRow runFromJson(Map<String, dynamic> r) => UsageRunRow(
-    runId: '${r['runId'] ?? ''}',
-    sessionId: '${r['sessionId'] ?? ''}',
-    sessionTitle: r['sessionTitle'] is String
-        ? r['sessionTitle'] as String
-        : null,
-    status: r['status'] is String ? r['status'] as String : null,
-    startedAt: _t(r['startedAt']),
-    finishedAt: _t(r['finishedAt']),
-    models: [
-      for (final m in (r['models'] is List ? r['models'] as List : const []))
-        if (m is String) m,
-    ],
-    counts: UsageCounts.fromJson(r),
-  );
+  static UsageRunRow runFromJson(Map<String, dynamic> r) =>
+      UsageRunRow.fromJson(r);
 
-  factory UsageHistory.fromJson(Map<String, dynamic> j) => UsageHistory(
-    since: _t(j['since']),
-    until: _t(j['until']),
-    totals: UsageCounts.fromJson(
-      j['totals'] is Map
-          ? Map<String, dynamic>.from(j['totals'] as Map)
-          : const {},
-    ),
-    days: [
-      for (final d in _list(j['days']))
-        if (d['date'] is String)
-          UsageDay(d['date'] as String, UsageCounts.fromJson(d)),
-    ],
-    models: [
-      for (final m in _list(j['models']))
-        if (m['model'] is String)
-          UsageModelRow(m['model'] as String, UsageCounts.fromJson(m)),
-    ],
-    sessions: [
-      for (final s in _list(j['sessions']))
-        UsageSessionRow(
-          sessionId: '${s['sessionId'] ?? ''}',
-          title: s['title'] is String ? s['title'] as String : null,
-          counts: UsageCounts.fromJson(s),
-          lastAt: _t(s['lastAt']),
-        ),
-    ],
-    runs: [for (final r in _list(j['runs'])) runFromJson(r)],
-    nextBefore: j['nextBefore'] is String ? j['nextBefore'] as String : null,
-  );
+  factory UsageHistory.fromJson(Map<String, dynamic> j) {
+    final rawSessions = j['sessions'];
+    var sessionsKnown = rawSessions is List;
+    final sessions = <UsageSessionRow>[];
+    if (sessionsKnown) {
+      for (final raw in rawSessions) {
+        if (raw is! Map ||
+            raw['sessionId'] is! String ||
+            (raw['sessionId'] as String).trim().isEmpty) {
+          sessionsKnown = false;
+          break;
+        }
+        final session = Map<String, dynamic>.from(raw);
+        sessions.add(
+          UsageSessionRow(
+            sessionId: session['sessionId'] as String,
+            title: session['title'] is String
+                ? session['title'] as String
+                : null,
+            counts: UsageCounts.fromJson(session),
+            lastAt: _t(session['lastAt']),
+          ),
+        );
+      }
+    }
+    return UsageHistory(
+      since: _t(j['since']),
+      until: _t(j['until']),
+      totals: UsageCounts.fromJson(
+        j['totals'] is Map
+            ? Map<String, dynamic>.from(j['totals'] as Map)
+            : const {},
+      ),
+      days: [
+        for (final d in _list(j['days']))
+          if (d['date'] is String)
+            UsageDay(d['date'] as String, UsageCounts.fromJson(d)),
+      ],
+      models: [
+        for (final m in _list(j['models']))
+          if (m['model'] is String)
+            UsageModelRow(m['model'] as String, UsageCounts.fromJson(m)),
+      ],
+      sessions: sessionsKnown ? sessions : const [],
+      sessionsKnown: sessionsKnown,
+      runs: [for (final r in _list(j['runs'])) runFromJson(r)],
+      nextBefore: j['nextBefore'] is String ? j['nextBefore'] as String : null,
+    );
+  }
 }
 
 /// Loads [UsageHistory] for the Usage screen: range changes, refresh, and
@@ -270,6 +365,7 @@ class UsageHistoryStore extends ChangeNotifier {
         days: current.days,
         models: current.models,
         sessions: current.sessions,
+        sessionsKnown: current.sessionsKnown,
         runs: [
           ...current.runs,
           for (final r in page.runs)

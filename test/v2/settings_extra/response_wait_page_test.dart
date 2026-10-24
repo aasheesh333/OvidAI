@@ -65,11 +65,12 @@ void main() {
 
     expect(find.text('Response wait'), findsOneWidget);
     expect(find.text('When a reply goes quiet'), findsOneWidget);
-    expect(find.text('2 min'), findsNWidgets(2));
+    expect(find.text('2 min'), findsOneWidget);
     expect(find.byType(Slider), findsOneWidget);
     expect(find.byType(OChip), findsNWidgets(3));
-    expect(find.text('1 min'), findsOneWidget);
-    expect(find.text('5 min'), findsOneWidget);
+    expect(find.text('Fast · 15 s'), findsOneWidget);
+    expect(find.text('Balanced · 45 s'), findsOneWidget);
+    expect(find.text('Deep · 2 min'), findsOneWidget);
     expect(find.byType(Switch), findsNothing);
   });
 
@@ -120,28 +121,28 @@ void main() {
       ),
     );
 
-    await tester.tap(find.widgetWithText(OPressable, '5 min'));
+    await tester.tap(find.widgetWithText(OPressable, 'Fast · 15 s'));
     await tester.pumpAndSettle();
 
-    expect(writes, <int>[300]);
-    expect(tester.widget<Slider>(find.byType(Slider)).value, 300);
+    expect(writes, <int>[15]);
+    expect(tester.widget<Slider>(find.byType(Slider)).value, 15);
     expect(
       tester
           .widget<Text>(find.byKey(const ValueKey('response-wait-current')))
           .data,
-      '5 min',
+      '15 s',
     );
     expect(
-      tester.getSemantics(find.widgetWithText(OPressable, '5 min')),
+      tester.getSemantics(find.widgetWithText(OPressable, 'Fast · 15 s')),
       isSemantics(
-        label: '5 min wait time',
+        label: 'Fast, 15 s wait time',
         isButton: true,
         isEnabled: true,
         isSelected: true,
       ),
     );
     expect(
-      tester.getSemantics(find.widgetWithText(OPressable, '1 min')),
+      tester.getSemantics(find.widgetWithText(OPressable, 'Deep · 2 min')),
       isSemantics(isSelected: false),
     );
   });
@@ -163,9 +164,9 @@ void main() {
 
     expect(writes, isNotEmpty);
     final seconds = writes.last;
-    expect(seconds, greaterThanOrEqualTo(30));
+    expect(seconds, greaterThanOrEqualTo(15));
     expect(seconds, lessThanOrEqualTo(600));
-    expect(seconds % 30, 0);
+    expect((seconds - 15) % 15, 0);
     expect(
       tester.widget<Slider>(find.byType(Slider)).value,
       seconds.toDouble(),
@@ -190,7 +191,7 @@ void main() {
     );
 
     final slider = _spokenNode(tester, (data) => data.flagsCollection.isSlider);
-    expect(slider.label, 'Response wait limit, 30 seconds to 10 minutes');
+    expect(slider.label, 'Response wait limit, 15 seconds to 10 minutes');
     expect(slider.value, '2 min');
     expect(slider.flagsCollection.isEnabled, ui.Tristate.isTrue);
     expect(slider.hasAction(SemanticsAction.increase), isTrue);
@@ -209,12 +210,12 @@ void main() {
     expect(slider.max, AppState.maxResponseTimeoutSec.toDouble());
     expect(
       slider.divisions,
-      (AppState.maxResponseTimeoutSec - AppState.minResponseTimeoutSec) ~/ 30,
+      (AppState.maxResponseTimeoutSec - AppState.minResponseTimeoutSec) ~/ 15,
     );
-    for (final preset in <int>[60, 120, 300]) {
+    for (final preset in <int>[15, 45, 120]) {
       expect(preset, greaterThanOrEqualTo(AppState.minResponseTimeoutSec));
       expect(preset, lessThanOrEqualTo(AppState.maxResponseTimeoutSec));
-      expect((preset - slider.min) % 30, 0);
+      expect((preset - slider.min) % 15, 0);
     }
   });
 
@@ -279,7 +280,7 @@ void main() {
       V2ResponseWaitPageData(seconds: 120, onChanged: save, onPreset: save),
     );
 
-    await tester.tap(find.widgetWithText(OPressable, '5 min'));
+    await tester.tap(find.widgetWithText(OPressable, 'Fast · 15 s'));
     await tester.pumpAndSettle();
 
     // The thumb and the readout go back to the last saved value.
@@ -295,15 +296,15 @@ void main() {
 
     // The next attempt clears the message and keeps the new value.
     fail = false;
-    await tester.tap(find.widgetWithText(OPressable, '5 min'));
+    await tester.tap(find.widgetWithText(OPressable, 'Fast · 15 s'));
     await tester.pumpAndSettle();
 
-    expect(writes, <int>[300]);
+    expect(writes, <int>[15]);
     expect(
       tester
           .widget<Text>(find.byKey(const ValueKey('response-wait-current')))
           .data,
-      '5 min',
+      '15 s',
     );
     expect(find.text('Could not save. Still 2 min.'), findsNothing);
   });
@@ -343,18 +344,18 @@ void main() {
       ),
     );
 
-    await tester.tap(find.widgetWithText(OPressable, '1 min'));
+    await tester.tap(find.widgetWithText(OPressable, 'Fast · 15 s'));
     await tester.pumpAndSettle();
 
-    expect(AppState.I.responseTimeoutSec, 60);
+    expect(AppState.I.responseTimeoutSec, 15);
     final prefs = await SharedPreferences.getInstance();
-    expect(prefs.getInt('ovid_response_timeout_sec'), 60);
+    expect(prefs.getInt('ovid_response_timeout_sec'), 15);
 
     // Restart: a fresh state reads the same key back.
     AppState.resetTestInstance();
     AppState.createForTest();
     await AppState.I.reloadShellPreferencesForTest();
-    expect(AppState.I.responseTimeoutSec, 60);
+    expect(AppState.I.responseTimeoutSec, 15);
 
     await _pump(
       tester,
@@ -364,7 +365,7 @@ void main() {
       tester
           .widget<Text>(find.byKey(const ValueKey('response-wait-current')))
           .data,
-      '1 min',
+      '15 s',
     );
   });
 
@@ -389,9 +390,9 @@ void main() {
     await tester.pumpAndSettle();
 
     final seconds = AppState.I.responseTimeoutSec;
-    expect(seconds, greaterThanOrEqualTo(30));
+    expect(seconds, greaterThanOrEqualTo(15));
     expect(seconds, lessThanOrEqualTo(600));
-    expect(seconds % 30, 0);
+    expect((seconds - 15) % 15, 0);
     final prefs = await SharedPreferences.getInstance();
     expect(prefs.getInt('ovid_response_timeout_sec'), seconds);
   });
@@ -407,9 +408,9 @@ void main() {
       textScale: 2,
     );
 
-    await tester.ensureVisible(find.widgetWithText(OPressable, '5 min'));
+    await tester.ensureVisible(find.widgetWithText(OPressable, 'Fast · 15 s'));
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(OPressable, '5 min'));
+    await tester.tap(find.widgetWithText(OPressable, 'Fast · 15 s'));
     await tester.pumpAndSettle();
 
     expect(tester.takeException(), isNull);
@@ -438,13 +439,13 @@ void main() {
     final handle = tester.ensureSemantics();
     await _pump(tester, const V2ResponseWaitPageData(seconds: 120));
 
-    await tester.tap(find.widgetWithText(OPressable, '5 min'));
+    await tester.tap(find.widgetWithText(OPressable, 'Fast · 15 s'));
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
 
     expect(
-      tester.getSemantics(find.widgetWithText(OPressable, '5 min')),
-      isSemantics(isEnabled: false, label: '5 min wait time'),
+      tester.getSemantics(find.widgetWithText(OPressable, 'Fast · 15 s')),
+      isSemantics(isEnabled: false, label: 'Fast, 15 s wait time'),
     );
     expect(tester.widget<Slider>(find.byType(Slider)).onChanged, isNull);
     expect(
@@ -467,7 +468,7 @@ void main() {
     );
 
     expect(
-      tester.getSemantics(find.widgetWithText(OPressable, '5 min')),
+      tester.getSemantics(find.widgetWithText(OPressable, 'Fast · 15 s')),
       isSemantics(isButton: true, isEnabled: true),
     );
     expect(

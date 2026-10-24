@@ -19,6 +19,35 @@ import 'auth_identity.dart';
 import 'auth_phone_flow.dart';
 import 'auth_providers.dart';
 
+const String _telemetryRelease = String.fromEnvironment(
+  'OVID_RELEASE_TAG',
+  defaultValue: '1.0.0+3',
+);
+
+/// Only a bounded category and release reach Crashlytics. Raw exception text,
+/// flutter details and stacks may contain prompts, provider payloads or URLs.
+class _SanitizedTelemetryError {
+  const _SanitizedTelemetryError(this.name, this.release);
+
+  final String name;
+  final String release;
+
+  @override
+  String toString() => name;
+}
+
+_SanitizedTelemetryError _sanitizeTelemetryError(Object error) {
+  final name = switch (error) {
+    RangeError() => 'RangeError',
+    ArgumentError() => 'ArgumentError',
+    TypeError() => 'TypeError',
+    StateError() => 'StateError',
+    FormatException() => 'FormatException',
+    _ => 'Error',
+  };
+  return _SanitizedTelemetryError(name, _telemetryRelease);
+}
+
 /// Firebase bootstrap + auth + consent-gated telemetry.
 ///
 /// Design:
@@ -36,6 +65,10 @@ class FirebaseService extends ChangeNotifier {
     AuthIdentity? identity,
     User? initialUser,
     Stream<User?>? userChanges,
+    this._setCrashCollection,
+    this._setAnalyticsCollection,
+    this._crashReleaseWriter,
+    this._crashRecorder,
   }) : _configureForTest = configure,
        _userChangesForTest = userChanges,
        _authIdentity = identity,
@@ -52,12 +85,21 @@ class FirebaseService extends ChangeNotifier {
     AuthIdentity? identity,
     User? initialUser,
     Stream<User?>? userChanges,
+    Future<void> Function(bool enabled)? setCrashCollection,
+    Future<void> Function(bool enabled)? setAnalyticsCollection,
+    Future<void> Function(String release)? crashReleaseWriter,
+    Future<void> Function(Object error, StackTrace stack, bool fatal)?
+    crashRecorder,
   }) : this._(
          initializeApp: initializeApp,
          configure: configure,
          identity: identity,
          initialUser: initialUser,
          userChanges: userChanges,
+         setCrashCollection: setCrashCollection,
+         setAnalyticsCollection: setAnalyticsCollection,
+         crashReleaseWriter: crashReleaseWriter,
+         crashRecorder: crashRecorder,
        );
 
   static const _consentKey = 'ovid_telemetry_consent'; // 'yes' | 'no' | null
@@ -65,6 +107,7 @@ class FirebaseService extends ChangeNotifier {
   bool _available = false;
   bool _consentGiven = false;
   bool _consentAsked = false;
+  int _consentRevision = 0;
   User? _user;
 
   bool get isAvailable => _available;
@@ -81,6 +124,7 @@ class FirebaseService extends ChangeNotifier {
     _firstUserKnown = true;
     notifyListeners();
   }
+
   bool get consentGiven => _consentGiven;
   bool get consentAsked => _consentAsked;
   bool get isSignedIn => _user != null && !_user!.isAnonymous;
@@ -142,6 +186,7 @@ class FirebaseService extends ChangeNotifier {
     }
     return phoneNumber != null ? 'Signed in with phone' : 'Signed in';
   }
+
   final authProviders = AuthProviders();
   AuthIdentity? _authIdentity;
   AuthIdentity get _identity => _authIdentity ??= AuthIdentity(
@@ -171,6 +216,11 @@ class FirebaseService extends ChangeNotifier {
   Future<void>? _appInitialization;
   final Future<void> Function()? _initializeApp;
   final Future<void> Function()? _configureForTest;
+  final Future<void> Function(bool enabled)? _setCrashCollection;
+  final Future<void> Function(bool enabled)? _setAnalyticsCollection;
+  final Future<void> Function(String release)? _crashReleaseWriter;
+  final Future<void> Function(Object error, StackTrace stack, bool fatal)?
+  _crashRecorder;
   final Stream<User?>? _userChangesForTest;
 
   /// Initialize Firebase if a config is present. Safe to call on all builds.
@@ -217,16 +267,17 @@ class FirebaseService extends ChangeNotifier {
     final existing = _appInitialization;
     if (existing != null) return existing;
     late final Future<void> attempt;
-    attempt = (() async {
-      if (_initializeApp != null) {
-        await _initializeApp();
-      } else {
-        await Firebase.initializeApp();
-      }
-    })().catchError((Object error, StackTrace stack) {
-      if (identical(_appInitialization, attempt)) _appInitialization = null;
-      Error.throwWithStackTrace(error, stack);
-    });
+    attempt =
+        (() async {
+          if (_initializeApp != null) {
+            await _initializeApp();
+          } else {
+            await Firebase.initializeApp();
+          }
+        })().catchError((Object error, StackTrace stack) {
+          if (identical(_appInitialization, attempt)) _appInitialization = null;
+          Error.throwWithStackTrace(error, stack);
+        });
     _appInitialization = attempt;
     return attempt;
   }
@@ -411,9 +462,11 @@ class FirebaseService extends ChangeNotifier {
       _accountSession.clear();
       ImageStudio.I.bindAccount(null);
       notifyListeners();
-      unawaited(retryAccountLogin().catchError((Object e) {
-        Diag.swallow('account.recheck_admission', e);
-      }));
+      unawaited(
+        retryAccountLogin().catchError((Object e) {
+          Diag.swallow('account.recheck_admission', e);
+        }),
+      );
     } catch (e) {
       // A transient failure keeps the current admission; the next resume or
       // gateway rejection checks again.
@@ -592,11 +645,13 @@ class FirebaseService extends ChangeNotifier {
     final v = prefs.getString(_consentKey);
     _consentAsked = v != null;
     _consentGiven = v == 'yes';
+    _consentRevision++;
     await _applyTelemetryFlags();
   }
 
   /// Record the user's telemetry choice and apply it.
   Future<void> setConsent(bool allow) async {
+    _consentRevision++;
     _consentGiven = allow;
     _consentAsked = true;
     final prefs = await SharedPreferences.getInstance();
@@ -608,13 +663,21 @@ class FirebaseService extends ChangeNotifier {
 
   Future<void> _applyTelemetryFlags() async {
     if (!_available) return;
+    // Apply each flag independently: one unavailable plugin must not leave the
+    // other collection switch at its previous value.
     try {
-      await FirebaseAnalytics.instance.setAnalyticsCollectionEnabled(
-        _consentGiven,
-      );
-      await FirebaseCrashlytics.instance.setCrashlyticsCollectionEnabled(
-        _consentGiven,
-      );
+      await (_setCrashCollection?.call(_consentGiven) ??
+          FirebaseCrashlytics.instance.setCrashlyticsCollectionEnabled(
+            _consentGiven,
+          ));
+    } catch (e) {
+      Diag.swallow('firebase_service', e);
+    }
+    try {
+      await (_setAnalyticsCollection?.call(_consentGiven) ??
+          FirebaseAnalytics.instance.setAnalyticsCollectionEnabled(
+            _consentGiven,
+          ));
     } catch (e) {
       Diag.swallow('firebase_service', e);
     }
@@ -633,24 +696,68 @@ class FirebaseService extends ChangeNotifier {
     final previousOnError = FlutterError.onError;
     FlutterError.onError = (details) {
       previousOnError?.call(details);
-      FirebaseCrashlytics.instance.recordFlutterFatalError(details);
+      if (!_consentGiven) return;
+      unawaited(
+        _recordCrash(details.exception, details.stack ?? StackTrace.empty),
+      );
     };
     PlatformDispatcher.instance.onError = (error, stack) {
-      FirebaseCrashlytics.instance.recordError(error, stack, fatal: true);
+      if (!_consentGiven) return false;
+      unawaited(_recordCrash(error, stack));
       return true;
     };
+  }
+
+  Future<bool> _recordCrash(Object error, StackTrace stack) async {
+    // Handler installation is not consent. No crash payload may even reach the
+    // SDK until this account has explicitly opted in.
+    if (!_available || !_consentGiven) return false;
+    final revision = _consentRevision;
+    final sanitized = _sanitizeTelemetryError(error);
+    bool consentCurrent() =>
+        _available && _consentGiven && revision == _consentRevision;
+    try {
+      final recorder = _crashRecorder;
+      final releaseWriter = _crashReleaseWriter;
+      if (releaseWriter != null || recorder == null) {
+        await (releaseWriter?.call(_telemetryRelease) ??
+            FirebaseCrashlytics.instance.setCustomKey(
+              'release',
+              _telemetryRelease,
+            ));
+        // Consent may have been revoked while the metadata write was awaiting.
+        // Re-check immediately before the actual native record, not just at
+        // the beginning of the operation.
+        if (!consentCurrent()) return false;
+      }
+      if (!consentCurrent()) return false;
+      if (recorder != null) {
+        await recorder(sanitized, StackTrace.empty, true);
+      } else {
+        await FirebaseCrashlytics.instance.recordError(
+          sanitized,
+          StackTrace.empty,
+          fatal: true,
+        );
+      }
+      return true;
+    } catch (_) {
+      // Do not turn a transport/provider message into another raw diagnostic.
+      Diag.swallow('firebase_service', 'telemetry report failed');
+      return false;
+    }
   }
 
   /// Reports an uncaught asynchronous error from the guarded boot zone.
   ///
   /// Before Firebase is up there is nowhere to send it, so it is printed
-  /// instead of swallowed.
-  void recordZoneError(Object error, StackTrace stack) {
+  /// instead of swallowed. Available-but-unconsented reporting is a quiet no-op.
+  Future<bool> recordZoneError(Object error, StackTrace stack) {
     if (!_available) {
       debugPrint('Uncaught boot error: $error\n$stack');
-      return;
+      return Future<bool>.value(false);
     }
-    FirebaseCrashlytics.instance.recordError(error, stack, fatal: true);
+    return _recordCrash(error, stack);
   }
 
   /// The current user's Firebase ID token (JWT), or null when signed out.

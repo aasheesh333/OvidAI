@@ -90,6 +90,7 @@ V2PlanBillingData _billingData({
   ValueChanged<V2BillingPeriod>? onPeriodChanged,
   ValueChanged<V2PlanPurchase>? onPurchase,
   VoidCallback? onRestorePurchases,
+  VoidCallback? onManageBilling,
   ValueChanged<V2BillingHistoryEntry>? onHistoryTap,
   VoidCallback? onRetry,
 }) {
@@ -104,6 +105,7 @@ V2PlanBillingData _billingData({
     onPeriodChanged: onPeriodChanged,
     onPurchase: onPurchase,
     onRestorePurchases: onRestorePurchases,
+    onManageBilling: onManageBilling,
     onHistoryTap: onHistoryTap,
     onRetry: onRetry,
   );
@@ -328,14 +330,32 @@ void main() {
     expect(purchases, isEmpty);
   });
 
-  testWidgets('the Free card is a Play management action, not a purchase', (
+  testWidgets('the Free card manages only an active entitlement', (
     tester,
   ) async {
     final purchases = <V2PlanPurchase>[];
+    var manages = 0;
     await tester.pumpWidget(
       _app(
         OTheme.light(),
         _billingData(currentPlanId: 'go', onPurchase: purchases.add),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // No server-confirmed active entitlement: no management control exists.
+    expect(find.byKey(const ValueKey<String>('plan-cta-free')), findsNothing);
+    expect(purchases, isEmpty);
+    expect(manages, 0);
+
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        _billingData(
+          currentPlanId: 'go',
+          onPurchase: purchases.add,
+          onManageBilling: () => manages++,
+        ),
       ),
     );
     await tester.pumpAndSettle();
@@ -347,9 +367,8 @@ void main() {
     await tester.tap(find.byKey(const ValueKey<String>('plan-cta-free')));
     await tester.pump();
 
-    expect(purchases.single.planId, 'free');
-    expect(purchases.single.tier, 'free');
-    expect(purchases.single.productId, isNull);
+    expect(manages, 1);
+    expect(purchases, isEmpty, reason: 'management is not a purchase');
   });
 
   testWidgets('the billing period toggle changes price and product', (

@@ -37,6 +37,7 @@ import 'cloud_session_store.dart';
 import 'cloud_ws.dart';
 import 'event_projection.dart';
 import 'models.dart';
+import 'static_rich_content.dart';
 
 /// Cloud facade over the REST + WS surface.
 class CloudAgentFacade extends ChangeNotifier
@@ -47,10 +48,10 @@ class CloudAgentFacade extends ChangeNotifier
     required CloudSessionStore? store,
     Duration Function()? stallWindowFor,
     this.persistQueue = false,
-  })  : _rest = rest, // ignore: prefer_initializing_formals
-        _ws = ws, // ignore: prefer_initializing_formals
-        _store = store, // ignore: prefer_initializing_formals
-        _stallWindowFor = stallWindowFor { // ignore: prefer_initializing_formals
+  }) : _rest = rest, // ignore: prefer_initializing_formals
+       _ws = ws, // ignore: prefer_initializing_formals
+       _store = store, // ignore: prefer_initializing_formals
+       _stallWindowFor = stallWindowFor { // ignore: prefer_initializing_formals
     final s = store;
     if (s != null) {
       // Task 9 wiring: the store seeds this facade's projections and the
@@ -96,11 +97,11 @@ class CloudAgentFacade extends ChangeNotifier
   /// The process-wide default. Nothing reads it until Task 10 flips
   /// `chat_screen.dart` onto the facade.
   static CloudAgentFacade get I => _instance ??= CloudAgentFacade(
-        rest: CloudRestClient.I,
-        ws: WsMultiplexer.I,
-        store: CloudSessionStore.I,
-        persistQueue: true,
-      );
+    rest: CloudRestClient.I,
+    ws: WsMultiplexer.I,
+    store: CloudSessionStore.I,
+    persistQueue: true,
+  );
 
   /// Replaces the singleton — test wiring only.
   @visibleForTesting
@@ -175,8 +176,7 @@ class CloudAgentFacade extends ChangeNotifier
   }
 
   /// Account-scoped reset that never constructs the facade just to clear it.
-  static void resetAccountStateIfInstalled() =>
-      _instance?.resetAccountState();
+  static void resetAccountStateIfInstalled() => _instance?.resetAccountState();
 
   /// Single-session teardown for `AppState.onSessionDeleted`: unsubscribes
   /// the socket stream, disposes the projection and drops every per-session
@@ -297,8 +297,7 @@ class CloudAgentFacade extends ChangeNotifier
 
   /// Staged attachments per session (server id → files). No workspace copy:
   /// the bytes are uploaded straight from the staged file path.
-  final Map<String, List<({String name, String path, int size})>>
-      _attachments =
+  final Map<String, List<({String name, String path, int size})>> _attachments =
       <String, List<({String name, String path, int size})>>{};
 
   /// Composer cap (the retired local service's `maxAttachments`; the UI's
@@ -354,16 +353,15 @@ class CloudAgentFacade extends ChangeNotifier
   static const Duration _stallTickInterval = Duration(seconds: 1);
 
   /// The production stall window: the user's responseTimeoutSec clamped to
-  /// [30s, 600s]. The setting itself allows up to 3600s, but a "still
-  /// waiting" surface that first appears an hour in says nothing the busy
-  /// dot does not already; the clamp bounds the SURFACE only — the server's
-  /// own timeouts are untouched. A degenerate read (unset/non-positive)
-  /// falls back to 60s.
+  /// [15s, 600s]. Fast 15s and the server setting share one lower bound.
+  /// The clamp bounds only the SURFACE — the server's own timeouts and active
+  /// runs are untouched. A degenerate read (unset/non-positive) falls back to
+  /// 60s.
   Duration _responseTimeoutStallWindow() {
     final configured = _stallWindowFor?.call();
     if (configured != null) return configured;
     final sec = AppState.I.responseTimeoutSec;
-    return Duration(seconds: (sec > 0 ? sec : 60).clamp(30, 600));
+    return Duration(seconds: (sec > 0 ? sec : 60).clamp(15, 600));
   }
 
   /// Re-stamps [serverId]'s quiet-time — every event of any kind does this —
@@ -522,92 +520,91 @@ class CloudAgentFacade extends ChangeNotifier
   }
 
   void _subscribe(String serverId, _SessionCloudState state) {
-    state.subscription = _ws.subscribe(serverId).listen(
-          (CloudSessionEvent event) {
-            if (_disposed) return;
-            // Response-timeout watchdog: every event of any kind re-stamps
-            // this session's last-event time (run_started arms the periodic
-            // check below; any event resets it; a terminal's settle path —
-            // via the busy check in the tick itself — stops it).
-            _noteStallEvent(serverId);
-            // Capture BEFORE folding: the projector clears activeRunId on
-            // terminal events, and run_failed carries no runId — the
-            // pre-fold active run is what identifies it (I-2). run_cancelled
-            // (the full processor's cancel terminal) does carry its runId.
-            final activeBefore = state.projection.activeRunId;
-            if (_isDuplicateTerminal(state, event, activeBefore)) {
-              // Both spellings of one cancel: the settle already happened.
-              // Dropped BEFORE the fold so the duplicate appends no second
-              // turn-tail row, and before the terminal switch below so it
-              // records no error and drains no queue.
-              return;
+    state.subscription = _ws.subscribe(serverId).listen((
+      CloudSessionEvent event,
+    ) {
+      if (_disposed) return;
+      // Response-timeout watchdog: every event of any kind re-stamps
+      // this session's last-event time (run_started arms the periodic
+      // check below; any event resets it; a terminal's settle path —
+      // via the busy check in the tick itself — stops it).
+      _noteStallEvent(serverId);
+      // Capture BEFORE folding: the projector clears activeRunId on
+      // terminal events, and run_failed carries no runId — the
+      // pre-fold active run is what identifies it (I-2). run_cancelled
+      // (the full processor's cancel terminal) does carry its runId.
+      final activeBefore = state.projection.activeRunId;
+      if (_isDuplicateTerminal(state, event, activeBefore)) {
+        // Both spellings of one cancel: the settle already happened.
+        // Dropped BEFORE the fold so the duplicate appends no second
+        // turn-tail row, and before the terminal switch below so it
+        // records no error and drains no queue.
+        return;
+      }
+      state.projector.apply(event);
+      switch (event.type) {
+        case 'run_started':
+          final runId = event.payload['runId'];
+          if (runId is String && runId != state.terminalSettledRunId) {
+            state.terminalSettledRunId = null;
+          }
+          state.queuedBehindActiveRun = false;
+          _clearError(serverId);
+          // A live run exists from now on: start the silence clock.
+          _armStallWatchdog(serverId);
+          _notify();
+          break;
+        case 'run_completed':
+        case 'run_failed':
+        case 'run_cancelled':
+          _onTerminalEvent(
+            serverId,
+            state,
+            event.type,
+            event.payload,
+            activeBefore,
+          );
+          break;
+        case 'plan_mode_changed':
+        // The agent left (or entered) plan mode server-side
+        // (exit_plan_mode): the Plan chip must follow, or the next
+        // send would put the session straight back into plan mode.
+        case 'todo_updated':
+        case 'goal_updated':
+          _syncSessionState(serverId, state);
+          _notify();
+          break;
+        case 'subagent_started':
+          // The live activity card reads the child's own events.
+          final child = event.payload['childSessionId'];
+          if (child is String && child.isNotEmpty) {
+            _subagentSessions.add(child);
+            _watchChild(child);
+          }
+          break;
+        case 'system_note':
+          // CH-016: a queued run the server merged into the active
+          // one never gets its own terminal — settle it here or the
+          // composer shows Stop forever.
+          if (event.payload['code'] == 'run_merged') {
+            final merged = event.payload['mergedRunId'];
+            if (merged is String &&
+                merged == state.runState.runId &&
+                merged != state.projection.activeRunId) {
+              final into = event.payload['runId'];
+              state.runState = _copyRunState(
+                state.runState,
+                runId: into is String ? into : null,
+                clearRunId: into is! String,
+                busy: into is String,
+              );
+              state.queuedBehindActiveRun = false;
+              _notify();
             }
-            state.projector.apply(event);
-            switch (event.type) {
-              case 'run_started':
-                final runId = event.payload['runId'];
-                if (runId is String && runId != state.terminalSettledRunId) {
-                  state.terminalSettledRunId = null;
-                }
-                state.queuedBehindActiveRun = false;
-                _clearError(serverId);
-                // A live run exists from now on: start the silence clock.
-                _armStallWatchdog(serverId);
-                _notify();
-                break;
-              case 'run_completed':
-              case 'run_failed':
-              case 'run_cancelled':
-                _onTerminalEvent(
-                  serverId,
-                  state,
-                  event.type,
-                  event.payload,
-                  activeBefore,
-                );
-                break;
-              case 'plan_mode_changed':
-              // The agent left (or entered) plan mode server-side
-              // (exit_plan_mode): the Plan chip must follow, or the next
-              // send would put the session straight back into plan mode.
-              case 'todo_updated':
-              case 'goal_updated':
-                _syncSessionState(serverId, state);
-                _notify();
-                break;
-              case 'subagent_started':
-                // The live activity card reads the child's own events.
-                final child = event.payload['childSessionId'];
-                if (child is String && child.isNotEmpty) {
-                  _subagentSessions.add(child);
-                  _watchChild(child);
-                }
-                break;
-              case 'system_note':
-                // CH-016: a queued run the server merged into the active
-                // one never gets its own terminal — settle it here or the
-                // composer shows Stop forever.
-                if (event.payload['code'] == 'run_merged') {
-                  final merged = event.payload['mergedRunId'];
-                  if (merged is String &&
-                      merged == state.runState.runId &&
-                      merged != state.projection.activeRunId) {
-                    final into = event.payload['runId'];
-                    state.runState = _copyRunState(
-                      state.runState,
-                      runId: into is String ? into : null,
-                      clearRunId: into is! String,
-                      busy: into is String,
-                    );
-                    state.queuedBehindActiveRun = false;
-                    _notify();
-                  }
-                }
-                break;
-            }
-          },
-          onError: (Object error) => _onStreamError(serverId, error),
-        );
+          }
+          break;
+      }
+    }, onError: (Object error) => _onStreamError(serverId, error));
   }
 
   /// The local row mapped to [serverId], if any.
@@ -709,9 +706,9 @@ class CloudAgentFacade extends ChangeNotifier
   /// Subscribed session ids, for tests.
   @visibleForTesting
   Set<String> get subscribedSessionsForTest => <String>{
-        for (final e in _sessions.entries)
-          if (e.value.subscription != null) e.key,
-      };
+    for (final e in _sessions.entries)
+      if (e.value.subscription != null) e.key,
+  };
 
   /// True when [event] is a terminal the session has ALREADY settled — the
   /// server may emit BOTH spellings of one cancel (the full processor's
@@ -756,13 +753,11 @@ class CloudAgentFacade extends ChangeNotifier
     // The 409-missed-terminal exception: that settle came from the cancel
     // race, not from a folded event — the projection is still in flight on
     // the settled run and the late terminal must fold.
-    if (state.projection.busy &&
-        state.projection.activeRunId == settled) {
+    if (state.projection.busy && state.projection.activeRunId == settled) {
       return false;
     }
     final payloadRunId = event.payload['runId'];
-    final terminalRunId =
-        payloadRunId is String ? payloadRunId : activeBefore;
+    final terminalRunId = payloadRunId is String ? payloadRunId : activeBefore;
     if (terminalRunId != null) return terminalRunId == settled;
     return state.runState.runId == null;
   }
@@ -790,10 +785,10 @@ class CloudAgentFacade extends ChangeNotifier
     String? activeBefore,
   ) {
     final payloadRunId = payload['runId'];
-    final terminalRunId =
-        payloadRunId is String ? payloadRunId : activeBefore;
+    final terminalRunId = payloadRunId is String ? payloadRunId : activeBefore;
     final currentRunId = state.runState.runId;
-    final matches = terminalRunId == null ||
+    final matches =
+        terminalRunId == null ||
         currentRunId == null ||
         terminalRunId == currentRunId;
     if (!matches) {
@@ -832,7 +827,10 @@ class CloudAgentFacade extends ChangeNotifier
     }
   }
 
-  Future<void> _persistTerminal(String serverId, _SessionCloudState state) async {
+  Future<void> _persistTerminal(
+    String serverId,
+    _SessionCloudState state,
+  ) async {
     final store = _store;
     if (store == null || _disposed) return;
     try {
@@ -901,8 +899,12 @@ class CloudAgentFacade extends ChangeNotifier
     }
   }
 
-  void _recordError(String serverId, String code, String message,
-      {DateTime? resetsAt}) {
+  void _recordError(
+    String serverId,
+    String code,
+    String message, {
+    DateTime? resetsAt,
+  }) {
     _errors[serverId] = (code, message);
     _errorResetsAt[serverId] = resetsAt;
     final state = _sessions[serverId];
@@ -942,10 +944,9 @@ class CloudAgentFacade extends ChangeNotifier
   String? _lastQueueSnapshot;
 
   String _queueSnapshot() => jsonEncode(<String, Object>{
-        for (final e in _queues.entries)
-          if (e.value.isNotEmpty)
-            e.key: [for (final row in e.value) row.toJson()],
-      });
+    for (final e in _queues.entries)
+      if (e.value.isNotEmpty) e.key: [for (final row in e.value) row.toJson()],
+  });
 
   void _persistQueuesIfChanged() {
     if (!persistQueue || !_queuesLoaded) return;
@@ -966,7 +967,9 @@ class CloudAgentFacade extends ChangeNotifier
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(
-          AppState.I.accountScopedPrefKey(queuePrefKey), snapshot);
+        AppState.I.accountScopedPrefKey(queuePrefKey),
+        snapshot,
+      );
     } catch (e, s) {
       Diag.swallow('cloud.persistQueue', e, s);
     }
@@ -975,8 +978,9 @@ class CloudAgentFacade extends ChangeNotifier
   Future<void> _loadPersistedQueues() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final raw =
-          prefs.getString(AppState.I.accountScopedPrefKey(queuePrefKey));
+      final raw = prefs.getString(
+        AppState.I.accountScopedPrefKey(queuePrefKey),
+      );
       if (raw != null && raw.isNotEmpty) {
         final decoded = jsonDecode(raw);
         if (decoded is Map) {
@@ -984,12 +988,15 @@ class CloudAgentFacade extends ChangeNotifier
             final rows = e.value;
             if (e.key is! String || rows is! List) continue;
             final queue = _queues.putIfAbsent(
-                e.key as String, () => <_QueuedCloudMessage>[]);
+              e.key as String,
+              () => <_QueuedCloudMessage>[],
+            );
             final known = {for (final r in queue) r.id};
             for (final r in rows) {
               if (r is! Map) continue;
               final row = _QueuedCloudMessage.fromJson(
-                  Map<String, dynamic>.from(r));
+                Map<String, dynamic>.from(r),
+              );
               if (row.text.trim().isEmpty || !known.add(row.id)) continue;
               queue.add(row);
               if (row.id >= _nextQueueId) _nextQueueId = row.id + 1;
@@ -1009,7 +1016,6 @@ class CloudAgentFacade extends ChangeNotifier
     notifyListeners();
   }
 
-
   static CloudRunState _copyRunState(
     CloudRunState s, {
     String? runId,
@@ -1022,18 +1028,18 @@ class CloudAgentFacade extends ChangeNotifier
     String? lastErrorMessage,
     bool clearError = false,
     bool clearRunId = false,
-  }) =>
-      CloudRunState(
-        runId: clearRunId ? null : (runId ?? s.runId),
-        busy: busy ?? s.busy,
-        stopRequested: stopRequested ?? s.stopRequested,
-        statusLine: statusLine ?? s.statusLine,
-        retryAttempt: retryAttempt ?? s.retryAttempt,
-        retryNextBackoffMs: retryNextBackoffMs ?? s.retryNextBackoffMs,
-        lastErrorCode: clearError ? null : (lastErrorCode ?? s.lastErrorCode),
-        lastErrorMessage:
-            clearError ? null : (lastErrorMessage ?? s.lastErrorMessage),
-      );
+  }) => CloudRunState(
+    runId: clearRunId ? null : (runId ?? s.runId),
+    busy: busy ?? s.busy,
+    stopRequested: stopRequested ?? s.stopRequested,
+    statusLine: statusLine ?? s.statusLine,
+    retryAttempt: retryAttempt ?? s.retryAttempt,
+    retryNextBackoffMs: retryNextBackoffMs ?? s.retryNextBackoffMs,
+    lastErrorCode: clearError ? null : (lastErrorCode ?? s.lastErrorCode),
+    lastErrorMessage: clearError
+        ? null
+        : (lastErrorMessage ?? s.lastErrorMessage),
+  );
 
   // -------------------------------------------------------------------------
   // AgentSurface — mode
@@ -1051,7 +1057,8 @@ class CloudAgentFacade extends ChangeNotifier
   /// Control was retired server-side (spec D5) and no longer exists in the
   /// enum.
   AgentMode _persistedModeFor(String? localId, String serverId) {
-    final session = AppState.I.sessionById(serverId) ??
+    final session =
+        AppState.I.sessionById(serverId) ??
         (localId == null ? null : AppState.I.sessionById(localId)) ??
         AppState.I.activeSession;
     final persisted = session?.mode;
@@ -1074,8 +1081,8 @@ class CloudAgentFacade extends ChangeNotifier
     // Mirror the retired local service: an explicit mode pick persists on the
     // session row and ends plan mode. An unknown id still PATCHes (the facade
     // is addressable by server id even when no local row exists).
-    final session = AppState.I.sessionById(localId ?? '') ??
-        AppState.I.sessionById(id);
+    final session =
+        AppState.I.sessionById(localId ?? '') ?? AppState.I.sessionById(id);
     if (session != null) {
       if (session.planMode || session.planModePending != null) {
         session.planMode = false;
@@ -1211,11 +1218,8 @@ class CloudAgentFacade extends ChangeNotifier
   }
 
   @override
-  ValueListenable<bool> busyListenable(String sessionId) =>
-      _busyNotifiers.putIfAbsent(
-        sessionId,
-        () => ValueNotifier<bool>(busyFor(sessionId)),
-      );
+  ValueListenable<bool> busyListenable(String sessionId) => _busyNotifiers
+      .putIfAbsent(sessionId, () => ValueNotifier<bool>(busyFor(sessionId)));
 
   @override
   String? statusFor(String sessionId) {
@@ -1312,13 +1316,14 @@ class CloudAgentFacade extends ChangeNotifier
   static const String _pendingPrefix = 'pending:';
 
   /// The transcript row id of a not-yet-confirmed prompt.
-  static String pendingRowId(String clientMsgId) => '$_pendingPrefix$clientMsgId';
+  static String pendingRowId(String clientMsgId) =>
+      '$_pendingPrefix$clientMsgId';
 
   /// The clientMsgId behind a pending row, or null for a confirmed row.
   static String? pendingClientMsgIdOf(Message m) =>
       m.privateSyncId.startsWith(_pendingPrefix)
-          ? m.privateSyncId.substring(_pendingPrefix.length)
-          : null;
+      ? m.privateSyncId.substring(_pendingPrefix.length)
+      : null;
 
   /// Pending rows per session key (survive a transcript re-seed).
   final Map<String, List<Message>> _pendingRows = <String, List<Message>>{};
@@ -1357,7 +1362,13 @@ class CloudAgentFacade extends ChangeNotifier
       content: content,
       privateSyncId: rowId,
       attachments: [
-        for (final f in files) MessageAttachment(name: f.name, size: f.size),
+        for (final f in files)
+          RichMessageAttachment(
+            name: f.name,
+            size: f.size,
+            path: f.path,
+            availability: MessageAttachmentAvailability.pending,
+          ),
       ],
     );
     _pendingRows.putIfAbsent(key, () => <Message>[]).add(row);
@@ -1388,8 +1399,14 @@ class CloudAgentFacade extends ChangeNotifier
           privateSyncId: rowId,
           time: entry.createdAt,
           attachments: [
+            ..._readyAttachments(entry.attachmentIds),
             for (final f in entry.attachmentFiles)
-              MessageAttachment(name: f.name, size: f.size),
+              RichMessageAttachment(
+                name: f.name,
+                size: f.size,
+                path: f.path,
+                availability: MessageAttachmentAvailability.pending,
+              ),
           ],
         );
         _pendingRows.putIfAbsent(key, () => <Message>[]).add(row);
@@ -1407,8 +1424,10 @@ class CloudAgentFacade extends ChangeNotifier
     String key,
     String clientMsgId,
     String userMessageId,
-    String content,
-  ) {
+    String content, {
+    List<String> attachmentIds = const <String>[],
+    List<OutboxFile> stagedFiles = const <OutboxFile>[],
+  }) {
     final state = _sessions[key];
     final rowId = pendingRowId(clientMsgId);
     _pendingRows[key]?.removeWhere((m) => m.privateSyncId == rowId);
@@ -1428,18 +1447,57 @@ class CloudAgentFacade extends ChangeNotifier
           content: pending.content,
           privateSyncId: userMessageId,
           time: pending.time,
-          attachments: pending.attachments,
+          attachments: _readyAttachments(
+            attachmentIds,
+            previous: pending.attachments,
+            stagedFiles: stagedFiles,
+          ),
         );
       }
     } else if (!already) {
-      messages.add(Message(
-        role: 'user',
-        kind: MsgKind.text,
-        content: content,
-        privateSyncId: userMessageId,
-      ));
+      messages.add(
+        Message(
+          role: 'user',
+          kind: MsgKind.text,
+          content: content,
+          privateSyncId: userMessageId,
+          attachments: _readyAttachments(
+            attachmentIds,
+            stagedFiles: stagedFiles,
+          ),
+        ),
+      );
     }
     state.projection.notifyListeners();
+  }
+
+  List<MessageAttachment> _readyAttachments(
+    List<String> ids, {
+    List<MessageAttachment> previous = const <MessageAttachment>[],
+    List<OutboxFile> stagedFiles = const <OutboxFile>[],
+  }) {
+    return <MessageAttachment>[
+      for (var i = 0; i < ids.length; i++)
+        RichMessageAttachment(
+          id: ids[i],
+          name: i < previous.length
+              ? previous[i].name
+              : i < stagedFiles.length
+              ? stagedFiles[i].name
+              : 'Attachment',
+          size: i < previous.length
+              ? previous[i].size
+              : i < stagedFiles.length
+              ? stagedFiles[i].size
+              : 0,
+          path: i < previous.length
+              ? previous[i].path
+              : i < stagedFiles.length
+              ? stagedFiles[i].path
+              : null,
+          availability: MessageAttachmentAvailability.ready,
+        ),
+    ];
   }
 
   /// Drops a pending row (the user discarded the prompt).
@@ -1521,8 +1579,11 @@ class CloudAgentFacade extends ChangeNotifier
     if (last == null) return;
     _clearError(key);
     _notify();
-    await runTask(last.text,
-        sessionId: sessionId, sessionRefs: last.turn.sessionRefs);
+    await runTask(
+      last.text,
+      sessionId: sessionId,
+      sessionRefs: last.turn.sessionRefs,
+    );
   }
 
   /// True when [sessionId] has a prompt Retry can re-send.
@@ -1598,7 +1659,10 @@ class CloudAgentFacade extends ChangeNotifier
     final key = _serverId(sessionId) ?? sessionId;
     if (!isServerMessage(message)) {
       throw CloudApiException(
-          status: 400, code: 'bad_request', message: 'This row cannot be deleted.');
+        status: 400,
+        code: 'bad_request',
+        message: 'This row cannot be deleted.',
+      );
     }
     await _rest.deleteMessagesFrom(key, message.privateSyncId);
     _truncateLocal(key, message.privateSyncId);
@@ -1622,7 +1686,10 @@ class CloudAgentFacade extends ChangeNotifier
     final key = _serverId(sessionId) ?? sessionId;
     if (!isServerMessage(target)) {
       throw CloudApiException(
-          status: 400, code: 'bad_request', message: 'This row cannot be run again.');
+        status: 400,
+        code: 'bad_request',
+        message: 'This row cannot be run again.',
+      );
     }
     final maxOut = AppState.I.maxOutputTokens;
     final response = await _rest.regenerateMessage(
@@ -1655,7 +1722,10 @@ class CloudAgentFacade extends ChangeNotifier
     final key = _serverId(sessionId) ?? sessionId;
     if (!isServerMessage(message)) {
       throw CloudApiException(
-          status: 400, code: 'bad_request', message: 'This row cannot start a branch.');
+        status: 400,
+        code: 'bad_request',
+        message: 'This row cannot start a branch.',
+      );
     }
     final dto = await _rest.branchSession(key, message.privateSyncId);
     final store = _store;
@@ -1694,8 +1764,10 @@ class CloudAgentFacade extends ChangeNotifier
     // of failing every send with a 400 the settings screen never warned
     // about.
     final maxOutputTokens = AppState.I.maxOutputTokens > 0
-        ? min(AppState.I.maxOutputTokens,
-            CloudRestClient.maxOutputTokensWireCap)
+        ? min(
+            AppState.I.maxOutputTokens,
+            CloudRestClient.maxOutputTokensWireCap,
+          )
         : null;
 
     // Double-send guard (chat P1): a second tap while the first send is
@@ -1763,8 +1835,15 @@ class CloudAgentFacade extends ChangeNotifier
 
       if (store == null) {
         onQueued?.call();
-        await _sendDirect(key, state, originalPrompt, msgId, staged, turn,
-            maxOutputTokens);
+        await _sendDirect(
+          key,
+          state,
+          originalPrompt,
+          msgId,
+          staged,
+          turn,
+          maxOutputTokens,
+        );
         return;
       }
 
@@ -1790,13 +1869,21 @@ class CloudAgentFacade extends ChangeNotifier
       if (resolved != key) guardKeys.add(resolved);
       final entry = store.outboxEntry(msgId);
       if (entry != null && entry.failed) {
-        _recordError(resolved, entry.failedCode!, entry.failedMessage ?? '',
-            resetsAt: store.outboxErrorResetsAt);
+        _recordError(
+          resolved,
+          entry.failedCode!,
+          entry.failedMessage ?? '',
+          resetsAt: store.outboxErrorResetsAt,
+        );
       }
     } catch (e, s) {
       // Never an unhandled exception out of a send (CH-012).
       Diag.swallow('cloud.runTask', e, s);
-      _recordError(key, cloudFailureCode(e), e is CloudApiException ? e.message : '');
+      _recordError(
+        key,
+        cloudFailureCode(e),
+        e is CloudApiException ? e.message : '',
+      );
     } finally {
       // The send settled (accepted, queued or refused): the in-flight window
       // is over and the composer falls back to run-tracking busy state.
@@ -1807,8 +1894,8 @@ class CloudAgentFacade extends ChangeNotifier
       // rows flagged by that guard are drained here — a queued send that
       // fails must not be retried in a loop.
       final drainKey = _serverId(localId) ?? key;
-      final requested = _drainAfterSend.remove(key) |
-          _drainAfterSend.remove(drainKey);
+      final requested =
+          _drainAfterSend.remove(key) | _drainAfterSend.remove(drainKey);
       if (requested && _queues[drainKey]?.isNotEmpty == true) {
         scheduleMicrotask(() => unawaited(_drainQueue(drainKey)));
       }
@@ -1848,7 +1935,17 @@ class CloudAgentFacade extends ChangeNotifier
         maxOutputTokens: maxOutputTokens,
         turn: turn,
       );
-      _confirmPendingRow(id, clientMsgId, response.userMessageId, prompt);
+      _confirmPendingRow(
+        id,
+        clientMsgId,
+        response.userMessageId,
+        prompt,
+        attachmentIds: attachmentIds,
+        stagedFiles: <OutboxFile>[
+          for (final file in staged)
+            OutboxFile(name: file.name, path: file.path, size: file.size),
+        ],
+      );
       _markAccepted(id, state, response.runId, queuedBehindActiveRun);
     } catch (e) {
       // Without an outbox the row cannot wait: it leaves and the error row
@@ -1857,9 +1954,12 @@ class CloudAgentFacade extends ChangeNotifier
       if (staged.isNotEmpty) {
         _attachments.putIfAbsent(id, () => []).insertAll(0, staged);
       }
-      _recordError(id, cloudFailureCode(e),
-          e is CloudApiException ? e.message : '',
-          resetsAt: e is CloudApiException ? e.resetsAt : null);
+      _recordError(
+        id,
+        cloudFailureCode(e),
+        e is CloudApiException ? e.message : '',
+        resetsAt: e is CloudApiException ? e.resetsAt : null,
+      );
       _notify();
     }
   }
@@ -2014,7 +2114,7 @@ class CloudAgentFacade extends ChangeNotifier
 
   @override
   List<({String sessionId, String title, ApprovalRequest request})>
-      get pendingApprovalsElsewhere {
+  get pendingApprovalsElsewhere {
     final active = _serverId(null);
     return [
       for (final entry in _approvalRequests.entries)
@@ -2145,8 +2245,7 @@ class CloudAgentFacade extends ChangeNotifier
     if (approvalId == null || approvalId.isEmpty) return false;
     String? serverId;
     for (final entry in _approvalRequests.entries) {
-      if (identical(entry.value, req) ||
-          entry.value.approvalId == approvalId) {
+      if (identical(entry.value, req) || entry.value.approvalId == approvalId) {
         serverId = entry.key;
         break;
       }
@@ -2160,14 +2259,20 @@ class CloudAgentFacade extends ChangeNotifier
     pending.sending = true;
     _ensureRawListener();
     _approvalTimers.remove(approvalId)?.cancel();
-    _approvalTimers[approvalId] =
-        Timer(approvalConfirmTimeout, () => _restoreApproval(approvalId));
-    unawaited(_ws.sendRaw(<String, Object?>{
-      'op': 'approval_response',
-      'sessionId': serverId,
-      'approvalId': approvalId,
-      'decision': decision,
-    }).catchError((Object _) => _restoreApproval(approvalId)));
+    _approvalTimers[approvalId] = Timer(
+      approvalConfirmTimeout,
+      () => _restoreApproval(approvalId),
+    );
+    unawaited(
+      _ws
+          .sendRaw(<String, Object?>{
+            'op': 'approval_response',
+            'sessionId': serverId,
+            'approvalId': approvalId,
+            'decision': decision,
+          })
+          .catchError((Object _) => _restoreApproval(approvalId)),
+    );
     _notify();
     return true;
   }
@@ -2195,7 +2300,9 @@ class CloudAgentFacade extends ChangeNotifier
     // existing attachments by adding to this list (the retired local service
     // exposed the same mutable view).
     return _attachments.putIfAbsent(
-        id, () => <({String name, String path, int size})>[]);
+      id,
+      () => <({String name, String path, int size})>[],
+    );
   }
 
   @override
@@ -2210,7 +2317,9 @@ class CloudAgentFacade extends ChangeNotifier
     final id = _serverId(sessionId);
     if (id == null) return 'Select a chat before attaching files.';
     final pending = _attachments.putIfAbsent(
-        id, () => <({String name, String path, int size})>[]);
+      id,
+      () => <({String name, String path, int size})>[],
+    );
     if (pending.length + (_attachmentReservations[id] ?? 0) >=
         _maxAttachments) {
       return 'You can attach up to 20 files per message. Remove a file first.';
@@ -2246,8 +2355,7 @@ class CloudAgentFacade extends ChangeNotifier
       // Re-read the map after the await: a send that settled during the
       // picker call may have removed this session's staged snapshot.
       _attachments
-          .putIfAbsent(
-              id, () => <({String name, String path, int size})>[])
+          .putIfAbsent(id, () => <({String name, String path, int size})>[])
           .add((name: fileName, path: sourcePath, size: size));
       _notify();
       return null;
@@ -2337,7 +2445,7 @@ class CloudAgentFacade extends ChangeNotifier
   /// The id is the card's position, stable for the life of the run.
   @override
   List<({int id, String name, String state, int elapsedSec, int outChars})>
-      jobsFor(String sessionId) {
+  jobsFor(String sessionId) {
     final rows = _subagentRows(sessionId);
     final now = DateTime.now();
     return [
@@ -2365,9 +2473,16 @@ class CloudAgentFacade extends ChangeNotifier
         ? null
         : _sessions[key]?.projection.childRunOf(child);
     if (runId == null) return;
-    unawaited(_rest.cancelRun(runId).then((_) {}, onError: (Object e) {
-      Diag.swallow('cloud.killSubagent', e);
-    }));
+    unawaited(
+      _rest
+          .cancelRun(runId)
+          .then(
+            (_) {},
+            onError: (Object e) {
+              Diag.swallow('cloud.killSubagent', e);
+            },
+          ),
+    );
   }
 
   /// The `dispatch_agent` rows (subagent activity cards) of a session.
@@ -2442,8 +2557,7 @@ class CloudAgentFacade extends ChangeNotifier
   // -------------------------------------------------------------------------
 
   @override
-  List<String> get queuedMessages =>
-      queuedMessagesFor(_serverId(null) ?? '');
+  List<String> get queuedMessages => queuedMessagesFor(_serverId(null) ?? '');
 
   @override
   List<String> queuedMessagesFor(String sessionId) {
@@ -2546,7 +2660,9 @@ class CloudAgentFacade extends ChangeNotifier
           final port = ProjectsPort.instance;
           if (port != null && port.supportsTurnProjectRefs) {
             try {
-              entry.projectRefs = List<String>.from(port.projectRefsIn(newText));
+              entry.projectRefs = List<String>.from(
+                port.projectRefsIn(newText),
+              );
             } catch (e) {
               Diag.swallow('facade.editQueuedProjectRefs', e);
             }
@@ -2641,8 +2757,10 @@ class CloudAgentFacade extends ChangeNotifier
       if (existing.contains(item.id)) continue;
       // Undo restores the row WITH its attachments — "queued text and files
       // come back with their original ids" (queue dock copy).
-      queue.insert(0, _QueuedCloudMessage(item.id, item.text,
-          attachments: item.attachments));
+      queue.insert(
+        0,
+        _QueuedCloudMessage(item.id, item.text, attachments: item.attachments),
+      );
       if (item.id >= _nextQueueId) _nextQueueId = item.id + 1;
       restored++;
     }
@@ -2768,15 +2886,15 @@ class CloudAgentFacade extends ChangeNotifier
     return [
       for (var i = rows.length - 1; i >= 0; i--)
         SubagentInfo(
-          id: 'sub-${i + 1}',
-          label: rows[i].toolTitle ?? 'Subagent',
-          sessionId: rows[i].toolSessionId!,
-          parentSessionId: key,
-          parentMode: mode,
-          prompt: rows[i].toolSummary ?? '',
-          agentType: rows[i].toolTitle ?? 'general-purpose',
-          handle: handleOf(rows[i]),
-        )
+            id: 'sub-${i + 1}',
+            label: rows[i].toolTitle ?? 'Subagent',
+            sessionId: rows[i].toolSessionId!,
+            parentSessionId: key,
+            parentMode: mode,
+            prompt: rows[i].toolSummary ?? '',
+            agentType: rows[i].toolTitle ?? 'general-purpose',
+            handle: handleOf(rows[i]),
+          )
           ..finished = rows[i].toolState != 'running'
           ..interrupted = rows[i].toolState == 'stopped',
     ];
@@ -2926,7 +3044,9 @@ class CloudAgentFacade extends ChangeNotifier
   }
 
   static bool _sameTodos(
-      List<Map<String, String>> a, List<Map<String, String>> b) {
+    List<Map<String, String>> a,
+    List<Map<String, String>> b,
+  ) {
     if (a.length != b.length) return false;
     for (var i = 0; i < a.length; i++) {
       if (!mapEquals(a[i], b[i])) return false;
@@ -2962,9 +3082,20 @@ class CloudAgentFacade extends ChangeNotifier
     final state = _stateFor(serverSessionId, subscribe: true);
     // A clientMsgId replay returns the ORIGINAL userMessageId: dedupe keeps
     // it to one row.
-    _confirmPendingRow(serverSessionId, entry.clientMsgId,
-        response.userMessageId, entry.content);
-    _markAccepted(serverSessionId, state, response.runId, queuedBehindActiveRun);
+    _confirmPendingRow(
+      serverSessionId,
+      entry.clientMsgId,
+      response.userMessageId,
+      entry.content,
+      attachmentIds: entry.attachmentIds,
+      stagedFiles: entry.attachmentFiles,
+    );
+    _markAccepted(
+      serverSessionId,
+      state,
+      response.runId,
+      queuedBehindActiveRun,
+    );
   }
 
   /// Every per-session surface keyed by a chat's LOCAL id moves to its new
@@ -2978,12 +3109,15 @@ class CloudAgentFacade extends ChangeNotifier
       final from = map.remove(localSessionId);
       if (from == null) return;
       final into = map[serverSessionId];
-      map[serverSessionId] =
-          into == null || merge == null ? from : merge(into, from);
+      map[serverSessionId] = into == null || merge == null
+          ? from
+          : merge(into, from);
     }
 
     move<List<({String name, String path, int size})>>(
-        _attachments, (a, b) => [...a, ...b]);
+      _attachments,
+      (a, b) => [...a, ...b],
+    );
     move<List<_QueuedCloudMessage>>(_queues, (a, b) => [...a, ...b]);
     move<AgentMode>(_modes, null);
     move<(String, String)>(_errors, null);
@@ -3005,15 +3139,16 @@ class CloudAgentFacade extends ChangeNotifier
     }
     final state = _sessions.remove(localSessionId);
     if (state != null && !_sessions.containsKey(serverSessionId)) {
-      final moved = _SessionCloudState(
-          serverSessionId, state.projection, state.projector)
-        ..runState = state.runState
-        ..terminalSettledRunId = state.terminalSettledRunId
-        ..queuedBehindActiveRun = state.queuedBehindActiveRun;
+      final moved =
+          _SessionCloudState(serverSessionId, state.projection, state.projector)
+            ..runState = state.runState
+            ..terminalSettledRunId = state.terminalSettledRunId
+            ..queuedBehindActiveRun = state.queuedBehindActiveRun;
       unawaited(state.subscription?.cancel());
       _sessions[serverSessionId] = moved;
       moved.projection.addListener(
-          () => _onProjectionChanged(serverSessionId, moved));
+        () => _onProjectionChanged(serverSessionId, moved),
+      );
       final t = _tickNotifierFor(serverSessionId);
       moved.projection.liveBubbleTicks.addListener(
         () => t.value = moved.projection.liveBubbleTicks.value,
@@ -3096,10 +3231,7 @@ class CloudAgentFacade extends ChangeNotifier
     final state = _sessions[id];
     if (state != null) return state.runState;
     final error = _errors[id];
-    return CloudRunState(
-      lastErrorCode: error?.$1,
-      lastErrorMessage: error?.$2,
-    );
+    return CloudRunState(lastErrorCode: error?.$1, lastErrorMessage: error?.$2);
   }
 
   @visibleForTesting
@@ -3110,9 +3242,10 @@ class CloudAgentFacade extends ChangeNotifier
 
   @visibleForTesting
   List<({String name, String path, int size})> pendingAttachmentsForTest(
-          String sessionId) =>
-      List.unmodifiable(
-          _attachments[_serverId(sessionId) ?? sessionId] ?? const []);
+    String sessionId,
+  ) => List.unmodifiable(
+    _attachments[_serverId(sessionId) ?? sessionId] ?? const [],
+  );
 
   /// Awaits every cancel posted by the last [hardStopAll].
   @visibleForTesting

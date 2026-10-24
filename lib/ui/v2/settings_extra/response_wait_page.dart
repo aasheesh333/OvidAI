@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/cloud/account_settings_client.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_screen.dart';
@@ -7,19 +8,12 @@ import '../../design/o_tokens.dart';
 
 // TODO(l10n): move the English copy in this screen to the ARB files.
 
-/// The product's real bounds — `AppState.minResponseTimeoutSec` /
-/// `maxResponseTimeoutSec`. Anything outside this is not a wait Ovid honours.
-const int _minSeconds = 30;
-const int _maxSeconds = 600;
+/// The server-enforced response-wait bounds.
+const int _minSeconds = minResponseWaitSeconds;
+const int _maxSeconds = maxResponseWaitSeconds;
 
-/// The slider moves in half minutes: (600 − 30) / 30.
-const int _stepSeconds = 30;
-const int _sliderDivisions = 19;
-
-/// The three answers that cover almost every reply. Each one is a slider
-/// stop, so a preset snaps the thumb instead of setting a value the slider
-/// cannot show.
-const List<int> _waitPresets = <int>[60, 120, 300];
+const int _stepSeconds = 15;
+const int _sliderDivisions = (_maxSeconds - _minSeconds) ~/ _stepSeconds;
 
 /// What actually happens at the limit. A surface, never a cancel: the run
 /// keeps going, the composer only says it is still working.
@@ -234,7 +228,7 @@ class _ResponseWaitPageState extends State<ResponseWaitPage> {
             child: Semantics(
               // The slider speaks its own value; the label carries the
               // range, which the thumb alone cannot show.
-              label: 'Response wait limit, 30 seconds to 10 minutes',
+              label: 'Response wait limit, 15 seconds to 10 minutes',
               enabled: canDrag,
               child: SizedBox(
                 height: OSpace.touch,
@@ -265,7 +259,8 @@ class _ResponseWaitPageState extends State<ResponseWaitPage> {
             spacing: OSpace.s,
             runSpacing: OSpace.s,
             children: [
-              for (final preset in _waitPresets) _presetChip(preset, seconds),
+              for (final preset in responseWaitPresets)
+                _presetChip(preset, seconds),
             ],
           ),
           if (_saveError != null) ...[
@@ -285,13 +280,14 @@ class _ResponseWaitPageState extends State<ResponseWaitPage> {
     );
   }
 
-  Widget _presetChip(int preset, int seconds) {
+  Widget _presetChip(ResponseWaitPreset preset, int seconds) {
     final handler = _presetSave;
-    final selected = seconds == preset;
-    final label = _waitLabel(preset);
+    final selected = seconds == preset.seconds;
+    final duration = _waitLabel(preset.seconds);
+    final label = '${preset.label} · $duration';
     return OPressable(
-      onTap: handler == null ? null : () => _save(preset, handler),
-      semanticLabel: '$label wait time',
+      onTap: handler == null ? null : () => _save(preset.seconds, handler),
+      semanticLabel: '${preset.label}, $duration wait time',
       selected: selected,
       child: SizedBox(
         // The chip draws at 34 dp; the touch target stays 48.

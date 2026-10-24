@@ -3947,8 +3947,8 @@ class AppState extends ChangeNotifier {
   }
 
   /// The response timeout is a first-byte / idle limit, so anything below
-  /// this would fail every turn of a reasoning model that thinks quietly.
-  static const minResponseTimeoutSec = 30;
+  /// Fast 15s is a supported local surface; anything shorter is not.
+  static const minResponseTimeoutSec = 15;
   static const maxResponseTimeoutSec = 600;
 
   /// Below this the Settings screen warns that slow models may time out.

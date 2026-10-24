@@ -290,7 +290,7 @@ void main() {
     await tester.tap(find.text('Clear cache'));
     await tester.pump();
 
-    expect(find.text('Cache is already empty.'), findsOneWidget);
+    expect(find.text('Cache is empty.'), findsOneWidget);
   });
 
   testWidgets('the clean-up row drops the size value without a local cache', (

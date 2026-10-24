@@ -10,6 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../../core/account_service.dart';
 import '../../../core/app_info.dart';
 import '../../../core/background_notifications.dart';
+import '../../../core/cloud/account_profile_client.dart';
 import '../../../core/cloud/account_settings_client.dart';
 import '../../../core/cloud/cloud_backup.dart';
 import '../../../core/cloud/cloud_session_store.dart';
@@ -34,7 +35,16 @@ import '../settings_extra/notifications_page.dart';
 /// Live actions used by the settings destinations. Kept out of the screens so
 /// every page stays presentational and testable with injected data.
 class V2SettingsActions {
-  V2SettingsActions(this.usage) {
+  V2SettingsActions(
+    this.usage, {
+    AccountProfileClient? accountProfile,
+    AccountSettingsClient? accountSettings,
+  }) : _accountProfile =
+           accountProfile ??
+           AccountProfileClient(
+             refreshCollabProjection: () => AppState.I.collaboration?.refresh(),
+           ),
+       _accountSettings = accountSettings ?? AccountSettingsClient.I {
     // Launch hook: reconcile the cached plan with the store's entitlements
     // (refunds/cancellations) and mirror every server plan answer.
     usage.addListener(_onUsage);
@@ -42,6 +52,8 @@ class V2SettingsActions {
   }
 
   final CloudUsageStore usage;
+  final AccountProfileClient _accountProfile;
+  final AccountSettingsClient _accountSettings;
 
   /// Drops the listener this object added to [usage].
   ///
@@ -60,7 +72,12 @@ class V2SettingsActions {
   /// its tier is recorded for [isServerConfirmed] and written to [AppState]
   /// (`setOvidCloudTier` is a no-op when it already matches).
   void _onUsage() {
-    final tier = usage.usage?.tier;
+    final billing = RevenueCatBilling.I;
+    final tier = authoritativeServerTier(
+      entitlementKnown: billing.serverEntitlementKnown,
+      entitlement: billing.serverEntitlement,
+      usageTier: usage.usage?.tier,
+    );
     if (tier == null) return; // no server answer yet: keep the last one
     confirmPlanTier(tier);
     if (tier == 'free' || isKnownOvidTier(tier)) {
@@ -116,7 +133,7 @@ class V2SettingsActions {
       if (context.mounted) _snack(context, e.message);
     } catch (_) {
       if (context.mounted) {
-        _snack(context, 'Could not request account deletion. Try again.');
+        _snack(context, 'Deletion failed. Retry.');
       }
     }
   }
@@ -162,8 +179,21 @@ class V2SettingsActions {
     controller.dispose();
     final clean = name?.trim();
     if (clean == null || clean.isEmpty) return;
+    try {
+      await _accountProfile.rename(clean);
+    } catch (_) {
+      if (context.mounted) {
+        _snack(context, 'Rename failed.');
+      }
+      return;
+    }
     final error = await FirebaseService.I.updateDisplayName(clean);
-    if (error != null && context.mounted) _snack(context, error);
+    if (error != null && context.mounted) {
+      _snack(
+        context,
+        'Saved; profile failed.',
+      );
+    }
   }
 
   Future<void> buyPlan(
@@ -175,7 +205,7 @@ class V2SettingsActions {
     // SharedPreferences is display-only (state.dart:4789), so a stale cache
     // must not block a real purchase.
     if (isServerConfirmed(tier)) {
-      _snack(context, 'You are already on this plan.');
+      _snack(context, 'Already on this plan.');
       return;
     }
     if (tier == 'free') {
@@ -258,9 +288,7 @@ class V2SettingsActions {
       return;
     }
     final viaRevenueCat = route != BillingRoute.play;
-    final outcome = viaRevenueCat
-        ? await rc.restore()
-        : await play.restore();
+    final outcome = viaRevenueCat ? await rc.restore() : await play.restore();
     if (!context.mounted) return;
     if (!outcome.ok) {
       _snack(context, _billingMessage(outcome.result));
@@ -582,8 +610,15 @@ class V2SettingsActions {
     v2SavedVoiceLanguage = AppState.I.voiceLanguage;
   }
 
-  Future<void> setResponseWait(int seconds) =>
-      AppState.I.setResponseTimeout(seconds);
+  Future<int?> readResponseWait() async =>
+      (await _accountSettings.getSettings()).responseWaitSeconds;
+
+  Future<void> setResponseWait(int seconds) async {
+    // The server must accept first. Only then mirror the preference into the
+    // local stall hint; no active run is cancelled or restarted.
+    await _accountSettings.setResponseWaitSeconds(seconds);
+    await AppState.I.setResponseTimeout(seconds);
+  }
 
   Future<void> setQuietHours({
     required bool enabled,

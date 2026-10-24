@@ -48,6 +48,12 @@ class V2AccountHealthPageData {
     this.tokensRemainingLabel = '',
     this.deletionScheduledLabel = '',
     this.deletionKnown = false,
+    this.devicesLabel = '',
+    this.securityLabel = '',
+    this.securityAttentionLabel = '',
+    this.securityVerifiedGood = false,
+    this.uploadWindowLabel = '',
+    this.supplementalHealthKnown = false,
     this.loading = false,
     this.status = V2AccountHealthStatus.ready,
     this.errorMessage,
@@ -106,6 +112,20 @@ class V2AccountHealthPageData {
   /// deletion row although the server said there is no deletion.
   final bool deletionKnown;
 
+  final String devicesLabel;
+  final String securityLabel;
+
+  /// A recognized security warning that must outrank a healthy verdict.
+  final String securityAttentionLabel;
+
+  /// True only for a complete, explicitly verified-good security projection.
+  final bool securityVerifiedGood;
+  final String uploadWindowLabel;
+
+  /// False by default: incomplete facts cannot produce a healthy verdict.
+  /// Live routes set this true only when every supplemental fact is known.
+  final bool supplementalHealthKnown;
+
   final bool loading;
 
   /// The explicit screen state. The legacy [loading]/[errorMessage] flags are
@@ -126,6 +146,12 @@ class V2AccountHealthPageData {
 
   bool get deletionPending => accountStatus == V2AccountStatus.deletionPending;
 
+  bool get _hasCompleteSupplementalFacts =>
+      supplementalHealthKnown &&
+      devicesLabel.trim().isNotEmpty &&
+      securityLabel.trim().isNotEmpty &&
+      uploadWindowLabel.trim().isNotEmpty;
+
   bool get canCancelDeletion => deletionPending && onCancelDeletion != null;
 
   /// The state the page renders. An explicit status wins; the legacy flags
@@ -142,12 +168,17 @@ class V2AccountHealthPageData {
   String get statusLabel {
     if (accountStatus == V2AccountStatus.banned) return 'Banned';
     if (deletionPending) return 'Attention needed · Deletion scheduled';
-    if (accountStatus == null) return 'Attention needed · Status unknown';
     if ((storageFraction ?? 0) >= 0.9) {
       return 'Attention needed · Storage almost full';
     }
     if ((todayUsageFraction ?? 0) >= 1) {
       return 'Attention needed · Daily limit reached';
+    }
+    if (securityAttentionLabel.isNotEmpty) return securityAttentionLabel;
+    if (accountStatus == null ||
+        !_hasCompleteSupplementalFacts ||
+        !securityVerifiedGood) {
+      return 'Attention needed · Status unknown';
     }
     return 'Healthy';
   }
@@ -166,6 +197,15 @@ class V2AccountHealthPageData {
   String get storageText =>
       storageUsedLabel.trim().isEmpty ? unknown : storageUsedLabel.trim();
 
+  String get devicesText =>
+      devicesLabel.trim().isEmpty ? unknown : devicesLabel.trim();
+
+  String get securityText =>
+      securityLabel.trim().isEmpty ? unknown : securityLabel.trim();
+
+  String get uploadWindowText =>
+      uploadWindowLabel.trim().isEmpty ? unknown : uploadWindowLabel.trim();
+
   /// Tokens recorded today, already formatted. Unknown when the server did
   /// not report it (an older gateway has no token caps at all).
   String get tokensUsedText =>
@@ -179,7 +219,6 @@ class V2AccountHealthPageData {
   String get tokensRemainingText => tokensRemainingLabel.trim().isEmpty
       ? unknown
       : tokensRemainingLabel.trim();
-
 
   String get deletionText {
     if (deletionPending) {
@@ -260,13 +299,13 @@ class AccountHealthPage extends StatelessWidget {
               _HealthRow(
                 key: const ValueKey<String>('health-tokens'),
                 icon: Icons.data_usage_outlined,
-                title: 'Tokens used',
+                title: 'Used',
                 value: data.tokensUsedText,
               ),
               _HealthRow(
                 key: const ValueKey<String>('health-token-cap'),
                 icon: Icons.speed_outlined,
-                title: 'Token cap',
+                title: 'Cap',
                 value: data.tokenCapText,
               ),
               _HealthRow(
@@ -290,6 +329,24 @@ class AccountHealthPage extends StatelessWidget {
                 onTap: data.canCancelDeletion
                     ? () => _confirmCancelDeletion(context)
                     : null,
+              ),
+              _HealthRow(
+                key: const ValueKey<String>('health-devices'),
+                icon: Icons.devices_outlined,
+                title: 'Devices',
+                value: data.devicesText,
+              ),
+              _HealthRow(
+                key: const ValueKey<String>('health-security'),
+                icon: Icons.shield_outlined,
+                title: 'Security',
+                value: data.securityText,
+              ),
+              _HealthRow(
+                key: const ValueKey<String>('health-upload-window'),
+                icon: Icons.upload_outlined,
+                title: 'Upload window',
+                value: data.uploadWindowText,
               ),
             ],
           ),

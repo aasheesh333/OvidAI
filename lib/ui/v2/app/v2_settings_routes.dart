@@ -4,7 +4,6 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart' show kIsWeb, visibleForTesting;
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../../../core/account_service.dart';
@@ -20,6 +19,7 @@ import '../../../core/cloud/artifact_vault.dart';
 import '../../../core/cloud/cloud_rest.dart';
 import '../../../core/cloud/cloud_session_store.dart';
 import '../../../core/cloud/credentials.dart';
+import '../../../core/cloud/entitlement_client.dart';
 import '../../../core/cloud/plans_client.dart';
 import '../../../core/cloud/projects.dart';
 import '../../../core/cloud/usage_history.dart';
@@ -28,6 +28,7 @@ import '../../../core/firebase_service.dart';
 import '../../../core/format.dart';
 import '../../../core/github_service.dart';
 import '../../../core/legal_links.dart';
+import '../../../core/mobile_cache_service.dart';
 import '../../../core/notification_permission.dart';
 import '../../../core/ovid_cloud_service.dart';
 import '../../../core/play_billing.dart';
@@ -121,7 +122,7 @@ class V2SettingsRoutes {
       case 'presets':
         return _PresetLoader(actions: actions);
       case 'response_wait':
-        return ResponseWaitPage(data: _responseWait(context, actions));
+        return _ResponseWaitLoader(actions: actions);
       case 'permissions':
         return _PermissionsLoader();
       case 'app_lock':
@@ -336,7 +337,6 @@ class V2SettingsRoutes {
     ValueChanged<V2BillingPeriod>? onPeriodChanged,
   }) {
     final usage = actions.usage.usage;
-    final app = AppState.I;
     final play = PlayBillingService.I;
     // Play's catalogue only gates the CTA when Play is the attempted path. A
     // confirmed RevenueCat fallback (or Test Store) may sell products Play does
@@ -368,11 +368,9 @@ class V2SettingsRoutes {
       }
     }
 
-    // The server's answer is the only source that can confirm the plan
-    // (state.dart restores a display-only cache); until it answers, fall back
-    // to the cached tier for the badge only. Purchases re-check with
-    // `isServerConfirmed` inside [V2SettingsActions.buyPlan].
-    final currentTier = confirmedPlanTier ?? app.ovidCloudTier;
+    // Only a fresh server answer marks a current plan. A cached tier may
+    // belong to the previous account or predate a refund.
+    final currentTier = confirmedPlanTier ?? '';
     final status = plans.isNotEmpty
         ? V2PlanBillingStatus.ready
         : plansLoading
@@ -380,6 +378,9 @@ class V2SettingsRoutes {
         : plansError != null
         ? V2PlanBillingStatus.error
         : V2PlanBillingStatus.empty;
+    final managementUri = billingManagementUri(
+      RevenueCatBilling.I.serverEntitlement,
+    );
     return V2PlanBillingData(
       status: status,
       currency: currency,
@@ -408,20 +409,19 @@ class V2SettingsRoutes {
       // so a Go user's "Upgrade" bought Plus. The period travels with the
       // request so the yearly toggle cannot silently buy the monthly product.
       onPurchase: (purchase) {
-        if (purchase.planId == 'free') {
-          // Downgrading or cancelling is a Play action, not a purchase.
-          unawaited(
-            actions.openUrl(context, playSubscriptionCenterUri().toString()),
-          );
-          return;
-        }
+        if (purchase.planId == 'free') return;
         actions.buyPlan(
           context,
           purchase.tier,
           period: ovidPeriodFor(purchase.period),
         );
       },
-      onRestorePurchases: () => actions.restorePurchases(context),
+      onRestorePurchases: route == BillingRoute.none
+          ? null
+          : () => actions.restorePurchases(context),
+      onManageBilling: managementUri == null
+          ? null
+          : () => unawaited(actions.openUrl(context, managementUri.toString())),
       onRetry: () {
         actions.refreshUsage();
         onReloadPlans?.call();
@@ -596,6 +596,9 @@ class V2SettingsRoutes {
     // ledger's equivalent of a request (one row per model call).
     final requests = today?.requests ?? bucket?.counts.modelCalls;
     final images = today?.images;
+    final costMicros = recorded?.totals.costMicros;
+    final imagesGenerated = recorded?.totals.imagesGenerated;
+    final imagesEdited = recorded?.totals.imagesEdited;
 
     // Both endpoints are still in flight and nothing real is known yet: show
     // the skeleton, not an empty state that claims there is no usage.
@@ -647,6 +650,14 @@ class V2SettingsRoutes {
       models: _usageModels(usage, recorded),
       requestsLabel: requests == null ? '' : '$requests',
       imagesLabel: images == null ? '' : '$images',
+      costLabel: costMicros == null ? '' : formatUsageCostMicros(costMicros),
+      sessionsLabel: recorded == null ? '' : formatUsageSessionCount(recorded),
+      imagesGeneratedLabel: imagesGenerated == null
+          ? ''
+          : formatUsageValue(imagesGenerated),
+      imagesEditedLabel: imagesEdited == null
+          ? ''
+          : formatUsageValue(imagesEdited),
       storageLimitLabel: limits.storageGb == null
           ? ''
           : '${limits.storageGb} GB',
@@ -932,10 +943,10 @@ class V2SettingsRoutes {
     V2SettingsActions actions, {
     int artifactsBytes = 0,
     int sessionsBytes = 0,
-    int cacheBytes = 0,
+    int? cacheBytes,
     bool loading = false,
     String? errorMessage,
-    Future<int> Function()? onClearCacheAndReport,
+    Future<CacheClearReport> Function()? onClearCacheMeasured,
     VoidCallback? onRetry,
   }) {
     final spec = _planSpec(AppState.I.ovidCloudTier);
@@ -962,7 +973,7 @@ class V2SettingsRoutes {
             valueGb: gb(sessionsBytes),
             sizeLabel: _bytes(sessionsBytes),
           ),
-        if (cacheBytes > 0)
+        if (cacheBytes != null && cacheBytes > 0)
           V2StorageSlice(
             label: 'Cache',
             valueGb: gb(cacheBytes),
@@ -973,11 +984,11 @@ class V2SettingsRoutes {
       artifactsSizeLabel: _bytes(artifactsBytes),
       sessionsGb: gb(sessionsBytes),
       sessionsSizeLabel: _bytes(sessionsBytes),
-      cacheGb: gb(cacheBytes),
-      cacheSizeLabel: _bytes(cacheBytes),
+      cacheGb: cacheBytes == null ? 0 : gb(cacheBytes),
+      cacheSizeLabel: cacheBytes == null ? '' : _bytes(cacheBytes),
       loading: loading,
       errorMessage: errorMessage,
-      onClearCacheAndReport: onClearCacheAndReport,
+      onClearCacheMeasured: onClearCacheMeasured,
       onDeleteOldChats: () => actions.deleteOldChats(context),
       onRetry: onRetry,
       onGoUpgrade: () => open(context, 'plan_billing', actions),
@@ -1075,7 +1086,7 @@ class V2SettingsRoutes {
   /// facts. A null section (or a null field inside one) stays unknown and
   /// renders the page's dash; it is never coerced to zero. The status is
   /// passed separately so loading, empty and error do not need fake data.
-  static health.V2AccountHealthPageData _health(
+  static health.V2AccountHealthPageData healthData(
     BuildContext context,
     V2SettingsActions actions, {
     AccountHealth? accountHealth,
@@ -1130,6 +1141,46 @@ class V2SettingsRoutes {
     }
 
     final deadline = deletion?.deleteAfter;
+    final devices = accountHealth?.devices;
+    final security = accountHealth?.security;
+    final uploads = plan?.limits?.uploads;
+    final deviceTotal = devices?.total;
+    final deviceActive = devices?.active;
+    final devicesLabel =
+        devices?.isComplete == true &&
+            deviceTotal != null &&
+            deviceActive != null
+        ? '$deviceActive active of $deviceTotal'
+        : '';
+    final securityStatus = security?.status?.toLowerCase();
+    final securityFlags = security?.multiIpFlags;
+    final securityComplete = security?.isComplete == true;
+    final securityAttention =
+        securityComplete &&
+        (securityStatus == 'attention' ||
+            securityStatus == 'degraded' ||
+            (securityFlags ?? 0) > 0);
+    final securityLabel = !securityComplete
+        ? ''
+        : securityStatus == 'degraded'
+        ? 'Degraded'
+        : securityAttention
+        ? 'Review needed'
+        : 'No issues reported';
+    final securityAttentionLabel = !securityAttention
+        ? ''
+        : securityStatus == 'degraded'
+        ? 'Attention needed · Security degraded'
+        : 'Attention needed · Security review';
+    final securityVerifiedGood =
+        securityComplete &&
+        (securityStatus == 'ok' || securityStatus == 'healthy') &&
+        securityFlags == 0;
+    final uploadCount = uploads?.count;
+    final uploadHours = uploads?.windowHours;
+    final uploadWindowLabel = uploadCount == null || uploadHours == null
+        ? ''
+        : '$uploadCount files / ${uploadHours == 24 ? 'day' : '$uploadHours h'}';
     return health.V2AccountHealthPageData(
       status: status,
       planLabel: planName,
@@ -1159,6 +1210,13 @@ class V2SettingsRoutes {
           ? formatLocalDateTime(deadline)
           : '',
       deletionKnown: standing != null,
+      devicesLabel: devicesLabel,
+      securityLabel: securityLabel,
+      securityAttentionLabel: securityAttentionLabel,
+      securityVerifiedGood: securityVerifiedGood,
+      uploadWindowLabel: uploadWindowLabel,
+      supplementalHealthKnown:
+          accountHealth?.hasCompleteSupplementalFacts ?? false,
       errorMessage: errorMessage,
       onRetry: onRetry,
       // The plan list and the storage screen are real routes; each row opens
@@ -1377,19 +1435,6 @@ class V2SettingsRoutes {
       }
     }
     return options.values.toList(growable: false);
-  }
-
-  static V2ResponseWaitPageData _responseWait(
-    BuildContext context,
-    V2SettingsActions actions,
-  ) {
-    // The persisted value the watchdog actually reads; AppState loads it from
-    // prefs at boot, so this is never a synthetic default.
-    final seconds = AppState.I.responseTimeoutSec;
-    return V2ResponseWaitPageData(
-      seconds: seconds,
-      onChanged: actions.setResponseWait,
-    );
   }
 
   /// Maps the OS answer onto the page's four-state model.
@@ -1780,6 +1825,64 @@ class V2MemorySource {
   }
 }
 
+class _ResponseWaitLoader extends StatefulWidget {
+  const _ResponseWaitLoader({required this.actions});
+
+  final V2SettingsActions actions;
+
+  @override
+  State<_ResponseWaitLoader> createState() => _ResponseWaitLoaderState();
+}
+
+class _ResponseWaitLoaderState extends State<_ResponseWaitLoader> {
+  int? _seconds;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_load());
+  }
+
+  Future<void> _load() async {
+    try {
+      final seconds = await widget.actions.readResponseWait();
+      if (!mounted) return;
+      setState(() {
+        _seconds = seconds;
+        _error = seconds == null
+            ? 'Response wait is not available on this server yet.'
+            : null;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _seconds = null;
+        _error = 'Could not load your wait time.';
+      });
+    }
+  }
+
+  Future<void> _save(int seconds) async {
+    await widget.actions.setResponseWait(seconds);
+    if (!mounted) return;
+    setState(() {
+      _seconds = seconds;
+      _error = null;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => ResponseWaitPage(
+    data: V2ResponseWaitPageData(
+      seconds: _seconds,
+      errorMessage: _error,
+      onChanged: _save,
+      onRetry: () => unawaited(_load()),
+    ),
+  );
+}
+
 class _PlanLoader extends StatefulWidget {
   const _PlanLoader({required this.actions});
 
@@ -1806,6 +1909,16 @@ class _PlanLoaderState extends State<_PlanLoader> {
     // The plan badge must reflect the server, not a stale cached tier.
     widget.actions.refreshUsage();
     unawaited(_loadPlans());
+    unawaited(_loadEntitlement());
+  }
+
+  Future<void> _loadEntitlement() async {
+    try {
+      await RevenueCatBilling.I.refreshServerEntitlement();
+    } catch (_) {
+      // Unknown authority never enables subscription management.
+    }
+    if (mounted) setState(() {});
   }
 
   @override
@@ -2054,15 +2167,18 @@ class _AccountHealthLoader extends StatefulWidget {
 }
 
 class _AccountHealthLoaderState extends State<_AccountHealthLoader> {
+  late final AccountHealthClient _healthClient = AccountHealthClient(
+    currentUid: () => FirebaseService.I.uid,
+  );
   AccountHealth? _health;
   health.V2AccountHealthStatus _status = health.V2AccountHealthStatus.loading;
   String? _error;
-  bool? _signedIn;
+  String? _accountUid;
 
   @override
   void initState() {
     super.initState();
-    _signedIn = FirebaseService.I.isSignedIn;
+    _accountUid = FirebaseService.I.uid;
     FirebaseService.I.addListener(_onChange);
     unawaited(_loadHealth());
   }
@@ -2074,9 +2190,9 @@ class _AccountHealthLoaderState extends State<_AccountHealthLoader> {
   }
 
   void _onChange() {
-    final signedIn = FirebaseService.I.isSignedIn;
-    if (signedIn != _signedIn) {
-      _signedIn = signedIn;
+    final uid = FirebaseService.I.uid;
+    if (uid != _accountUid) {
+      _accountUid = uid;
       unawaited(_loadHealth());
       return;
     }
@@ -2100,7 +2216,7 @@ class _AccountHealthLoaderState extends State<_AccountHealthLoader> {
       });
     }
     try {
-      final answer = await AccountHealthClient().fetch();
+      final answer = await _healthClient.fetch();
       if (!mounted) return;
       setState(() {
         _health = answer;
@@ -2113,6 +2229,9 @@ class _AccountHealthLoaderState extends State<_AccountHealthLoader> {
             ? health.V2AccountHealthPageData.loadFailed
             : null;
       });
+    } on AccountHealthStaleResponse {
+      // A newer UID/request owns the screen; stale errors must not replace it.
+      return;
     } on CloudApiException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -2149,7 +2268,7 @@ class _AccountHealthLoaderState extends State<_AccountHealthLoader> {
   @override
   Widget build(BuildContext context) {
     return health.AccountHealthPage(
-      data: V2SettingsRoutes._health(
+      data: V2SettingsRoutes.healthData(
         context,
         widget.actions,
         accountHealth: _health,
@@ -2511,9 +2630,10 @@ class _StorageLoader extends StatefulWidget {
 }
 
 class _StorageLoaderState extends State<_StorageLoader> {
+  final MobileCacheService _cacheService = MobileCacheService();
   int _artifacts = 0;
   int _sessions = 0;
-  int _cache = 0;
+  int? _cache;
   bool _loading = true;
 
   @override
@@ -2555,72 +2675,19 @@ class _StorageLoaderState extends State<_StorageLoader> {
     }
   }
 
-  Future<int> _cacheBytes() async {
+  Future<int?> _cacheBytes() async {
     try {
-      final dir = await getTemporaryDirectory();
-      if (!await dir.exists()) return 0;
-      var total = 0;
-      await for (final entity in dir.list(
-        recursive: true,
-        followLinks: false,
-      )) {
-        if (entity is! File) continue;
-        try {
-          total += await entity.length();
-        } catch (_) {
-          // A file removed mid-walk does not invalidate the measurement.
-        }
-      }
-      return total;
+      return (await _cacheService.measure()).afterBytes;
     } catch (_) {
-      return 0;
+      return null;
     }
   }
 
-  /// Empties the temporary directory and returns the bytes actually freed, so
-  /// the "Clear cache" row reports a measured number and the page reloads.
-  Future<int> _clearCache() async {
-    try {
-      final dir = await getTemporaryDirectory();
-      if (!await dir.exists()) return 0;
-      final before = await _dirBytes(dir);
-      await for (final entity in dir.list(followLinks: false)) {
-        try {
-          await entity.delete(recursive: true);
-        } catch (_) {
-          // A file in use is skipped; the difference reports what went.
-        }
-      }
-      final after = await _dirBytes(dir);
-      if (mounted) await _load();
-      return (before - after).clamp(0, before);
-    } catch (_) {
-      return 0;
-    }
-  }
-
-  Future<int> _dirBytes(Directory dir) async {
-    var bytes = 0;
-    final stack = <Directory>[dir];
-    while (stack.isNotEmpty) {
-      final current = stack.removeLast();
-      try {
-        await for (final entity in current.list(followLinks: false)) {
-          if (entity is File) {
-            try {
-              bytes += await entity.length();
-            } catch (_) {
-              // Unreadable entries are not part of the report.
-            }
-          } else if (entity is Directory) {
-            stack.add(entity);
-          }
-        }
-      } catch (_) {
-        // Unreadable directories are skipped.
-      }
-    }
-    return bytes;
+  /// Returns the measured report so the page can show freed and residual bytes.
+  Future<CacheClearReport> _clearCache() async {
+    final report = await _cacheService.clear();
+    if (mounted) await _load();
+    return report;
   }
 
   @override
@@ -2632,7 +2699,7 @@ class _StorageLoaderState extends State<_StorageLoader> {
       sessionsBytes: _sessions,
       cacheBytes: _cache,
       loading: _loading,
-      onClearCacheAndReport: _clearCache,
+      onClearCacheMeasured: _clearCache,
       onRetry: () {
         setState(() => _loading = true);
         unawaited(_load());

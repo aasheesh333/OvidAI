@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:purchases_flutter/purchases_flutter.dart';
 
+import 'cloud/entitlement_client.dart';
 import 'diag.dart';
 import 'distribution.dart';
 import 'firebase_service.dart';
@@ -77,8 +78,7 @@ const bool kRevenueCatServerConfirmation = bool.fromEnvironment(
 
 /// The reason shown instead of starting a purchase when RevenueCat would take
 /// money but no server-side confirmation route can set the tier.
-const String kRevenueCatUnconfirmedReason =
-    'Purchases are not available yet.';
+const String kRevenueCatUnconfirmedReason = 'Purchases are not available yet.';
 
 /// RevenueCat entitlement id per Ovid tier.
 const Map<String, String> kRevenueCatEntitlements = {
@@ -133,6 +133,7 @@ class RevenueCatConfig {
 /// That combination is what makes an internal sideload testable while a store
 /// upload stays incapable of giving a plan away.
 bool demoGrantAllowed({required bool releaseMode, required bool testStore}) {
+  if (Distribution.production) return false;
   if (!testStore) return false;
   if (!releaseMode) return true;
   return Distribution.billingDemo;
@@ -242,7 +243,10 @@ BillingRoute resolveBillingRoute({
   // with OVID_BILLING_DEMO=true runs the labelled demo instead of a disabled
   // CTA, so every paid surface can be exercised. `Distribution.billingDemo`
   // is false in a Play artifact, so a store upload can never grant a plan.
-  if (Distribution.billingDemo) return BillingRoute.demo;
+  if (Distribution.billingDemo &&
+      demoGrantAllowed(releaseMode: kReleaseMode, testStore: true)) {
+    return BillingRoute.demo;
+  }
   if (playLoaded && playAvailable) return BillingRoute.play;
   // Play is unavailable or has not answered. With no RevenueCat key the Play
   // path is still the only candidate: `buy` awaits the load and reports an
@@ -285,6 +289,20 @@ void confirmPlanTier(String? tier) {
 // `isServerConfirmed(tier)` / `confirmedPlanTier` from this file once
 // state.dart / those hosts are editable.
 bool isServerConfirmed(String tier) => _confirmedPlanTier == tier;
+
+/// Chooses the freshest account authority. Once an entitlement read succeeds,
+/// an older `/usage` notification cannot restore a refunded tier or overwrite
+/// the newly restored one.
+String? authoritativeServerTier({
+  required bool entitlementKnown,
+  required BillingEntitlement? entitlement,
+  required String? usageTier,
+}) {
+  if (!entitlementKnown) return usageTier;
+  return entitlement != null && entitlement.isActive
+      ? entitlement.tier
+      : 'free';
+}
 
 @visibleForTesting
 void resetConfirmedPlanTierForTest() => _confirmedPlanTier = null;
@@ -397,6 +415,13 @@ abstract class RevenueCatPlatform {
   Future<RevenueCatResult> customerInfo();
 }
 
+typedef ServerEntitlementReader = Future<BillingEntitlement?> Function();
+
+/// An older server answer must not overwrite a newer account entitlement.
+class EntitlementReadSuperseded extends StateError {
+  EntitlementReadSuperseded() : super('Entitlement read was superseded');
+}
+
 /// RevenueCat purchase/entitlement service.
 class RevenueCatBilling with WidgetsBindingObserver {
   RevenueCatBilling({
@@ -408,7 +433,9 @@ class RevenueCatBilling with WidgetsBindingObserver {
     bool? serverConfirmation,
     bool Function()? playActive,
     void Function(String tier)? applyTier,
+    ServerEntitlementReader? serverEntitlement,
   }) : _platform = platform ?? PurchasesRevenueCatPlatform(),
+       _serverEntitlement = serverEntitlement ?? EntitlementClient.I.current,
        _uid = uid ?? (() => FirebaseService.I.uid),
        _releaseMode = releaseMode ?? kReleaseMode,
        _serverConfirmation =
@@ -452,10 +479,18 @@ class RevenueCatBilling with WidgetsBindingObserver {
   final bool _serverConfirmation;
   final bool Function() _playActive;
   final void Function(String tier) _applyTier;
+  final ServerEntitlementReader _serverEntitlement;
+
+  BillingEntitlement? _currentServerEntitlement;
+  bool _serverEntitlementKnown = false;
+  int _entitlementReadGeneration = 0;
+
+  BillingEntitlement? get serverEntitlement =>
+      _serverEntitlementKnown ? _currentServerEntitlement : null;
+  bool get serverEntitlementKnown => _serverEntitlementKnown;
 
   bool _configured = false;
   String? _configuredFor;
-  bool _started = false;
   bool _observerAttached = false;
 
   /// Set when the last purchase was granted by the local demo fallback rather
@@ -501,8 +536,8 @@ class RevenueCatBilling with WidgetsBindingObserver {
   void start() {
     if (!available) return;
     _attachLifecycle();
-    if (_started) return;
-    _started = true;
+    // A settings owner may be recreated after sign-out/sign-in. Even when the
+    // SDK was configured before, the new account needs a fresh server read.
     unawaited(reconcile());
   }
 
@@ -522,6 +557,39 @@ class RevenueCatBilling with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) unawaited(reconcile());
   }
 
+  /// Re-reads the account's entitlement without calling a store SDK. Restore,
+  /// account switching and subscription management all share this authority.
+  Future<BillingEntitlement?> refreshServerEntitlement() async {
+    final generation = ++_entitlementReadGeneration;
+    final account = _uid();
+    bool superseded() =>
+        generation != _entitlementReadGeneration || account != _uid();
+    try {
+      final entitlement = await _serverEntitlement();
+      if (superseded()) throw EntitlementReadSuperseded();
+      if (entitlement == null || !entitlement.isActive) {
+        _currentServerEntitlement = entitlement;
+        _serverEntitlementKnown = true;
+        confirmPlanTier('free');
+        _applyTier('free');
+        return entitlement;
+      }
+      if (!isKnownOvidTier(entitlement.tier)) {
+        throw StateError('Server returned an unknown paid entitlement tier');
+      }
+      _currentServerEntitlement = entitlement;
+      _serverEntitlementKnown = true;
+      confirmPlanTier(entitlement.tier);
+      _applyTier(entitlement.tier);
+      return entitlement;
+    } catch (error) {
+      // Failures are races too: an older malformed/error answer must not send
+      // restore/reconcile down a store-only fallback after a newer verdict.
+      if (superseded()) throw EntitlementReadSuperseded();
+      rethrow;
+    }
+  }
+
   /// Configure once per signed-in uid. Safe to call repeatedly.
   Future<bool> configure({String? uid}) async {
     final error = _config.error;
@@ -531,11 +599,28 @@ class RevenueCatBilling with WidgetsBindingObserver {
     final user = uid ?? _uid();
     if (user == null || user.trim().isEmpty) return false;
     if (_configured && _configuredFor == user) return true;
+    final previousUser = _configuredFor;
+    final accountChanged = previousUser != null && previousUser != user;
+    if (accountChanged) {
+      _entitlementReadGeneration++;
+      // Close paid gates immediately; the new account's own server answer is
+      // the only thing that may reopen them.
+      confirmPlanTier(null);
+      _currentServerEntitlement = null;
+      _serverEntitlementKnown = false;
+    }
     try {
       await _platform.configure(apiKey: apiKey, appUserId: user);
       _configured = true;
       _configuredFor = user;
       _attachLifecycle();
+      if (accountChanged) {
+        try {
+          await refreshServerEntitlement();
+        } catch (e) {
+          Diag.swallow('revenuecat.account_entitlement', e);
+        }
+      }
       return true;
     } catch (e) {
       Diag.swallow('revenuecat.configure', e);
@@ -584,7 +669,7 @@ class RevenueCatBilling with WidgetsBindingObserver {
     // An opted-in internal build grants locally: there is no store to call and
     // nothing to charge. This is the same labelled demo the Test Store path
     // uses, so the UI marks the plan the same way.
-    if (Distribution.billingDemo) {
+    if (demoAllowed && Distribution.billingDemo) {
       lastPurchaseWasDemo = true;
       lastPurchaseError = null;
       return UpgradeOutcome(UpgradeResult.ok, tier: tier);
@@ -696,6 +781,26 @@ class RevenueCatBilling with WidgetsBindingObserver {
     }
     try {
       final result = await _platform.restore();
+      try {
+        final entitlement = await refreshServerEntitlement();
+        if (entitlement == null || !entitlement.isActive) {
+          return const UpgradeOutcome(UpgradeResult.nothingToRestore);
+        }
+        return UpgradeOutcome(
+          UpgradeResult.ok,
+          tier: entitlement.tier,
+          expiresAt: entitlement.expiresAt,
+        );
+      } on EntitlementReadSuperseded {
+        // A newer restore/resume/account read owns the answer. In particular,
+        // do not resurrect this older call's store-only tier as a fallback.
+        return const UpgradeOutcome(UpgradeResult.confirming);
+      } catch (e) {
+        // An unavailable authority cannot unlock by itself. Preserve the store
+        // outcome for the outer server-confirmed purchase gate, which will
+        // still refuse to unlock until `/usage` confirms the account's tier.
+        Diag.swallow('revenuecat.restore_entitlement', e);
+      }
       if (result.ok) return result.toOutcome();
       // The SDK answered with no entitlement and no error: the account really
       // has nothing to restore. That is a different outcome from a failed
@@ -715,6 +820,16 @@ class RevenueCatBilling with WidgetsBindingObserver {
   Future<String?> currentTier() async {
     if (!await configure()) return null;
     try {
+      final entitlement = await refreshServerEntitlement();
+      return entitlement != null && entitlement.isActive
+          ? entitlement.tier
+          : 'free';
+    } on EntitlementReadSuperseded {
+      return null;
+    } catch (e) {
+      Diag.swallow('revenuecat.server_entitlement', e);
+    }
+    try {
       final info = await _platform.customerInfo();
       return info.ok ? info.tier : null;
     } catch (e) {
@@ -723,28 +838,27 @@ class RevenueCatBilling with WidgetsBindingObserver {
     }
   }
 
-  /// Reconciles the local plan with the store's entitlements.
-  ///
-  /// Refunds, cancellations and expiries remove the entitlement, so the cached
-  /// tier would otherwise keep a paid plan unlocked forever. Only a
-  /// *downgrade* is applied here: an active entitlement never unlocks by
-  /// itself — the server still has to name the plan
-  /// ([refreshServerTier] / [applyPurchasedPlan]).
-  ///
-  /// Returns the store's tier (`'free'` when the entitlement is gone), or null
-  /// when the store could not be asked. An unreachable store or an SDK error
-  /// changes nothing: an offline launch must not wipe a paying user's plan.
+  /// Reconciles the local plan with the server's entitlement authority.
+  /// Refunds and expiries revoke access; a failed read changes nothing. The
+  /// store-only compatibility path may downgrade only when Play is absent.
   Future<String?> reconcile() async {
     if (_demoOnly) return null;
     if (!available) return null;
-    // RevenueCat may only downgrade a plan it is the purchase path for. When
-    // Play is available (or has not answered), an empty RC entitlement list is
-    // not evidence of a refund: Play purchases made through
-    // `in_app_purchase` never appear in RevenueCat, and wiping the tier here
-    // would relock a paying user. An unconfirmed RC build is never a purchase
-    // path either, so it must not downgrade anything.
-    if (!_serverConfirmation || _playActive()) return null;
+    if (!_serverConfirmation) return null;
     if (!await configure()) return null;
+    try {
+      final entitlement = await refreshServerEntitlement();
+      return entitlement != null && entitlement.isActive
+          ? entitlement.tier
+          : 'free';
+    } on EntitlementReadSuperseded {
+      return null;
+    } catch (e) {
+      Diag.swallow('revenuecat.reconcile_entitlement', e);
+    }
+    // A store-only fallback cannot revoke a Play plan: those purchases never
+    // appear in RevenueCat. It remains only for older injected store clients.
+    if (_playActive()) return null;
     try {
       final info = await _platform.customerInfo();
       // ok=false with an error means "could not ask", not "no entitlement".
