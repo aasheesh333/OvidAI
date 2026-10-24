@@ -1,0 +1,43 @@
+{
+  "contractVersion": 1,
+  "items": [
+    {
+      "connectionId": "019a0000-0000-7000-8000-000000000001",
+      "userId": "fixture-user",
+      "providerId": "google-drive",
+      "enabled": true,
+      "agentEnabled": false,
+      "authState": "configured",
+      "healthState": "never_checked",
+      "lastCheckedAt": null,
+      "lastSuccessAt": null,
+      "configVersion": 1,
+      "disconnectGeneration": 0,
+      "name": "Google Drive",
+      "transport": "native",
+      "hasSecrets": true,
+      "createdAt": "2026-10-24T12:00:00.000Z",
+      "updatedAt": "2026-10-24T12:00:00.000Z"
+    },
+    {
+      "connectionId": "019a0000-0000-7000-8000-000000000002",
+      "userId": "fixture-user",
+      "providerId": "approved-plugin",
+      "enabled": false,
+      "agentEnabled": false,
+      "authState": "revoked",
+      "healthState": "revoked",
+      "lastCheckedAt": "2026-10-24T12:01:00.000Z",
+      "lastSuccessAt": "2026-10-24T12:00:30.000Z",
+      "configVersion": 3,
+      "disconnectGeneration": 1,
+      "approvedSourceId": "source-fixture",
+      "approvedDigest": "sha256:approved-fixture",
+      "name": "Approved plugin connector",
+      "transport": "http",
+      "hasSecrets": false,
+      "createdAt": "2026-10-24T12:00:00.000Z",
+      "updatedAt": "2026-10-24T12:02:00.000Z"
+    }
+  ]
+}

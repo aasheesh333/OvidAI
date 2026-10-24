@@ -1,21 +1,37 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import {
+  ConnectionAdmissionError,
+  createConnectionWithinCap,
+  disconnectConnection,
   lockCustomConnectorCreates,
   mcpOauthTokens,
   mcpServers as mcpServersRepo,
+  normalizeConnectionName,
+  toMcpConnectionRow,
+  transitionConnection,
   users,
   type Db,
+  type McpConnectionRow,
   type McpServerRow,
+  type TransitionConnectionPatch,
 } from "@ovid/db";
 import {
   CURATED_IDS,
+  CURATED_MANIFEST,
   PRO_REQUIRED_MESSAGE,
   parseMcpConfig,
   safeServerName,
   type ImportedMcp,
 } from "@ovid/mcp";
-import { planFor, type McpServerDto } from "@ovid/shared";
+import {
+  planFor,
+  type McpConnectionDto,
+  type McpServerDto,
+  type McpTransport,
+  type ProviderAuthState,
+  type ProviderHealthState,
+} from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
 import { badRequest, isUuid, notFound, sendError, zodBadRequest } from "./http.js";
 
@@ -67,6 +83,26 @@ const patchBodySchema = z
     enabled: z.boolean().optional(),
     // The whole object REPLACES the sealed blob (custom rows: {env?,
     // headers?}; curated rows: the flat credential map).
+    secrets: z.record(z.string(), z.unknown()).optional(),
+  })
+  .strict();
+
+const connectionCreateBodySchema = z
+  .object({
+    providerId: z.string().trim().min(1).max(128),
+    name: z.string().trim().min(1).max(200),
+    transport: z.enum(["stdio", "http", "sse", "native"]).optional(),
+    config: z.record(z.string(), z.unknown()).optional(),
+    secrets: z.record(z.string(), z.unknown()).optional(),
+    agentEnabled: z.literal(false).optional(),
+  })
+  .strict();
+
+const connectionPatchBodySchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    agentEnabled: z.boolean().optional(),
+    name: z.string().trim().min(1).max(200).optional(),
     secrets: z.record(z.string(), z.unknown()).optional(),
   })
   .strict();
@@ -159,6 +195,264 @@ function toDto(row: McpServerRow, needsAuth: boolean): McpServerDto {
 
 async function dtoFor(deps: GatewayDeps, row: McpServerRow, uid: string): Promise<McpServerDto> {
   return toDto(row, await needsAuthFor(deps, row, uid));
+}
+
+export interface ConnectionGenerationChange {
+  connectionId: string;
+  userId: string;
+  configVersion: number;
+  disconnectGeneration: number;
+}
+
+export interface ConnectionGenerationInvalidationListener {
+  invalidate(change: ConnectionGenerationChange): void | Promise<void>;
+}
+
+type McpConnectionRouteDeps = GatewayDeps & {
+  connectionGenerationListener?: ConnectionGenerationInvalidationListener;
+};
+
+function providerIdOf(row: McpServerRow): string {
+  return row.providerId ?? row.curatedId ?? "custom";
+}
+
+function requiredProviderKeys(providerId: string, secret?: boolean): readonly string[] {
+  const fields = CURATED_MANIFEST.find((entry) => entry.curatedId === providerId)?.credentialFields ?? [];
+  return fields
+    .filter((field) => secret === undefined || field.secret === secret)
+    .filter((field) => !/\boptional\b/i.test(field.label) && !/\bempty\s+means\b/i.test(field.hint ?? ""))
+    .map((field) => field.key);
+}
+
+function hasRequiredValues(values: Record<string, unknown>, keys: readonly string[]): boolean {
+  return keys.every((key) => {
+    const value = values[key];
+    return typeof value === "string" && value.trim() !== "";
+  });
+}
+
+function hasSecretValue(secrets: Record<string, unknown> | undefined): boolean {
+  return secrets !== undefined && Object.values(secrets).some((value) => {
+    if (typeof value === "string") return value.trim() !== "";
+    if (value === null || value === undefined) return false;
+    if (typeof value === "object") return Object.keys(value).length > 0;
+    return true;
+  });
+}
+
+/** Evaluate the complete catalog connection contract, not just its secret half. */
+function authStateForConnection(
+  providerId: string,
+  transport: McpTransport,
+  config: Record<string, unknown> | undefined,
+  secrets: Record<string, unknown> | undefined,
+  oauthAuthorized = false,
+): ProviderAuthState {
+  const remote = transport === "http" || transport === "sse";
+  if (CURATED_IDS.includes(providerId)) {
+    const values = { ...(config ?? {}), ...(secrets ?? {}) };
+    if (!hasRequiredValues(values, requiredProviderKeys(providerId, false))) return "missing";
+    if (remote && oauthAuthorized) return "authorized";
+    return hasRequiredValues(values, requiredProviderKeys(providerId, true))
+      ? "configured"
+      : "missing";
+  }
+  if (remote) {
+    if (oauthAuthorized) return "authorized";
+    return hasSecretValue(secrets) ? "configured" : "needs_auth";
+  }
+  return "configured";
+}
+
+function readSealedConnectionSecrets(
+  deps: GatewayDeps,
+  raw: McpServerRow,
+): Record<string, unknown> | undefined {
+  if (raw.secretsSealed === null || deps.crypto === undefined) return undefined;
+  try {
+    const parsed = JSON.parse(
+      deps.crypto.decrypt(raw.secretsSealed, `mcp_servers:${raw.id}`),
+    ) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
+function toConnectionDto(
+  row: McpConnectionRow,
+  projection: { authState?: ProviderAuthState; healthState?: ProviderHealthState } = {},
+): McpConnectionDto {
+  return {
+    connectionId: row.connectionId,
+    userId: row.userId,
+    providerId: row.providerId,
+    enabled: row.enabled,
+    agentEnabled: row.agentEnabled,
+    authState: projection.authState ?? row.authState,
+    healthState: projection.healthState ?? row.healthState,
+    lastCheckedAt: row.lastCheckedAt,
+    lastSuccessAt: row.lastSuccessAt,
+    configVersion: row.configVersion,
+    disconnectGeneration: row.disconnectGeneration,
+    ...(row.approvedSourceId !== undefined ? { approvedSourceId: row.approvedSourceId } : {}),
+    ...(row.approvedDigest !== undefined ? { approvedDigest: row.approvedDigest } : {}),
+    name: row.name,
+    transport: row.transport,
+    hasSecrets: row.secretsSealed !== null,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+async function connectionDtoFor(
+  deps: GatewayDeps,
+  raw: McpServerRow,
+  uid: string,
+): Promise<McpConnectionDto> {
+  const row = toMcpConnectionRow(raw);
+  let projectedAuth = row.authState;
+  if (raw.authState === "unknown") {
+    const remote = raw.transport === "http" || raw.transport === "sse";
+    const token = remote ? await mcpOauthTokens.get(deps.db, raw.id, uid) : null;
+    projectedAuth = authStateForConnection(
+      providerIdOf(raw),
+      raw.transport as McpTransport,
+      raw.config ?? undefined,
+      readSealedConnectionSecrets(deps, raw),
+      token !== null,
+    );
+  }
+  const projectedHealth = !raw.enabled && raw.healthState === "never_checked"
+    ? "disabled"
+    : row.healthState;
+  return toConnectionDto(row, { authState: projectedAuth, healthState: projectedHealth });
+}
+
+/** Return only authentication facts established without a network health probe. */
+async function activationAuthState(
+  deps: GatewayDeps,
+  raw: McpServerRow,
+  uid: string,
+): Promise<"configured" | "authorized" | null> {
+  const row = toMcpConnectionRow(raw);
+  if (row.authState === "revoked") return null;
+  const remote = raw.transport === "http" || raw.transport === "sse";
+  const oauth = remote ? await mcpOauthTokens.get(deps.db, raw.id, uid) : null;
+  const projected = authStateForConnection(
+    providerIdOf(raw),
+    raw.transport as McpTransport,
+    raw.config ?? undefined,
+    readSealedConnectionSecrets(deps, raw),
+    oauth !== null,
+  );
+  return projected === "configured" || projected === "authorized" ? projected : null;
+}
+
+function normalizeConfigKey(key: string): string {
+  return key.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+const CATALOG_CREDENTIAL_CONFIG_KEYS = new Set(
+  CURATED_MANIFEST.flatMap((entry) => entry.credentialFields)
+    .filter((field) => field.secret)
+    .map((field) => normalizeConfigKey(field.key)),
+);
+const DIRECT_CREDENTIAL_CONFIG_KEYS = new Set([
+  "env",
+  "header",
+  "headers",
+  "oauth",
+  "authorization",
+  "cookie",
+  "cookies",
+  "credential",
+  "credentials",
+  "password",
+  "passwd",
+  "privateKey",
+  "secret",
+  "secrets",
+  "token",
+  "refreshToken",
+  "clientSecret",
+].map(normalizeConfigKey));
+
+function hasCredentialConfigKey(value: unknown, depth = 0): boolean {
+  if (depth > 16) return true;
+  if (Array.isArray(value)) return value.some((entry) => hasCredentialConfigKey(entry, depth + 1));
+  if (value === null || typeof value !== "object") return false;
+  return Object.entries(value).some(([key, entry]) => {
+    const normalized = normalizeConfigKey(key);
+    if (CATALOG_CREDENTIAL_CONFIG_KEYS.has(normalized) || DIRECT_CREDENTIAL_CONFIG_KEYS.has(normalized)) {
+      return true;
+    }
+    return hasCredentialConfigKey(entry, depth + 1);
+  });
+}
+
+function validateConnectionTransport(
+  transport: McpTransport,
+  config: Record<string, unknown> | undefined,
+): string | null {
+  if (transport === "stdio") {
+    return typeof config?.command === "string" && config.command.length > 0
+      ? null
+      : "stdio connections require config.command.";
+  }
+  if (transport === "http" || transport === "sse") {
+    return typeof config?.url === "string" && config.url.length > 0
+      ? null
+      : `${transport} connections require config.url.`;
+  }
+  return null;
+}
+
+async function notifyConnectionGeneration(
+  deps: McpConnectionRouteDeps,
+  row: McpConnectionRow,
+): Promise<void> {
+  try {
+    await deps.connectionGenerationListener?.invalidate({
+      connectionId: row.connectionId,
+      userId: row.userId,
+      configVersion: row.configVersion,
+      disconnectGeneration: row.disconnectGeneration,
+    });
+  } catch {
+    // The DB versions are the authoritative fence. Notification is only a
+    // cache hint; never turn an already-committed mutation into a fake retry.
+    deps.logger?.warn(
+      {
+        connectionId: row.connectionId,
+        userId: row.userId,
+        configVersion: row.configVersion,
+        disconnectGeneration: row.disconnectGeneration,
+      },
+      "Connection generation listener failed; database fencing remains authoritative.",
+    );
+  }
+}
+
+function connectionChanged(reply: FastifyReply): FastifyReply {
+  return sendError(reply, 409, "connection_changed", "The connection changed. Refresh and try again.");
+}
+
+function connectionAdmissionFailure(reply: FastifyReply, error: unknown): FastifyReply {
+  if (!(error instanceof ConnectionAdmissionError)) throw error;
+  if (error.code === "server_exists") return serverExists(reply);
+  if (error.code === "secret_sealing_unavailable") {
+    return sendError(reply, 503, "unavailable", "MCP secret sealing is not configured.");
+  }
+  const limit = error.limit ?? 0;
+  if (limit === 0) return sendError(reply, 402, "pro_required", PRO_REQUIRED_MESSAGE);
+  return sendError(
+    reply,
+    403,
+    "connector_limit_reached",
+    `Your plan includes ${limit} custom connector${limit === 1 ? "" : "s"}. Delete one before adding another.`,
+  );
 }
 
 /**
@@ -282,6 +576,176 @@ async function createCurated(
 }
 
 export function registerMcpServerRoutes(app: FastifyInstance, deps: GatewayDeps): void {
+  const connectionDeps = deps as McpConnectionRouteDeps;
+
+  app.post("/mcp/connections", async (request, reply) => {
+    const parsed = connectionCreateBodySchema.safeParse(request.body);
+    if (!parsed.success) return zodBadRequest(reply, parsed.error);
+    if (parsed.data.secrets !== undefined && deps.crypto === undefined) {
+      return sendError(reply, 503, "unavailable", "MCP secret sealing is not configured.");
+    }
+    const { uid } = request.principal;
+    const providerId = parsed.data.providerId;
+    const kind = CURATED_IDS.includes(providerId) ? "curated" : "custom";
+    const transport = parsed.data.transport ?? (kind === "curated" ? "native" : "http");
+    if (kind === "curated" && transport !== "native") {
+      return badRequest(reply, "Curated providers use their catalog-owned transport.");
+    }
+    if (hasCredentialConfigKey(parsed.data.config)) {
+      return badRequest(reply, "Credential fields must be sent in secrets, not config.");
+    }
+    const invalid = validateConnectionTransport(transport, parsed.data.config);
+    if (invalid !== null) return badRequest(reply, invalid);
+
+    try {
+      const row = await createConnectionWithinCap(deps.db, {
+        userId: uid,
+        kind,
+        providerId,
+        name: parsed.data.name,
+        normalizedConnectionName: normalizeConnectionName(parsed.data.name),
+        transport,
+        config: parsed.data.config ?? null,
+        secrets: parsed.data.secrets,
+        sealSecrets: parsed.data.secrets === undefined
+          ? undefined
+          : (plaintext, recordId) => deps.crypto!.encrypt(plaintext, recordId),
+        agentEnabled: false,
+        authState: authStateForConnection(
+          providerId,
+          transport,
+          parsed.data.config,
+          parsed.data.secrets,
+        ),
+      });
+      return reply.code(201).send(toConnectionDto(row));
+    } catch (error) {
+      return connectionAdmissionFailure(reply, error);
+    }
+  });
+
+  app.get("/mcp/connections", async (request) => {
+    const { uid } = request.principal;
+    const rows = await mcpServersRepo.list(deps.db, uid);
+    return {
+      contractVersion: 1 as const,
+      items: await Promise.all(rows.map((row) => connectionDtoFor(deps, row, uid))),
+    };
+  });
+
+  app.get("/mcp/connections/:id", async (request, reply) => {
+    const { uid } = request.principal;
+    const { id } = request.params as { id: string };
+    if (!isUuid(id)) return mcpNotFound(reply);
+    const row = await mcpServersRepo.get(deps.db, id, uid);
+    if (row === null) return mcpNotFound(reply);
+    return connectionDtoFor(deps, row, uid);
+  });
+
+  app.patch("/mcp/connections/:id", async (request, reply) => {
+    const { uid } = request.principal;
+    const { id } = request.params as { id: string };
+    if (!isUuid(id)) return mcpNotFound(reply);
+    const raw = await mcpServersRepo.get(deps.db, id, uid);
+    if (raw === null) return mcpNotFound(reply);
+    const parsed = connectionPatchBodySchema.safeParse(request.body);
+    if (!parsed.success) return zodBadRequest(reply, parsed.error);
+    if (parsed.data.secrets !== undefined && deps.crypto === undefined) {
+      return sendError(reply, 503, "unavailable", "MCP secret sealing is not configured.");
+    }
+
+    let activationAuth: "configured" | "authorized" | null = null;
+    const activationRequested = parsed.data.agentEnabled === true;
+    const activeMutationRequiresAuth = (parsed.data.agentEnabled ?? raw.agentEnabled) &&
+      (parsed.data.secrets !== undefined || parsed.data.enabled === true);
+    if (activationRequested || activeMutationRequiresAuth) {
+      const providerId = providerIdOf(raw);
+      if (raw.curatedId === null || !CURATED_IDS.includes(providerId)) {
+        return sendError(
+          reply,
+          409,
+          "provider_unsupported",
+          "This provider is not supported for agent activation.",
+        );
+      }
+      if (!(parsed.data.enabled ?? raw.enabled)) {
+        return sendError(reply, 409, "connection_disabled", "Enable the connection before agent activation.");
+      }
+      if (parsed.data.secrets !== undefined) {
+        const oauth = await mcpOauthTokens.get(deps.db, raw.id, uid);
+        const candidate = authStateForConnection(
+          providerId,
+          raw.transport as McpTransport,
+          raw.config ?? undefined,
+          parsed.data.secrets,
+          oauth !== null,
+        );
+        activationAuth = candidate === "configured" || candidate === "authorized" ? candidate : null;
+      } else {
+        activationAuth = await activationAuthState(deps, raw, uid);
+      }
+      if (activationAuth === null) {
+        return sendError(
+          reply,
+          409,
+          "auth_required",
+          "Provider authentication is required before agent activation.",
+        );
+      }
+    }
+
+    const patch: TransitionConnectionPatch = {
+      enabled: parsed.data.enabled,
+      agentEnabled: parsed.data.agentEnabled,
+      name: parsed.data.name,
+    };
+    if (parsed.data.secrets !== undefined) {
+      patch.secrets = parsed.data.secrets;
+      patch.sealSecrets = (plaintext, recordId) => deps.crypto!.encrypt(plaintext, recordId);
+      const oauth = await mcpOauthTokens.get(deps.db, raw.id, uid);
+      patch.authState = activationAuth ?? authStateForConnection(
+        providerIdOf(raw),
+        raw.transport as McpTransport,
+        raw.config ?? undefined,
+        parsed.data.secrets,
+        oauth !== null,
+      );
+    }
+    if (activationAuth !== null) patch.authState = activationAuth;
+
+    try {
+      const updated = await transitionConnection(deps.db, id, uid, patch, {
+        configVersion: raw.configVersion,
+        disconnectGeneration: raw.disconnectGeneration,
+      });
+      if (updated === null) return connectionChanged(reply);
+      if (updated.configVersion !== raw.configVersion ||
+          updated.disconnectGeneration !== raw.disconnectGeneration) {
+        await notifyConnectionGeneration(connectionDeps, updated);
+      }
+      if (raw.authState === "unknown") {
+        const current = await mcpServersRepo.get(deps.db, id, uid);
+        if (current === null) return mcpNotFound(reply);
+        return connectionDtoFor(deps, current, uid);
+      }
+      return toConnectionDto(updated);
+    } catch (error) {
+      return connectionAdmissionFailure(reply, error);
+    }
+  });
+
+  app.delete("/mcp/connections/:id", async (request, reply) => {
+    const { uid } = request.principal;
+    const { id } = request.params as { id: string };
+    if (!isUuid(id)) return mcpNotFound(reply);
+    const raw = await mcpServersRepo.get(deps.db, id, uid);
+    if (raw === null) return mcpNotFound(reply);
+    const disconnected = await disconnectConnection(deps.db, id, uid, raw.configVersion);
+    if (disconnected === null) return connectionChanged(reply);
+    await notifyConnectionGeneration(connectionDeps, disconnected);
+    return reply.code(204).send();
+  });
+
   app.post("/mcp/servers", async (request, reply) => {
     const { uid } = request.principal;
     const body = request.body as unknown;
@@ -438,27 +902,84 @@ export function registerMcpServerRoutes(app: FastifyInstance, deps: GatewayDeps)
       return sendError(reply, 503, "unavailable", "MCP secret sealing is not configured.");
     }
 
-    const patch: { enabled?: boolean; secretsSealed?: ReturnType<NonNullable<GatewayDeps["crypto"]>["encrypt"]> } = {};
-    if (parsed.data.enabled !== undefined) patch.enabled = parsed.data.enabled;
+    const activeMutationRequiresAuth = row.agentEnabled &&
+      (parsed.data.secrets !== undefined || parsed.data.enabled === true);
+    let candidateAuth: "configured" | "authorized" | null = null;
+    if (activeMutationRequiresAuth) {
+      const providerId = providerIdOf(row);
+      if (row.curatedId === null || !CURATED_IDS.includes(providerId)) {
+        return sendError(
+          reply,
+          409,
+          "provider_unsupported",
+          "This provider is not supported for agent activation.",
+        );
+      }
+      if (parsed.data.secrets !== undefined) {
+        const oauth = await mcpOauthTokens.get(deps.db, row.id, uid);
+        const candidate = authStateForConnection(
+          providerId,
+          row.transport as McpTransport,
+          row.config ?? undefined,
+          parsed.data.secrets,
+          oauth !== null,
+        );
+        candidateAuth = candidate === "configured" || candidate === "authorized" ? candidate : null;
+      } else {
+        candidateAuth = await activationAuthState(deps, row, uid);
+      }
+      if (candidateAuth === null) {
+        return sendError(
+          reply,
+          409,
+          "auth_required",
+          "Provider authentication is required before agent activation.",
+        );
+      }
+    }
+
+    const patch: TransitionConnectionPatch = { enabled: parsed.data.enabled };
+    if (candidateAuth !== null) patch.authState = candidateAuth;
     if (parsed.data.secrets !== undefined) {
-      // REPLACE the sealed blob — never merge, never echo.
-      patch.secretsSealed = deps.crypto!.encrypt(
-        JSON.stringify(parsed.data.secrets),
-        `mcp_servers:${row.id}`,
+      // REPLACE the sealed blob — never merge, never echo. Legacy writes use
+      // the same generation fence as the v1 endpoint without changing its DTO.
+      patch.secrets = parsed.data.secrets;
+      patch.sealSecrets = (plaintext, recordId) => deps.crypto!.encrypt(plaintext, recordId);
+      patch.authState = candidateAuth ?? authStateForConnection(
+        providerIdOf(row),
+        row.transport as McpTransport,
+        row.config ?? undefined,
+        parsed.data.secrets,
       );
     }
 
-    const updated = await mcpServersRepo.update(deps.db, row.id, uid, patch);
-    if (updated === null) return mcpNotFound(reply);
-    return dtoFor(deps, updated, uid);
+    try {
+      const updated = await transitionConnection(deps.db, row.id, uid, patch, {
+        configVersion: row.configVersion,
+        disconnectGeneration: row.disconnectGeneration,
+      });
+      if (updated === null) return connectionChanged(reply);
+      if (updated.configVersion !== row.configVersion ||
+          updated.disconnectGeneration !== row.disconnectGeneration) {
+        await notifyConnectionGeneration(connectionDeps, updated);
+      }
+      const current = await mcpServersRepo.get(deps.db, row.id, uid);
+      if (current === null) return mcpNotFound(reply);
+      return dtoFor(deps, current, uid);
+    } catch (error) {
+      return connectionAdmissionFailure(reply, error);
+    }
   });
 
   app.delete("/mcp/servers/:id", async (request, reply) => {
     const { uid } = request.principal;
     const { id } = request.params as { id: string };
     if (!isUuid(id)) return mcpNotFound(reply);
+    const row = await mcpServersRepo.get(deps.db, id, uid);
+    if (row === null) return mcpNotFound(reply);
     const removed = await mcpServersRepo.remove(deps.db, id, uid);
     if (!removed) return mcpNotFound(reply);
+    await notifyConnectionGeneration(connectionDeps, toMcpConnectionRow(row));
     return reply.code(204).send();
   });
 }

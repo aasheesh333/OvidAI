@@ -47,6 +47,98 @@ export const mcpServerDtoSchema: z.ZodType<McpServerDto> = z.object({
   updatedAt: z.string().min(1),
 });
 
+export type McpTransport = "stdio" | "http" | "sse" | "native";
+export type ProviderAuthState = "missing" | "configured" | "needs_auth" | "authorized" | "revoked";
+export type ProviderHealthState =
+  | "never_checked"
+  | "checking"
+  | "healthy"
+  | "degraded"
+  | "needs_auth"
+  | "refreshing"
+  | "revoked"
+  | "unavailable"
+  | "disabled";
+
+/** Stable, secret-free connection state shared by persistence and the v1 API. */
+export interface ProviderConnectionState {
+  connectionId: string;
+  userId: string;
+  providerId: string;
+  enabled: boolean;
+  agentEnabled: boolean;
+  authState: ProviderAuthState;
+  healthState: ProviderHealthState;
+  lastCheckedAt: string | null;
+  lastSuccessAt: string | null;
+  configVersion: number;
+  disconnectGeneration: number;
+  approvedSourceId?: string;
+  approvedDigest?: string;
+}
+
+const providerConnectionStateShape = {
+  connectionId: z.string().min(1),
+  userId: z.string().min(1),
+  providerId: z.string().min(1),
+  enabled: z.boolean(),
+  agentEnabled: z.boolean(),
+  authState: z.enum(["missing", "configured", "needs_auth", "authorized", "revoked"]),
+  healthState: z.enum([
+    "never_checked",
+    "checking",
+    "healthy",
+    "degraded",
+    "needs_auth",
+    "refreshing",
+    "revoked",
+    "unavailable",
+    "disabled",
+  ]),
+  lastCheckedAt: z.string().min(1).nullable(),
+  lastSuccessAt: z.string().min(1).nullable(),
+  configVersion: z.number().int().nonnegative(),
+  disconnectGeneration: z.number().int().nonnegative(),
+  approvedSourceId: z.string().min(1).optional(),
+  approvedDigest: z.string().min(1).optional(),
+};
+
+export const providerConnectionStateSchema: z.ZodType<ProviderConnectionState> = z
+  .object(providerConnectionStateShape)
+  .strict();
+
+/** The v1 connection DTO deliberately does not extend the legacy server DTO. */
+export interface McpConnectionDto extends ProviderConnectionState {
+  name: string;
+  transport: McpTransport;
+  hasSecrets: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const mcpConnectionDtoSchema: z.ZodType<McpConnectionDto> = z
+  .object({
+    ...providerConnectionStateShape,
+    name: z.string().min(1),
+    transport: z.enum(["stdio", "http", "sse", "native"]),
+    hasSecrets: z.boolean(),
+    createdAt: z.string().min(1),
+    updatedAt: z.string().min(1),
+  })
+  .strict();
+
+export interface ConnectionEnvelope {
+  contractVersion: 1;
+  items: McpConnectionDto[];
+}
+
+export const connectionEnvelopeSchema: z.ZodType<ConnectionEnvelope> = z
+  .object({
+    contractVersion: z.literal(1),
+    items: z.array(mcpConnectionDtoSchema),
+  })
+  .strict();
+
 /** One curated catalog entry with the caller's configured flag. */
 export interface CatalogServerDto {
   curatedId: string;
