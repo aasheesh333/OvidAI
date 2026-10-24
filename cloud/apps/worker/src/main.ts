@@ -1,7 +1,7 @@
 import { pathToFileURL } from "node:url";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { Redis } from "ioredis";
-import { createDb, dbPoolOptionsFromEnv, byokKeysRepo, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, imagesRepo, mcpOauthFlows, messages as messagesRepo, runs as runsRepo, sharesRepo, users, workspaceObjects as workspaceObjectsRepo } from "@ovid/db";
+import { createDb, dbPoolOptionsFromEnv, byokKeysRepo, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, imagesRepo, mcpOauthFlows, mcpServers as mcpServersRepo, messages as messagesRepo, runs as runsRepo, sharesRepo, users, workspaceObjects as workspaceObjectsRepo } from "@ovid/db";
 import {
   createCloudCleanup,
   createFirebaseAdmin,
@@ -75,6 +75,7 @@ import {
 } from "./runProcessor.js";
 import { createServerKeyResolver } from "./keyResolver.js";
 import { buildFileService } from "./fileService.js";
+import { createStudioGitService, parseStudioGitAllowedHosts } from "./studioGitRoutes.js";
 import { createMcpRuntime } from "./mcpRuntime.js";
 import { createNotifier, createFcmPushSender } from "./notify.js";
 import { createWebPushSender } from "./webPush.js";
@@ -421,6 +422,10 @@ export function createProductionAgentRunProcessor(
  */
 export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> {
   const cfg = loadWorkerEnv(env);
+  const studioMasterKey = cfg.masterKey;
+  if (studioMasterKey === null) {
+    throw new Error("OVID_MASTER_KEY is required for Studio git");
+  }
 
   // Audit P1 (MCP client): a server→client request racing a close rejects
   // inside fire-and-forget promise chains, and Node's default for an
@@ -592,6 +597,13 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     rootfs,
   });
   await manager.recover(); // orphan env cgroups from a crashed run die now
+
+  const studioGit = createStudioGitService({
+    manager,
+    masterKey: studioMasterKey,
+    listServers: (userId) => mcpServersRepo.list(db, userId),
+    allowedHosts: parseStudioGitAllowedHosts(env.OVID_GIT_ALLOWED_HOSTS),
+  });
 
   // P3 Task 16: the production processor is the FULL engine. Egress is the
   // SSRF-guarded fetch at every construction site (T5-I1 / M-4): model
@@ -835,6 +847,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     sandboxUid,
     activity,
     internalToken: cfg.internalToken,
+    studioGit,
     inlineMaxBytes: cfg.inlineMaxBytes,
     port: cfg.workerFilePort,
     host: "0.0.0.0",

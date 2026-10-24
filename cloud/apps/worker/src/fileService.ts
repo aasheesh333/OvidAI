@@ -29,6 +29,8 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { assertSessionFileCapacity, ProjectFileLimitError, type Db } from "@ovid/db";
 import type { EventLog } from "@ovid/events";
 import type { UiManifest } from "@ovid/shared";
+import { createInternalServiceAuth } from "./internalServiceAuth.js";
+import { registerStudioGitRoutes, type StudioGitRoutesDeps } from "./studioGitRoutes.js";
 import {
   FileNotInArchiveError,
   FileTooLargeError,
@@ -96,6 +98,8 @@ export interface FileServiceDeps {
    * existing presigned-S3 path is unchanged.
    */
   cdn?: CdnConfig;
+  /** Production-composed Studio git surface; optional only for legacy file-service tests. */
+  studioGit?: StudioGitRoutesDeps;
 }
 
 interface ErrorEnvelope {
@@ -196,16 +200,9 @@ export function buildFileService(deps: FileServiceDeps): FastifyInstance {
   };
 
   // -- internal-token gate (every route) ----------------------------------
-  app.addHook("preHandler", async (req, reply) => {
-    const token = req.headers["x-ovid-internal-token"];
-    if (typeof token !== "string" || token !== deps.internalToken) {
-      return fail(reply, 401, "unauthenticated", "Missing or invalid internal token.");
-    }
-    const userId = req.headers["x-ovid-user-id"];
-    if (typeof userId !== "string" || userId.trim() === "") {
-      return fail(reply, 401, "unauthenticated", "Missing x-ovid-user-id.");
-    }
-  });
+  app.addHook("preHandler", createInternalServiceAuth(deps.internalToken));
+
+  if (deps.studioGit !== undefined) registerStudioGitRoutes(app, deps.studioGit);
 
   // -- GET /internal/sessions/:sid/tree[?path=sub] ------------------------
   // ST-003: the agent workspace dir only exists once the agent has run a
@@ -495,12 +492,21 @@ export function buildFileService(deps: FileServiceDeps): FastifyInstance {
   );
 
   // Malformed JSON / body-limit errors still use the one envelope.
-  app.setErrorHandler((err, _req, reply) => {
+  app.setErrorHandler((err, req, reply) => {
     const e = err as { statusCode?: number; message?: string };
     const status =
       typeof e.statusCode === "number" && e.statusCode >= 400 && e.statusCode < 500
         ? e.statusCode
         : 500;
+    if (req.url.includes("/studio-git/")) {
+      if (status === 413) {
+        return fail(reply, 413, "bad_request", "Studio git request body is too large.");
+      }
+      if (status === 400) {
+        return fail(reply, 400, "bad_request", "Invalid Studio git request.");
+      }
+      return fail(reply, 500, "internal", "Internal server error.");
+    }
     const code =
       status === 400 ? "bad_request" : status === 413 ? "file_too_large" : "internal";
     return fail(reply, status, code, e.message ?? "Internal server error.");
