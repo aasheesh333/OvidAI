@@ -451,7 +451,7 @@ export function buildGateway(
       // Dedicated preview requests never enter the Firebase-aware identity
       // path. Their scoped ticket/cookie and live worker registration are the
       // only authorization inputs; API management remains rate-limited.
-      if (deps.studioPreview !== undefined && isStudioPreviewOriginPath(request.raw.url)) {
+      if (deps.studioPreview !== undefined && isStudioPreviewOriginPath(request.raw.url ?? request.url)) {
         return;
       }
       return enforceRateLimit(request, reply);
