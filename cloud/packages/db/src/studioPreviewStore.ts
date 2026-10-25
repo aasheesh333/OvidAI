@@ -78,6 +78,14 @@ export type StudioPreviewStorePatch = Partial<Pick<StudioPreviewRecord,
 export type StudioPreviewCasUpdate = StudioPreviewStorePatch &
   Pick<StudioPreviewRecord, "generation">;
 
+/** Worker-issued access timestamp and the generation it was authorized against. */
+export interface StudioPreviewTouchInput {
+  id: string;
+  generation: number;
+  /** ISO-8601 timestamp used for the write, expiry check, and throttle window. */
+  now: string;
+}
+
 export type StudioPreviewCapacityErrorCode = "per_user_capacity" | "global_capacity";
 
 /** Typed, non-sensitive admission refusal. No row is inserted when thrown. */
@@ -160,6 +168,17 @@ export interface StudioPreviewStorePort {
   ): Promise<StudioPreviewRecord | null>;
 
   /**
+   * One atomic conditional access write, equivalent to updating only
+   * lastAccessAt = now WHERE id and generation match, status is starting or
+   * running, expiresAt > now, and lastAccessAt is null or at least one second
+   * before now. The persisted row supplies the throttle/expiry inputs; do not
+   * substitute an unlocked read-then-write. Return true only when a row was
+   * actually updated, and false for stale, missing, denied, or throttled calls.
+   * Generation, status, expiry, and every other field must remain unchanged.
+   */
+  touch(input: StudioPreviewTouchInput): Promise<boolean>;
+
+  /**
    * Read at most limit live rows with expiresAt <= now, ordered by
    * (expiresAt, id). Do not mark rows expired here: the manager must CAS-claim,
    * clean up the real process/cgroup, and only then persist a terminal status.
@@ -194,6 +213,12 @@ export interface StudioPreviewStore {
     generation: number,
     patch: StudioPreviewStorePatch,
   ): Promise<StudioPreviewRecord | null>;
+
+  /**
+   * Throttled, generation-preserving lastAccessAt write for the current live
+   * generation. Returns false when no real row write occurred.
+   */
+  touch(input: StudioPreviewTouchInput): Promise<boolean>;
 
   sweepExpired(now: string, limit: number): Promise<StudioPreviewRecord[]>;
 }
@@ -246,6 +271,10 @@ export function createStudioPreviewStore(
         ...patch,
         generation: generation + 1,
       });
+    },
+
+    touch(input) {
+      return port.touch(input);
     },
 
     sweepExpired(now, limit) {

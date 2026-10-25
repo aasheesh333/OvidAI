@@ -161,6 +161,19 @@ class SharedPreviewDatabase {
         this.rows.set(id, next);
         return clone(next);
       },
+      touch: async ({ id, generation, now }) => {
+        // No await between the checks and replacement: this models one atomic
+        // conditional UPDATE of lastAccessAt, not an unlocked read-then-write.
+        const current = this.rows.get(id);
+        if (current === undefined || current.generation !== generation) return false;
+        if (current.status !== "starting" && current.status !== "running") return false;
+        const at = Date.parse(now);
+        if (Date.parse(current.expiresAt) <= at) return false;
+        const last = current.lastAccessAt === null ? null : Date.parse(current.lastAccessAt);
+        if (last !== null && at - last < 1_000) return false;
+        this.rows.set(id, { ...current, lastAccessAt: now });
+        return true;
+      },
       sweepExpired: async (now, limit) => [...this.rows.values()]
         .filter((row) => LIVE.has(row.status) && Date.parse(row.expiresAt) <= Date.parse(now))
         .sort((left, right) =>
@@ -353,6 +366,81 @@ describe("Studio preview DB port contract (in-memory; Postgres not exercised)", 
       lastAccessAt: null,
       logBytes: 128,
     });
+  });
+
+  it("UNEXECUTED: touch changes only lastAccessAt at the same generation and preserves nullable unknowns", async () => {
+    const { store } = harness();
+    const original = staticRecord(previewId(1));
+    original.generation = 7;
+    await store.start(original, CAPS);
+
+    expect(await store.touch({ id: original.id, generation: 7, now: iso(30_000) })).toBe(true);
+    expect((await store.getForUser(UID, SID, original.id))[0]).toEqual({
+      ...original,
+      lastAccessAt: iso(30_000),
+    });
+
+    const updated = await store.update(original.id, 7, { status: "stopping" });
+    expect(updated).toEqual({
+      ...original,
+      generation: 8,
+      status: "stopping",
+      lastAccessAt: iso(30_000),
+    });
+  });
+
+  it("UNEXECUTED: touch uses now for exact one-second throttle inputs and reports only real writes", async () => {
+    const { database, store } = harness();
+    const original = previewRecord(previewId(1), {
+      generation: 4,
+      status: "starting",
+      lastAccessAt: iso(10_000),
+    });
+    await database.seed(original);
+
+    expect(await store.touch({ id: original.id, generation: 4, now: iso(10_999) })).toBe(false);
+    expect((await store.getForUser(UID, SID, original.id))[0]).toEqual(original);
+    expect(await store.touch({ id: original.id, generation: 4, now: iso(11_000) })).toBe(true);
+    expect(await store.touch({ id: original.id, generation: 4, now: iso(11_999) })).toBe(false);
+    expect((await store.getForUser(UID, SID, original.id))[0]).toEqual({
+      ...original,
+      lastAccessAt: iso(11_000),
+    });
+    expect(await store.touch({ id: original.id, generation: 4, now: iso(12_000) })).toBe(true);
+    expect((await store.getForUser(UID, SID, original.id))[0]).toEqual({
+      ...original,
+      lastAccessAt: iso(12_000),
+    });
+  });
+
+  it("UNEXECUTED: touch denies stale, missing, stopping, terminal, and expired rows without mutation", async () => {
+    const { database, store } = harness();
+    const current = previewRecord(previewId(1), { generation: 4, status: "running" });
+    const stopping = previewRecord(previewId(2), { status: "stopping" });
+    const terminal = previewRecord(previewId(3), {
+      status: "stopped",
+      endedAt: iso(),
+    });
+    const expired = previewRecord(previewId(4), {
+      status: "running",
+      expiresAt: iso(30_000),
+    });
+    await database.seed(current);
+    await database.seed(stopping);
+    await database.seed(terminal);
+    await database.seed(expired);
+    const before = database.all();
+
+    expect(await store.touch({ id: current.id, generation: 3, now: iso(60_000) })).toBe(false);
+    expect(await store.touch({ id: previewId(99), generation: 1, now: iso(60_000) })).toBe(false);
+    for (const denied of [stopping, terminal, expired]) {
+      expect(await store.touch({
+        id: denied.id,
+        generation: denied.generation,
+        now: iso(60_000),
+      })).toBe(false);
+    }
+    expect(database.all()).toEqual(before);
   });
 
   it("returns bounded expired live candidates in expiry order without terminalizing them", async () => {
