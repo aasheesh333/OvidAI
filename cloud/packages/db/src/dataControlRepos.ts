@@ -78,8 +78,8 @@ export const dataControlRepo = {
    * Remove every chat the account owns and everything that belongs to a chat.
    *
    * FK-safe order: schedule occurrences, schedules, grants, uploads, event
-   * mirrors, agent state, messages, runs, workspace manifests and objects,
-   * session-scoped memory, then the sessions themselves.
+   * mirrors, agent state, compaction rows, messages, runs, workspace manifests
+   * and objects, session-scoped memory, then the sessions themselves.
    *
    * Projects are NOT deleted: a project is a folder, not a chat, and its
    * memory survives here — that is what "Reset all memory" is for. The shared
@@ -97,6 +97,12 @@ export const dataControlRepo = {
       );
       await tx`DELETE FROM session_event_mirror WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
       await tx`DELETE FROM session_agent_state WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+      // 0039 rows reference canonical runs and 0034 workers/attempts with NO
+      // ACTION. Cursors also reference checkpoints, so they must go first.
+      // Exact history is removed only through this account's owned sessions.
+      await tx`DELETE FROM compaction_cursors WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+      await tx`DELETE FROM compaction_history_items WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+      await tx`DELETE FROM compaction_checkpoints WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
       // 0034 leaves reference other lineage rows as well as canonical runs and
       // messages. Remove the whole descendant graph before either authority.
       await tx`DELETE FROM subagent_control_audit WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;

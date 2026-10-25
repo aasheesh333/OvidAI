@@ -398,6 +398,12 @@ export function createCloudCleanup(deps: CloudCleanupDeps): CloudCleanup {
     await db.$client`DELETE FROM attachments WHERE user_id = ${uid}`;
     await db.$client`DELETE FROM session_event_mirror WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
     await db.$client`DELETE FROM session_agent_state WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+    // 0039 rows reference canonical runs and 0034 workers/attempts with NO
+    // ACTION. Cursors also reference checkpoints, so they must go first.
+    // Exact history is removed only through this account's owned sessions.
+    await db.$client`DELETE FROM compaction_cursors WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+    await db.$client`DELETE FROM compaction_history_items WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+    await db.$client`DELETE FROM compaction_checkpoints WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
     // Preserve the complete 0034 descendant cleanup before canonical runs and
     // messages; these NO ACTION links otherwise wedge every deletion retry.
     await db.$client`DELETE FROM subagent_control_audit WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;

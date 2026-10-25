@@ -4,8 +4,13 @@ import {
   byokKeysRepo,
   createDb,
   imagesRepo,
+  messages,
   migrate,
+  newId,
+  runs,
+  sessions,
   sharesRepo,
+  users,
   type Db,
 } from "@ovid/db";
 import type { App } from "firebase-admin/app";
@@ -398,6 +403,62 @@ describe("createNoopR2Deleter", () => {
   });
 });
 
+describe("createCloudCleanup deletion SQL", () => {
+  it("deletes 0039 rows in dependency order through a bound uid session scope", async () => {
+    const statements: Array<{ text: string; values: unknown[] }> = [];
+    const sql = (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const text = strings.join("$").replace(/\s+/g, " ").trim();
+      statements.push({ text, values });
+      return Promise.resolve([]);
+    };
+    const cleanup = createCloudCleanup({
+      db: { $client: sql } as unknown as Db,
+      redisDb2: new FakeRedis() as unknown as Redis,
+      litellm: new FakeKeyAdmin(),
+      r2: new FakeR2(),
+      images: { deleteAccount: async () => {} },
+      shares: { deleteAccount: async () => {} },
+      byok: { deleteAccount: async () => {} },
+    });
+    const sessionsStep = cleanup.deletionSteps().find((step) => step.name === "sessions");
+    expect(sessionsStep).toBeDefined();
+
+    await sessionsStep!.run("scope-owner", { tokens: [], session_ids: [] });
+
+    const compactionDeletes = statements.filter((statement) =>
+      statement.text.startsWith("DELETE FROM compaction_"),
+    );
+    expect(compactionDeletes.map((statement) => statement.text)).toEqual([
+      "DELETE FROM compaction_cursors WHERE session_id IN (SELECT id FROM sessions WHERE user_id = $)",
+      "DELETE FROM compaction_history_items WHERE session_id IN (SELECT id FROM sessions WHERE user_id = $)",
+      "DELETE FROM compaction_checkpoints WHERE session_id IN (SELECT id FROM sessions WHERE user_id = $)",
+    ]);
+    for (const statement of compactionDeletes) {
+      expect(statement.values).toEqual(["scope-owner"]);
+    }
+
+    const indexOf = (prefix: string) =>
+      statements.findIndex((statement) => statement.text.startsWith(prefix));
+    const authorities = [
+      "DELETE FROM subagent_attempts ",
+      "DELETE FROM subagent_logical_workers ",
+      "DELETE FROM runs ",
+      "DELETE FROM sessions ",
+    ];
+    for (const authority of authorities) {
+      expect(indexOf(authority), `${authority} must run`).toBeGreaterThanOrEqual(0);
+      for (const table of [
+        "compaction_cursors",
+        "compaction_history_items",
+        "compaction_checkpoints",
+      ]) {
+        expect(indexOf(`DELETE FROM ${table} `), `${table} precedes ${authority}`)
+          .toBeLessThan(indexOf(authority));
+      }
+    }
+  });
+});
+
 const UID = "acct-cleanup-user";
 const OTHER = "acct-cleanup-other";
 const SESSION = "11111111-1111-7111-8111-111111111111";
@@ -405,6 +466,78 @@ const OTHER_SESSION = "22222222-2222-7222-8222-222222222222";
 const SCHEDULE = "33333333-3333-7333-8333-333333333333";
 const SHARE_TOKEN = "A".repeat(43);
 const OTHER_SHARE_TOKEN = "B".repeat(43);
+
+async function compactionRows(db: Db, sessionId: string) {
+  return {
+    cursors: await db.$client`
+      SELECT * FROM compaction_cursors WHERE session_id = ${sessionId}
+      ORDER BY root_task_run_id, actor_kind, actor_id`,
+    checkpoints: await db.$client`
+      SELECT * FROM compaction_checkpoints WHERE session_id = ${sessionId}
+      ORDER BY checkpoint_id`,
+    history: await db.$client`
+      SELECT * FROM compaction_history_items WHERE session_id = ${sessionId}
+      ORDER BY position`,
+  };
+}
+
+async function canonicalRows(db: Db, userId: string) {
+  return {
+    sessions: await db.$client`
+      SELECT * FROM sessions WHERE user_id = ${userId} ORDER BY id`,
+    runs: await db.$client`
+      SELECT * FROM runs WHERE session_id IN
+        (SELECT id FROM sessions WHERE user_id = ${userId}) ORDER BY id`,
+    messages: await db.$client`
+      SELECT * FROM messages WHERE session_id IN
+        (SELECT id FROM sessions WHERE user_id = ${userId}) ORDER BY id`,
+  };
+}
+
+/** Populate every 0039 FK direction, including worker lineage and cursor -> checkpoint. */
+async function seedCloudCompactionFixture(db: Db, userId: string) {
+  const fixture = await seedSessionCleanupFixture(db, userId);
+  const [attempt] = await db.$client`
+    SELECT logical_worker_id FROM subagent_attempts WHERE id = ${fixture.attemptId}`;
+  const logicalWorkerId = attempt?.logical_worker_id;
+  if (typeof logicalWorkerId !== "string") {
+    throw new Error("cleanup fixture has no logical worker lineage");
+  }
+  const checkpointId = newId();
+  const compactionId = newId();
+  await db.$client`
+    INSERT INTO compaction_checkpoints
+      (checkpoint_id, compaction_id, session_id, root_task_run_id,
+       logical_worker_id, attempt_id, actor_id, actor_kind, request_digest,
+       model, context_limit, output_reserve_tokens, provider_reserve_tokens,
+       before_tokens, after_tokens, usage_source, cutoff_cursor,
+       cutoff_message_id, ledger_version, ledger, summary, active_state,
+       continuation, created_at)
+    VALUES
+      (${checkpointId}, ${compactionId}, ${fixture.sessionId}, ${fixture.runId},
+       ${logicalWorkerId}, ${fixture.attemptId}, ${logicalWorkerId}, 'worker',
+       ${"d".repeat(64)}, 'cleanup-model', 1000, 100, 10, 800, 200, 'measured',
+       ${fixture.messageId}, ${fixture.messageId}, 1, '{"v":1,"version":1}'::jsonb,
+       'cleanup checkpoint', '{}'::jsonb, 'continuing_existing_task', now())`;
+  await db.$client`
+    INSERT INTO compaction_history_items
+      (session_id, root_task_run_id, logical_worker_id, attempt_id,
+       kind, stable_id, event_cursor, object_ref, byte_length)
+    VALUES
+      (${fixture.sessionId}, ${fixture.runId}, ${logicalWorkerId}, ${fixture.attemptId},
+       'message', ${fixture.messageId}, ${fixture.messageId},
+       ${`postgres:messages/${fixture.messageId}`}, ${Buffer.byteLength("root cleanup prompt")})`;
+  await db.$client`
+    INSERT INTO compaction_cursors
+      (session_id, root_task_run_id, actor_kind, actor_id, logical_worker_id,
+       attempt_id, checkpoint_id, compaction_id, cutoff_cursor,
+       cutoff_message_id, ledger_version)
+    VALUES
+      (${fixture.sessionId}, ${fixture.runId}, 'worker', ${logicalWorkerId},
+       ${logicalWorkerId}, ${fixture.attemptId}, ${checkpointId}, ${compactionId},
+       ${fixture.messageId}, ${fixture.messageId}, 1)`;
+  return fixture;
+}
 
 describe.skipIf(!TEST_DATABASE_URL)("createCloudCleanup (real postgres)", () => {
   let db: Db;
@@ -420,7 +553,7 @@ describe.skipIf(!TEST_DATABASE_URL)("createCloudCleanup (real postgres)", () => 
       await admin.unsafe(`DROP SCHEMA IF EXISTS drizzle CASCADE`);
       await admin.unsafe(`DROP SEQUENCE IF EXISTS users_sandbox_uid_seq CASCADE`);
       await admin.unsafe(
-        `DROP TABLE IF EXISTS schedules, schedule_runs, devices, notifications, grants, file_manifests, workspace_objects, attachments, session_event_mirror, session_agent_state, runs, messages, sessions, users,` +
+        `DROP TABLE IF EXISTS compaction_cursors, compaction_history_items, compaction_checkpoints, schedules, schedule_runs, devices, notifications, grants, file_manifests, workspace_objects, attachments, session_event_mirror, session_agent_state, runs, messages, sessions, users,` +
           ` plans, mint_settings, user_plan_overrides, mint_audit, billing_purchases, image_jobs,` +
           ` image_deleted_accounts, image_cards, image_card_history, image_probe_log, image_probe_state,` +
           ` shares, share_forks, reports, account_deletions, byok_keys,` +
@@ -449,6 +582,9 @@ describe.skipIf(!TEST_DATABASE_URL)("createCloudCleanup (real postgres)", () => 
     await db.$client`DELETE FROM attachments`;
     await db.$client`DELETE FROM session_event_mirror`;
     await db.$client`DELETE FROM session_agent_state`;
+    await db.$client`DELETE FROM compaction_cursors`;
+    await db.$client`DELETE FROM compaction_history_items`;
+    await db.$client`DELETE FROM compaction_checkpoints`;
     for (const table of SESSION_CLEANUP_TABLES) {
       await db.$client.unsafe(`DELETE FROM ${table}`);
     }
@@ -570,9 +706,12 @@ describe.skipIf(!TEST_DATABASE_URL)("createCloudCleanup (real postgres)", () => 
     redis.sets.set("ipacct:1.2.3.4", new Set([UID, OTHER]));
   }
 
-  async function runAllSteps(ctx: Awaited<ReturnType<typeof cleanup.prepare>>) {
+  async function runAllSteps(
+    ctx: Awaited<ReturnType<typeof cleanup.prepare>>,
+    uid = UID,
+  ) {
     for (const step of cleanup.deletionSteps()) {
-      await step.run(UID, ctx);
+      await step.run(uid, ctx);
     }
   }
 
@@ -661,6 +800,59 @@ describe.skipIf(!TEST_DATABASE_URL)("createCloudCleanup (real postgres)", () => 
     // Idempotent replay: every step tolerates already-deleted rows.
     await runAllSteps(ctx);
   });
+
+  it("deletes populated 0039 rows before their authorities without cross-account collateral", async () => {
+    const target = await seedCloudCompactionFixture(db, UID);
+    const survivor = await seedCloudCompactionFixture(db, OTHER);
+    const targetBefore = await compactionRows(db, target.sessionId);
+    expect(targetBefore.cursors).toHaveLength(1);
+    expect(targetBefore.checkpoints).toHaveLength(1);
+    expect(targetBefore.history).toHaveLength(1);
+    const survivorCompactionBefore = await compactionRows(db, survivor.sessionId);
+    const survivorCanonicalBefore = await canonicalRows(db, survivor.userId);
+
+    const ctx = await cleanup.prepare(UID);
+    await expect(runAllSteps(ctx)).resolves.toBeUndefined();
+    expect(await compactionRows(db, target.sessionId)).toEqual({
+      cursors: [], checkpoints: [], history: [],
+    });
+    expect(await canonicalRows(db, target.userId)).toEqual({
+      sessions: [], runs: [], messages: [],
+    });
+
+    // Replaying the same durable context must neither fail nor widen the scope.
+    await expect(runAllSteps(ctx)).resolves.toBeUndefined();
+    expect(await compactionRows(db, survivor.sessionId)).toEqual(survivorCompactionBefore);
+    expect(await canonicalRows(db, survivor.userId)).toEqual(survivorCanonicalBefore);
+
+    // Do not leave the surviving account's lineage for a later database-wide assertion.
+    const survivorCtx = await cleanup.prepare(OTHER);
+    await runAllSteps(survivorCtx, OTHER);
+    expect(await compactionRows(db, survivor.sessionId)).toEqual({
+      cursors: [], checkpoints: [], history: [],
+    });
+  }, 60_000);
+
+  it("preserves legacy-empty cleanup and idempotent replay on the migrated 0039 schema", async () => {
+    await users.ensure(db, UID, null);
+    const session = await sessions.create(db, UID, "legacy compaction-empty cleanup");
+    const prompt = await messages.append(db, {
+      sessionId: session.id,
+      role: "user",
+      content: "legacy canonical prompt",
+    });
+    await runs.create(db, { sessionId: session.id, promptMessageId: prompt.id });
+    // Empty-table compatibility, not execution against a pre-0039 schema.
+    expect(await compactionRows(db, session.id)).toEqual({
+      cursors: [], checkpoints: [], history: [],
+    });
+
+    const ctx = await cleanup.prepare(UID);
+    await expect(runAllSteps(ctx)).resolves.toBeUndefined();
+    expect(await canonicalRows(db, UID)).toEqual({ sessions: [], runs: [], messages: [] });
+    await expect(runAllSteps(ctx)).resolves.toBeUndefined();
+    expect(await canonicalRows(db, UID)).toEqual({ sessions: [], runs: [], messages: [] });
+  }, 60_000);
 
   it("includes an orphaned LiteLLM key with no Redis keyid mapping (H4)", async () => {
     await seed();

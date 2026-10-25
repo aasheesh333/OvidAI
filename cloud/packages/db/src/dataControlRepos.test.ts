@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDb, migrate, type Db } from "./client.js";
 import { dataControlRepo } from "./dataControlRepos.js";
 import { createMigrationScratch, type MigrationScratch } from "./migrationTestKit.js";
+import { messages, newId, runs, sessions, users } from "./repos.js";
 import {
   expectSessionCleanupFixtureGone,
   seedSessionCleanupFixture,
@@ -19,8 +20,8 @@ import {
  *   - session-owned rows are removed before the sessions themselves, so a
  *     real database can never reject the transaction on a foreign key.
  *
- * Behaviour against real Postgres is exercised by the gateway's integration
- * tests; this file guards the shape of the SQL itself.
+ * Behaviour against real Postgres is exercised by the isolated cases below;
+ * this file also guards the shape of the SQL itself.
  */
 
 type Statement = { text: string; values: unknown[] };
@@ -101,6 +102,9 @@ describe("dataControlRepo", () => {
       "DELETE FROM system_request_responses",
       "DELETE FROM system_requests",
       "DELETE FROM run_outbox",
+      "DELETE FROM compaction_cursors",
+      "DELETE FROM compaction_history_items",
+      "DELETE FROM compaction_checkpoints",
       "DELETE FROM subagent_control_audit",
       "DELETE FROM subagent_reports",
       "DELETE FROM subagent_checkpoints",
@@ -116,6 +120,23 @@ describe("dataControlRepo", () => {
     }
     expect(indexOf("DELETE FROM system_request_responses"))
       .toBeLessThan(indexOf("DELETE FROM system_requests"));
+    // 0039: cursor -> checkpoint is NO ACTION, as is each compaction row's
+    // run/worker/attempt reference. Session cascades do not make those safe.
+    expect(indexOf("DELETE FROM compaction_cursors"))
+      .toBeLessThan(indexOf("DELETE FROM compaction_checkpoints"));
+    for (const dependent of [
+      "DELETE FROM compaction_cursors",
+      "DELETE FROM compaction_history_items",
+      "DELETE FROM compaction_checkpoints",
+    ]) {
+      for (const authority of [
+        "DELETE FROM subagent_attempts",
+        "DELETE FROM subagent_logical_workers",
+      ]) {
+        expect(indexOf(dependent), `${dependent} precedes ${authority}`)
+          .toBeLessThan(indexOf(authority));
+      }
+    }
 
     for (const child of [
       "DELETE FROM schedule_runs",
@@ -127,6 +148,9 @@ describe("dataControlRepo", () => {
       "DELETE FROM system_request_responses",
       "DELETE FROM system_requests",
       "DELETE FROM run_outbox",
+      "DELETE FROM compaction_cursors",
+      "DELETE FROM compaction_history_items",
+      "DELETE FROM compaction_checkpoints",
       "DELETE FROM subagent_control_audit",
       "DELETE FROM subagent_reports",
       "DELETE FROM subagent_checkpoints",
@@ -172,7 +196,79 @@ describe("dataControlRepo", () => {
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 
-describe.skipIf(!TEST_DATABASE_URL)("dataControlRepo 0033/0034 cleanup (isolated real Postgres)", () => {
+async function compactionRows(db: Db, sessionId: string) {
+  return {
+    cursors: await db.$client`
+      SELECT * FROM compaction_cursors WHERE session_id = ${sessionId}
+      ORDER BY root_task_run_id, actor_kind, actor_id`,
+    checkpoints: await db.$client`
+      SELECT * FROM compaction_checkpoints WHERE session_id = ${sessionId}
+      ORDER BY checkpoint_id`,
+    history: await db.$client`
+      SELECT * FROM compaction_history_items WHERE session_id = ${sessionId}
+      ORDER BY position`,
+  };
+}
+
+async function canonicalRows(db: Db, userId: string) {
+  return {
+    sessions: await db.$client`
+      SELECT * FROM sessions WHERE user_id = ${userId} ORDER BY id`,
+    runs: await db.$client`
+      SELECT * FROM runs WHERE session_id IN
+        (SELECT id FROM sessions WHERE user_id = ${userId}) ORDER BY id`,
+    messages: await db.$client`
+      SELECT * FROM messages WHERE session_id IN
+        (SELECT id FROM sessions WHERE user_id = ${userId}) ORDER BY id`,
+  };
+}
+
+/** Populate every 0039 FK direction, including worker lineage and cursor -> checkpoint. */
+async function seedCompactionCleanupFixture(db: Db, userId: string) {
+  const fixture = await seedSessionCleanupFixture(db, userId);
+  const [attempt] = await db.$client`
+    SELECT logical_worker_id FROM subagent_attempts WHERE id = ${fixture.attemptId}`;
+  const logicalWorkerId = attempt?.logical_worker_id;
+  if (typeof logicalWorkerId !== "string") {
+    throw new Error("cleanup fixture has no logical worker lineage");
+  }
+  const checkpointId = newId();
+  const compactionId = newId();
+  await db.$client`
+    INSERT INTO compaction_checkpoints
+      (checkpoint_id, compaction_id, session_id, root_task_run_id,
+       logical_worker_id, attempt_id, actor_id, actor_kind, request_digest,
+       model, context_limit, output_reserve_tokens, provider_reserve_tokens,
+       before_tokens, after_tokens, usage_source, cutoff_cursor,
+       cutoff_message_id, ledger_version, ledger, summary, active_state,
+       continuation, created_at)
+    VALUES
+      (${checkpointId}, ${compactionId}, ${fixture.sessionId}, ${fixture.runId},
+       ${logicalWorkerId}, ${fixture.attemptId}, ${logicalWorkerId}, 'worker',
+       ${"d".repeat(64)}, 'cleanup-model', 1000, 100, 10, 800, 200, 'measured',
+       ${fixture.messageId}, ${fixture.messageId}, 1, '{"v":1,"version":1}'::jsonb,
+       'cleanup checkpoint', '{}'::jsonb, 'continuing_existing_task', now())`;
+  await db.$client`
+    INSERT INTO compaction_history_items
+      (session_id, root_task_run_id, logical_worker_id, attempt_id,
+       kind, stable_id, event_cursor, object_ref, byte_length)
+    VALUES
+      (${fixture.sessionId}, ${fixture.runId}, ${logicalWorkerId}, ${fixture.attemptId},
+       'message', ${fixture.messageId}, ${fixture.messageId},
+       ${`postgres:messages/${fixture.messageId}`}, ${Buffer.byteLength("root cleanup prompt")})`;
+  await db.$client`
+    INSERT INTO compaction_cursors
+      (session_id, root_task_run_id, actor_kind, actor_id, logical_worker_id,
+       attempt_id, checkpoint_id, compaction_id, cutoff_cursor,
+       cutoff_message_id, ledger_version)
+    VALUES
+      (${fixture.sessionId}, ${fixture.runId}, 'worker', ${logicalWorkerId},
+       ${logicalWorkerId}, ${fixture.attemptId}, ${checkpointId}, ${compactionId},
+       ${fixture.messageId}, ${fixture.messageId}, 1)`;
+  return fixture;
+}
+
+describe.skipIf(!TEST_DATABASE_URL).sequential("dataControlRepo 0033/0034/0039 cleanup (isolated real Postgres)", () => {
   let scratch: MigrationScratch;
   let db: Db;
 
@@ -194,5 +290,62 @@ describe.skipIf(!TEST_DATABASE_URL)("dataControlRepo 0033/0034 cleanup (isolated
     await expectSessionCleanupFixtureGone(db);
     await expect(dataControlRepo.deleteAllData(db, "data-control-0033-user"))
       .resolves.toEqual({ sessions: 0, attachments: 0, artifacts: 0, workspaceFiles: 0 });
+  }, 60_000);
+
+  it("preserves legacy-empty deletion and zero-count replay when no 0039 rows exist", async () => {
+    const userId = newId();
+    await users.ensure(db, userId, null);
+    const session = await sessions.create(db, userId, "legacy compaction-empty cleanup");
+    const prompt = await messages.append(db, {
+      sessionId: session.id,
+      role: "user",
+      content: "legacy canonical prompt",
+    });
+    await runs.create(db, { sessionId: session.id, promptMessageId: prompt.id });
+    expect(await compactionRows(db, session.id)).toEqual({
+      cursors: [], checkpoints: [], history: [],
+    });
+
+    await expect(dataControlRepo.deleteAllData(db, userId)).resolves.toEqual({
+      sessions: 1, attachments: 0, artifacts: 0, workspaceFiles: 0,
+    });
+    expect(await canonicalRows(db, userId)).toEqual({ sessions: [], runs: [], messages: [] });
+    await expect(dataControlRepo.deleteAllData(db, userId)).resolves.toEqual({
+      sessions: 0, attachments: 0, artifacts: 0, workspaceFiles: 0,
+    });
+  }, 60_000);
+
+  it("deletes populated 0039 rows before their authorities without cross-account collateral", async () => {
+    const target = await seedCompactionCleanupFixture(db, newId());
+    const survivor = await seedCompactionCleanupFixture(db, newId());
+    const targetBefore = await compactionRows(db, target.sessionId);
+    expect(targetBefore.cursors).toHaveLength(1);
+    expect(targetBefore.checkpoints).toHaveLength(1);
+    expect(targetBefore.history).toHaveLength(1);
+    const survivorCompactionBefore = await compactionRows(db, survivor.sessionId);
+    const survivorCanonicalBefore = await canonicalRows(db, survivor.userId);
+
+    const first = await dataControlRepo.deleteAllData(db, target.userId);
+    expect(first).toEqual({ sessions: 2, attachments: 0, artifacts: 0, workspaceFiles: 0 });
+    expect(await compactionRows(db, target.sessionId)).toEqual({
+      cursors: [], checkpoints: [], history: [],
+    });
+    expect(await canonicalRows(db, target.userId)).toEqual({
+      sessions: [], runs: [], messages: [],
+    });
+    await expect(dataControlRepo.deleteAllData(db, target.userId)).resolves.toEqual({
+      sessions: 0, attachments: 0, artifacts: 0, workspaceFiles: 0,
+    });
+
+    // Exact history, checkpoints/cursors and canonical rows for another uid
+    // must survive both the initial delete and its idempotent replay verbatim.
+    expect(await compactionRows(db, survivor.sessionId)).toEqual(survivorCompactionBefore);
+    expect(await canonicalRows(db, survivor.userId)).toEqual(survivorCanonicalBefore);
+
+    // Leave the shared scratch database clean for subsequent cases.
+    await dataControlRepo.deleteAllData(db, survivor.userId);
+    expect(await compactionRows(db, survivor.sessionId)).toEqual({
+      cursors: [], checkpoints: [], history: [],
+    });
   }, 60_000);
 });
