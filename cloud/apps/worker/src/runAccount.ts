@@ -1,5 +1,6 @@
-import { accountSettings, customPresets, type Db } from "@ovid/db";
+import { accountSettings, customPresets, type Db, type InheritedModelContext } from "@ovid/db";
 import {
+  parseModelEffort,
   presetById,
   type AgentPreset,
   type ResolvedKey as AgentResolvedKey,
@@ -72,26 +73,57 @@ export async function loadRunAccountContext(db: Db, userId: string): Promise<Run
  * session/preset requested (an Ovid catalog id means nothing to the user's
  * provider).
  */
+export function snapshotRunModelContext(o: {
+  actorUserId: string;
+  requestedModel: string | null;
+  presetModel?: string | null;
+  presetTemperature?: number | null;
+  byokKeyId: string | null;
+  byokDefault: ByokDefault | null;
+  byokModel?: string;
+}): InheritedModelContext {
+  const presetModel = o.presetModel?.trim() ?? "";
+  const useDefault = o.byokKeyId === null && o.byokDefault !== null;
+  const byokModel = o.byokModel ?? (useDefault ? o.byokDefault!.model : undefined);
+  return {
+    requestedModel: presetModel !== "" ? presetModel : o.requestedModel,
+    byokKeyId: useDefault ? o.byokDefault!.keyId : o.byokKeyId,
+    ...(byokModel !== undefined ? { byokModel } : {}),
+    ...(o.presetTemperature !== undefined ? { temperature: o.presetTemperature } : {}),
+    actorUserId: o.actorUserId,
+  };
+}
+
 export function runKeyAdapter(o: {
   resolver: KeyResolver;
   ctx: { unattended: boolean; byokKeyId: string | null };
   byokDefault: ByokDefault | null;
   byokModel?: string;
   defaultModel: string;
+  /** A dispatch snapshot freezes both model selection and billing identity. */
+  modelContext?: InheritedModelContext;
 }): {
   ctx: { unattended: boolean; byokKeyId: string | null };
   resolve(uid: string, requestedModel: string): Promise<AgentResolvedKey | null>;
 } {
-  const useDefault = o.ctx.byokKeyId === null && o.byokDefault !== null;
-  const ctx = useDefault ? { ...o.ctx, byokKeyId: o.byokDefault!.keyId } : o.ctx;
+  const useDefault = o.modelContext === undefined && o.ctx.byokKeyId === null && o.byokDefault !== null;
+  const ctx = o.modelContext !== undefined
+    ? { ...o.ctx, byokKeyId: o.modelContext.byokKeyId }
+    : useDefault ? { ...o.ctx, byokKeyId: o.byokDefault!.keyId } : o.ctx;
   return {
     ctx,
     async resolve(uid, requestedModel) {
       const key = await o.resolver.resolveForRun(uid, ctx);
       if (key === null) return null;
-      const model = key.kind === "byok"
-        ? (o.byokModel ?? (useDefault ? o.byokDefault!.model : requestedModel))
+      const captured = o.modelContext !== undefined
+        ? o.modelContext.requestedModel
         : requestedModel;
+      // An inherited null is explicit Auto; only an absent snapshot falls back
+      // to the caller's current model. Ordinary legacy jobs are unchanged.
+      const capturedModel = captured === null ? "" : parseModelEffort(captured).model;
+      const model = key.kind === "byok"
+        ? (o.byokModel ?? o.modelContext?.byokModel ?? (useDefault ? o.byokDefault!.model : capturedModel))
+        : capturedModel;
       return agentKeyFor(key, model, o.defaultModel);
     },
   };

@@ -26,7 +26,7 @@
 
 import { randomUUID } from "node:crypto";
 
-import { messages, runs, type Db } from "@ovid/db";
+import { messages, runs, type Db, type InheritedModelContext } from "@ovid/db";
 
 import { createDeltaCoalescer, deltaCoalesceMsFromEnv } from "./deltaCoalescer.js";
 
@@ -54,7 +54,7 @@ import type {
   SkillCatalog,
   TodoItem,
 } from "./ports.js";
-import { sandboxFailureCode } from "./ports.js";
+import { ModelQuotaExceededError, sandboxFailureCode } from "./ports.js";
 import {
   computeToolRoster,
   isToolPermitted,
@@ -155,6 +155,10 @@ export interface AgentRunJob {
    * this set; absent → the normal computeToolRoster projection.
    */
   roster?: readonly ToolSpec[];
+  /** Resolved dispatch model/billing identity; never contains a raw key. */
+  modelContext?: InheritedModelContext;
+  /** Originating client provenance for durable dispatch admission. */
+  provenance?: "web" | "android" | "server";
 }
 
 export interface NormalizedRunJob extends AgentRunJob {
@@ -194,6 +198,9 @@ export interface LoopDeps {
    * the user's custom presets. Absent = built-ins only (`presetById`).
    */
   presets?: (id: string | null) => AgentPreset | null;
+  /** Worker composition binds the current root/child snapshot through async context. */
+  modelContextForCurrentRun?: () => InheritedModelContext | undefined;
+  runProvenanceForCurrentRun?: () => "web" | "android" | "server" | undefined;
   /**
    * P3 Task 16: spill oversized tool output to `.spill/` before the event /
    * tool row (default true). The P2-compat path passes false so P2's caps
@@ -292,6 +299,10 @@ const MUTATING_TOOLS: ReadonlySet<string> = new Set([
   "notebook_edit",
   "run_code",
   "dispatch_agent",
+  "dispatch_agents",
+  "reconsider_deferred_subagents",
+  "cancel_deferred_subagent",
+  "reprioritize_deferred_subagent",
   "workflow",
   "ralph",
   "request_working_folder",
@@ -689,16 +700,23 @@ export async function runAgentLoop(
   // ── key resolution precedes run_started (P1: key_not_minted has no
   // run_started event — runProcessor.ts:236–241) ────────────────────────────
   let state = await deps.state.get(sessionId);
+  const inheritedModelContext = deps.modelContextForCurrentRun?.() ?? job.modelContext;
 
   const routeFor = (s: SessionAgentState): Promise<ResolvedRoute | null> =>
     resolveRoute(
       {
-        userId,
-        requestedModel: s.modelPin,
-        preset: (() => {
-          const p = presetFor(s, deps);
-          return p === null ? null : { model: p.model, temperature: p.temperature };
-        })(),
+        userId: inheritedModelContext?.actorUserId ?? userId,
+        // Presence of an inherited snapshot is authoritative: null is the
+        // accepted Auto sentinel, not absence/fallback to the host pin.
+        requestedModel: inheritedModelContext !== undefined
+          ? inheritedModelContext.requestedModel
+          : s.modelPin,
+        preset: inheritedModelContext !== undefined
+          ? { model: null, temperature: inheritedModelContext.temperature ?? null }
+          : (() => {
+              const p = presetFor(s, deps);
+              return p === null ? null : { model: p.model, temperature: p.temperature };
+            })(),
       },
       { keys: deps.keys, litellmBaseUrl: deps.litellmBaseUrl, defaultModel: deps.defaultModel },
     );
@@ -838,8 +856,12 @@ export async function runAgentLoop(
     return { status: "cancelled", code: "cancelled", message: CANCELLED_MESSAGE };
   };
 
-  const failed = async (code: string, message?: string): Promise<LoopResult> => {
-    await emit("run_failed", { code, ...(message !== undefined ? { message } : {}) });
+  const failed = async (
+    code: string,
+    message?: string,
+    detail?: Record<string, unknown>,
+  ): Promise<LoopResult> => {
+    await emit("run_failed", { code, ...(message !== undefined ? { message } : {}), ...detail });
     // The run row carries the canonical failure CODE, never the provider's
     // prose: the scheduler's settle pass classifies retryability on an exact
     // match of last_error against RETRYABLE_RUN_CODES (schedulerSettle.ts),
@@ -868,6 +890,7 @@ export async function runAgentLoop(
   ): Promise<
     | { kind: "ok"; response: AgentResponse }
     | { kind: "failed"; code: "model_transient_exhausted" | "model_terminal"; message: string }
+    | { kind: "failed"; code: "quota_exceeded"; message: string; window: "day" | "month"; resetsAt: Date }
     | { kind: "cancelled" }
   > => {
     const transport = deps.transports[route!.transportKind];
@@ -903,6 +926,15 @@ export async function runAgentLoop(
         if (isCancelled(rt)) return { kind: "cancelled" };
         const message = messageOf(err);
 
+        if (err instanceof ModelQuotaExceededError) {
+          return {
+            kind: "failed",
+            code: "quota_exceeded",
+            message: err.message,
+            window: err.window,
+            resetsAt: err.resetsAt,
+          };
+        }
         if (err instanceof TransientModelError) {
           if (attempt >= MAX_MODEL_ATTEMPTS - 1) {
             return { kind: "failed", code: "model_transient_exhausted", message };
@@ -1110,7 +1142,13 @@ export async function runAgentLoop(
           msgs = [...compacted.messages];
           continue;
         }
-        return await failed(attempt.code, attempt.message);
+        return await failed(
+          attempt.code,
+          attempt.message,
+          attempt.code === "quota_exceeded"
+            ? { window: attempt.window, resetsAt: attempt.resetsAt.toISOString() }
+            : undefined,
+        );
       }
 
       // ── 7. post_request hook (fire-and-forget, never injected) ─────────
@@ -1453,7 +1491,10 @@ export async function runAgentLoop(
         let dispatched = false;
         if (result === null) {
           dispatched = true;
-          const toolCtx: ToolContext = {
+          const toolCtx: ToolContext & {
+            modelContext?: InheritedModelContext;
+            provenance?: "web" | "android" | "server";
+          } = {
             sessionId,
             runId,
             userId,
@@ -1464,6 +1505,8 @@ export async function runAgentLoop(
             unattended: job.unattended,
             callKey,
             signal: abortSignal,
+            ...(inheritedModelContext !== undefined ? { modelContext: inheritedModelContext } : {}),
+            provenance: deps.runProvenanceForCurrentRun?.() ?? job.provenance ?? "server",
           };
           try {
             // T9-C1: toolName is part of the single withToolTimeout arity;

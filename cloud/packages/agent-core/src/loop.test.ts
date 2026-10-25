@@ -19,6 +19,7 @@ import {
   sessions,
   users,
   type Db,
+  type InheritedModelContext,
   type RunRow,
 } from "@ovid/db";
 import type { SessionEventType } from "@ovid/shared";
@@ -366,6 +367,7 @@ describe.skipIf(!TEST_DATABASE_URL)("runAgentLoop (real postgres)", () => {
     windowTokens?: number;
     unattended?: boolean;
     turnContext?: string;
+    modelContext?: InheritedModelContext;
   }): Promise<Ctx & { transport: AgentTransport; seedRunId: string; runRow: () => Promise<RunRow | null> }> {
     const seeded = o.preSeeded ?? (await seedSession());
     const { userId, sessionId } = seeded;
@@ -407,6 +409,7 @@ describe.skipIf(!TEST_DATABASE_URL)("runAgentLoop (real postgres)", () => {
       ...(o.mode !== undefined ? { mode: o.mode } : {}),
       ...(o.roster !== undefined ? { roster: o.roster } : {}),
       ...(o.isSubagent !== undefined ? { isSubagent: o.isSubagent } : {}),
+      ...(o.modelContext !== undefined ? { modelContext: o.modelContext } : {}),
     };
     const controller = new AbortController();
     const rt: RunTime = { cancelled: false, generation: 1, signal: controller.signal };
@@ -453,6 +456,44 @@ describe.skipIf(!TEST_DATABASE_URL)("runAgentLoop (real postgres)", () => {
     const { rows } = await messages.page(db, c.job.sessionId, { limit: 10 });
     expect(rows[0]!.role).toBe("assistant");
     expect(rows[0]!.content).toBe("Hello world");
+  });
+
+  it("inherited null means accepted Auto while an absent context preserves host-pin fallback", async () => {
+    const acceptedAuto = await makeCtx({
+      script: [{ text: "auto done" }],
+      statePatch: { modelPin: "host-pin" },
+      modelContext: {
+        requestedModel: null,
+        byokKeyId: null,
+        actorUserId: "sender-user",
+      },
+    });
+    acceptedAuto.deps.keys = {
+      resolve: async (_uid, requestedModel) => ({
+        kind: "litellm" as const,
+        apiKey: "sk-test",
+        baseUrl: "https://litellm.test",
+        model: requestedModel === "" ? "ovid-test-model" : requestedModel,
+      }),
+    };
+    expect((await runAgentLoop(acceptedAuto.job, acceptedAuto.deps, acceptedAuto.rt)).status)
+      .toBe("completed");
+    expect(acceptedAuto.requests[0]?.model).toBe("ovid-test-model");
+
+    const legacy = await makeCtx({
+      script: [{ text: "legacy done" }],
+      statePatch: { modelPin: "host-pin" },
+    });
+    legacy.deps.keys = {
+      resolve: async (_uid, requestedModel) => ({
+        kind: "litellm" as const,
+        apiKey: "sk-test",
+        baseUrl: "https://litellm.test",
+        model: requestedModel === "" ? "ovid-test-model" : requestedModel,
+      }),
+    };
+    expect((await runAgentLoop(legacy.job, legacy.deps, legacy.rt)).status).toBe("completed");
+    expect(legacy.requests[0]?.model).toBe("host-pin");
   });
 
   it("retries transients with the P1 ladder (sleeps 3000/9000) and reports the attempt about to run", async () => {
@@ -800,6 +841,33 @@ describe.skipIf(!TEST_DATABASE_URL)("runAgentLoop (real postgres)", () => {
     const row = c.requests[1]!.messages.find((m) => m.role === "tool")!;
     expect(row.content.startsWith("READ-ONLY MODE: this action is blocked.")).toBe(true);
   });
+
+  for (const name of [
+    "dispatch_agents",
+    "reconsider_deferred_subagents",
+    "cancel_deferred_subagent",
+    "reprioritize_deferred_subagent",
+  ]) {
+    it(`unattended safe mode denies orchestration mutation ${name} before execution`, async () => {
+      const mutation = tool(name);
+      const approvals = recordingApprovals("allow");
+      const c = await makeCtx({
+        tools: [mutation],
+        approvals,
+        unattended: true,
+        statePatch: { mode: "safe" },
+        script: [
+          { text: "", toolCalls: [{ id: "c1", name, args: {} }] },
+          { text: "done" },
+        ],
+      });
+      await runAgentLoop(c.job, c.deps, c.rt);
+      expect(mutation.calls).toHaveLength(0);
+      expect(approvals.requests).toHaveLength(0);
+      const row = c.requests[1]!.messages.find((m) => m.role === "tool")!;
+      expect(row.content.startsWith("READ-ONLY MODE: this action is blocked.")).toBe(true);
+    });
+  }
 
   // Wave 1a (CH-001): Read-Only "asks for permission before every shell,
   // browser, or write action".

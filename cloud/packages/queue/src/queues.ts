@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Queue, Worker } from "bullmq";
 import type {
   ConnectionOptions,
@@ -40,6 +41,78 @@ export const PLUGIN_INSTALLS = "plugin-installs";
 
 /** Job name callers pass to `pluginInstalls.add(PLUGIN_INSTALL_JOB_NAME, …)`. */
 export const PLUGIN_INSTALL_JOB_NAME = "plugin-install";
+
+export type AgentRunSource =
+  | "interactive"
+  | "schedule_create"
+  | "schedule_run_now"
+  | "schedule_tick"
+  | "schedule_retry"
+  | "parent_wake"
+  | "subagent"
+  | "collab";
+
+export interface AgentRunModelContext {
+  requestedModel: string | null;
+  byokKeyId: string | null;
+  byokModel?: string;
+  temperature?: number | null;
+  actorUserId: string;
+}
+
+export interface AgentRunCollab {
+  roomId: string;
+  /** Opaque membership identity; deliberately not constrained to UUID syntax. */
+  participantId: string;
+  membershipGeneration: number;
+  leaseId: string;
+  leaseGeneration: number;
+  outboxId: string;
+  rootRunId: string;
+}
+
+/** Publication/claim fence carried by the exact queue payload, never a side channel. */
+export interface AgentRunCollabPublication {
+  outboxStatus: "published";
+  /** Minimum durable attempt; retries may advance it without changing the logical job. */
+  outboxAttempts: number;
+  runStatus: "queued";
+  turnStatus: "queued";
+  leaseGeneration: number;
+  authorityToken: string;
+}
+
+export interface CollabAuthorityTokenInput {
+  roomId: string;
+  sessionId: string;
+  ownerUserId: string;
+  actorUserId: string;
+  participantId: string;
+  roomGeneration: number;
+  membershipGeneration: number;
+  leaseId: string;
+  leaseGeneration: number;
+  rootRunId: string;
+  turnId: string;
+}
+
+/** Deterministic secret-free fence shared by gateway publication and worker claim. */
+export function collabAuthorityToken(input: CollabAuthorityTokenInput): string {
+  return createHash("sha256").update(JSON.stringify([
+    "collab-authority-v1",
+    input.roomId,
+    input.sessionId,
+    input.ownerUserId,
+    input.actorUserId,
+    input.participantId,
+    input.roomGeneration,
+    input.membershipGeneration,
+    input.leaseId,
+    input.leaseGeneration,
+    input.rootRunId,
+    input.turnId,
+  ])).digest("hex");
+}
 
 export interface AgentRunJob {
   runId: string;
@@ -107,10 +180,51 @@ export interface AgentRunJob {
    * only; absent = no project context beyond the chat's own project.
    */
   projectRefs?: string[];
+  /** Initiating billing actor and run provenance; userId remains workspace owner. */
+  source?: AgentRunSource;
+  actorUserId?: string;
+  provenance?: "web" | "android" | "server";
+  /** Non-secret model/billing snapshot; raw credentials are never accepted. */
+  modelContext?: AgentRunModelContext;
+  /** Host workspace owner; userId remains that same owner for Collab jobs. */
+  ownerUserId?: string;
+  /** Run-scoped accepted model; absent means Auto. */
+  requestedModel?: string;
+  /** Root membership/lease/outbox lineage; participant IDs remain opaque. */
+  collab?: AgentRunCollab;
+  /** Expected publication state and current-authority proof for worker claim. */
+  collabPublication?: AgentRunCollabPublication;
 }
 
 // Wire-format ids are plain nonempty strings (same convention as
 // @ovid/shared's sessionEventSchema); UUIDv7 shape is a DB-boundary concern.
+const agentRunModelContextSchema: z.ZodType<AgentRunModelContext> = z.object({
+  requestedModel: z.string().min(1).nullable(),
+  byokKeyId: z.string().min(1).nullable(),
+  byokModel: z.string().trim().min(1).max(160).optional(),
+  temperature: z.number().finite().nullable().optional(),
+  actorUserId: z.string().min(1),
+}).strict();
+
+const agentRunCollabSchema: z.ZodType<AgentRunCollab> = z.object({
+  roomId: z.string().min(1),
+  participantId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+  membershipGeneration: z.number().int().positive(),
+  leaseId: z.string().min(1),
+  leaseGeneration: z.number().int().positive(),
+  outboxId: z.string().min(1),
+  rootRunId: z.string().min(1),
+}).strict();
+
+const agentRunCollabPublicationSchema: z.ZodType<AgentRunCollabPublication> = z.object({
+  outboxStatus: z.literal("published"),
+  outboxAttempts: z.number().int().positive(),
+  runStatus: z.literal("queued"),
+  turnStatus: z.literal("queued"),
+  leaseGeneration: z.number().int().positive(),
+  authorityToken: z.string().regex(/^[0-9a-f]{64}$/),
+}).strict();
+
 const scheduleRunRefSchema: z.ZodType<ScheduleRunRef> = z.object({
   scheduleId: z.string().min(1),
   scheduleRunId: z.string().min(1),
@@ -133,6 +247,23 @@ export const agentRunJobSchema: z.ZodType<AgentRunJob> = z.object({
   schedule: scheduleRunRefSchema.optional(),
   sessionRefs: z.array(z.string().min(1)).optional(),
   projectRefs: z.array(z.string().min(1)).optional(),
+  source: z.enum([
+    "interactive",
+    "schedule_create",
+    "schedule_run_now",
+    "schedule_tick",
+    "schedule_retry",
+    "parent_wake",
+    "subagent",
+    "collab",
+  ]).optional(),
+  actorUserId: z.string().min(1).optional(),
+  provenance: z.enum(["web", "android", "server"]).optional(),
+  modelContext: agentRunModelContextSchema.optional(),
+  ownerUserId: z.string().min(1).optional(),
+  requestedModel: z.string().trim().min(1).max(160).optional(),
+  collab: agentRunCollabSchema.optional(),
+  collabPublication: agentRunCollabPublicationSchema.optional(),
 });
 
 /** Why a workspace is being hibernated (warm → cold). */

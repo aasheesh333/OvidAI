@@ -8,6 +8,7 @@ import {
   AGENT_RUNS_DEFAULT_CONCURRENCY,
   AGENT_RUNS_STALLED_INTERVAL_MS,
   agentRunJobSchema,
+  collabAuthorityToken,
   addScheduleMirrorJob,
   createAgentRunsWorker,
   createHibernateWorker,
@@ -77,6 +78,116 @@ describe("agentRunJobSchema", () => {
       ...valid, byokKeyId: "k1", byokModel: "gpt-4.1-mini",
     });
     expect(agentRunJobSchema.safeParse({ ...valid, byokModel: "" }).success).toBe(false);
+  });
+
+  it("retains run source, initiating actor, provenance, and non-secret inherited model context", () => {
+    const modelContext = {
+      requestedModel: "captured-model · high",
+      byokKeyId: "byok-key-id",
+      byokModel: "provider-model",
+      temperature: 0.2,
+      actorUserId: "participant",
+    };
+    expect(agentRunJobSchema.parse({
+      ...valid,
+      source: "collab",
+      actorUserId: "participant",
+      provenance: "android",
+      modelContext,
+    })).toEqual({
+      ...valid,
+      source: "collab",
+      actorUserId: "participant",
+      provenance: "android",
+      modelContext,
+    });
+    expect(agentRunJobSchema.safeParse({ ...valid, source: "invalid" }).success).toBe(false);
+    expect(agentRunJobSchema.safeParse({
+      ...valid,
+      modelContext: { ...modelContext, apiKey: "must-not-appear" },
+    }).success).toBe(false);
+  });
+
+  // UNEXECUTED round-2 additions under HEAVY-COMMANDS-PAUSED.md.
+  it("retains Collab owner/actor, model/BYOK, host tier and publication fence lineage", () => {
+    const collab = {
+      roomId: "room-1",
+      participantId: `p${"0".repeat(31)}1`,
+      membershipGeneration: 4,
+      leaseId: "lease-1",
+      leaseGeneration: 9,
+      outboxId: "outbox-1",
+      rootRunId: "run-1",
+    };
+    const collabPublication = {
+      outboxStatus: "published" as const,
+      outboxAttempts: 1,
+      runStatus: "queued" as const,
+      turnStatus: "queued" as const,
+      leaseGeneration: 9,
+      authorityToken: "a".repeat(64),
+    };
+    const enriched = {
+      ...valid,
+      userId: "host-owner",
+      ownerUserId: "host-owner",
+      actorUserId: "sender-user",
+      source: "collab" as const,
+      requestedModel: "provider/model",
+      tier: "free",
+      byokKeyId: "sender-key-id",
+      byokModel: "gpt-4.1-mini",
+      modelContext: {
+        requestedModel: "provider/model",
+        byokKeyId: "sender-key-id",
+        byokModel: "gpt-4.1-mini",
+        temperature: null,
+        actorUserId: "sender-user",
+      },
+      collab,
+      collabPublication,
+    };
+
+    expect(agentRunJobSchema.parse(enriched)).toEqual(enriched);
+    expect(agentRunJobSchema.safeParse(valid)).toEqual({ success: true, data: valid });
+    expect(agentRunJobSchema.safeParse({
+      ...enriched,
+      collab: { ...collab, participantId: "participant\nforgery" },
+    }).success).toBe(false);
+    expect(agentRunJobSchema.safeParse({
+      ...enriched,
+      collabPublication: { ...collabPublication, authorityToken: "short" },
+    }).success).toBe(false);
+    expect(agentRunJobSchema.safeParse({
+      ...enriched,
+      collabPublication: { ...collabPublication, outboxAttempts: -1 },
+    }).success).toBe(false);
+    expect(agentRunJobSchema.safeParse({
+      ...enriched,
+      collabPublication: { ...collabPublication, outboxAttempts: 0 },
+    }).success).toBe(false);
+  });
+
+  it("derives a deterministic authority token and changes it when any fence identity changes", () => {
+    const authority = {
+      roomId: "room-1",
+      sessionId: "session-1",
+      ownerUserId: "host-user",
+      actorUserId: "sender-user",
+      participantId: `p${"0".repeat(31)}1`,
+      roomGeneration: 4,
+      membershipGeneration: 4,
+      leaseId: "lease-1",
+      leaseGeneration: 9,
+      rootRunId: "run-1",
+      turnId: "turn-1",
+    };
+    const first = collabAuthorityToken(authority);
+    expect(first).toMatch(/^[0-9a-f]{64}$/);
+    expect(collabAuthorityToken({ ...authority })).toBe(first);
+    expect(collabAuthorityToken({ ...authority, membershipGeneration: 5 })).not.toBe(first);
+    expect(collabAuthorityToken({ ...authority, participantId: `p${"0".repeat(31)}2` })).not.toBe(first);
+    expect(collabAuthorityToken({ ...authority, leaseGeneration: 10 })).not.toBe(first);
   });
 
   it("rejects a job missing prompt", () => {

@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { accountSettings, customPresets, type Db } from "@ovid/db";
-import type { KeyResolver } from "@ovid/shared";
-import { agentPresetFromCustom, loadRunAccountContext, presetResolverFor, runKeyAdapter } from "./runAccount.js";
+import { resolveRoute } from "@ovid/agent-core";
+import { DEFAULT_NOTIFICATION_PREFERENCES, type KeyResolver } from "@ovid/shared";
+import { agentPresetFromCustom, loadRunAccountContext, presetResolverFor, runKeyAdapter, snapshotRunModelContext } from "./runAccount.js";
 
 // Wave 4 — the per-run account context (BYOK default routing, custom presets).
 
@@ -30,7 +31,11 @@ describe("loadRunAccountContext", () => {
   });
 
   it("fails closed when custom tool restrictions cannot be read", async () => {
-    vi.spyOn(accountSettings, "get").mockResolvedValue({ notificationsEnabled: true, byokDefault: null });
+    vi.spyOn(accountSettings, "get").mockResolvedValue({
+      notificationsEnabled: true,
+      notificationPreferences: DEFAULT_NOTIFICATION_PREFERENCES,
+      byokDefault: null,
+    });
     vi.spyOn(customPresets, "list").mockRejectedValue(new Error("presets unavailable"));
     await expect(loadRunAccountContext({} as Db, "u1")).rejects.toThrow("presets unavailable");
   });
@@ -103,6 +108,107 @@ describe("runKeyAdapter", () => {
       defaultModel: "d",
     });
     expect(await keys.resolve("u1", "auto")).toBeNull();
+  });
+});
+
+describe("inherited model and billing identity", () => {
+  it("snapshots the selected preset model and effective BYOK identity without secrets", () => {
+    expect(snapshotRunModelContext({
+      actorUserId: "participant",
+      requestedModel: "picker-model",
+      presetModel: "preset-model",
+      byokKeyId: null,
+      byokDefault: { keyId: KEY_ID, model: "provider-model" },
+    })).toEqual({
+      requestedModel: "preset-model",
+      byokKeyId: KEY_ID,
+      byokModel: "provider-model",
+      actorUserId: "participant",
+    });
+  });
+
+  it("inherited null is explicit Auto for both billing classes, never the host pin", async () => {
+    const resolver = recordingResolver();
+    const ovidAuto = runKeyAdapter({
+      resolver,
+      ctx: { unattended: false, byokKeyId: null },
+      modelContext: {
+        requestedModel: null,
+        byokKeyId: null,
+        actorUserId: "sender-user",
+      },
+      byokDefault: null,
+      defaultModel: "auto-default",
+    });
+    expect((await ovidAuto.resolve("sender-user", "host-pin"))?.model).toBe("auto-default");
+
+    const byokAuto = runKeyAdapter({
+      resolver,
+      ctx: { unattended: false, byokKeyId: KEY_ID },
+      modelContext: {
+        requestedModel: null,
+        byokKeyId: KEY_ID,
+        byokModel: "accepted-provider-model",
+        actorUserId: "sender-user",
+      },
+      byokDefault: null,
+      defaultModel: "auto-default",
+    });
+    expect((await byokAuto.resolve("sender-user", "host-pin"))?.model)
+      .toBe("accepted-provider-model");
+    expect(resolver.ctxs.map((ctx) => ctx.byokKeyId ?? null)).toEqual([null, KEY_ID]);
+  });
+
+  it("re-resolves only the captured key and never adopts a later billing default", async () => {
+    const resolver = recordingResolver();
+    const keys = runKeyAdapter({
+      resolver,
+      ctx: { unattended: false, byokKeyId: "new-default-must-not-apply" },
+      modelContext: {
+        requestedModel: "captured-model",
+        byokKeyId: null,
+        actorUserId: "u1",
+      },
+      byokDefault: { keyId: KEY_ID, model: "new-default-model" },
+      defaultModel: "auto-default",
+    });
+    expect((await keys.resolve("u1", "changed-picker-model"))?.model).toBe("captured-model");
+    expect(resolver.ctxs[0]!.byokKeyId).toBeNull();
+
+    const revoked = runKeyAdapter({
+      resolver: { resolveForRun: async () => null },
+      ctx: { unattended: false, byokKeyId: null },
+      modelContext: {
+        requestedModel: "captured-model",
+        byokKeyId: "revoked-key",
+        byokModel: "captured-provider-model",
+        actorUserId: "u1",
+      },
+      byokDefault: null,
+      defaultModel: "auto-default",
+    });
+    expect(await revoked.resolve("u1", "changed-picker-model")).toBeNull();
+  });
+});
+
+describe("captured route compatibility", () => {
+  it("strips an inherited effort suffix without losing route effort", async () => {
+    const keys = runKeyAdapter({
+      resolver: recordingResolver(),
+      ctx: { unattended: false, byokKeyId: null },
+      byokDefault: null,
+      modelContext: {
+        requestedModel: "captured-model · high",
+        byokKeyId: null,
+        actorUserId: "u1",
+      },
+      defaultModel: "auto-default",
+    });
+    const route = await resolveRoute(
+      { userId: "u1", requestedModel: "captured-model · high", preset: null },
+      { keys, litellmBaseUrl: "https://litellm.test", defaultModel: "auto-default" },
+    );
+    expect(route).toMatchObject({ model: "captured-model", effort: "high" });
   });
 });
 
