@@ -3,6 +3,7 @@ import {
   DATA_SEARCH_BLOCKED,
   DATA_SEARCH_DESCRIPTORS,
   DATA_SEARCH_PROVIDERS,
+  dataSearchProviderOperation,
 } from "../../src/rest/descriptors/dataSearch.js";
 import { CURATED_DESCRIPTORS } from "../../src/rest/descriptors/index.js";
 import {
@@ -14,6 +15,7 @@ import {
   validateProviderArgs,
   validateProviderDefinition,
   type ProviderDefinition,
+  type ProviderOperation,
 } from "../../src/providers/types.js";
 
 interface CandidateCase {
@@ -33,9 +35,15 @@ interface CandidateCase {
 const CANDIDATES: readonly CandidateCase[] = [
   {
     id: "docusign",
-    supported: false,
-    blockReason: "OAuth/UserInfo discovery and rotating-token lifecycle",
-    doc: "https://developers.docusign.com/platform/auth/reference/user-info/",
+    supported: true,
+    operation: "list_envelopes",
+    method: "GET",
+    baseUrl: "https://account.docusign.com",
+    path: "/restapi/v2.1/accounts/{account_id}/envelopes",
+    auth: "bearer",
+    authProfileId: "docusign-esignature-userinfo-read",
+    scope: "signature",
+    doc: "https://developers.docusign.com/docs/esign-rest-api/reference/envelopes/envelopes/liststatuschanges/",
   },
   {
     id: "typeform",
@@ -99,9 +107,15 @@ const CANDIDATES: readonly CandidateCase[] = [
   },
   {
     id: "snowflake",
-    supported: false,
-    blockReason: "single-statement SQL, bind, partition and warehouse-cost handler",
-    doc: "https://docs.snowflake.com/en/developer-guide/sql-api/reference",
+    supported: true,
+    operation: "list_databases",
+    method: "GET",
+    baseUrl: "{account_url}",
+    path: "/api/v2/databases",
+    auth: "bearer",
+    authProfileId: "snowflake-rest-database-usage",
+    scope: "USAGE (database)",
+    doc: "https://docs.snowflake.com/en/developer-guide/snowflake-rest-api/reference/database",
   },
   {
     id: "bigquery",
@@ -117,9 +131,15 @@ const CANDIDATES: readonly CandidateCase[] = [
   },
   {
     id: "databricks",
-    supported: false,
-    blockReason: "OAuth/SQL policy, chunk and external-link handler",
-    doc: "https://docs.databricks.com/api/statement-execution/v1/statement-execution",
+    supported: true,
+    operation: "list_warehouses",
+    method: "GET",
+    baseUrl: "{workspace_url}",
+    path: "/api/2.0/sql/warehouses",
+    auth: "bearer",
+    authProfileId: "databricks-warehouse-read-scoped-pat-or-u2m",
+    scope: "Scoped PAT: sql; U2M: all-apis offline_access plus warehouse-only workspace permissions",
+    doc: "https://docs.databricks.com/api/workspace/warehouses/list",
   },
   {
     id: "pinecone",
@@ -135,15 +155,27 @@ const CANDIDATES: readonly CandidateCase[] = [
   },
   {
     id: "elasticsearch",
-    supported: false,
-    blockReason: "deployment-pinned tenant origin and PIT-aware scoped-key handler",
-    doc: "https://www.elastic.co/docs/api/doc/elasticsearch",
+    supported: true,
+    operation: "get_document",
+    method: "GET",
+    baseUrl: "{instance_url}",
+    path: "/{index}/_doc/{document_id}",
+    auth: "apiKeyHeader",
+    authProfileId: "elasticsearch-named-index-read",
+    scope: "read (named index)",
+    doc: "https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-get",
   },
   {
     id: "typesense",
-    supported: false,
-    blockReason: "tenant origin and collection-scoped HMAC key handler",
-    doc: "https://typesense.org/docs/30.2/api/api-keys.html",
+    supported: true,
+    operation: "get_collection",
+    method: "GET",
+    baseUrl: "{instance_url}",
+    path: "/collections/{collection}",
+    auth: "apiKeyHeader",
+    authProfileId: "typesense-collection-get",
+    scope: "collections:get (named collection)",
+    doc: "https://typesense.org/docs/30.2/api/collections.html",
   },
   {
     id: "brave-search",
@@ -171,15 +203,27 @@ const CANDIDATES: readonly CandidateCase[] = [
   },
   {
     id: "serpapi",
-    supported: false,
-    blockReason: "secret-in-query handling; use brave-search or tavily",
-    doc: "https://serpapi.com/search-api",
+    supported: true,
+    operation: "get_archived_search",
+    method: "GET",
+    baseUrl: "https://serpapi.com",
+    path: "/searches/{search_id}.json",
+    auth: "queryKey",
+    authProfileId: "serpapi-archive-endpoint-allowlisted-account-key",
+    scope: "Dedicated full account key; archive-only connector endpoint allowlist",
+    doc: "https://serpapi.com/search-archive-api",
   },
   {
     id: "algolia",
-    supported: false,
-    blockReason: "secured-key derivation, dual-auth headers and fallback-host handler",
-    doc: "https://www.algolia.com/doc/rest-api/search/search-single-index",
+    supported: true,
+    operation: "get_object",
+    method: "GET",
+    baseUrl: "https://{app_id}-dsn.algolia.net",
+    path: "/1/indexes/{index_name}/{object_id}",
+    auth: "apiKeyHeader",
+    authProfileId: "algolia-secured-search-record-read",
+    scope: "search",
+    doc: "https://www.algolia.com/doc/rest-api/search/get-object",
   },
   {
     id: "google-maps",
@@ -243,21 +287,33 @@ const CANDIDATES: readonly CandidateCase[] = [
   },
   {
     id: "metabase",
-    supported: false,
-    blockReason: "versioned Agent semantic-query/session handler and tenant origin",
-    doc: "https://www.metabase.com/docs/latest/api",
+    supported: true,
+    operation: "search_semantic_resources",
+    method: "POST",
+    baseUrl: "{instance_url}",
+    path: "/api/agent/v1/search",
+    auth: "bearer",
+    authProfileId: "metabase-agent-user-jwt-read",
+    scope: "Agent API resource discovery (view-only user)",
+    doc: "https://github.com/metabase/metabase/blob/master/src/metabase/agent_api/reference.md",
   },
   {
     id: "redash",
     supported: false,
-    blockReason: "version-specific cached-result/Query API key handler and tenant origin",
+    blockReason: "current complete version-specific cached-result API/auth contract and deployed-version compatibility review",
     doc: "https://redash.io/help/user-guide/integrations-and-api/api/",
   },
   {
     id: "superset",
-    supported: false,
-    blockReason: "JWT/Rison/RBAC handler and tenant origin",
-    doc: "https://superset.apache.org/developer-docs/6.1.0/api/",
+    supported: true,
+    operation: "list_dashboards",
+    method: "GET",
+    baseUrl: "{instance_url}",
+    path: "/api/v1/dashboard/",
+    auth: "bearer",
+    authProfileId: "superset-6-1-dashboard-read",
+    scope: "Dashboard read (Gamma + dashboard RBAC)",
+    doc: "https://superset.apache.org/developer-docs/6.1.0/api/get-a-list-of-dashboards",
   },
   {
     id: "stripe",
@@ -273,9 +329,15 @@ const CANDIDATES: readonly CandidateCase[] = [
   },
   {
     id: "paypal",
-    supported: false,
-    blockReason: "client-credentials token lifecycle without a granular read-only scope",
-    doc: "https://developer.paypal.com/api/rest/authentication",
+    supported: true,
+    operation: "get_order",
+    method: "GET",
+    baseUrl: "https://api-m.paypal.com",
+    path: "/v2/checkout/orders/{order_id}",
+    auth: "bearer",
+    authProfileId: "paypal-orders-v2-dedicated-merchant-app",
+    scope: "Orders v2 app/product entitlement plus connector GET-only allowlist",
+    doc: "https://developer.paypal.com/api/orders/v2/",
   },
 ];
 
@@ -295,6 +357,17 @@ const OUT_OF_BOUNDS: Readonly<Record<string, readonly Record<string, unknown>[]>
   posthog: [{ limit: 51 }, { offset: 1_001 }],
   segment: [{ limit: 26 }],
   stripe: [{ limit: 101 }],
+  docusign: [{ count: 101 }, { start_position: 10_001 }],
+  snowflake: [{ showLimit: 51 }],
+  databricks: [{ page_size: 51 }],
+  elasticsearch: [],
+  typesense: [],
+  serpapi: [],
+  algolia: [],
+  metabase: [{ query: "x".repeat(201) }],
+  redash: [],
+  superset: [{ page: 101 }, { page_size: 26 }],
+  paypal: [],
 };
 
 function provider(id: string): ProviderDefinition {
@@ -338,7 +411,7 @@ describe("data/search per-candidate admission contract", () => {
     expect(definition!.readiness).toBe("supported");
     expect(definition!.connectionSchema.additionalProperties).toBe(false);
     expect(descriptor!.baseUrl).toBe(candidate.baseUrl);
-    expect(descriptor!.baseUrl.startsWith("https://")).toBe(true);
+    expect(/^https:\/\/|^\{(?:account|workspace|instance)_url\}$/.test(descriptor!.baseUrl)).toBe(true);
     expect(descriptor!.baseUrl).not.toContain("{host");
     expect(descriptor!.baseUrl).not.toContain("{base");
     expect(descriptor!.auth).toBe(candidate.auth);
@@ -384,11 +457,57 @@ describe("data/search per-candidate admission contract", () => {
     },
   );
 
+  it.each([
+    "docusign", "snowflake", "databricks", "elasticsearch", "typesense",
+    "serpapi", "algolia", "metabase", "superset", "paypal",
+  ] as const)("UNEXECUTED (heavy pause): %s uses actual PublishedRestToolDef→ProviderOperation conversion", (id) => {
+    const descriptor = DATA_SEARCH_DESCRIPTORS.find((candidate) => candidate.curatedId === id)!;
+    const published = restToolDefs(descriptor)[0];
+    const operation = dataSearchProviderOperation(descriptor, published);
+    expect(operation.description).toBe(published.description ?? published.name);
+    expect(operation.inputSchema).toEqual(published.inputSchema);
+    expect(operation.name).toBe(published.name);
+    expect(operation.effect).toBe(published.effect);
+    expect(operation.approval).toBe(published.approval);
+    expect(operation.requiredScopes).toEqual(published.requiredScopes);
+    expect(operation.outputPolicy).toEqual(published.outputPolicy);
+    expect(operation.request).toEqual(published.request);
+    expect(operation.limits).toEqual(published.limits);
+    expect(Object.hasOwn(operation, "custom")).toBe(false);
+  });
+
+  it("UNEXECUTED (heavy pause): falls back to operation name only when published description is absent", () => {
+    const descriptor = DATA_SEARCH_DESCRIPTORS.find((candidate) => candidate.curatedId === "snowflake")!;
+    const published = { ...restToolDefs(descriptor)[0], description: undefined };
+    const operation = dataSearchProviderOperation(descriptor, published);
+    expect(operation.description).toBe(published.name);
+    expect(operation.inputSchema).toEqual(published.inputSchema);
+  });
+
   it("pins the exact reviewed dated Stripe-Version and official versioning evidence", () => {
     const descriptor = DATA_SEARCH_DESCRIPTORS.find((entry) => entry.curatedId === "stripe")!;
     expect(descriptor.staticHeaders?.["Stripe-Version"]).toBe("2026-09-30.endive");
     expect(provider("stripe").officialDocs.map((doc) => doc.url)).toContain(
       "https://docs.stripe.com/api/versioning",
+    );
+  });
+
+  it("UNEXECUTED (heavy pause): separates Databricks, SerpApi, PayPal, and Metabase official auth evidence", () => {
+    expect(provider("databricks").operations[0].requiredScopes).toEqual([
+      "Scoped PAT: sql; U2M: all-apis offline_access plus warehouse-only workspace permissions",
+    ]);
+    expect(provider("databricks").officialDocs.map((doc) => doc.url)).toEqual(expect.arrayContaining([
+      "https://docs.databricks.com/aws/en/dev-tools/auth/pat",
+      "https://docs.databricks.com/aws/en/dev-tools/auth/oauth-u2m",
+    ]));
+    expect(provider("serpapi").operations[0].requiredScopes).toEqual([
+      "Dedicated full account key; archive-only connector endpoint allowlist",
+    ]);
+    expect(provider("paypal").operations[0].requiredScopes).toEqual([
+      "Orders v2 app/product entitlement plus connector GET-only allowlist",
+    ]);
+    expect(provider("metabase").officialDocs.map((doc) => doc.url)).toContain(
+      "https://github.com/metabase/metabase/blob/master/src/metabase/agent_api/reference.md#authentication",
     );
   });
 

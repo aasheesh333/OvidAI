@@ -11,7 +11,7 @@ import type { RestServiceDescriptor } from "../../src/rest/engine.js";
 interface LiveCase {
   id: string;
   operation: string;
-  args: Record<string, unknown>;
+  args: Record<string, unknown> | ((secrets: Record<string, string>) => Record<string, unknown>);
   env: Record<string, string>;
   secretKeys: readonly string[];
 }
@@ -136,6 +136,105 @@ const CASES: readonly LiveCase[] = [
     env: { restricted_key: "OVID_LIVE_STRIPE_RESTRICTED_KEY" },
     secretKeys: ["restricted_key"],
   },
+  {
+    id: "docusign",
+    operation: "list_envelopes",
+    args: { from_date: "2026-01-01T00:00:00Z", count: 1, start_position: 0 },
+    env: { access_token: "OVID_LIVE_DOCUSIGN_ACCESS_TOKEN", account_id: "OVID_LIVE_DOCUSIGN_ACCOUNT_ID" },
+    secretKeys: ["access_token"],
+  },
+  {
+    id: "snowflake",
+    operation: "list_databases",
+    args: { showLimit: 1 },
+    env: { access_token: "OVID_LIVE_SNOWFLAKE_ACCESS_TOKEN", account_url: "OVID_LIVE_SNOWFLAKE_ACCOUNT_URL" },
+    secretKeys: ["access_token"],
+  },
+  {
+    id: "databricks",
+    operation: "list_warehouses",
+    args: { page_size: 1 },
+    env: { access_token: "OVID_LIVE_DATABRICKS_ACCESS_TOKEN", workspace_url: "OVID_LIVE_DATABRICKS_WORKSPACE_URL" },
+    secretKeys: ["access_token"],
+  },
+  {
+    id: "elasticsearch",
+    operation: "get_document",
+    args: (secrets) => ({ document_id: secrets.document_id }),
+    env: {
+      api_key: "OVID_LIVE_ELASTICSEARCH_API_KEY",
+      instance_url: "OVID_LIVE_ELASTICSEARCH_INSTANCE_URL",
+      index: "OVID_LIVE_ELASTICSEARCH_INDEX",
+      document_id: "OVID_LIVE_ELASTICSEARCH_DOCUMENT_ID",
+    },
+    secretKeys: ["api_key"],
+  },
+  {
+    id: "typesense",
+    operation: "get_collection",
+    args: {},
+    env: {
+      api_key: "OVID_LIVE_TYPESENSE_API_KEY",
+      instance_url: "OVID_LIVE_TYPESENSE_INSTANCE_URL",
+      collection: "OVID_LIVE_TYPESENSE_COLLECTION",
+    },
+    secretKeys: ["api_key"],
+  },
+  {
+    id: "serpapi",
+    operation: "get_archived_search",
+    args: (secrets) => ({ search_id: secrets.search_id }),
+    env: { api_key: "OVID_LIVE_SERPAPI_API_KEY", search_id: "OVID_LIVE_SERPAPI_SEARCH_ID" },
+    secretKeys: ["api_key"],
+  },
+  {
+    id: "algolia",
+    operation: "get_object",
+    args: (secrets) => ({ object_id: secrets.object_id }),
+    env: {
+      api_key: "OVID_LIVE_ALGOLIA_API_KEY",
+      app_id: "OVID_LIVE_ALGOLIA_APP_ID",
+      index_name: "OVID_LIVE_ALGOLIA_INDEX_NAME",
+      object_id: "OVID_LIVE_ALGOLIA_OBJECT_ID",
+    },
+    secretKeys: ["api_key"],
+  },
+  {
+    id: "metabase",
+    operation: "search_semantic_resources",
+    args: { query: "orders" },
+    env: { jwt: "OVID_LIVE_METABASE_JWT", instance_url: "OVID_LIVE_METABASE_INSTANCE_URL" },
+    secretKeys: ["jwt"],
+  },
+  {
+    id: "redash",
+    operation: "get_cached_query_result",
+    args: {},
+    env: {
+      api_key: "OVID_LIVE_REDASH_API_KEY",
+      instance_url: "OVID_LIVE_REDASH_INSTANCE_URL",
+      query_id: "OVID_LIVE_REDASH_QUERY_ID",
+    },
+    secretKeys: ["api_key"],
+  },
+  {
+    id: "superset",
+    operation: "list_dashboards",
+    args: { page: 0, page_size: 1 },
+    env: { access_token: "OVID_LIVE_SUPERSET_ACCESS_TOKEN", instance_url: "OVID_LIVE_SUPERSET_INSTANCE_URL" },
+    secretKeys: ["access_token"],
+  },
+  {
+    id: "paypal",
+    operation: "get_order",
+    args: (secrets) => ({ order_id: secrets.order_id }),
+    env: {
+      client_id: "OVID_LIVE_PAYPAL_CLIENT_ID",
+      client_secret: "OVID_LIVE_PAYPAL_CLIENT_SECRET",
+      order_id: "OVID_LIVE_PAYPAL_ORDER_ID",
+    },
+    secretKeys: ["client_secret"],
+  },
 ];
 
 function optInName(id: string): string {
@@ -170,15 +269,18 @@ describe.runIf(process.env.OVID_LIVE_PROVIDER_TESTS === "1")("data/search explic
     expect(process.env[optIn], `${fixture.id} is not explicitly opted in: set ${optIn}=1`).toBe("1");
     const secrets = credentials(fixture);
     const definition = descriptor(fixture.id);
-    const egress = createProviderEgress({
+    const dynamicTenant = /{/.test(definition.baseUrl) || fixture.id === "docusign" || fixture.id === "paypal";
+    // Dynamic handlers construct and close a fresh pinned egress from the
+    // authenticated tenant binding; static reads use the fixed official origin.
+    const egress = dynamicTenant ? undefined : createProviderEgress({
       origins: { [fixture.id]: [new URL(definition.baseUrl)] },
       redactor: createSecretRedactor(),
       production: true,
     });
     try {
-      const result = await createDataSearchHandler(definition, { providerEgress: egress }).callTool(
+      const result = await createDataSearchHandler(definition, egress === undefined ? {} : { providerEgress: egress }).callTool(
         fixture.operation,
-        fixture.args,
+        typeof fixture.args === "function" ? fixture.args(secrets) : fixture.args,
         {
           uid: "live-fixture-user",
           secrets,
@@ -212,7 +314,7 @@ describe.runIf(process.env.OVID_LIVE_PROVIDER_TESTS === "1")("data/search explic
         sanitizedResult,
       }));
     } finally {
-      await egress.close();
+      await egress?.close();
     }
   });
 });

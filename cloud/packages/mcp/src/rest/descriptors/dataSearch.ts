@@ -1,27 +1,45 @@
 /**
  * Verified-read candidates for documents, data, search, and finance.
  *
- * Only fixed-origin, least-privilege reads are defined here. SQL/job endpoints,
- * mutable financial APIs, arbitrary request bodies, dynamic tenant hosts, and
- * incomplete OAuth/token lifecycle profiles stay blocked below. Every response
- * is projected to a small allowlisted shape before it can reach a model.
+ * Only narrow, least-privilege reads are defined here. SQL/job endpoints,
+ * mutable financial APIs, arbitrary request bodies, and unvalidated tenant
+ * origins are never exported. Authenticated dynamic tenants receive one fresh
+ * pinned egress per call. Every response is projected to a small allowlisted
+ * shape before it can reach a model.
  *
  * These are contract candidates, not live-readiness evidence. catalog.ts keeps
  * them out of CURATED_IDS/CURATED_MANIFEST until explicit live reads pass.
  */
 
+import { isIP } from "node:net";
 import {
+  authorizeProviderOperation,
   createRestHandler,
   createSecretRedactor,
+  resolveTimeoutSeconds,
   restToolDefs,
   type ProviderDefinition,
   type ProviderOperation,
   type RestHandlerOptions,
   type RestServiceDescriptor,
   type RestToolDef,
+  type PublishedRestToolDef,
   type SecretRedactor,
+  type ToolContext,
 } from "../engine.js";
-import { validateProviderDefinition } from "../../providers/types.js";
+import {
+  normalizeConnectionConfig,
+  snapshotProviderArgs,
+  validateProviderArgs,
+  validateProviderDefinition,
+} from "../../providers/types.js";
+import { createProviderEgress, type ProviderEgress } from "../../egress/providerEgress.js";
+import {
+  assertBoundedHeadersOrCancel,
+  readBoundedBody,
+  type EgressLimits,
+} from "../../egress/responseLimits.js";
+import type { McpCallContext } from "../../transports/native.js";
 
 const VERIFIED_AT = "2026-10-24";
 const CATALOG_VERSION = "2026-10-24.1";
@@ -351,6 +369,121 @@ function projectStripe(value: unknown): JsonObject {
   return result;
 }
 
+function projectDocuSign(value: unknown): JsonObject {
+  const root = object(value);
+  const result = pick(root, ["resultSetSize", "totalSetSize", "startPosition", "endPosition"]);
+  withOptionalTruncation(result, capped(root.envelopes, 100, (entry) =>
+    pick(entry, ["envelopeId", "status", "emailSubject", "createdDateTime", "sentDateTime", "statusChangedDateTime"]),
+  ), "envelopes");
+  return result;
+}
+
+function projectSnowflake(value: unknown): JsonObject {
+  const databases = capped(Array.isArray(value) ? value : object(value).databases, 50, (entry) =>
+    pick(entry, ["name", "kind", "created_on", "retention_time"]),
+  );
+  return { databases: databases.items, total: databases.total, truncated: databases.truncated };
+}
+
+function projectDatabricks(value: unknown): JsonObject {
+  const root = object(value);
+  const result = nextCursor(root.next_page_token === undefined ? root : { nextPageToken: root.next_page_token });
+  withOptionalTruncation(result, capped(root.warehouses, 50, (entry) =>
+    pick(entry, ["id", "name", "cluster_size", "warehouse_type", "state", "num_clusters"]),
+  ), "warehouses");
+  return result;
+}
+
+function projectElastic(value: unknown): JsonObject {
+  const root = object(value);
+  return {
+    ...pick(root, ["_index", "_id", "found", "_version", "_seq_no", "_primary_term"]),
+    _source: boundedRecord(root._source, 20),
+  };
+}
+
+function projectTypesense(value: unknown): JsonObject {
+  const root = object(value);
+  const result = pick(root, ["name", "num_documents", "enable_nested_fields"]);
+  withOptionalTruncation(result, capped(root.fields, 50, (entry) =>
+    pick(entry, ["name", "type", "facet", "index", "sort", "optional"]),
+  ), "fields");
+  return result;
+}
+
+function projectSerpApi(value: unknown): JsonObject {
+  const root = object(value);
+  return {
+    search_metadata: pick(root.search_metadata, ["id", "status", "created_at", "processed_at", "total_time_taken"]),
+    organic_results: capped(root.organic_results, 10, (entry) =>
+      pick(entry, ["position", "title", "link", "snippet", "date"]),
+    ).items,
+  };
+}
+
+function projectAlgolia(value: unknown): JsonObject {
+  return boundedRecord(value, 20);
+}
+
+function projectMetabase(value: unknown): JsonObject {
+  const root = object(value);
+  const result = pick(root, ["total_count"]);
+  withOptionalTruncation(result, capped(root.data, 25, (entry) =>
+    pick(entry, ["type", "id", "name", "display_name", "description", "database_id", "database_schema", "verified"]),
+  ), "data");
+  return result;
+}
+
+function projectSuperset(value: unknown): JsonObject {
+  const root = object(value);
+  const result = pick(root, ["count"]);
+  const ids = array(root.ids);
+  result.ids = ids.slice(0, 25);
+  if (ids.length > 25) result.ids_truncated = true;
+  withOptionalTruncation(result, capped(root.result, 25, (entry) =>
+    pick(entry, ["id", "dashboard_title", "slug", "status", "changed_on"]),
+  ), "result");
+  return result;
+}
+
+function projectPayPal(value: unknown): JsonObject {
+  const root = object(value);
+  const result = pick(root, ["id", "intent", "status", "create_time", "update_time"]);
+  withOptionalTruncation(result, capped(root.purchase_units, 10, (entry) => {
+    const unit = object(entry);
+    return {
+      ...pick(unit, ["reference_id"]),
+      amount: pick(unit.amount, ["currency_code", "value"]),
+    };
+  }), "purchase_units");
+  return result;
+}
+
+function boundedScalar(value: unknown): unknown {
+  if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value === "string") return value.length > 512 ? value.slice(0, 512) : value;
+  return undefined;
+}
+
+const SENSITIVE_RECORD_KEYS = new Set([
+  "authorization", "proxy-authorization", "cookie", "set-cookie", "api_key", "apikey",
+  "access_token", "refresh_token", "client_secret", "password", "secret", "token", "jwt",
+]);
+
+function boundedRecord(value: unknown, cap: number): JsonObject {
+  const result: JsonObject = {};
+  for (const [key, entry] of Object.entries(object(value)).slice(0, cap)) {
+    const normalizedKey = key.toLowerCase();
+    if (SENSITIVE_RECORD_KEYS.has(normalizedKey) || normalizedKey === "private" || normalizedKey.startsWith("private_")) continue;
+    const scalar = boundedScalar(entry);
+    if (scalar !== undefined) result[key] = scalar;
+    else if (Array.isArray(entry)) {
+      result[key] = entry.slice(0, 10).map(boundedScalar).filter((item) => item !== undefined);
+    }
+  }
+  return result;
+}
+
 const PROJECTORS: Readonly<Record<string, (value: unknown) => JsonObject>> = {
   typeform: projectTypeform,
   calendly: projectCalendly,
@@ -367,6 +500,16 @@ const PROJECTORS: Readonly<Record<string, (value: unknown) => JsonObject>> = {
   posthog: projectPostHog,
   segment: projectSegment,
   stripe: projectStripe,
+  docusign: projectDocuSign,
+  snowflake: projectSnowflake,
+  databricks: projectDatabricks,
+  elasticsearch: projectElastic,
+  typesense: projectTypesense,
+  serpapi: projectSerpApi,
+  algolia: projectAlgolia,
+  metabase: projectMetabase,
+  superset: projectSuperset,
+  paypal: projectPayPal,
 };
 
 const TENANT_ID_RULES: Readonly<Record<string, Readonly<Record<string, RegExp>>>> = {
@@ -374,6 +517,10 @@ const TENANT_ID_RULES: Readonly<Record<string, Readonly<Record<string, RegExp>>>
   amplitude: { project_id: /^\d{1,20}$/ },
   posthog: { project_id: /^\d{1,20}$/ },
   mixpanel: { project_id: /^\d{1,20}$/, bookmark_id: /^\d{1,20}$/ },
+  docusign: { account_id: /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/ },
+  elasticsearch: { index: /^[a-z0-9][a-z0-9._-]{0,127}$/ },
+  typesense: { collection: /^(?!\.{1,2}$)[^\\/?#\s]{1,255}$/ },
+  algolia: { index_name: /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/ },
 };
 
 function validateTenantConfig(providerId: string, config: Record<string, unknown>): void {
@@ -385,10 +532,247 @@ function validateTenantConfig(providerId: string, config: Record<string, unknown
   }
 }
 
+const DYNAMIC_TENANT_PROVIDERS = new Set([
+  "docusign", "snowflake", "databricks", "elasticsearch", "typesense", "serpapi",
+  "algolia", "metabase", "superset", "paypal",
+]);
+
+export interface DataSearchHandlerOptions extends RestHandlerOptions {
+  /** Test seam only; production constructs a fresh pinned egress per call. */
+  egressFactory?: (origins: Readonly<Record<string, readonly URL[]>>) => ProviderEgress;
+}
+
+function strictTenantOrigin(raw: string): URL {
+  const url = new URL(raw);
+  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  if (url.protocol !== "https:" || url.username !== "" || url.password !== "" ||
+      (url.pathname !== "/" && url.pathname !== "") || url.search !== "" || url.hash !== "" ||
+      (url.port !== "" && url.port !== "443") || isIP(hostname) !== 0 ||
+      hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local")) {
+    throw new Error("Invalid authenticated tenant origin.");
+  }
+  return new URL(url.origin);
+}
+
+function safeTenantLabel(raw: string | undefined): string {
+  if (raw === undefined || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})$/.test(raw)) {
+    throw new Error("Invalid tenant label.");
+  }
+  return raw;
+}
+
+function hostHasSuffix(hostname: string, suffix: string): boolean {
+  return hostname.length > suffix.length && hostname.endsWith(suffix);
+}
+
+function tenantOriginFor(descriptor: RestServiceDescriptor, config: Record<string, string>): URL {
+  switch (descriptor.curatedId) {
+    case "docusign":
+      return new URL("https://account.docusign.com");
+    case "snowflake": {
+      const origin = strictTenantOrigin(config.account_url ?? "");
+      if (!hostHasSuffix(origin.hostname, ".snowflakecomputing.com")) throw new Error("Invalid Snowflake account origin.");
+      return origin;
+    }
+    case "databricks": {
+      const origin = strictTenantOrigin(config.workspace_url ?? "");
+      if (![".cloud.databricks.com", ".azuredatabricks.net", ".gcp.databricks.com"].some(
+        (suffix) => hostHasSuffix(origin.hostname, suffix),
+      )) throw new Error("Invalid Databricks workspace origin.");
+      return origin;
+    }
+    case "algolia":
+      return new URL(`https://${safeTenantLabel(config.app_id)}-dsn.algolia.net`);
+    case "elasticsearch":
+    case "typesense":
+    case "metabase":
+    case "superset":
+      return strictTenantOrigin(config.instance_url ?? "");
+    default:
+      return strictTenantOrigin(descriptor.baseUrl);
+  }
+}
+
+function safeResourceSegment(value: unknown): boolean {
+  return typeof value === "string" && value.trim().length > 0 && value !== "." && value !== ".." &&
+    !/[\\/?#]/.test(value);
+}
+
+function gapArgsValid(providerId: string, args: Record<string, unknown>): boolean {
+  if (providerId === "serpapi") return /^[a-f0-9]{24}$/.test(String(args.search_id ?? ""));
+  if (providerId === "elasticsearch") return safeResourceSegment(args.document_id);
+  if (providerId === "algolia") return safeResourceSegment(args.object_id);
+  if (providerId === "paypal") return safeResourceSegment(args.order_id);
+  if (providerId === "docusign") {
+    return typeof args.from_date === "string" &&
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(args.from_date) &&
+      !Number.isNaN(Date.parse(args.from_date));
+  }
+  return true;
+}
+
+const AUTH_JSON_LIMITS: EgressLimits = {
+  connectMs: 10_000,
+  headersMs: 15_000,
+  idleMs: 30_000,
+  totalMs: 30_000,
+  maxRedirects: 0,
+  headerBytes: 8_192,
+  responseBytes: 16_384,
+  decompressedBytes: 65_536,
+};
+
+function auxiliarySignal(caller?: AbortSignal): { signal: AbortSignal; dispose: () => void } {
+  const controller = new AbortController();
+  const timeout = AbortSignal.timeout(AUTH_JSON_LIMITS.totalMs);
+  const abort = () => controller.abort(caller?.aborted ? caller.reason : timeout.reason);
+  if (caller?.aborted === true) abort();
+  caller?.addEventListener("abort", abort, { once: true });
+  timeout.addEventListener("abort", abort, { once: true });
+  return {
+    signal: controller.signal,
+    dispose() {
+      caller?.removeEventListener("abort", abort);
+      timeout.removeEventListener("abort", abort);
+    },
+  };
+}
+
+async function authJson(
+  egress: ProviderEgress,
+  originKey: string,
+  url: string,
+  init: { method: "GET" | "POST"; headers: Record<string, string>; body?: string; secrets: string[] },
+  caller?: AbortSignal,
+): Promise<JsonObject> {
+  const linked = auxiliarySignal(caller);
+  try {
+    const response = await egress.request({
+      originKey,
+      url: new URL(url),
+      method: init.method,
+      headers: init.headers,
+      ...(init.body === undefined ? {} : { body: new TextEncoder().encode(init.body) }),
+      secretValues: init.secrets,
+      privileged: true,
+      redirect: "deny",
+      limits: AUTH_JSON_LIMITS,
+      signal: linked.signal,
+    });
+    await assertBoundedHeadersOrCancel(response, AUTH_JSON_LIMITS);
+    if (response.status < 200 || response.status >= 300) {
+      await response.body.cancel().catch(() => {});
+      throw new Error("Provider authentication or discovery failed.");
+    }
+    const bytes = await readBoundedBody(response, AUTH_JSON_LIMITS);
+    return object(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
+  } finally {
+    linked.dispose();
+  }
+}
+
+async function docusignApiBase(
+  descriptor: RestServiceDescriptor,
+  config: Record<string, string>,
+  egressFactory: NonNullable<DataSearchHandlerOptions["egressFactory"]>,
+  caller?: AbortSignal,
+): Promise<URL> {
+  const discoveryOrigin = new URL("https://account.docusign.com");
+  const egress = egressFactory({ [descriptor.curatedId]: Object.freeze([discoveryOrigin]) });
+  try {
+    const userinfo = await authJson(egress, descriptor.curatedId, "https://account.docusign.com/oauth/userinfo", {
+      method: "GET",
+      headers: { Authorization: `Bearer ${config.access_token}`, Accept: "application/json" },
+      secrets: [config.access_token ?? ""],
+    }, caller);
+    const account = array(userinfo.accounts).map(object).find(
+      (candidate) => candidate.account_id === config.account_id,
+    );
+    if (account === undefined) throw new Error("DocuSign account binding was not present in UserInfo.");
+    const origin = strictTenantOrigin(String(account.base_uri ?? ""));
+    if (!hostHasSuffix(origin.hostname, ".docusign.net")) throw new Error("Unexpected DocuSign account origin.");
+    return origin;
+  } finally {
+    await egress.close().catch(() => {});
+  }
+}
+
+async function paypalAccessToken(
+  descriptor: RestServiceDescriptor,
+  config: Record<string, string>,
+  egress: ProviderEgress,
+  caller?: AbortSignal,
+): Promise<string> {
+  const basic = Buffer.from(`${config.client_id}:${config.client_secret}`, "utf8").toString("base64");
+  const token = await authJson(egress, descriptor.curatedId, "https://api-m.paypal.com/v1/oauth2/token", {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${basic}`,
+      "content-type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
+    },
+    body: "grant_type=client_credentials",
+    secrets: [config.client_id ?? "", config.client_secret ?? ""],
+  }, caller);
+  if (typeof token.access_token !== "string" || token.access_token.length < 1 || token.access_token.length > 16_384) {
+    throw new Error("Invalid PayPal token response.");
+  }
+  return token.access_token;
+}
+
+function providerAuthorizationContext(ctx: McpCallContext, descriptor: RestServiceDescriptor): ToolContext {
+  const candidate = ctx as unknown as Partial<ToolContext>;
+  return {
+    ...candidate,
+    sessionId: candidate.sessionId ?? "",
+    runId: candidate.runId ?? "",
+    userId: candidate.userId ?? ctx.uid,
+    connectionId: candidate.connectionId ?? "",
+    providerId: descriptor.curatedId,
+    mode: candidate.mode ?? "safe",
+    planMode: candidate.planMode ?? false,
+    unattended: candidate.unattended ?? true,
+    isSubagent: candidate.isSubagent ?? false,
+    depth: candidate.depth ?? 0,
+    callKey: candidate.callKey ?? "",
+    signal: candidate.signal ?? new AbortController().signal,
+  } as ToolContext;
+}
+
+/** Converts only fields declared by PublishedRestToolDef; no optional custom is invented. */
+export function dataSearchProviderOperation(
+  descriptor: RestServiceDescriptor,
+  published: PublishedRestToolDef,
+): ProviderOperation {
+  return {
+    name: published.name,
+    description: published.description ?? published.name,
+    effect: published.effect,
+    approval: published.approval,
+    requiredScopes: published.requiredScopes,
+    inputSchema: published.inputSchema ?? objectSchema({}),
+    outputPolicy: published.outputPolicy,
+    request: published.request,
+    limits: published.limits,
+  };
+}
+
+function requiredStringsBlank(
+  descriptor: RestServiceDescriptor,
+  operation: ProviderOperation,
+  args: Record<string, unknown>,
+): boolean {
+  const required = new Set<string>([
+    ...(descriptor.tools.find((tool) => tool.name === operation.name)?.required ?? []),
+    ...((operation.inputSchema.required as string[] | undefined) ?? []),
+  ]);
+  return [...required].some((key) => typeof args[key] === "string" && (args[key] as string).trim() === "");
+}
+
 /** Uses the normal typed engine and adds only provider-specific output projection. */
 export function createDataSearchHandler(
   descriptor: RestServiceDescriptor,
-  options: RestHandlerOptions = {},
+  options: DataSearchHandlerOptions = {},
 ): ReturnType<typeof createRestHandler> {
   const projector = PROJECTORS[descriptor.curatedId];
   const canonical = DATA_SEARCH_DESCRIPTORS.find((entry) => entry.curatedId === descriptor.curatedId);
@@ -412,7 +796,126 @@ export function createDataSearchHandler(
     validateTenantConfig(descriptor.curatedId, unresolved);
     return unresolved;
   };
+  const runtimeRedactor = (runtimeConfig: Record<string, unknown>): SecretRedactor => {
+    const sensitiveKeys = new Set([
+      descriptor.credentialKey,
+      ...(descriptor.extraConfig ?? []).filter((field) => field.secret).map((field) => field.key),
+      "access_token",
+    ]);
+    const sensitiveValues = new Set(
+      [...sensitiveKeys].flatMap((key) => {
+        const value = runtimeConfig[key];
+        return typeof value === "string" && value !== "" ? [value] : [];
+      }),
+    );
+    const onlySecrets = (values: readonly string[]) => values.filter((value) => sensitiveValues.has(value));
+    return {
+      text: (value, secrets) => baseRedactor.text(value, onlySecrets(secrets ?? [])),
+      error: (error, secrets) => baseRedactor.error(error, onlySecrets(secrets ?? [])),
+      json: <T>(value: T, secrets: readonly string[] = []): T =>
+        baseRedactor.json(projector(value), onlySecrets(secrets)) as T,
+    };
+  };
   const rest = createRestHandler(descriptor, { ...options, resolveConnectionConfig, redactor });
+  if (DYNAMIC_TENANT_PROVIDERS.has(descriptor.curatedId)) {
+    const published = restToolDefs(descriptor);
+    return {
+      ...rest,
+      async callTool(name, input, ctx) {
+        const fail = (text: string) => ({ text, isError: true, content: [{ type: "text" as const, text }] });
+        const operation = published.find((candidate) => candidate.name === name);
+        if (operation === undefined) return rest.callTool(name, input, ctx);
+        // Construct-only context shared by preflight and execution; no config,
+        // discovery, token exchange, or other side effect occurs at this point.
+        const authorizationContext = providerAuthorizationContext(ctx, descriptor);
+        let args: Record<string, unknown>;
+        // Published tool defs keep MCP's optional description/inputSchema;
+        // authorization requires a complete ProviderOperation with both fields.
+        const authorizationOperation = dataSearchProviderOperation(descriptor, operation);
+        try {
+          args = snapshotProviderArgs(input ?? {});
+          if (!validateProviderArgs(authorizationOperation.inputSchema, args).ok ||
+              !gapArgsValid(descriptor.curatedId, args) ||
+              requiredStringsBlank(descriptor, authorizationOperation, args)) return fail("Invalid operation arguments.");
+          resolveTimeoutSeconds(args);
+          const authorization = await authorizeProviderOperation(
+            authorizationContext,
+            authorizationOperation,
+            args,
+          );
+          if (authorization.kind === "deny") return fail(`Operation denied (${authorization.code}).`);
+        } catch {
+          return fail("Invalid operation arguments.");
+        }
+
+        let egress: ProviderEgress | undefined;
+        try {
+          const unresolved = await resolveConnectionConfig(ctx);
+          const config = normalizeConnectionConfig(
+            descriptor.connectionSchema ?? objectSchema({}),
+            unresolved,
+          );
+          if (authorizationContext.signal.aborted) return fail("Operation denied (cancelled).");
+          const egressFactory = options.egressFactory ?? ((origins: Readonly<Record<string, readonly URL[]>>) =>
+            createProviderEgress({ origins, production: true, redactor: baseRedactor }));
+          let origin = tenantOriginFor(descriptor, config);
+          let runtimeDescriptor = descriptor;
+          let runtimeConfig: Record<string, unknown> = config;
+          if (descriptor.curatedId === "docusign") {
+            origin = await docusignApiBase(descriptor, config, egressFactory, authorizationContext.signal);
+            runtimeDescriptor = { ...descriptor, baseUrl: origin.origin };
+          }
+          if (authorizationContext.signal.aborted) return fail("Operation denied (cancelled).");
+          egress = egressFactory({ [descriptor.curatedId]: Object.freeze([origin]) });
+          if (descriptor.curatedId === "algolia") {
+            runtimeDescriptor = {
+              ...descriptor,
+              staticHeaders: { ...descriptor.staticHeaders, "X-Algolia-Application-Id": config.app_id },
+            };
+          }
+          if (descriptor.curatedId === "superset") {
+            const page = typeof args.page === "number" ? args.page : 0;
+            const pageSize = typeof args.page_size === "number" ? args.page_size : 10;
+            runtimeDescriptor = {
+              ...descriptor,
+              tools: descriptor.tools.map((tool) => tool.name === name ? {
+                ...tool,
+                fixedQuery: {
+                  q: `(columns:!(id,dashboard_title,slug,status,changed_on),page:${page},page_size:${pageSize})`,
+                },
+              } : tool),
+            };
+          }
+          if (descriptor.curatedId === "paypal") {
+            if (authorizationContext.signal.aborted) return fail("Operation denied (cancelled).");
+            const accessToken = await paypalAccessToken(descriptor, config, egress, authorizationContext.signal);
+            runtimeDescriptor = {
+              ...descriptor,
+              auth: "bearer",
+              authPrefix: "Bearer ",
+              credentialKey: "access_token",
+              credentialLabel: "PayPal request-scoped access token",
+              connectionSchema: connectionSchema({
+                client_id: secretField(),
+                client_secret: secretField(),
+                access_token: secretField(),
+              }),
+            };
+            runtimeConfig = { ...config, access_token: accessToken };
+          }
+          return await createRestHandler(runtimeDescriptor, {
+            providerEgress: egress,
+            resolveConnectionConfig: async () => runtimeConfig,
+            redactor: runtimeRedactor(runtimeConfig),
+          }).callTool(name, args, ctx);
+        } catch {
+          return fail("Provider operation failed or connection configuration was invalid.");
+        } finally {
+          if (egress !== undefined) await egress.close().catch(() => {});
+        }
+      },
+    };
+  }
   if (descriptor.curatedId !== "brave-search") return rest;
   return {
     ...rest,
@@ -909,11 +1412,325 @@ const SPECS: readonly DataSearchSpec[] = [
       })],
     },
   },
+  {
+    authProfileId: "docusign-esignature-userinfo-read",
+    officialDocs: docs(
+      "https://developers.docusign.com/platform/auth/reference/user-info/",
+      "https://developers.docusign.com/docs/esign-rest-api/reference/envelopes/envelopes/liststatuschanges/",
+    ),
+    descriptor: {
+      curatedId: "docusign",
+      displayName: "DocuSign Envelopes",
+      description: "List eSignature envelopes using OAuth UserInfo account discovery and a validated per-account API base URI.",
+      baseUrl: "https://account.docusign.com",
+      auth: "bearer",
+      authPrefix: "Bearer ",
+      credentialKey: "access_token",
+      credentialLabel: "DocuSign OAuth access token (signature)",
+      extraConfig: [{ key: "account_id", label: "DocuSign account ID from UserInfo", secret: false }],
+      connectionSchema: connectionSchema({ access_token: secretField(), account_id: idField() }),
+      tools: [readOperation({
+        name: "list_envelopes",
+        description: "List one bounded page of envelope metadata; no recipients, documents, sends, or drafts are exposed.",
+        method: "GET",
+        path: "/restapi/v2.1/accounts/{account_id}/envelopes",
+        scope: "signature",
+        properties: {
+          from_date: stringSchema(40, 1),
+          count: integerSchema(1, 100, 20),
+          start_position: integerSchema(0, 10_000, 0),
+        },
+        required: ["from_date"],
+        queryArgMap: { from_date: "from_date", count: "count:20", start_position: "start_position:0" },
+      })],
+    },
+  },
+  {
+    authProfileId: "snowflake-rest-database-usage",
+    officialDocs: docs(
+      "https://docs.snowflake.com/en/developer-guide/snowflake-rest-api/reference/database",
+      "https://docs.snowflake.com/en/developer-guide/snowflake-rest-api/authentication",
+    ),
+    descriptor: {
+      curatedId: "snowflake",
+      displayName: "Snowflake Databases",
+      description: "List accessible database metadata through Snowflake REST API v2 without SQL execution or warehouse compute.",
+      baseUrl: "{account_url}",
+      auth: "bearer",
+      authPrefix: "Bearer ",
+      credentialKey: "access_token",
+      credentialLabel: "Snowflake OAuth access token",
+      extraConfig: [{ key: "account_url", label: "Snowflake account HTTPS origin", secret: false }],
+      staticHeaders: {
+        "X-Snowflake-Authorization-Token-Type": "OAUTH",
+        Accept: "application/json",
+        "User-Agent": "OvidSi/1.0 (data-search connector)",
+      },
+      connectionSchema: connectionSchema({ access_token: secretField(), account_url: stringSchema(2_048, 1) }),
+      tools: [readOperation({
+        name: "list_databases",
+        description: "List accessible databases with showLimit and fromName only; history and SQL statements are not exposed.",
+        method: "GET",
+        path: "/api/v2/databases",
+        scope: "USAGE (database)",
+        properties: {
+          showLimit: integerSchema(1, 50, 20),
+          fromName: stringSchema(255),
+        },
+        queryArgMap: { showLimit: "showLimit:20", fromName: "fromName" },
+        fixedQuery: { history: "false" },
+      })],
+    },
+  },
+  {
+    authProfileId: "databricks-warehouse-read-scoped-pat-or-u2m",
+    officialDocs: docs(
+      "https://docs.databricks.com/api/workspace/warehouses/list",
+      "https://docs.databricks.com/aws/en/dev-tools/auth/pat",
+      "https://docs.databricks.com/aws/en/dev-tools/auth/oauth-u2m",
+    ),
+    descriptor: {
+      curatedId: "databricks",
+      displayName: "Databricks SQL Warehouses",
+      description: "List SQL warehouse metadata with a scoped PAT/workspace identity; U2M uses all-apis offline_access and needs separate least-privilege workspace permissions.",
+      baseUrl: "{workspace_url}",
+      auth: "bearer",
+      authPrefix: "Bearer ",
+      credentialKey: "access_token",
+      credentialLabel: "Databricks scoped PAT (sql) or U2M token with equivalent warehouse-only permissions",
+      extraConfig: [{ key: "workspace_url", label: "Databricks workspace HTTPS origin", secret: false }],
+      connectionSchema: connectionSchema({ access_token: secretField(), workspace_url: stringSchema(2_048, 1) }),
+      tools: [readOperation({
+        name: "list_warehouses",
+        description: "List one bounded page of accessible SQL warehouses; no start, stop, create, edit, or statement calls.",
+        method: "GET",
+        path: "/api/2.0/sql/warehouses",
+        scope: "Scoped PAT: sql; U2M: all-apis offline_access plus warehouse-only workspace permissions",
+        properties: {
+          page_size: integerSchema(1, 50, 20),
+          page_token: stringSchema(2_048),
+        },
+        queryArgMap: { page_size: "page_size:20", page_token: "page_token" },
+      })],
+    },
+  },
+  {
+    authProfileId: "elasticsearch-named-index-read",
+    officialDocs: docs(
+      "https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-get",
+      "https://www.elastic.co/docs/reference/elasticsearch/security-privileges",
+    ),
+    descriptor: {
+      curatedId: "elasticsearch",
+      displayName: "Elasticsearch Document",
+      description: "Get one document from a configured named index using an expiring read-only ApiKey; no cluster search or writes.",
+      baseUrl: "{instance_url}",
+      auth: "apiKeyHeader",
+      authHeader: "Authorization",
+      authPrefix: "ApiKey ",
+      credentialKey: "api_key",
+      credentialLabel: "Elasticsearch read-only named-index ApiKey",
+      extraConfig: [
+        { key: "instance_url", label: "Elasticsearch HTTPS origin", secret: false },
+        { key: "index", label: "Allowed index name", secret: false },
+      ],
+      connectionSchema: connectionSchema({
+        api_key: secretField(), instance_url: stringSchema(2_048, 1), index: stringSchema(255, 1),
+      }),
+      tools: [readOperation({
+        name: "get_document",
+        description: "Get one document by ID from the authenticated named index; _source is bounded to 20 primitive fields.",
+        method: "GET",
+        path: "/{index}/_doc/{document_id}",
+        scope: "read (named index)",
+        properties: { document_id: stringSchema(256, 1) },
+        required: ["document_id"],
+      })],
+    },
+  },
+  {
+    authProfileId: "typesense-collection-get",
+    officialDocs: docs(
+      "https://typesense.org/docs/30.2/api/collections.html",
+      "https://typesense.org/docs/30.2/api/api-keys.html",
+    ),
+    descriptor: {
+      curatedId: "typesense",
+      displayName: "Typesense Collection",
+      description: "Read one named collection schema using a collections:get scoped key; no admin key, search body, or document writes.",
+      baseUrl: "{instance_url}",
+      auth: "apiKeyHeader",
+      authHeader: "X-TYPESENSE-API-KEY",
+      credentialKey: "api_key",
+      credentialLabel: "Typesense collections:get scoped key",
+      extraConfig: [
+        { key: "instance_url", label: "Typesense HTTPS origin", secret: false },
+        { key: "collection", label: "Allowed collection name", secret: false },
+      ],
+      connectionSchema: connectionSchema({
+        api_key: secretField(), instance_url: stringSchema(2_048, 1), collection: stringSchema(255, 1),
+      }),
+      tools: [readOperation({
+        name: "get_collection",
+        description: "Read one configured collection schema with a bounded field projection.",
+        method: "GET",
+        path: "/collections/{collection}",
+        scope: "collections:get (named collection)",
+      })],
+    },
+  },
+  {
+    authProfileId: "serpapi-archive-endpoint-allowlisted-account-key",
+    officialDocs: docs("https://serpapi.com/search-archive-api"),
+    descriptor: {
+      curatedId: "serpapi",
+      displayName: "SerpApi Search Archive",
+      description: "Retrieve an existing archived search with a separate full account key; only the connector archive endpoint is allowed, never fresh search.",
+      baseUrl: "https://serpapi.com",
+      auth: "queryKey",
+      authParam: "api_key",
+      credentialKey: "api_key",
+      credentialLabel: "SerpApi separate account key (archive-only connector endpoint allowlist)",
+      connectionSchema: connectionSchema({ api_key: secretField() }),
+      tools: [readOperation({
+        name: "get_archived_search",
+        description: "Retrieve one archived result by its 24-character ID; required query-string auth stays in memory and is never emitted in results or errors.",
+        method: "GET",
+        path: "/searches/{search_id}.json",
+        scope: "Dedicated full account key; archive-only connector endpoint allowlist",
+        properties: { search_id: stringSchema(24, 24) },
+        required: ["search_id"],
+      })],
+    },
+  },
+  {
+    authProfileId: "algolia-secured-search-record-read",
+    officialDocs: docs(
+      "https://www.algolia.com/doc/rest-api/search/get-object",
+      "https://www.algolia.com/doc/guides/security/api-keys/in-depth/api-key-restrictions",
+    ),
+    descriptor: {
+      curatedId: "algolia",
+      displayName: "Algolia Record",
+      description: "Get one record using a secured search-only key restricted to the configured index; no Admin key or search writes.",
+      baseUrl: "https://{app_id}-dsn.algolia.net",
+      auth: "apiKeyHeader",
+      authHeader: "X-Algolia-API-Key",
+      credentialKey: "api_key",
+      credentialLabel: "Algolia secured search-only API key",
+      extraConfig: [
+        { key: "app_id", label: "Algolia application ID", secret: false },
+        { key: "index_name", label: "Allowed index name", secret: false },
+      ],
+      connectionSchema: connectionSchema({
+        api_key: secretField(), app_id: stringSchema(63, 1), index_name: stringSchema(255, 1),
+      }),
+      tools: [readOperation({
+        name: "get_object",
+        description: "Get one object by ID with search ACL and a bounded primitive-field projection.",
+        method: "GET",
+        path: "/1/indexes/{index_name}/{object_id}",
+        scope: "search",
+        properties: { object_id: stringSchema(256, 1) },
+        required: ["object_id"],
+      })],
+    },
+  },
+  {
+    authProfileId: "metabase-agent-user-jwt-read",
+    officialDocs: docs(
+      "https://github.com/metabase/metabase/blob/master/src/metabase/agent_api/reference.md",
+      "https://github.com/metabase/metabase/blob/master/src/metabase/agent_api/reference.md#authentication",
+    ),
+    descriptor: {
+      curatedId: "metabase",
+      displayName: "Metabase Semantic Discovery",
+      description: "Search tables and metrics through Agent API v1 with a fresh user JWT and view-only permissions; native SQL is absent.",
+      baseUrl: "{instance_url}",
+      auth: "bearer",
+      authPrefix: "Bearer ",
+      credentialKey: "jwt",
+      credentialLabel: "Metabase fresh user JWT (iat under 180 seconds)",
+      extraConfig: [{ key: "instance_url", label: "Metabase HTTPS origin", secret: false }],
+      connectionSchema: connectionSchema({ jwt: secretField(), instance_url: stringSchema(2_048, 1) }),
+      tools: [readOperation({
+        name: "search_semantic_resources",
+        description: "Search semantic tables and metrics with one typed term query; no semantic execution, SQL, saved questions, or dashboards writes.",
+        method: "POST",
+        path: "/api/agent/v1/search",
+        scope: "Agent API resource discovery (view-only user)",
+        properties: { query: stringSchema(200, 1) },
+        required: ["query"],
+        bodyTemplate: { "term_queries.0": "arg:query" },
+      })],
+    },
+  },
+  {
+    authProfileId: "superset-6-1-dashboard-read",
+    officialDocs: docs(
+      "https://superset.apache.org/developer-docs/6.1.0/api/get-a-list-of-dashboards",
+      "https://superset.apache.org/admin-docs/security/",
+    ),
+    descriptor: {
+      curatedId: "superset",
+      displayName: "Superset Dashboards",
+      description: "List dashboard metadata on Superset 6.1.0 using a user JWT/API key with Gamma and dashboard-only RBAC; SQL Lab is absent.",
+      baseUrl: "{instance_url}",
+      auth: "bearer",
+      authPrefix: "Bearer ",
+      credentialKey: "access_token",
+      credentialLabel: "Superset user JWT or restricted API key",
+      extraConfig: [{ key: "instance_url", label: "Superset HTTPS origin", secret: false }],
+      connectionSchema: connectionSchema({ access_token: secretField(), instance_url: stringSchema(2_048, 1) }),
+      tools: [readOperation({
+        name: "list_dashboards",
+        description: "List one bounded dashboard metadata page with a server-constructed Rison column/page query; no filters or SQL Lab.",
+        method: "GET",
+        path: "/api/v1/dashboard/",
+        scope: "Dashboard read (Gamma + dashboard RBAC)",
+        properties: {
+          page: integerSchema(0, 100, 0),
+          page_size: integerSchema(1, 25, 10),
+        },
+      })],
+    },
+  },
+  {
+    authProfileId: "paypal-orders-v2-dedicated-merchant-app",
+    officialDocs: docs(
+      "https://developer.paypal.com/api/rest/authentication",
+      "https://developer.paypal.com/api/orders/v2/",
+    ),
+    descriptor: {
+      curatedId: "paypal",
+      displayName: "PayPal Order",
+      description: "Read one Orders v2 resource with a request-scoped token from a dedicated per-connection merchant app; the token is not intrinsically read-only, so the connector allows only this GET.",
+      baseUrl: "https://api-m.paypal.com",
+      auth: "bearer",
+      authPrefix: "Bearer ",
+      credentialKey: "client_secret",
+      credentialLabel: "PayPal dedicated merchant-app client secret",
+      extraConfig: [{ key: "client_id", label: "PayPal dedicated merchant-app client ID", secret: true }],
+      staticHeaders: { Accept: "application/json" },
+      connectionSchema: connectionSchema({ client_id: secretField(), client_secret: secretField() }),
+      tools: [readOperation({
+        name: "get_order",
+        description: "Get one order by ID with bounded amount/status fields; no capture, authorize, refund, payout, transfer, or invoice actions.",
+        method: "GET",
+        path: "/v2/checkout/orders/{order_id}",
+        scope: "Orders v2 app/product entitlement plus connector GET-only allowlist",
+        properties: { order_id: stringSchema(128, 1) },
+        required: ["order_id"],
+      })],
+    },
+  },
 ];
 
 const PROVIDER_ORDER = [
-  "typeform", "calendly", "miro", "canva", "webflow", "bigquery", "pinecone",
-  "brave-search", "tavily", "google-maps", "mixpanel", "amplitude", "posthog", "segment", "stripe",
+  "docusign", "typeform", "calendly", "miro", "canva", "webflow",
+  "snowflake", "bigquery", "databricks", "pinecone", "elasticsearch", "typesense",
+  "brave-search", "tavily", "serpapi", "algolia", "google-maps", "mixpanel",
+  "amplitude", "posthog", "segment", "metabase", "redash", "superset", "stripe", "paypal",
 ] as const;
 const ORDERED_SPECS = [...SPECS].sort(
   (left, right) =>
@@ -958,62 +1775,11 @@ export const DATA_SEARCH_PROVIDERS: readonly ProviderDefinition[] = Object.freez
 
 export const DATA_SEARCH_BLOCKED: readonly DataSearchBlockedCandidate[] = Object.freeze([
   {
-    providerId: "docusign",
-    reason: "Blocked: requires OAuth/UserInfo discovery and rotating-token lifecycle plus a discovered per-account base URI; pasted tokens and a hardcoded demo host are not a production connector.",
-    officialDocs: docs(
-      "https://developers.docusign.com/platform/auth/reference/user-info/",
-      "https://developers.docusign.com/docs/esign-rest-api/reference/envelopes/envelopes/liststatuschanges/",
-    ),
-  },
-  {
-    providerId: "snowflake",
-    reason: "Blocked: a safe connector needs a single-statement SQL, bind, partition and warehouse-cost handler plus per-user OAuth/JWT and read-only role enforcement; arbitrary SQL and no-cost SELECT probes are not exported.",
-    officialDocs: docs("https://docs.snowflake.com/en/developer-guide/sql-api/reference"),
-  },
-  {
-    providerId: "databricks",
-    reason: "Blocked: requires an OAuth/SQL policy, chunk and external-link handler with warehouse-cost controls and a restricted workspace origin; no generic statement endpoint is exposed.",
-    officialDocs: docs("https://docs.databricks.com/api/statement-execution/v1/statement-execution"),
-  },
-  {
-    providerId: "elasticsearch",
-    reason: "Blocked: requires a deployment-pinned tenant origin and PIT-aware scoped-key handler with named-index privileges; generic cluster search and arbitrary hosts are not exposed.",
-    officialDocs: docs("https://www.elastic.co/docs/api/doc/elasticsearch"),
-  },
-  {
-    providerId: "typesense",
-    reason: "Blocked: requires a restricted tenant origin and collection-scoped HMAC key handler with enforced tenant filters; admin keys and arbitrary cluster hosts are not accepted.",
-    officialDocs: docs("https://typesense.org/docs/30.2/api/api-keys.html"),
-  },
-  {
-    providerId: "serpapi",
-    reason: "Blocked: secret-in-query handling; use brave-search or tavily for the supported web-search profile instead. The private key otherwise enters request URLs and needs engine-specific archive/redaction handling.",
-    officialDocs: docs("https://serpapi.com/search-api"),
-    replacements: ["brave-search", "tavily"],
-  },
-  {
-    providerId: "algolia",
-    reason: "Blocked: requires secured-key derivation, dual-auth headers and fallback-host handler with restrictIndices/tenant filters; an admin key or single generic POST is not exported.",
-    officialDocs: docs("https://www.algolia.com/doc/rest-api/search/search-single-index"),
-  },
-  {
-    providerId: "metabase",
-    reason: "Blocked: requires a versioned Agent semantic-query/session handler and tenant origin with native SQL disabled; group-wide keys and arbitrary /api/dataset or execute-sql calls are not exported.",
-    officialDocs: docs("https://www.metabase.com/docs/latest/api"),
-  },
-  {
     providerId: "redash",
-    reason: "Blocked: requires a version-specific cached-result/Query API key handler and tenant origin; the official endpoint list remains incomplete and fresh query execution/arbitrary SQL is not exposed.",
-    officialDocs: docs("https://redash.io/help/user-guide/integrations-and-api/api/"),
-  },
-  {
-    providerId: "superset",
-    reason: "Blocked: requires a JWT/Rison/RBAC handler and tenant origin pinned to a reviewed deployment; SQL Lab, arbitrary queries, and password login passthrough are not exported.",
-    officialDocs: docs("https://superset.apache.org/developer-docs/6.1.0/api/"),
-  },
-  {
-    providerId: "paypal",
-    reason: "Blocked: client-credentials token lifecycle without a granular read-only scope is merchant/server-app rather than per-buyer auth; no shared-secret token cache or payment read is substituted.",
-    officialDocs: docs("https://developer.paypal.com/api/rest/authentication"),
+    reason: "Blocked: the official endpoint list is incomplete V9-era material. A current complete version-specific cached-result API/auth contract and deployed-version compatibility review are still required; no descriptor is admitted.",
+    officialDocs: docs(
+      "https://redash.io/help/user-guide/integrations-and-api/api/",
+      "https://redash.io/help/open-source/admin-guide/how-to-upgrade",
+    ),
   },
 ]);
