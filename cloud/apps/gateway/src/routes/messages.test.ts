@@ -1,7 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { accountSettings, attachments, byokKeysRepo, messages, newId, runs, runUsage, sessionState, sessions, users, type Db } from "@ovid/db";
+import { accountSettings, admitDispatches, attachments, byokKeysRepo, messages, newId, runs, runUsage, sessionState, sessions, users, type Db } from "@ovid/db";
 import { AGENT_RUN_JOB_NAME } from "@ovid/queue";
+import type { ActivityTracker } from "@ovid/storage";
 import {
   messageDtoSchema,
   pageSchema,
@@ -66,6 +67,8 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
       mintTimeoutMs?: number;
       /** Fixed clock for the token-cap windows and their reset header. */
       clock?: () => Date;
+      /** Optional activity boundary for route-ordering regressions. */
+      activity?: ActivityTracker;
     } = {},
   ): TestApp {
     const { queues, adds } = stubQueues({ failAdd: behavior.failAdd });
@@ -84,6 +87,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
         : {}),
       ...(behavior.presigner !== undefined ? { presigner: behavior.presigner } : {}),
       ...(behavior.clock !== undefined ? { clock: behavior.clock } : {}),
+      ...(behavior.activity !== undefined ? { activity: behavior.activity } : {}),
     });
     const handle = { app, adds, mint };
     built.push(handle);
@@ -1033,6 +1037,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
     inputTokens: number,
     outputTokens: number,
     createdAt: Date,
+    billingClass: "ovid_allowance" | "byok" = "ovid_allowance",
   ): Promise<void> {
     await runUsage.record(db, {
       userId: uid,
@@ -1042,6 +1047,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
       inputTokens,
       outputTokens,
       createdAt,
+      billingClass,
     });
   }
 
@@ -1049,7 +1055,17 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
     const handle = makeApp({ clock: () => CAP_NOW });
     const uid = testUid("msg-tokenday");
     const sid = await createSession(handle, uid);
-    await seedUsage(uid, sid, 49_000_000, 1_000_000, new Date("2026-10-23T10:00:00.000Z"));
+    await seedUsage(
+      uid,
+      sid,
+      49_000_000,
+      1_000_000,
+      new Date("2026-10-23T10:00:00.000Z"),
+      "ovid_allowance",
+    );
+    // Additional BYOK telemetry neither reduces nor replaces the Ovid usage
+    // that independently exhausts the allowance.
+    await seedUsage(uid, sid, 60_000_000, 0, new Date("2026-10-23T11:00:00.000Z"), "byok");
 
     const res = await sendMessage(handle, uid, sid, { content: "one more" });
 
@@ -1103,6 +1119,30 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
     expect(handle.mint.calls).toEqual([{ uid }]);
   });
 
+  it("keeps BYOK actual telemetry out of the early token cap for a new Ovid send", async () => {
+    const handle = makeApp({ clock: () => CAP_NOW });
+    const uid = testUid("msg-token-mixed-actual");
+    const sid = await createSession(handle, uid);
+    await seedUsage(
+      uid,
+      sid,
+      49_000_000,
+      999_999,
+      new Date("2026-10-23T10:00:00.000Z"),
+      "ovid_allowance",
+    );
+    // The unfiltered actual total is 109,999,999 tokens, but only the
+    // 49,999,999 Ovid-billed tokens belong to this Ovid allowance check.
+    await seedUsage(uid, sid, 60_000_000, 0, new Date("2026-10-23T11:00:00.000Z"), "byok");
+
+    const res = await sendMessage(handle, uid, sid, { content: "Ovid still has one token of headroom" });
+
+    expect(res.statusCode).toBe(202);
+    expect(handle.mint.calls).toEqual([{ uid }]);
+    expect(handle.adds).toHaveLength(1);
+    expect(handle.adds[0]!.data).toMatchObject({ userId: uid, sessionId: sid });
+  });
+
   it("gives a paid tier its multiplier: Go may pass Free's 50M daily ceiling", async () => {
     const handle = makeApp({ clock: () => CAP_NOW });
     const uid = testUid("msg-tokengo");
@@ -1152,6 +1192,97 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
     expect(res.statusCode).toBe(202);
     expect(handle.mint.calls).toEqual([]);
     expect(handle.adds[0]!.data).toMatchObject({ byokKeyId: key.id });
+  });
+
+  it("preserves the A0 child-send fence before mint, activity, queue, or durable state changes", async () => {
+    const activityBumps: string[] = [];
+    const activity: ActivityTracker = {
+      async bump(sessionId) { activityBumps.push(sessionId); },
+      async read() { return null; },
+      async readMany() { return new Map<string, number>(); },
+    };
+    const handle = makeApp({ activity });
+    const uid = testUid("msg-a0-child-send");
+    const parentSessionId = await createSession(handle, uid);
+    const parentPrompt = await messages.append(db, {
+      sessionId: parentSessionId,
+      role: "user",
+      content: "dispatch a durable child",
+    });
+    const rootRun = await runs.create(db, {
+      sessionId: parentSessionId,
+      promptMessageId: parentPrompt.id,
+    });
+    expect(await runs.claimNext(db, rootRun.id)).toBe(true);
+    const [admitted] = await admitDispatches(db, [{
+      requestId: newId(),
+      index: 0,
+      sessionId: parentSessionId,
+      userId: uid,
+      rootTaskRunId: rootRun.id,
+      parentRunId: rootRun.id,
+      batchId: newId(),
+      prompt: "child work protected from public message sends",
+      provenance: "web",
+      requestedAt: new Date(),
+      modelContext: {
+        requestedModel: null,
+        byokKeyId: null,
+        actorUserId: uid,
+      },
+    }]);
+    expect(admitted).toMatchObject({ admission: "admitted" });
+    const childSessionId = admitted!.childSessionId!;
+    const attemptId = admitted!.attemptId!;
+    const workerId = admitted!.logicalWorkerId!;
+
+    async function childState() {
+      const session = await db.$client`
+        SELECT title, mode, pinned_at, updated_at, deleted_at
+          FROM sessions WHERE id = ${childSessionId}`;
+      const sessionAgentState = await db.$client`
+        SELECT state FROM session_agent_state WHERE session_id = ${childSessionId}`;
+      const childRuns = await db.$client`
+        SELECT id, status, cancel_requested, last_error, finished_at
+          FROM runs WHERE session_id = ${childSessionId} ORDER BY id`;
+      const childMessages = await db.$client`
+        SELECT id, role, content, client_msg_id, created_at
+          FROM messages WHERE session_id = ${childSessionId} ORDER BY id`;
+      const attempt = await db.$client`
+        SELECT status, ended_at FROM subagent_attempts WHERE id = ${attemptId}`;
+      const worker = await db.$client`
+        SELECT status, updated_at FROM subagent_logical_workers WHERE id = ${workerId}`;
+      return {
+        session,
+        sessionAgentState,
+        runs: childRuns,
+        messages: childMessages,
+        attempt,
+        worker,
+      };
+    }
+
+    const before = await childState();
+    expect(before.session).toHaveLength(1);
+    expect(before.sessionAgentState).toEqual([
+      { state: { subagentParentSessionId: parentSessionId } },
+    ]);
+    expect(before.runs[0]).toMatchObject({ status: "running", cancel_requested: false });
+    expect(before.messages).toHaveLength(1);
+    expect(before.attempt[0]).toMatchObject({ status: "running", ended_at: null });
+    expect(before.worker[0]).toMatchObject({ status: "running" });
+
+    const res = await sendMessage(handle, uid, childSessionId, {
+      content: "a public client must not send a child follow-up",
+      clientMsgId: newId(),
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toMatchObject({ error: { code: "worker_control_main_only" } });
+    expect(handle.mint.calls).toEqual([]);
+    expect(activityBumps).toEqual([]);
+    expect(handle.adds).toEqual([]);
+    expect(await childState()).toEqual(before);
   });
 });
 

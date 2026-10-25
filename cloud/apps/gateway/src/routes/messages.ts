@@ -507,8 +507,8 @@ async function tokenCapRefusal(
   now: Date,
 ): Promise<FastifyReply | null> {
   const [today, month] = await Promise.all([
-    runUsage.totals(deps.db, { userId: uid, since: utcDayStart(now), until: now }),
-    runUsage.totals(deps.db, { userId: uid, since: utcMonthStart(now), until: now }),
+    runUsage.totals(deps.db, { userId: uid, since: utcDayStart(now), until: now, billingClass: "ovid_allowance" }),
+    runUsage.totals(deps.db, { userId: uid, since: utcMonthStart(now), until: now, billingClass: "ovid_allowance" }),
   ]);
   const verdict = evaluateTokenCaps({ tier, now, today, month });
   if (verdict === null) return null;
