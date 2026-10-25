@@ -294,6 +294,8 @@ export interface GatewayDeps {
    * root wires it once the worker exposes the transport (see COORDINATION.md).
    */
   studioGit?: StudioGitTransport;
+  /** Complete opt-in isolated Studio preview API/origin composition. */
+  studioPreview?: StudioPreviewGatewayConfig;
   /**
    * P9 Task 16: LEGACY public share routes at the gateway ROOT (POST/GET
    * /shares, /shares/:token, /s/*, /.well-known/assetlinks.json) — Caddy
@@ -309,8 +311,6 @@ export interface GatewayDeps {
   reports?: ReportsConfig;
   /**
    * P9 Task 15: the account deletion lifecycle. Registered at the gateway
-  /** Complete opt-in isolated Studio preview API/origin composition. */
-  studioPreview?: StudioPreviewGatewayConfig;
    * ROOT (legacy `/account/*` paths, outside `/cloud/v1`) with its own
    * Firebase verifier so disabled-token recovery never touches the ordinary
    * auth hook. OPTIONAL so existing compositions/tests stay source-compatible;
@@ -324,37 +324,6 @@ export interface BuildGatewayOptions {
   logger?: FastifyServerOptions["logger"];
 }
 
-export const API_PREFIX = "/cloud/v1";
-
-/**
- * Capped WS frame size (I2): 256 KiB per frame. The @fastify/websocket (ws)
- * default is 100 MiB per frame — with 32 pre-auth frames bufferable per
- * connection that is a trivial pre-auth OOM vector. 256 KiB is orders above
- * any legitimate client frame (subscribe/ping are < 200 bytes).
- */
-export const WS_MAX_PAYLOAD_BYTES = 262_144;
-
-/**
- * Builds the gateway HTTP app: routes under /cloud/v1, everything except
- * /health behind the Task 6 authHook, one ApiError envelope for every
- * failure. Returns an unlistened instance — inject()-testable as-is.
- */
-export function buildGateway(
-  deps: GatewayDeps,
-  opts: BuildGatewayOptions = {},
-): FastifyInstance {
-  const app = Fastify({
-    logger: studioPreviewLogger(opts.logger),
-  });
-
-  // Anything that THROWS (route bug, Fastify body-parse rejection) is mapped
-  // to the shared envelope here. 4xx keep Fastify's own message (e.g. the
-  // JSON parse complaint); 5xx are logged with the real error server-side and
-  // collapsed to a generic message for the client.
-  app.setErrorHandler((error: FastifyError, request, reply) => {
-    const status = typeof error.statusCode === "number" ? error.statusCode : 500;
-    if (status < 400 || status >= 500) {
-      request.log.error({ err: error }, "unhandled error in route");
 type GatewayLogger = FastifyServerOptions["logger"];
 type GatewayLoggerObject = Exclude<GatewayLogger, boolean | undefined>;
 type RequestLogInput = FastifyRequest;
@@ -402,13 +371,6 @@ function studioPreviewLogger(logger: GatewayLogger): GatewayLogger {
     return serialized;
   };
   return {
-
-  // Dedicated preview origin routes are a separate ROOT composition. They
-  // never inherit the authenticated /cloud/v1 authHook or forward its cookies.
-  if (deps.studioPreview !== undefined) {
-    registerStudioPreviewOriginRoot(app, deps.studioPreview);
-  }
-
     ...options,
     serializers: {
       ...options.serializers,
@@ -417,6 +379,37 @@ function studioPreviewLogger(logger: GatewayLogger): GatewayLogger {
   };
 }
 
+export const API_PREFIX = "/cloud/v1";
+
+/**
+ * Capped WS frame size (I2): 256 KiB per frame. The @fastify/websocket (ws)
+ * default is 100 MiB per frame — with 32 pre-auth frames bufferable per
+ * connection that is a trivial pre-auth OOM vector. 256 KiB is orders above
+ * any legitimate client frame (subscribe/ping are < 200 bytes).
+ */
+export const WS_MAX_PAYLOAD_BYTES = 262_144;
+
+/**
+ * Builds the gateway HTTP app: routes under /cloud/v1, everything except
+ * /health behind the Task 6 authHook, one ApiError envelope for every
+ * failure. Returns an unlistened instance — inject()-testable as-is.
+ */
+export function buildGateway(
+  deps: GatewayDeps,
+  opts: BuildGatewayOptions = {},
+): FastifyInstance {
+  const app = Fastify({
+    logger: studioPreviewLogger(opts.logger),
+  });
+
+  // Anything that THROWS (route bug, Fastify body-parse rejection) is mapped
+  // to the shared envelope here. 4xx keep Fastify's own message (e.g. the
+  // JSON parse complaint); 5xx are logged with the real error server-side and
+  // collapsed to a generic message for the client.
+  app.setErrorHandler((error: FastifyError, request, reply) => {
+    const status = typeof error.statusCode === "number" ? error.statusCode : 500;
+    if (status < 400 || status >= 500) {
+      request.log.error({ err: error }, "unhandled error in route");
       const body: ApiError = {
         error: { code: "internal", message: "Internal server error." },
       };
@@ -482,6 +475,27 @@ function studioPreviewLogger(logger: GatewayLogger): GatewayLogger {
   if (deps.account !== undefined) {
     registerAccountRoutes(app, deps.account);
   }
+
+  // The CDN Worker is a service principal, not a Firebase user. Mount its
+  // grant check on the root instance, before the authenticated /cloud/v1
+  // scope, only with a real >=32-byte credential. A partial configuration is
+  // never replaced by a public/grantless v2 route.
+  const cdnGrantSecret = (deps.cdn?.grantInternalSecret ?? "").trim();
+  if (Buffer.byteLength(cdnGrantSecret, "utf8") >= 32) {
+    registerCdnGrantRoutes(app, {
+      db: deps.db,
+      cdnGrantSecret,
+      storage: deps.storage,
+      clock: deps.clock,
+    });
+  }
+
+  // Dedicated preview origin routes are a separate ROOT composition. They
+  // never inherit the authenticated /cloud/v1 authHook or forward its cookies.
+  if (deps.studioPreview !== undefined) {
+    registerStudioPreviewOriginRoot(app, deps.studioPreview);
+  }
+
   app.register(
     async (scope) => {
       registerHealthRoutes(scope, deps);
@@ -506,27 +520,6 @@ function studioPreviewLogger(logger: GatewayLogger): GatewayLogger {
       registerSessionRoutes(scope, deps);
       registerProjectRoutes(scope, deps);
       registerMessageRoutes(scope, deps);
-
-  // The CDN Worker is a service principal, not a Firebase user. Mount its
-  // grant check on the root instance, before the authenticated /cloud/v1
-  // scope, only with a real >=32-byte credential. A partial configuration is
-  // never replaced by a public/grantless v2 route.
-  const cdnGrantSecret = (deps.cdn?.grantInternalSecret ?? "").trim();
-  if (Buffer.byteLength(cdnGrantSecret, "utf8") >= 32) {
-    registerCdnGrantRoutes(app, {
-      db: deps.db,
-      cdnGrantSecret,
-      storage: deps.storage,
-      clock: deps.clock,
-    });
-  }
-
-  // Dedicated preview origin routes are a separate ROOT composition. They
-  // never inherit the authenticated /cloud/v1 authHook or forward its cookies.
-  if (deps.studioPreview !== undefined) {
-    registerStudioPreviewOriginRoot(app, deps.studioPreview);
-  }
-
       registerPreferenceRoutes(scope, deps);
       // The model catalog + the account's tier, so a client can offer a real
       // model picker instead of a static "Auto" pill.
@@ -578,6 +571,9 @@ function studioPreviewLogger(logger: GatewayLogger): GatewayLogger {
       // git half answers 503 studio_git_unavailable until the worker exposes
       // its transport — an honest refusal, never a fake success.
       registerStudioRoutes(scope, deps);
+      if (deps.studioPreview !== undefined) {
+        registerStudioPreviewApiRoutes(scope, deps.studioPreview);
+      }
 
       // P9 Task 11: BYOK escrow CRUD + the SSRF-guarded provider probe.
       registerByokRoutes(scope, {
@@ -631,9 +627,6 @@ function studioPreviewLogger(logger: GatewayLogger): GatewayLogger {
     registerReportsRoutes(app, {
       db: deps.db,
       verifier: deps.verifier,
-      if (deps.studioPreview !== undefined) {
-        registerStudioPreviewApiRoutes(scope, deps.studioPreview);
-      }
       ...deps.reports,
     });
   }
