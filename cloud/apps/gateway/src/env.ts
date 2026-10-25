@@ -1,3 +1,5 @@
+import { isIP } from "node:net";
+
 import type { CdnConfig } from "@ovid/storage";
 import { loadCdnConfig } from "@ovid/storage";
 import { parseTrustedProxyCidrs } from "./clientIp.js";
@@ -12,6 +14,15 @@ import { parseTrustedProxyCidrs } from "./clientIp.js";
  */
 export type AppCheckMode = "required" | "optional" | "off";
 const APP_CHECK_MODES: readonly AppCheckMode[] = ["required", "optional", "off"];
+
+export interface StudioPreviewEnv {
+  /** Exact dedicated HTTPS origin; no path/query/fragment/credentials. */
+  previewOrigin: string;
+  /** Separate exact HTTPS Web origin used only for frame-ancestors. */
+  webOrigin: string;
+  /** Trusted private hostname/IP, never a client-provided upstream URL. */
+  workerHost: string;
+}
 
 export interface GatewayEnv {
   nodeEnv: string;
@@ -78,6 +89,8 @@ export interface GatewayEnv {
    * the CDN is optional and its absence is a typed 503, never a boot error.
    */
   cdn?: CdnConfig;
+  /** Complete opt-in Studio preview composition; absent keeps all preview routes unmounted. */
+  preview?: StudioPreviewEnv;
 }
 
 const DEFAULT_PORT = 8081;
@@ -93,6 +106,122 @@ export const DEFAULT_MCP_REDIRECT_URI = "https://ovidsi.com/oauth/callback";
 const MASTER_KEY_HEX_RE = /^[0-9a-fA-F]{64}$/;
 /** P9 Task 9: minimum HMAC secret size (OVID_INTERNAL_API_SECRET). */
 const MIN_INTERNAL_SECRET_BYTES = 32;
+
+/** One raw-string origin fence shared by env and direct route composition. */
+export function parseStudioPreviewOrigin(raw: string, variable: string): string {
+  try {
+    if (raw.length === 0 || raw.trim() !== raw) throw new Error("whitespace");
+    // One ordinary trailing slash is accepted; every other path/query/fragment
+    // spelling must already be the exact canonical origin serialization.
+    const serialized = raw.endsWith("/") ? raw.slice(0, -1) : raw;
+    if (serialized.length === 0) throw new Error("empty");
+    const url = new URL(serialized);
+    if (
+      url.protocol !== "https:" ||
+      url.username !== "" ||
+      url.password !== "" ||
+      serialized !== url.origin
+    ) {
+      throw new Error("noncanonical origin");
+    }
+    return url.origin;
+  } catch {
+    throw new Error(
+      `${variable} must be an exact HTTPS origin serialization with no path/query/fragment/credentials`,
+    );
+  }
+}
+
+function privateIpv4(host: string): boolean {
+  if (isIP(host) !== 4) return false;
+  const [a = -1, b = -1] = host.split(".").map(Number);
+  return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168);
+}
+
+function mappedIpv4(host: string): string | null {
+  if (!host.startsWith("::ffff:")) return null;
+  const words = host.slice("::ffff:".length).split(":");
+  if (words.length !== 2 || !words.every((word) => /^[0-9a-f]{1,4}$/.test(word))) {
+    return null;
+  }
+  const [high = 0, low = 0] = words.map((word) => Number.parseInt(word, 16));
+  return `${high >>> 8}.${high & 255}.${low >>> 8}.${low & 255}`;
+}
+
+function invalidWorkerHost(): never {
+  throw new Error("OVID_PREVIEW_WORKER_HOST must be a private/loopback IP or private hostname");
+}
+
+/**
+ * Canonicalize with WHATWG URL host semantics before applying address policy.
+ * Numeric/shortened/hex/octal input can therefore never mean one host to the
+ * config fence and another to the later fetch URL parser.
+ */
+export function parseStudioPreviewWorkerHost(raw: string): string {
+  if (raw.length === 0 || raw.length > 253 || /[\s/?#@\\]/.test(raw)) {
+    throw new Error("OVID_PREVIEW_WORKER_HOST must be a private hostname/IP, not a URL");
+  }
+  const unbracketed = raw.startsWith("[") && raw.endsWith("]")
+    ? raw.slice(1, -1)
+    : raw;
+  const urlHost = unbracketed.includes(":") ? `[${unbracketed}]` : unbracketed;
+  let canonical: string;
+  try {
+    canonical = new URL(`http://${urlHost}/`).hostname.toLowerCase();
+  } catch {
+    return invalidWorkerHost();
+  }
+
+  const ipv6 = canonical.startsWith("[") && canonical.endsWith("]")
+    ? canonical.slice(1, -1)
+    : null;
+  if (ipv6 !== null && isIP(ipv6) === 6) {
+    const first = Number.parseInt(ipv6.split(":", 1)[0] || "0", 16);
+    const mapped = mappedIpv4(ipv6);
+    if (ipv6 !== "::1" && (first & 0xfe00) !== 0xfc00 &&
+        (mapped === null || !privateIpv4(mapped))) {
+      return invalidWorkerHost();
+    }
+    return `[${ipv6}]`;
+  }
+
+  const hostname = canonical.endsWith(".") ? canonical.slice(0, -1) : canonical;
+  if (isIP(hostname) === 4) {
+    if (!privateIpv4(hostname)) return invalidWorkerHost();
+    return hostname;
+  }
+  const rawHostname = unbracketed.endsWith(".")
+    ? unbracketed.slice(0, -1)
+    : unbracketed;
+  const validHostname = (value: string): boolean =>
+    value.length > 0 &&
+    value.length <= 253 &&
+    !value.includes(":") &&
+    value.split(".").every((label) =>
+      /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label)
+    );
+  // Do not let URL IDNA/percent normalization broaden the original DNS grammar.
+  if (!validHostname(rawHostname) || !validHostname(hostname)) {
+    return invalidWorkerHost();
+  }
+  return hostname;
+}
+
+function loadStudioPreviewEnv(raw: NodeJS.ProcessEnv): StudioPreviewEnv | undefined {
+  const previewRaw = raw.OVID_PREVIEW_ORIGIN?.trim() ?? "";
+  if (previewRaw === "") return undefined;
+  const previewOrigin = parseStudioPreviewOrigin(previewRaw, "OVID_PREVIEW_ORIGIN");
+  const webRaw = raw.OVID_WEB_ORIGIN?.trim() ?? "";
+  const workerRaw = raw.OVID_PREVIEW_WORKER_HOST?.trim() ?? "";
+  // Partial opt-in is disabled, never replaced by a tunnel or Host-derived URL.
+  if (webRaw === "" || workerRaw === "") return undefined;
+  const webOrigin = parseStudioPreviewOrigin(webRaw, "OVID_WEB_ORIGIN");
+  if (previewOrigin === webOrigin) {
+    throw new Error("OVID_PREVIEW_ORIGIN and OVID_WEB_ORIGIN must be different origins");
+  }
+  return { previewOrigin, webOrigin, workerHost: parseStudioPreviewWorkerHost(workerRaw) };
+}
 
 /**
  * Validate + default the gateway's environment.
@@ -255,6 +384,10 @@ export function loadGatewayEnv(raw: NodeJS.ProcessEnv): GatewayEnv {
   // loadCdnConfig (a missing/short signing secret would be forgeable).
   const cdn = loadCdnConfig(raw) ?? undefined;
 
+  // Preview is independently opt-in. Missing companion config leaves it
+  // unmounted; malformed supplied values fail closed at configuration load.
+  const preview = loadStudioPreviewEnv(raw);
+
   return {
     nodeEnv,
     port,
@@ -277,5 +410,6 @@ export function loadGatewayEnv(raw: NodeJS.ProcessEnv): GatewayEnv {
     mcpRedirectUri,
     appCheckMode,
     ...(cdn !== undefined ? { cdn } : {}),
+    ...(preview !== undefined ? { preview } : {}),
   };
 }

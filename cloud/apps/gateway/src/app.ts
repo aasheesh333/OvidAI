@@ -1,6 +1,7 @@
 import Fastify, {
   type FastifyError,
   type FastifyInstance,
+  type FastifyRequest,
   type FastifyServerOptions,
 } from "fastify";
 import websocket from "@fastify/websocket";
@@ -23,6 +24,12 @@ import { registerByokRoutes } from "./routes/byok.js";
 import type { ByokRouteOverrides } from "./routes/byok.js";
 import type { GithubRouteOverrides } from "./studioGithub.js";
 import type { StudioGitTransport } from "./studioGit.js";
+import {
+  isStudioPreviewOriginPath,
+  registerStudioPreviewApiRoutes,
+  registerStudioPreviewOriginRoot,
+  type StudioPreviewGatewayConfig,
+} from "./studioPreviewGateway.js";
 import { registerDevicesRoutes } from "./routes/devices.js";
 import { registerWebPushRoutes } from "./routes/webPush.js";
 import { registerUsageHistoryRoutes } from "./routes/usageHistory.js";
@@ -302,6 +309,8 @@ export interface GatewayDeps {
   reports?: ReportsConfig;
   /**
    * P9 Task 15: the account deletion lifecycle. Registered at the gateway
+  /** Complete opt-in isolated Studio preview API/origin composition. */
+  studioPreview?: StudioPreviewGatewayConfig;
    * ROOT (legacy `/account/*` paths, outside `/cloud/v1`) with its own
    * Firebase verifier so disabled-token recovery never touches the ordinary
    * auth hook. OPTIONAL so existing compositions/tests stay source-compatible;
@@ -335,7 +344,7 @@ export function buildGateway(
   opts: BuildGatewayOptions = {},
 ): FastifyInstance {
   const app = Fastify({
-    logger: opts.logger ?? false,
+    logger: studioPreviewLogger(opts.logger),
   });
 
   // Anything that THROWS (route bug, Fastify body-parse rejection) is mapped
@@ -346,6 +355,68 @@ export function buildGateway(
     const status = typeof error.statusCode === "number" ? error.statusCode : 500;
     if (status < 400 || status >= 500) {
       request.log.error({ err: error }, "unhandled error in route");
+type GatewayLogger = FastifyServerOptions["logger"];
+type GatewayLoggerObject = Exclude<GatewayLogger, boolean | undefined>;
+type RequestLogInput = FastifyRequest;
+
+const SECRET_REQUEST_LOG_FIELDS = new Set([
+  "headers",
+  "cookie",
+  "authorization",
+  "x-ovid-internal-token",
+]);
+
+/** Keep path/method telemetry while dropping every query on the isolated origin. */
+export function sanitizeStudioPreviewRequestLogUrl(rawUrl: string): string {
+  if (!isStudioPreviewOriginPath(rawUrl)) return rawUrl;
+  const path = rawUrl.split("?", 1)[0]!;
+  return rawUrl.includes("?") ? `${path}?[redacted]` : path;
+}
+
+/** Merge rather than replace caller logger/stream/serializer options. */
+function studioPreviewLogger(logger: GatewayLogger): GatewayLogger {
+  if (logger === undefined || logger === false) return false;
+  const options: GatewayLoggerObject = logger === true ? {} : logger;
+  const customReq = options.serializers?.req;
+  const req = (request: RequestLogInput): Record<string, unknown> => {
+    const serialized: Record<string, unknown> = {
+      ...(customReq === undefined
+        ? {
+            method: request.method,
+            url: request.url,
+            version: request.headers && request.headers["accept-version"],
+            host: request.host,
+            remoteAddress: request.ip,
+            remotePort: request.socket ? request.socket.remotePort : undefined,
+          }
+        : customReq(request)),
+    };
+    for (const key of Object.keys(serialized)) {
+      if (SECRET_REQUEST_LOG_FIELDS.has(key.toLowerCase())) delete serialized[key];
+    }
+    if (isStudioPreviewOriginPath(request.url)) {
+      serialized.url = sanitizeStudioPreviewRequestLogUrl(request.url);
+    } else if (typeof serialized.url === "string") {
+      serialized.url = sanitizeStudioPreviewRequestLogUrl(serialized.url);
+    }
+    return serialized;
+  };
+  return {
+
+  // Dedicated preview origin routes are a separate ROOT composition. They
+  // never inherit the authenticated /cloud/v1 authHook or forward its cookies.
+  if (deps.studioPreview !== undefined) {
+    registerStudioPreviewOriginRoot(app, deps.studioPreview);
+  }
+
+    ...options,
+    serializers: {
+      ...options.serializers,
+      req,
+    },
+  };
+}
+
       const body: ApiError = {
         error: { code: "internal", message: "Internal server error." },
       };
@@ -382,7 +453,16 @@ export function buildGateway(
         rateLimitInternalSecret: deps.rateLimitInternalSecret!,
       });
     }
-    app.addHook("preHandler", createRateLimitPreHandler(rateLimitOptions));
+    const enforceRateLimit = createRateLimitPreHandler(rateLimitOptions);
+    app.addHook("preHandler", async (request, reply) => {
+      // Dedicated preview requests never enter the Firebase-aware identity
+      // path. Their scoped ticket/cookie and live worker registration are the
+      // only authorization inputs; API management remains rate-limited.
+      if (deps.studioPreview !== undefined && isStudioPreviewOriginPath(request.raw.url)) {
+        return;
+      }
+      return enforceRateLimit(request, reply);
+    });
   }
 
   // Public scope: health + the MCP OAuth callback. Both are explicitly
@@ -530,6 +610,9 @@ export function buildGateway(
     registerReportsRoutes(app, {
       db: deps.db,
       verifier: deps.verifier,
+      if (deps.studioPreview !== undefined) {
+        registerStudioPreviewApiRoutes(scope, deps.studioPreview);
+      }
       ...deps.reports,
     });
   }

@@ -9,7 +9,7 @@ export * from "./wsPty.js";
 import { initializeApp } from "firebase-admin/app";
 import { Redis } from "ioredis";
 import type { FastifyInstance } from "fastify";
-import { createDb, dbPoolOptionsFromEnv, newId, byokKeysRepo, imagesRepo, sharesRepo } from "@ovid/db";
+import { createDb, dbPoolOptionsFromEnv, newId, byokKeysRepo, imagesRepo, sessions, sharesRepo } from "@ovid/db";
 import {
   createCloudCleanup,
   createFirebaseAdmin,
@@ -37,6 +37,8 @@ import { createTicketStore } from "./tickets.js";
 import { createWorkerClient } from "./workerClient.js";
 import { createConnectionHealthClient } from "./connectionHealthClient.js";
 import { createStudioGitHttpTransport } from "./studioGitHttp.js";
+import { createPreviewTicketStore } from "./studioPreviewTickets.js";
+import { createStudioPreviewWorkerClient } from "./studioPreviewWorkerClient.js";
 import { CollabMembership, type AccountAdmission as CollabAccountAdmission } from "./collab/membership.js";
 import { CollabLifecycle } from "./collab/lifecycle.js";
 import { CollabProjection } from "./collab/projection.js";
@@ -310,6 +312,27 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
     baseUrl: cfg.workerInternalUrl,
     token: cfg.internalToken,
   });
+  const studioPreviewEnv = cfg.preview;
+  const studioPreview = studioPreviewEnv === undefined ||
+      cfg.workerInternalUrl === "" || cfg.internalToken === ""
+    ? undefined
+    : (() => {
+        const now = () => new Date();
+        const redisKeyPrefix = "ovid:studio:preview:";
+        return {
+          ...studioPreviewEnv,
+          worker: createStudioPreviewWorkerClient({
+            baseUrl: cfg.workerInternalUrl,
+            token: cfg.internalToken,
+          }),
+          tickets: createPreviewTicketStore(redisQ, { now, keyPrefix: redisKeyPrefix }),
+          redis: redisQ,
+          redisKeyPrefix,
+          isSessionOwner: async (userId: string, sessionId: string) =>
+            (await sessions.get(db, sessionId, userId)) !== null,
+          now,
+        };
+      })();
 
   // P10 Task 2: ONE server-level registry of live WS sockets, used by the
   // SIGTERM/SIGINT drain below to close them with 1001 "server restarting".
@@ -370,6 +393,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       worker,
       connectionHealthInvocations,
       studioGit,
+      ...(studioPreview !== undefined ? { studioPreview } : {}),
       inlineMaxBytes: cfg.fileInlineMaxBytes,
       putMaxBytes: cfg.putMaxBytes,
       presignTtlSeconds: cfg.presignTtlSeconds,
