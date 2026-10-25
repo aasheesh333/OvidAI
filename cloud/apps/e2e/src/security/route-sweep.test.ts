@@ -49,11 +49,12 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   attachments,
   browserCredentialsRepo,
   byokKeysRepo,
+  createConnectionHealthStore,
   createDb,
   createPrivateMemoryStore,
   customPresets,
@@ -87,7 +88,11 @@ import { browserCredentialRecordId } from "@ovid/shared";
 import { byokRecordId } from "@ovid/escrow";
 import type { EventLog, SystemBus } from "@ovid/events";
 import type { OAuthFlow } from "@ovid/mcp";
-import { createEnvelopeCrypto } from "@ovid/mcp";
+import {
+  createConnectionHealthInvocations,
+  createConnectionHealthLifecycle,
+  createEnvelopeCrypto,
+} from "@ovid/mcp";
 import type { QueueServices } from "@ovid/queue";
 import { buildGateway, createTestVerifier, type GatewayDeps } from "@ovid/gateway";
 // The account lifecycle's AccountError class must be the SAME module instance
@@ -758,6 +763,8 @@ describe("route sweep — 404 not 403", () => {
   let userA: string;
   let userB: string;
   let baseDeps: GatewayDeps;
+  let oauthCancelRefreshes: ReturnType<typeof vi.fn>;
+  let storeDisconnect: ReturnType<typeof vi.spyOn>;
 
   beforeAll(async () => {
     if (!TEST_DATABASE_URL) {
@@ -1069,6 +1076,7 @@ describe("route sweep — 404 not 403", () => {
         return async () => {};
       },
     };
+    oauthCancelRefreshes = vi.fn();
     const oauth: OAuthFlow = {
       async start() {
         return { authorizeUrl: "https://oauth.example.test/authorize" };
@@ -1080,7 +1088,18 @@ describe("route sweep — 404 not 403", () => {
         return null;
       },
       async disconnect() {},
+      cancelRefreshes: oauthCancelRefreshes,
     };
+    const connectionHealthStore = createConnectionHealthStore(db);
+    storeDisconnect = vi.spyOn(connectionHealthStore, "disconnect");
+    const connectionHealthInvocations = createConnectionHealthInvocations({
+      lifecycle: createConnectionHealthLifecycle({
+        store: connectionHealthStore,
+        providers: [],
+        open: async () => { throw new Error("no provider probe in route sweep"); },
+      }),
+      revalidate: async () => "denied",
+    });
     const system: SystemBus = {
       async publish() {},
       async subscribe() {
@@ -1210,6 +1229,7 @@ describe("route sweep — 404 not 403", () => {
       events,
       crypto,
       oauth,
+      connectionHealthInvocations,
       // Registration-gating optional deps: ALL wired (Finding 1b).
       // Legacy root routes included on purpose: the sweep must see every
       // registered route, not just the /cloud/v1 surface.
@@ -1242,6 +1262,7 @@ describe("route sweep — 404 not 403", () => {
   afterAll(async () => {
     await app?.close();
     await db?.$client.end({ timeout: 5 });
+    vi.restoreAllMocks();
   });
 
   function routeKey(route: RouteEntry): string {
@@ -1729,49 +1750,115 @@ describe("route sweep — 404 not 403", () => {
   it("every ownership route answers its OWNER with 2xx (positive control)", async () => {
     // Finding 4: "foreign owner → 404" alone would pass for a route that
     // unconditionally 404s. Every case must also succeed for its owner.
-    const failures: string[] = [];
-    for (const [key, ownershipCase] of Object.entries(OWNED_CASES)) {
-      const { method, path } = splitRouteKey(key);
-      let url = fillParams(path, ownershipCase.params(fixtures));
-      const ownerQuery = resolveQuery(ownershipCase.ownerQuery, fixtures);
-      if (ownerQuery !== undefined) {
-        url = withQuery(url, ownerQuery);
-      }
-      const res = await app.inject({
-        method: method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
-        url,
-        headers: authHeaders(userA),
-        payload: bodyFor(
-          method,
-          resolveBody(
-            (typeof ownershipCase.ownerBody === "function"
-              ? (ownershipCase.ownerBody as (f: Fixtures) => unknown)(fixtures)
-              : ownershipCase.ownerBody) ?? ownershipCase.body,
-            fixtures,
+    oauthCancelRefreshes.mockClear();
+    storeDisconnect.mockClear();
+    const legacyRemove = vi.spyOn(mcpServers, "remove");
+    try {
+      const failures: string[] = [];
+      for (const [key, ownershipCase] of Object.entries(OWNED_CASES)) {
+        const { method, path } = splitRouteKey(key);
+        let url = fillParams(path, ownershipCase.params(fixtures));
+        const ownerQuery = resolveQuery(ownershipCase.ownerQuery, fixtures);
+        if (ownerQuery !== undefined) {
+          url = withQuery(url, ownerQuery);
+        }
+        const res = await app.inject({
+          method: method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
+          url,
+          headers: authHeaders(userA),
+          payload: bodyFor(
+            method,
+            resolveBody(
+              (typeof ownershipCase.ownerBody === "function"
+                ? (ownershipCase.ownerBody as (f: Fixtures) => unknown)(fixtures)
+                : ownershipCase.ownerBody) ?? ownershipCase.body,
+              fixtures,
+            ),
           ),
-        ),
-      });
-      if (ownershipCase.ownerStatus !== undefined) {
-        // Documented release-gated refusal (history mutations): assert the
-        // exact status AND code, so a 409 cannot mask an ownership failure.
-        if (res.statusCode !== ownershipCase.ownerStatus) {
-          failures.push(
-            `${key} → ${res.statusCode} (expected ${ownershipCase.ownerStatus} for the owner)`,
-          );
+        });
+        if (ownershipCase.ownerStatus !== undefined) {
+          // Documented release-gated refusal (history mutations): assert the
+          // exact status AND code, so a 409 cannot mask an ownership failure.
+          if (res.statusCode !== ownershipCase.ownerStatus) {
+            failures.push(
+              `${key} → ${res.statusCode} (expected ${ownershipCase.ownerStatus} for the owner)`,
+            );
+            continue;
+          }
+          if (ownershipCase.ownerCode !== undefined) {
+            const code = (res.json() as { error?: { code?: string } }).error?.code;
+            if (code !== ownershipCase.ownerCode) {
+              failures.push(`${key} → ${res.statusCode} but code=${String(code)}`);
+            }
+          }
           continue;
         }
-        if (ownershipCase.ownerCode !== undefined) {
-          const code = (res.json() as { error?: { code?: string } }).error?.code;
-          if (code !== ownershipCase.ownerCode) {
-            failures.push(`${key} → ${res.statusCode} but code=${String(code)}`);
-          }
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          failures.push(`${key} → ${res.statusCode} (expected 2xx for the owner)`);
         }
-        continue;
       }
-      if (res.statusCode < 200 || res.statusCode >= 300) {
-        failures.push(`${key} → ${res.statusCode} (expected 2xx for the owner)`);
-      }
+      expect(failures).toEqual([]);
+      // UNEXECUTED I7 regression: gateway-local cancellation precedes the real
+      // lifecycle disconnect, which precedes legacy row removal.
+      expect(oauthCancelRefreshes).toHaveBeenCalledWith(userA, fixtures.mcpDeleteA.id);
+      expect(storeDisconnect).toHaveBeenCalledWith(
+        fixtures.mcpDeleteA.id,
+        userA,
+        fixtures.mcpDeleteA.configVersion,
+      );
+      expect(oauthCancelRefreshes.mock.invocationCallOrder[0]).toBeLessThan(
+        storeDisconnect.mock.invocationCallOrder[0]!,
+      );
+      expect(storeDisconnect.mock.invocationCallOrder[0]).toBeLessThan(
+        legacyRemove.mock.invocationCallOrder[0]!,
+      );
+    } finally {
+      legacyRemove.mockRestore();
     }
-    expect(failures).toEqual([]);
+  });
+
+  it("legacy owner deletion without lifecycle capability refuses 503 without row mutation; wrong owner remains 404", async () => {
+    const row = await mcpServers.create(db, {
+      userId: userA,
+      name: "sweep-missing-lifecycle-capability",
+      transport: "http",
+      config: { url: "https://mcp-capability.example.test" },
+    });
+    const bareApp = buildGateway({ ...baseDeps, connectionHealthInvocations: undefined });
+    try {
+      const before = await db.$client.unsafe(
+        `SELECT enabled, agent_enabled, auth_state, health_state, config_version, disconnect_generation
+         FROM mcp_servers WHERE id = $1`,
+        [row.id],
+      );
+      oauthCancelRefreshes.mockClear();
+      storeDisconnect.mockClear();
+
+      const owner = await bareApp.inject({
+        method: "DELETE",
+        url: `/cloud/v1/mcp/servers/${row.id}`,
+        headers: authHeaders(userA),
+      });
+      expect(owner.statusCode).toBe(503);
+      expect(owner.json()).toMatchObject({ error: { code: "unavailable" } });
+
+      const foreign = await bareApp.inject({
+        method: "DELETE",
+        url: `/cloud/v1/mcp/servers/${row.id}`,
+        headers: authHeaders(userB),
+      });
+      expect(foreign.statusCode).toBe(404);
+      expect(foreign.json()).toMatchObject({ error: { code: "not_found" } });
+      expect(oauthCancelRefreshes).not.toHaveBeenCalled();
+      expect(storeDisconnect).not.toHaveBeenCalled();
+      const after = await db.$client.unsafe(
+        `SELECT enabled, agent_enabled, auth_state, health_state, config_version, disconnect_generation
+         FROM mcp_servers WHERE id = $1`,
+        [row.id],
+      );
+      expect(after).toEqual(before);
+    } finally {
+      await bareApp.close();
+    }
   });
 });

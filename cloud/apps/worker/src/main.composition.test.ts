@@ -211,11 +211,13 @@ describe("worker Studio production composition", () => {
   });
 
   it("passes the real Studio service and preserves the existing MCP composition", async () => {
+    const connectionHealthInvocations = { checkAuthenticated: vi.fn() };
     const mcpRuntime = {
       activation: { activate: vi.fn() },
       router: { releaseRun: vi.fn(() => "released") },
       installer: { rehydrate: vi.fn(async () => 0) },
       resolver: {},
+      connectionHealthInvocations,
     };
     h.createMcpRuntime.mockReturnValue(mcpRuntime);
     const db = { $client: {} };
@@ -237,6 +239,8 @@ describe("worker Studio production composition", () => {
     expect(h.mcpList).toHaveBeenCalledWith(db, "verified-user");
 
     expect(h.buildFileService).toHaveBeenCalledTimes(1);
+    // UNEXECUTED round-2: the internal health RPC receives the worker-owned lifecycle.
+    expect(h.buildFileService.mock.calls[0]?.[0]).toMatchObject({ connectionHealthInvocations });
     expect(h.createStudioGitService.mock.invocationCallOrder[0]).toBeLessThan(
       h.buildFileService.mock.invocationCallOrder[0]!,
     );

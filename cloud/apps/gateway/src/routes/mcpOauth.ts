@@ -86,7 +86,23 @@ export function registerMcpOauthRoutes(app: FastifyInstance, deps: GatewayDeps):
     const row = await mcpServersRepo.get(deps.db, serverId, uid);
     if (row === null) return notFound(reply, MCP_SERVER_NOT_FOUND);
 
-    await deps.oauth.disconnect(uid, serverId);
+    // Cancel this gateway process's token calls as well as the worker-owned
+    // lifecycle below; the DB generation fence covers every other process.
+    deps.oauth.cancelRefreshes(uid, serverId);
+    if (deps.connectionHealthInvocations !== undefined) {
+      try {
+        await deps.connectionHealthInvocations.disconnectAuthenticated({
+          principal: { uid, authenticated: true },
+          connectionId: serverId,
+        });
+      } catch {
+        return sendError(reply, 503, "unavailable", "Connection disconnect is temporarily unavailable.");
+      }
+    } else {
+      // Legacy isolated compositions still get the flow's fenced generation
+      // bump and local refresh cancellation, but not a worker router close.
+      await deps.oauth.disconnect(uid, serverId);
+    }
     return reply.code(204).send();
   });
 }

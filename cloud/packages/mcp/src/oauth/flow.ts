@@ -36,7 +36,6 @@ import { createHash, randomBytes } from "node:crypto";
 import type { EncryptedEnvelope, EnvelopeCrypto } from "../crypto.js";
 import {
   DEFAULT_EGRESS_LIMITS,
-  readBoundedBody,
   type EgressLimits,
   type ProviderEgress,
 } from "../egress/responseLimits.js";
@@ -47,6 +46,7 @@ import {
   discoverOAuthConfig,
   requireOAuthEndpoint,
   requestOAuth,
+  readOAuthBody,
   type OAuthNetworkOptions,
 } from "./discovery.js";
 import type { DiscoveredOAuthConfig } from "./discovery.js";
@@ -141,6 +141,30 @@ interface DbServerRow {
   id: string;
   userId: string;
   config: Record<string, unknown> | null;
+  enabled: boolean;
+  authState: string;
+  healthState: string;
+  configVersion: number;
+  disconnectGeneration: number;
+}
+
+interface OAuthConnectionFacts {
+  enabled: boolean;
+  authState: string;
+  healthState: string;
+  configVersion: number;
+  disconnectGeneration: number;
+}
+
+interface OAuthTokenHealthStore {
+  get(connectionId: string, uid: string): Promise<OAuthConnectionFacts | null>;
+  writeRefreshedToken(write: {
+    connectionId: string;
+    userId: string;
+    expected: { configVersion: number; disconnectGeneration: number };
+    token: unknown;
+    signal: AbortSignal;
+  }): Promise<boolean>;
 }
 
 /** Structural mcp_oauth_flows row (Task 8 McpOauthFlowRow). */
@@ -164,6 +188,9 @@ interface DbTokenRow {
  * pinned signatures; only the namespaces the flow consumes.
  */
 interface DbRepos {
+  createConnectionHealthStore?(db: Db): OAuthTokenHealthStore & {
+    disconnect(connectionId: string, uid: string, expectedConfigVersion: number): Promise<OAuthConnectionFacts | null>;
+  };
   mcpServers: { get(db: Db, id: string, uid: string): Promise<DbServerRow | null> };
   mcpOauthFlows: {
     create(
@@ -321,7 +348,7 @@ async function postToken(
   }
   let body: unknown;
   try {
-    const bytes = await readBoundedBody(response, limits);
+    const bytes = await readOAuthBody(response, limits, network.signal);
     body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   } catch {
     throw new McpOAuthError("token", "Malformed OAuth token response");
@@ -368,6 +395,10 @@ export interface OAuthFlowDeps {
   db: Db;
   crypto: EnvelopeCrypto;
   systemBus: SystemEventPublisher;
+  /** Optional injection for isolated tests; production loads the real CAS store. */
+  connectionHealthStore?: OAuthTokenHealthStore & {
+    disconnect(connectionId: string, uid: string, expectedConfigVersion: number): Promise<OAuthConnectionFacts | null>;
+  };
   fetchImpl?: GuardedFetch;
   providerEgress?: ProviderEgress;
   originKey?: string;
@@ -389,8 +420,10 @@ export interface OAuthFlow {
     iss?: string;
   }): Promise<{ uid: string; serverId: string; ok: boolean; reason?: string }>;
   /** The live access token; refreshes via refresh_token when expired
-   *  (single-flight per server). Null when nothing usable is stored. */
+   *  (status-only single-flight per server). Null when nothing usable is stored. */
   getAccessToken(uid: string, serverId: string): Promise<string | null>;
+  /** Abort this process's refresh without any token write or DB mutation. */
+  cancelRefreshes(uid: string, serverId: string): void;
   /** Forget ALL durable oauth material for the server (tokens row; the
    *  server-existence check in handleCallback blocks late callbacks for a
    *  deleted server). In-flight flow rows self-expire within the TTL. */
@@ -440,8 +473,67 @@ export function createOAuthFlow(deps: OAuthFlowDeps): OAuthFlow {
     limits: deps.limits,
   };
   const redirectUri = deps.redirectUri ?? DEFAULT_MCP_REDIRECT_URI;
-  // Single-flight refreshes per (uid, serverId) — Dart's _oauthRefreshes map.
-  const refreshes = new Map<string, Promise<string | null>>();
+  type RefreshStatus = "refreshed" | "unavailable";
+  interface RefreshEntry {
+    promise: Promise<RefreshStatus>;
+    controller: AbortController;
+    epoch: number;
+  }
+  // Status only: no access/refresh token is a shared promise fulfillment value.
+  const refreshes = new Map<string, RefreshEntry>();
+  const refreshEpochs = new Map<string, number>();
+  const tokenCallControllers = new Map<string, Set<AbortController>>();
+  let healthStorePromise: Promise<NonNullable<OAuthFlowDeps["connectionHealthStore"]>> | undefined;
+
+  function connectionHealthStore(): Promise<NonNullable<OAuthFlowDeps["connectionHealthStore"]>> {
+    if (deps.connectionHealthStore !== undefined) return Promise.resolve(deps.connectionHealthStore);
+    healthStorePromise ??= (async () => {
+      const repos = await task8Repos();
+      if (repos.createConnectionHealthStore === undefined) {
+        throw new Error("fenced_connection_health_store_unavailable");
+      }
+      return repos.createConnectionHealthStore(deps.db);
+    })();
+    return healthStorePromise;
+  }
+
+  function refreshKey(uid: string, serverId: string): string {
+    return JSON.stringify([uid, serverId]);
+  }
+
+  function trackTokenCall(key: string, controller: AbortController): void {
+    const controllers = tokenCallControllers.get(key) ?? new Set<AbortController>();
+    controllers.add(controller);
+    tokenCallControllers.set(key, controllers);
+  }
+
+  function untrackTokenCall(key: string, controller: AbortController): void {
+    const controllers = tokenCallControllers.get(key);
+    controllers?.delete(controller);
+    if (controllers?.size === 0) tokenCallControllers.delete(key);
+    if (!refreshes.has(key) && !tokenCallControllers.has(key)) refreshEpochs.delete(key);
+  }
+
+  function cancelRefreshes(uid: string, serverId: string): void {
+    const key = refreshKey(uid, serverId);
+    const next = (refreshEpochs.get(key) ?? 0) + 1;
+    refreshEpochs.set(key, next);
+    const active = refreshes.get(key);
+    active?.controller.abort("oauth_disconnect");
+    for (const controller of tokenCallControllers.get(key) ?? []) {
+      controller.abort("oauth_disconnect");
+    }
+    // Epoch entries are removed with active calls' finally blocks; no
+    // missing-ID cache or token-bearing result is retained indefinitely.
+    if (active === undefined && !tokenCallControllers.has(key)) refreshEpochs.delete(key);
+  }
+
+  async function currentConnection(uid: string, serverId: string): Promise<OAuthConnectionFacts | null> {
+    const store = await connectionHealthStore();
+    const current = await store.get(serverId, uid);
+    return current === null || !current.enabled || current.authState === "revoked" ||
+      current.healthState === "revoked" ? null : current;
+  }
 
   /** Notification only; a bus failure must never fail the flow's outcome. */
   async function notify(
@@ -528,9 +620,13 @@ export function createOAuthFlow(deps: OAuthFlowDeps): OAuthFlow {
         // owned) — a sign-in for a deleted/disconnected server completes
         // nowhere.
         const server = await repos.mcpServers.get(deps.db, serverId, uid);
-        if (server === null) {
-          throw new McpOAuthError("callback", "MCP server no longer exists");
+        if (server === null || !server.enabled || server.authState === "revoked" || server.healthState === "revoked") {
+          throw new McpOAuthError("callback", "MCP server no longer accepts authorization");
         }
+        const expected = {
+          configVersion: server.configVersion,
+          disconnectGeneration: server.disconnectGeneration,
+        };
         if (params.code === undefined || params.code === "") {
           throw new McpOAuthError("callback", "OAuth callback missing code");
         }
@@ -564,25 +660,48 @@ export function createOAuthFlow(deps: OAuthFlowDeps): OAuthFlow {
             : {}),
           code_verifier: secrets.verifier,
         };
-        const response = await postToken(network, stored.tokenUrl, fields);
-        const parsed = parseTokenResponse(response);
+        const key = refreshKey(uid, serverId);
+        const epoch = refreshEpochs.get(key) ?? 0;
+        const controller = new AbortController();
+        trackTokenCall(key, controller);
+        try {
+          const current = await currentConnection(uid, serverId);
+          if (current === null || current.configVersion !== expected.configVersion ||
+              current.disconnectGeneration !== expected.disconnectGeneration ||
+              controller.signal.aborted || (refreshEpochs.get(key) ?? 0) !== epoch) {
+            throw new McpOAuthError("callback", "OAuth callback connection changed");
+          }
+          const response = await postToken({ ...network, signal: controller.signal }, stored.tokenUrl, fields);
+          const parsed = parseTokenResponse(response);
 
-        // Seal the token set WITH its refresh coordinates under
-        // mcp_oauth_tokens:{serverId} (put = upsert on UNIQUE(server_id)).
-        const tokens: SealedTokens = {
-          accessToken: parsed.accessToken,
-          refreshToken: parsed.refreshToken,
-          expiresAt: parsed.expiresAt,
-          tokenUrl: stored.tokenUrl,
-          clientId: stored.clientId,
-          clientSecret: secrets.clientSecret,
-          resource: stored.resource ?? null,
-        };
-        await repos.mcpOauthTokens.put(deps.db, {
-          userId: uid,
-          serverId,
-          tokensSealed: seal(deps.crypto, tokens, `mcp_oauth_tokens:${serverId}`),
-        });
+          const tokens: SealedTokens = {
+            accessToken: parsed.accessToken,
+            refreshToken: parsed.refreshToken,
+            expiresAt: parsed.expiresAt,
+            tokenUrl: stored.tokenUrl,
+            clientId: stored.clientId,
+            clientSecret: secrets.clientSecret,
+            resource: stored.resource ?? null,
+          };
+          const store = await connectionHealthStore();
+          const storedToken = await store.writeRefreshedToken({
+            connectionId: serverId,
+            userId: uid,
+            expected,
+            token: seal(deps.crypto, tokens, `mcp_oauth_tokens:${serverId}`),
+            signal: controller.signal,
+          });
+          if (!storedToken || controller.signal.aborted || (refreshEpochs.get(key) ?? 0) !== epoch) {
+            throw new McpOAuthError("callback", "OAuth token fence lost");
+          }
+        } finally {
+          untrackTokenCall(key, controller);
+        }
+        const current = await currentConnection(uid, serverId);
+        if (current === null || current.configVersion !== expected.configVersion ||
+            current.disconnectGeneration !== expected.disconnectGeneration) {
+          throw new McpOAuthError("callback", "OAuth callback connection changed");
+        }
         await notify(uid, "mcp_oauth_completed", { serverId, ok: true });
         return { uid, serverId, ok: true };
       } catch {
@@ -594,66 +713,106 @@ export function createOAuthFlow(deps: OAuthFlowDeps): OAuthFlow {
 
     async getAccessToken(uid: string, serverId: string): Promise<string | null> {
       const repos = await task8Repos();
+      const initial = await currentConnection(uid, serverId);
+      if (initial === null) return null;
+      const expected = {
+        configVersion: initial.configVersion,
+        disconnectGeneration: initial.disconnectGeneration,
+      };
+      const key = refreshKey(uid, serverId);
+      const epoch = refreshEpochs.get(key) ?? 0;
+
+      const currentAccessToken = async (): Promise<string | null> => {
+        const current = await currentConnection(uid, serverId);
+        if (current === null || current.configVersion !== expected.configVersion ||
+            current.disconnectGeneration !== expected.disconnectGeneration ||
+            (refreshEpochs.get(key) ?? 0) !== epoch) return null;
+        const row = await repos.mcpOauthTokens.get(deps.db, serverId, uid);
+        if (row === null) return null;
+        const tokens = unseal<SealedTokens>(deps.crypto, row.tokensSealed, `mcp_oauth_tokens:${serverId}`);
+        return tokens === null || tokens.accessToken === "" ? null : tokens.accessToken;
+      };
+
       const row = await repos.mcpOauthTokens.get(deps.db, serverId, uid);
       if (row === null) return null;
       const tokens = unseal<SealedTokens>(deps.crypto, row.tokensSealed, `mcp_oauth_tokens:${serverId}`);
       if (tokens === null || tokens.accessToken === "") return null;
-      const expired =
-        tokens.expiresAt !== null && Date.now() > tokens.expiresAt - EXPIRY_SKEW_MS;
-      if (!expired) return tokens.accessToken;
+      const expired = tokens.expiresAt !== null && Date.now() > tokens.expiresAt - EXPIRY_SKEW_MS;
+      if (!expired) return currentAccessToken();
       if (tokens.refreshToken === null) return null;
-      // Hoisted: property narrowing does not survive into the closure below.
-      const refreshToken = tokens.refreshToken;
 
-      // Single-flight: parallel callers of a hot expired token share one
-      // refresh POST (a rotating refresh token makes double-refresh fail).
-      const key = `${uid}:${serverId}`;
-      const inFlight = refreshes.get(key);
-      if (inFlight !== undefined) return inFlight;
-      const refresh = (async (): Promise<string | null> => {
-        try {
-          const response = await postToken(network, tokens.tokenUrl, {
-            grant_type: "refresh_token",
-            refresh_token: refreshToken,
-            client_id: tokens.clientId,
-            ...(tokens.clientSecret !== null ? { client_secret: tokens.clientSecret } : {}),
-            ...(tokens.resource !== null ? { resource: tokens.resource } : {}),
-          });
-          const parsed = parseTokenResponse(response);
-          const merged: SealedTokens = {
-            ...tokens,
-            accessToken: parsed.accessToken,
-            // A refresh response may omit the refresh token — keep the old one.
-            refreshToken: parsed.refreshToken ?? tokens.refreshToken,
-            expiresAt: parsed.expiresAt,
-          };
-          await repos.mcpOauthTokens.put(deps.db, {
-            userId: uid,
-            serverId,
-            tokensSealed: seal(deps.crypto, merged, `mcp_oauth_tokens:${serverId}`),
-          });
-          return merged.accessToken;
-        } catch {
-          return null; // silent — the caller falls back to no-auth (Dart parity)
-        }
-      })();
-      refreshes.set(key, refresh);
+      const existing = refreshes.get(key);
+      if (existing === undefined) {
+        const controller = new AbortController();
+        const promise = (async (): Promise<RefreshStatus> => {
+          trackTokenCall(key, controller);
+          try {
+            const store = await connectionHealthStore();
+            // Cross-process disconnect can happen after token decrypt/store
+            // setup. Re-fence at the final boundary before any token request.
+            const current = await currentConnection(uid, serverId);
+            if (current === null || current.configVersion !== expected.configVersion ||
+                current.disconnectGeneration !== expected.disconnectGeneration ||
+                controller.signal.aborted || (refreshEpochs.get(key) ?? 0) !== epoch) {
+              return "unavailable";
+            }
+            const response = await postToken({ ...network, signal: controller.signal }, tokens.tokenUrl, {
+              grant_type: "refresh_token",
+              refresh_token: tokens.refreshToken!,
+              client_id: tokens.clientId,
+              ...(tokens.clientSecret !== null ? { client_secret: tokens.clientSecret } : {}),
+              ...(tokens.resource !== null ? { resource: tokens.resource } : {}),
+            });
+            if (controller.signal.aborted || (refreshEpochs.get(key) ?? 0) !== epoch) return "unavailable";
+            const parsed = parseTokenResponse(response);
+            const merged: SealedTokens = {
+              ...tokens,
+              accessToken: parsed.accessToken,
+              refreshToken: parsed.refreshToken ?? tokens.refreshToken,
+              expiresAt: parsed.expiresAt,
+            };
+            const stored = await store.writeRefreshedToken({
+              connectionId: serverId,
+              userId: uid,
+              expected,
+              token: seal(deps.crypto, merged, `mcp_oauth_tokens:${serverId}`),
+              signal: controller.signal,
+            });
+            return stored && !controller.signal.aborted && (refreshEpochs.get(key) ?? 0) === epoch
+              ? "refreshed"
+              : "unavailable";
+          } catch {
+            return "unavailable";
+          } finally {
+            untrackTokenCall(key, controller);
+          }
+        })();
+        refreshes.set(key, { promise, controller, epoch });
+      }
+      const active = refreshes.get(key)!;
       try {
-        return await refresh;
+        const status = await active.promise;
+        // Joiners receive status only and independently re-read the fenced,
+        // sealed row. The shared promise never fulfills with token material.
+        return status === "refreshed" ? currentAccessToken() : null;
       } finally {
-        refreshes.delete(key);
+        if (refreshes.get(key) === active) {
+          refreshes.delete(key);
+          refreshEpochs.delete(key);
+        }
       }
     },
 
+    cancelRefreshes,
+
     async disconnect(uid: string, serverId: string): Promise<void> {
-      const repos = await task8Repos();
-      // The durable oauth material is the tokens row (ownership-scoped; a
-      // deleted server row cascades it away too). Live flow rows are one-use
-      // and expire within OAUTH_FLOW_TTL_MS, and handleCallback refuses to
-      // store tokens for a server that no longer exists — a flows-invalidate
-      // repo method in @ovid/db would close the remaining disconnect-without-
-      // delete window (ledgered for the db lane).
-      await repos.mcpOauthTokens.remove(deps.db, serverId, uid);
+      const store = await connectionHealthStore();
+      const current = await store.get(serverId, uid);
+      cancelRefreshes(uid, serverId);
+      if (current === null) return;
+      // The shared health store performs the atomic generation bump and token
+      // delete. A stale disconnect never deletes a newer generation's grant.
+      await store.disconnect(serverId, uid, current.configVersion);
     },
   };
 }

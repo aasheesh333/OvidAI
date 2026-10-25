@@ -44,6 +44,17 @@ export * from "./configParse.js";
 export * from "./catalog.js";
 export * from "./rest/engine.js";
 export * from "./activation.js";
+export * from "./health.js";
+export * from "./healthInvocation.js";
+export * from "./healthProbes.js";
+export { validateProviderArgs } from "./providers/types.js";
+export {
+  DEFAULT_EGRESS_LIMITS,
+  assertBoundedHeadersOrCancel,
+  egressResponseFromDecodedFetch,
+  readBoundedBody,
+} from "./egress/responseLimits.js";
+export * from "./discovery.js";
 // P5 Task 8: P9-aligned envelope crypto shim (deleted once P9's @ovid/escrow
 // lands and call sites swap imports — see crypto.ts header).
 export * from "./crypto.js";

@@ -169,6 +169,8 @@ export interface OAuthNetworkOptions {
   providerEgress?: ProviderEgress;
   originKey?: string;
   limits?: EgressLimits;
+  /** Caller disconnect/cancellation, linked with the OAuth total deadline. */
+  signal?: AbortSignal;
 }
 
 function oauthLimits(network: OAuthNetworkOptions): EgressLimits {
@@ -178,6 +180,72 @@ function oauthLimits(network: OAuthNetworkOptions): EgressLimits {
     idleMs: REQUEST_TIMEOUT_MS,
     headersMs: REQUEST_TIMEOUT_MS,
   };
+}
+
+function linkedOauthSignal(totalMs: number, parent?: AbortSignal): {
+  signal: AbortSignal;
+  cleanup(): void;
+} {
+  const controller = new AbortController();
+  const onAbort = () => controller.abort(parent?.reason);
+  if (parent?.aborted === true) onAbort();
+  else parent?.addEventListener("abort", onAbort, { once: true });
+  const timer = setTimeout(() => controller.abort("oauth_total_timeout"), totalMs);
+  timer.unref?.();
+  return {
+    signal: controller.signal,
+    cleanup() {
+      clearTimeout(timer);
+      parent?.removeEventListener("abort", onAbort);
+    },
+  };
+}
+
+/** Read a token response with disconnect cancellation linked to the real body reader. */
+export async function readOAuthBody(
+  response: EgressResponse,
+  limits: EgressLimits,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  if (signal === undefined) return readBoundedBody(response, limits);
+  if (signal.aborted) {
+    await response.body.cancel().catch(() => {});
+    throw new McpOAuthError("token", "OAuth request aborted");
+  }
+
+  const reader = response.body.getReader();
+  let rejectAbort!: () => void;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAbort = () => reject(new McpOAuthError("token", "OAuth request aborted"));
+  });
+  const onAbort = () => {
+    void reader.cancel().catch(() => {});
+    rejectAbort();
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const next = await reader.read();
+        if (next.done) controller.close();
+        else controller.enqueue(next.value);
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      await reader.cancel(reason);
+    },
+  });
+  try {
+    return await Promise.race([
+      readBoundedBody({ ...response, body }, limits),
+      aborted,
+    ]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    await reader.cancel().catch(() => {});
+  }
 }
 
 export async function requestOAuth(
@@ -191,34 +259,39 @@ export async function requestOAuth(
   },
 ): Promise<EgressResponse> {
   const limits = oauthLimits(network);
-  const signal = AbortSignal.timeout(limits.totalMs);
-  let response: EgressResponse;
-  if (network.providerEgress !== undefined) {
-    response = await network.providerEgress.request({
-      originKey: network.originKey ?? "oauth",
-      url,
-      method: init.method,
-      headers: init.headers,
-      ...(init.body === undefined ? {} : { body: new TextEncoder().encode(init.body) }),
-      secretValues: init.secretValues ?? [],
-      privileged: true,
-      redirect: "deny",
-      limits,
-      signal,
-    });
-  } else {
-    const fetcher = network.fetchImpl ?? createGuardedFetch();
-    const legacy = await fetcher(url.toString(), {
-      method: init.method,
-      redirect: "manual",
-      headers: init.headers,
-      ...(init.body === undefined ? {} : { body: init.body }),
-      signal,
-    });
-    response = egressResponseFromDecodedFetch(legacy, url);
+  const { signal, cleanup } = linkedOauthSignal(limits.totalMs, network.signal);
+  try {
+    if (signal.aborted) throw new McpOAuthError("token", "OAuth request aborted");
+    let response: EgressResponse;
+    if (network.providerEgress !== undefined) {
+      response = await network.providerEgress.request({
+        originKey: network.originKey ?? "oauth",
+        url,
+        method: init.method,
+        headers: init.headers,
+        ...(init.body === undefined ? {} : { body: new TextEncoder().encode(init.body) }),
+        secretValues: init.secretValues ?? [],
+        privileged: true,
+        redirect: "deny",
+        limits,
+        signal,
+      });
+    } else {
+      const fetcher = network.fetchImpl ?? createGuardedFetch();
+      const legacy = await fetcher(url.toString(), {
+        method: init.method,
+        redirect: "manual",
+        headers: init.headers,
+        ...(init.body === undefined ? {} : { body: init.body }),
+        signal,
+      });
+      response = egressResponseFromDecodedFetch(legacy, url);
+    }
+    await assertBoundedHeadersOrCancel(response, limits);
+    return response;
+  } finally {
+    cleanup();
   }
-  await assertBoundedHeadersOrCancel(response, limits);
-  return response;
 }
 
 async function getJson(

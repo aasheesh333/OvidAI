@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDb, migrate } from "../../../db/src/client.js";
 import { mcpOauthFlows, mcpOauthTokens, mcpServers } from "../../../db/src/repos.js";
 import { users } from "../../../db/src/schema.js";
@@ -698,6 +698,208 @@ describe.skipIf(!TEST_DATABASE_URL)("MCP OAuth flow (discovery → PKCE → seal
         expires_in: 3600,
       },
     };
+  });
+
+  // UNEXECUTED round-2 regression: legacy refresh is status-only and CAS-fenced.
+  it("aborts a shared refresh on disconnect and cannot resurrect tokens from its late response", async () => {
+    const uid = await seedUser();
+    const server = await seedServer(uid);
+    await mcpOauthTokens.put(db, {
+      userId: uid,
+      serverId: server.id,
+      tokensSealed: crypto.encrypt(JSON.stringify({
+        accessToken: "expired-access",
+        refreshToken: "refresh-race",
+        expiresAt: Date.now() - 1_000,
+        tokenUrl: `${as.origin}/as/token`,
+        clientId: "dcr-client-1",
+        clientSecret: null,
+        resource: null,
+      }), `mcp_oauth_tokens:${server.id}`),
+    });
+    let started!: () => void;
+    let finish!: (response: Response) => void;
+    const requestStarted = new Promise<void>((resolve) => { started = resolve; });
+    const response = new Promise<Response>((resolve) => { finish = resolve; });
+    let requests = 0;
+    const flow = createOAuthFlow({
+      db,
+      crypto,
+      systemBus: { async publish() {} },
+      fetchImpl: async () => {
+        requests += 1;
+        started();
+        return response;
+      },
+    });
+
+    const left = flow.getAccessToken(uid, server.id);
+    const right = flow.getAccessToken(uid, server.id);
+    await requestStarted;
+    expect(requests).toBe(1);
+    await flow.disconnect(uid, server.id);
+    finish(new Response(JSON.stringify({ access_token: "late-token-must-not-survive", token_type: "Bearer" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    await expect(left).resolves.toBeNull();
+    await expect(right).resolves.toBeNull();
+    expect(await mcpOauthTokens.get(db, server.id, uid)).toBeNull();
+    const disconnected = await mcpServers.get(db, server.id, uid);
+    expect(disconnected).toMatchObject({ enabled: false, authState: "revoked", healthState: "revoked" });
+  });
+
+  // UNEXECUTED round-2 regression: callback exchange is also abort/CAS fenced.
+  it("fences an in-flight authorization-code exchange against disconnect", async () => {
+    const uid = await seedUser();
+    const server = await seedServer(uid);
+    let started!: () => void;
+    let finish!: (response: Response) => void;
+    const requestStarted = new Promise<void>((resolve) => { started = resolve; });
+    const response = new Promise<Response>((resolve) => { finish = resolve; });
+    const guarded = createGuardedFetch({ allowedPorts: [as.port] });
+    const flow = createOAuthFlow({
+      db,
+      crypto,
+      systemBus: { async publish() {} },
+      fetchImpl: async (url, init) => {
+        if (url.endsWith("/as/token") && init?.method === "POST") {
+          started();
+          return response;
+        }
+        return guarded(url, init);
+      },
+    });
+    const { authorizeUrl } = await flow.start(uid, server.id);
+    const state = stateOf(authorizeUrl);
+    const pending = flow.handleCallback({ state, code: "disconnect-race-code" });
+    await requestStarted;
+    await flow.disconnect(uid, server.id);
+    finish(new Response(JSON.stringify({
+      access_token: "late-callback-token-must-not-survive",
+      token_type: "Bearer",
+      refresh_token: "late-refresh",
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+
+    await expect(pending).resolves.toMatchObject({ ok: false, reason: "oauth_failed" });
+    expect(await mcpOauthTokens.get(db, server.id, uid)).toBeNull();
+    expect(await mcpServers.get(db, server.id, uid)).toMatchObject({
+      enabled: false,
+      authState: "revoked",
+      healthState: "revoked",
+    });
+  });
+
+  // UNEXECUTED round-4 regression: abort is synchronized to an active stalled reader.read().
+  it("aborts legacy refresh during an active stalled body read after headers", async () => {
+    const uid = await seedUser();
+    const server = await seedServer(uid);
+    await mcpOauthTokens.put(db, {
+      userId: uid,
+      serverId: server.id,
+      tokensSealed: crypto.encrypt(JSON.stringify({
+        accessToken: "expired-access",
+        refreshToken: "refresh-body-race",
+        expiresAt: Date.now() - 1_000,
+        tokenUrl: `${as.origin}/as/token`,
+        clientId: "dcr-client-1",
+        clientSecret: null,
+        resource: null,
+      }), `mcp_oauth_tokens:${server.id}`),
+    });
+    let bodyReadStarted!: () => void;
+    const started = new Promise<void>((resolve) => { bodyReadStarted = resolve; });
+    let readerCancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(stream) {
+        const underlying = stream.getReader();
+        let readStarted = false;
+        Object.defineProperty(stream, "getReader", {
+          value: () => ({
+            read: () => {
+              if (!readStarted) {
+                readStarted = true;
+                bodyReadStarted();
+              }
+              return new Promise<never>(() => {});
+            },
+            cancel: async () => {
+              readerCancelled = true;
+            },
+            releaseLock: () => underlying.releaseLock(),
+          }),
+        });
+      },
+    });
+    const flow = createOAuthFlow({
+      db,
+      crypto,
+      systemBus: { async publish() {} },
+      fetchImpl: async () => new Response(body, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    });
+
+    const pending = flow.getAccessToken(uid, server.id);
+    const deadline = new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 100));
+    await started;
+    await flow.disconnect(uid, server.id);
+
+    await expect(Promise.race([pending, deadline])).resolves.toBeNull();
+    expect(readerCancelled).toBe(true);
+    expect(await mcpOauthTokens.get(db, server.id, uid)).toBeNull();
+  });
+
+  // UNEXECUTED round-3 regression: final generation check precedes refresh dispatch.
+  it("makes zero token requests when the parent generation changes immediately before legacy refresh", async () => {
+    const uid = await seedUser();
+    const server = await seedServer(uid);
+    await mcpOauthTokens.put(db, {
+      userId: uid,
+      serverId: server.id,
+      tokensSealed: crypto.encrypt(JSON.stringify({
+        accessToken: "expired-access",
+        refreshToken: "refresh-old-generation",
+        expiresAt: Date.now() - 1_000,
+        tokenUrl: `${as.origin}/as/token`,
+        clientId: "dcr-client-1",
+        clientSecret: null,
+        resource: null,
+      }), `mcp_oauth_tokens:${server.id}`),
+    });
+    const current = await mcpServers.get(db, server.id, uid);
+    expect(current).not.toBeNull();
+    const initial = {
+      enabled: true,
+      authState: "configured",
+      healthState: "never_checked",
+      configVersion: current!.configVersion,
+      disconnectGeneration: current!.disconnectGeneration,
+    };
+    const store = {
+      get: vi.fn()
+        .mockResolvedValueOnce(initial)
+        .mockResolvedValue({ ...initial, enabled: false, authState: "revoked", healthState: "revoked", disconnectGeneration: initial.disconnectGeneration + 1 }),
+      writeRefreshedToken: vi.fn(async () => true),
+      disconnect: vi.fn(async () => null),
+    };
+    let requests = 0;
+    const flow = createOAuthFlow({
+      db,
+      crypto,
+      systemBus: { async publish() {} },
+      connectionHealthStore: store,
+      fetchImpl: async () => {
+        requests += 1;
+        return new Response(JSON.stringify({ access_token: "must-not-be-requested" }), { status: 200 });
+      },
+    });
+
+    await expect(flow.getAccessToken(uid, server.id)).resolves.toBeNull();
+    expect(requests).toBe(0);
+    expect(store.writeRefreshedToken).not.toHaveBeenCalled();
   });
 
   it("disconnect removes the tokens row; a late callback for a deleted server cannot re-store tokens", async () => {

@@ -1,7 +1,14 @@
+// UNEXECUTED under /tmp/opencode/ovid-production-completion/HEAVY-COMMANDS-PAUSED.md.
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance, InjectOptions } from "fastify";
-import { newId, users, type Db } from "@ovid/db";
-import { createEnvelopeCrypto } from "@ovid/mcp";
+import { createConnectionHealthStore, newId, users, type Db } from "@ovid/db";
+import {
+  createConnectionHealthInvocations,
+  createConnectionHealthLifecycle,
+  createEnvelopeCrypto,
+  type ConnectionHealthInvocations,
+  type OAuthFlow,
+} from "@ovid/mcp";
 import { buildGateway } from "../app.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
 import {
@@ -40,10 +47,15 @@ const CANONICAL_DIGEST = `sha256:${"a".repeat(64)}`;
 describe.skipIf(!TEST_DATABASE_URL_)("gateway MCP connection contract parity (real postgres)", () => {
   let db: Db;
   let app: FastifyInstance;
+  let legacyNoInvocationApp: FastifyInstance;
   let now = new Date("2026-10-24T12:00:00.000Z");
   const extraApps: FastifyInstance[] = [];
   const crypto = createEnvelopeCrypto(MASTER_KEY_HEX);
   const warnings: unknown[] = [];
+  let connectionHealthInvocations: ConnectionHealthInvocations;
+  let storeDisconnect: ReturnType<typeof vi.spyOn>;
+  let cancelRefreshes: ReturnType<typeof vi.fn>;
+  let oauth: OAuthFlow;
 
   interface HealthProbeInput {
     connectionId: string;
@@ -91,12 +103,36 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway MCP connection contract parity (re
 
   beforeAll(async () => {
     db = await openTestDb();
-    app = buildGateway(gatewayDeps());
+    const store = createConnectionHealthStore(db);
+    storeDisconnect = vi.spyOn(store, "disconnect");
+    cancelRefreshes = vi.fn();
+    oauth = {
+      start: async () => ({ authorizeUrl: "https://oauth.example.test/authorize" }),
+      handleCallback: async () => ({ uid: "", serverId: "", ok: false }),
+      getAccessToken: async () => null,
+      disconnect: async () => {},
+      cancelRefreshes,
+    };
+    connectionHealthInvocations = createConnectionHealthInvocations({
+      lifecycle: createConnectionHealthLifecycle({
+        store,
+        providers: [],
+        open: async () => { throw new Error("no provider probe in this fixture"); },
+      }),
+      revalidate: async () => "denied",
+    });
+    // The base app exercises owner-success disconnects through the real
+    // lifecycle. Legacy health/no-adapter assertions use a distinct app so
+    // raw `unknown` keeps its secret-aware projection and old no-adapter path.
+    app = buildGateway({ ...gatewayDeps(), connectionHealthInvocations, oauth });
+    legacyNoInvocationApp = buildGateway(gatewayDeps());
+    extraApps.push(legacyNoInvocationApp);
   }, 60_000);
 
   afterAll(async () => {
     await Promise.all(extraApps.map((extra) => extra.close()));
     await app?.close();
+    vi.restoreAllMocks();
     await closeDb(db);
   });
 
@@ -116,6 +152,22 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway MCP connection contract parity (re
 
   async function storedRows(uid: string): Promise<unknown[]> {
     return db.$client.unsafe("SELECT id FROM mcp_servers WHERE user_id = $1", [uid]);
+  }
+
+  async function lifecycleRow(id: string): Promise<unknown[]> {
+    return db.$client.unsafe(
+      `SELECT enabled, agent_enabled, auth_state, health_state, config_version, disconnect_generation
+       FROM mcp_servers WHERE id = $1`,
+      [id],
+    );
+  }
+
+  function expectGatewayCancelBeforeDisconnect(uid: string, id: string, configVersion: number): void {
+    expect(cancelRefreshes).toHaveBeenCalledWith(uid, id);
+    expect(storeDisconnect).toHaveBeenCalledWith(id, uid, configVersion);
+    expect(cancelRefreshes.mock.invocationCallOrder[0]).toBeLessThan(
+      storeDisconnect.mock.invocationCallOrder[0]!,
+    );
   }
 
   async function createConfigured(uid: string): Promise<string> {
@@ -301,7 +353,7 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway MCP connection contract parity (re
     });
     expect(unauthenticated.statusCode).toBe(401);
     expect(probes).toBe(0);
-    expect((await getConnection(uid, id)).json()).toMatchObject({
+    expect((await getConnection(uid, id, legacyNoInvocationApp)).json()).toMatchObject({
       healthState: "never_checked",
       lastCheckedAt: null,
       lastSuccessAt: null,
@@ -314,7 +366,7 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway MCP connection contract parity (re
     const id = await createConfigured(uid);
     now = new Date("2026-10-24T12:10:00.000Z");
 
-    const res = await postHealth(uid, id);
+    const res = await postHealth(uid, id, legacyNoInvocationApp);
     expect(res.statusCode, res.body).toBe(200);
     expect(res.json()).toMatchObject({
       connectionId: id,
@@ -328,7 +380,7 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway MCP connection contract parity (re
     });
     expect(res.body).not.toContain(CREATE_SECRET);
     expect(JSON.stringify(warnings)).not.toContain(CREATE_SECRET);
-    expect((await getConnection(uid, id)).json()).toMatchObject({
+    expect((await getConnection(uid, id, legacyNoInvocationApp)).json()).toMatchObject({
       healthState: "unavailable",
       lastCheckedAt: now.toISOString(),
       lastSuccessAt: null,
@@ -342,7 +394,7 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway MCP connection contract parity (re
       config: { command: "local-command" },
     });
     expect(custom.statusCode, custom.body).toBe(201);
-    const unsupported = await postHealth(customUid, custom.json().connectionId);
+    const unsupported = await postHealth(customUid, custom.json().connectionId, legacyNoInvocationApp);
     expect(unsupported.statusCode, unsupported.body).toBe(200);
     expect(unsupported.json().healthState).toBe("unavailable");
   });
@@ -370,12 +422,15 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway MCP connection contract parity (re
     const disconnectedUid = testUid("parity-health-disconnected");
     await seedPro(disconnectedUid);
     const disconnectedId = await createConfigured(disconnectedUid);
+    cancelRefreshes.mockClear();
+    storeDisconnect.mockClear();
     const removed = await app.inject({
       method: "DELETE",
       url: `/cloud/v1/mcp/connections/${disconnectedId}`,
       headers: authHeaders(disconnectedUid),
     });
     expect(removed.statusCode).toBe(204);
+    expectGatewayCancelBeforeDisconnect(disconnectedUid, disconnectedId, 1);
     const disconnected = await postHealth(disconnectedUid, disconnectedId, healthApp);
     expect(disconnected.statusCode, disconnected.body).toBe(200);
     expect(disconnected.json()).toMatchObject({
@@ -562,11 +617,11 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway MCP connection contract parity (re
       expect(JSON.stringify(warnings)).not.toContain(CREATE_SECRET);
     }
 
-    const unavailable = await postHealth(validUid, validId, app);
+    const unavailable = await postHealth(validUid, validId, legacyNoInvocationApp);
     expect(unavailable.statusCode, unavailable.body).toBe(200);
     expect(unavailable.json()).toMatchObject({ authState: "configured", healthState: "unavailable" });
     expect((await patchConnection(validUid, validId, { enabled: false })).statusCode).toBe(200);
-    const disabled = await postHealth(validUid, validId, app);
+    const disabled = await postHealth(validUid, validId, legacyNoInvocationApp);
     expect(disabled.statusCode, disabled.body).toBe(200);
     expect(disabled.json()).toMatchObject({ authState: "configured", healthState: "disabled" });
   });
@@ -596,12 +651,15 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway MCP connection contract parity (re
         expect(changed.statusCode, changed.body).toBe(200);
         expect(changed.json().configVersion).toBe(2);
       } else {
+        cancelRefreshes.mockClear();
+        storeDisconnect.mockClear();
         const disconnected = await app.inject({
           method: "DELETE",
           url: `/cloud/v1/mcp/connections/${id}`,
           headers: authHeaders(uid),
         });
         expect(disconnected.statusCode).toBe(204);
+        expectGatewayCancelBeforeDisconnect(uid, id, 1);
       }
       release();
       const completed = await pending;
@@ -628,5 +686,55 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway MCP connection contract parity (re
         });
       }
     }
+  });
+
+  it("missing lifecycle capability returns 503 without cancelling or mutating owner rows", async () => {
+    const uid = testUid("parity-disconnect-missing-capability");
+    await seedPro(uid);
+    const id = await createConfigured(uid);
+    const bareApp = buildGateway({ ...gatewayDeps(), oauth });
+    extraApps.push(bareApp);
+    const before = await lifecycleRow(id);
+    cancelRefreshes.mockClear();
+    storeDisconnect.mockClear();
+
+    for (const collection of ["connections", "servers"] as const) {
+      const response = await bareApp.inject({
+        method: "DELETE",
+        url: `/cloud/v1/mcp/${collection}/${id}`,
+        headers: authHeaders(uid),
+      });
+      expect(response.statusCode).toBe(503);
+      expect(response.json().error.code).toBe("unavailable");
+    }
+
+    expect(cancelRefreshes).not.toHaveBeenCalled();
+    expect(storeDisconnect).not.toHaveBeenCalled();
+    expect(await lifecycleRow(id)).toEqual(before);
+  });
+
+  it("wrong-owner 404 precedes cancellation and lifecycle invocation on both delete aliases", async () => {
+    const uid = testUid("parity-disconnect-owner");
+    const other = testUid("parity-disconnect-other");
+    await seedPro(uid);
+    await seedPro(other);
+    const id = await createConfigured(uid);
+    const before = await lifecycleRow(id);
+    cancelRefreshes.mockClear();
+    storeDisconnect.mockClear();
+
+    for (const collection of ["connections", "servers"] as const) {
+      const response = await app.inject({
+        method: "DELETE",
+        url: `/cloud/v1/mcp/${collection}/${id}`,
+        headers: authHeaders(other),
+      });
+      expect(response.statusCode).toBe(404);
+      expect(response.json().error.code).toBe("not_found");
+    }
+
+    expect(cancelRefreshes).not.toHaveBeenCalled();
+    expect(storeDisconnect).not.toHaveBeenCalled();
+    expect(await lifecycleRow(id)).toEqual(before);
   });
 });

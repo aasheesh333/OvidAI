@@ -14,11 +14,12 @@
  * - shutdown is idempotent.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Redis } from "ioredis";
-import { createDb, migrate, newId, schema, type Db } from "@ovid/db";
+import { createDb, migrate, mcpServers, newId, schema, users as dbUsers, type Db, type McpServerRow } from "@ovid/db";
 import {
   createEnvelopeCrypto,
+  createCuratedProviderSupport,
   type EgressRequest,
   type GuardedFetch,
   type ProviderEgress,
@@ -26,6 +27,7 @@ import {
 } from "@ovid/mcp";
 import { createMcpToolProvider } from "./mcpTools.js";
 import { createMcpRuntime } from "./mcpRuntime.js";
+import { createTestProviderRegistry } from "../../../packages/mcp/src/__fixtures__/providerRegistry.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const TEST_REDIS_URL = process.env.TEST_REDIS_URL;
@@ -42,6 +44,208 @@ const fetchImpl: GuardedFetch = async () =>
     status: 200,
     headers: { "content-type": "text/html" },
   });
+
+function configuredOriginalRow(providerId: string, userId: string): McpServerRow {
+  return {
+    id: "00000000-0000-0000-0000-000000000006",
+    userId,
+    name: providerId,
+    transport: "native",
+    curatedId: providerId,
+    providerId,
+    agentEnabled: true,
+    authState: "configured",
+    healthState: "never_checked",
+    lastCheckedAt: null,
+    lastSuccessAt: null,
+    configVersion: 1,
+    disconnectGeneration: 0,
+    approvedSourceId: null,
+    approvedDigest: null,
+    normalizedConnectionName: providerId,
+    config: null,
+    secretsSealed: null,
+    enabled: true,
+    createdAt: new Date("2026-10-24T00:00:00.000Z"),
+    updatedAt: new Date("2026-10-24T00:00:00.000Z"),
+  };
+}
+
+describe("McpRuntime readiness composition", () => {
+  it("does not activate a real blocked original merely because its descriptor exists", async () => {
+    const raw = configuredOriginalRow("exa", "blocked-original-user");
+    const list = vi.spyOn(mcpServers, "list").mockResolvedValue([raw]);
+    const bus: UserSystemBus = {
+      async publish() {},
+      async request() { return null; },
+      async close() {},
+    };
+    const runtime = createMcpRuntime({
+      db: {} as Db,
+      redisQ: {} as Redis,
+      masterKey: MASTER_KEY_HEX,
+      sandbox: null,
+      systemBus: bus,
+    });
+    try {
+      const snapshot = await runtime.activation.snapshotForRun({
+        userId: raw.userId,
+        runId: "blocked-original-run",
+        sessionId: "blocked-original-session",
+        isSubagent: false,
+        allow: [],
+        deny: [],
+        mode: "auto",
+        planMode: false,
+        unattended: false,
+      });
+      expect(snapshot.operations).toEqual([]);
+      expect(list).toHaveBeenCalledWith(expect.anything(), raw.userId);
+    } finally {
+      await runtime.shutdown();
+      list.mockRestore();
+    }
+  });
+
+  it("keeps a configured legacy Fetch connection manageable while blocked readiness prevents activation", async () => {
+    const raw = configuredOriginalRow("fetch", "legacy-fetch-user");
+    const list = vi.spyOn(mcpServers, "list").mockResolvedValue([raw]);
+    const tier = vi.spyOn(dbUsers, "getTier").mockResolvedValue("free");
+    const bus: UserSystemBus = {
+      async publish() {},
+      async request() { return null; },
+      async close() {},
+    };
+    const runtime = createMcpRuntime({
+      db: {} as Db,
+      redisQ: {} as Redis,
+      masterKey: MASTER_KEY_HEX,
+      sandbox: null,
+      systemBus: bus,
+    });
+    try {
+      const snapshot = await runtime.activation.snapshotForRun({
+        userId: raw.userId,
+        runId: "legacy-fetch-run",
+        sessionId: "legacy-fetch-session",
+        isSubagent: false,
+        allow: [],
+        deny: [],
+        mode: "auto",
+        planMode: false,
+        unattended: false,
+      });
+      expect(snapshot.operations).toEqual([]);
+      expect(await runtime.activation.revalidate(snapshot, {
+        connectionId: raw.id,
+        operationId: "fetch",
+      })).toBe("denied");
+      expect(await runtime.router.listServers(raw.userId)).toEqual([
+        expect.objectContaining({ id: raw.id, curatedId: "fetch", enabled: true }),
+      ]);
+      // Blocked readiness leaves the configured row manageable, but its stale
+      // curated definition cannot resolve. Router.callTool throws here; it
+      // does not return an {isError} result for an unknown tool.
+      await expect(runtime.router.callTool(
+        raw.userId,
+        "mcp__fetch__fetch",
+        { url: "https://example.com/page" },
+        { sessionId: "legacy-fetch-session", runId: "legacy-fetch-run" },
+      )).rejects.toThrow("unknown MCP tool: mcp__fetch__fetch");
+    } finally {
+      await runtime.shutdown();
+      list.mockRestore();
+      tier.mockRestore();
+    }
+  });
+
+  // UNEXECUTED round-1 regression under the heavy-verification pause.
+  it("composes real health lifecycle and authenticated surfaces without eager health work", async () => {
+    const bus: UserSystemBus = {
+      async publish() {},
+      async request() { return null; },
+      async close() {},
+    };
+    const runtime = createMcpRuntime({
+      db: {} as Db,
+      redisQ: {} as Redis,
+      masterKey: MASTER_KEY_HEX,
+      sandbox: null,
+      systemBus: bus,
+      providerRegistry: createTestProviderRegistry(),
+    });
+    try {
+      expect(typeof runtime.connectionHealth?.checkConnectionHealth).toBe("function");
+      expect(typeof runtime.connectionHealth?.getConnectionHealth).toBe("function");
+      expect(typeof runtime.connectionHealth?.disconnectConnection).toBe("function");
+      expect(typeof runtime.connectionHealthInvocations?.checkAuthenticated).toBe("function");
+      expect(typeof runtime.connectionHealthInvocations?.getAuthenticated).toBe("function");
+      expect(typeof runtime.connectionHealthInvocations?.disconnectAuthenticated).toBe("function");
+      expect(typeof runtime.connectionHealthInvocations?.checkSelectedOperation).toBe("function");
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
+  it("uses one mixed test registry for worker catalog entries and activation", async () => {
+    const userId = "mixed-registry-user";
+    const providerIds = ["fetch", "cloudflare", "exa", "vercel"];
+    const rows = providerIds.map((providerId) => ({
+      ...configuredOriginalRow(providerId, userId),
+      id: `${providerId}-connection`,
+    }));
+    const list = vi.spyOn(mcpServers, "list")
+      .mockResolvedValueOnce(rows.filter((row) => row.curatedId === "fetch" || row.curatedId === "cloudflare"))
+      .mockResolvedValueOnce(rows);
+    const bus: UserSystemBus = {
+      async publish() {},
+      async request() { return null; },
+      async close() {},
+    };
+    const providerRegistry = createTestProviderRegistry({
+      supported: ["fetch", "cloudflare"],
+      internal: ["exa", "vercel"],
+    });
+    expect(providerRegistry.catalogDefinitions().map((definition) => definition.providerId))
+      .toEqual(["fetch", "cloudflare"]);
+    expect(createCuratedProviderSupport(providerRegistry).definitions.map((definition) => definition.providerId))
+      .toEqual(["fetch", "cloudflare"]);
+    const runtime = createMcpRuntime({
+      db: {} as Db,
+      redisQ: {} as Redis,
+      masterKey: MASTER_KEY_HEX,
+      sandbox: null,
+      systemBus: bus,
+      legacyProviderFetchForTest: true,
+      providerRegistry,
+    });
+    try {
+      const servers = await runtime.router.listServers(userId);
+      const catalogIds = servers
+        .filter((server) => server.curatedId !== null)
+        .map((server) => server.curatedId);
+      const snapshot = await runtime.activation.snapshotForRun({
+        userId,
+        runId: "mixed-registry-run",
+        sessionId: "mixed-registry-session",
+        isSubagent: false,
+        allow: [],
+        deny: [],
+        mode: "auto",
+        planMode: false,
+        unattended: false,
+      });
+      const activationIds = [...new Set(snapshot.operations.map((operation) => operation.providerId))];
+      expect(catalogIds).toEqual(["fetch", "cloudflare"]);
+      expect(activationIds).toEqual(catalogIds);
+      expect(activationIds).not.toContain("exa");
+      expect(activationIds).not.toContain("vercel");
+    } finally {
+      await runtime.shutdown();
+      list.mockRestore();
+    }
+  });
+});
 
 let db: Db;
 let redis: Redis;
@@ -64,7 +268,23 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)("McpRuntime", () => {
     await db?.$client.end({ timeout: 5 });
   });
 
-  it("sandbox null: curated fetch works, filesystem fails cleanly with sandbox_unavailable", async () => {
+  it("sandbox null: blocked configured originals remain manageable but cannot activate", async () => {
+    const id = await seedUser("free");
+    const fetchConnectionId = newId();
+    await db.insert(schema.mcpServers).values({
+      id: fetchConnectionId,
+      userId: id,
+      name: "fetch",
+      transport: "native",
+      curatedId: "fetch",
+      providerId: "fetch",
+      enabled: true,
+      agentEnabled: true,
+      authState: "configured",
+      healthState: "never_checked",
+      configVersion: 1,
+      disconnectGeneration: 0,
+    });
     const runtime = createMcpRuntime({
       db,
       redisQ: redis,
@@ -74,32 +294,46 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)("McpRuntime", () => {
       legacyProviderFetchForTest: true,
     });
     try {
-      const id = await seedUser("free");
       const run = { sessionId: "s-runtime", runId: "r-runtime" };
+      const snapshot = await runtime.activation.snapshotForRun({
+        userId: id,
+        runId: run.runId,
+        sessionId: run.sessionId,
+        isSubagent: false,
+        allow: [],
+        deny: [],
+        mode: "auto",
+        planMode: false,
+        unattended: false,
+      });
+      expect(snapshot.operations).toEqual([]);
+      expect(await runtime.activation.revalidate(snapshot, {
+        connectionId: fetchConnectionId,
+        operationId: "fetch",
+      })).toBe("denied");
+      expect(await runtime.router.listServers(id)).toEqual([
+        expect.objectContaining({ id: fetchConnectionId, curatedId: "fetch", enabled: true }),
+      ]);
 
-      const fetched = await runtime.router.callTool(
+      await expect(runtime.router.callTool(
         id,
         "mcp__fetch__fetch",
         { url: "https://example.com/page" },
         run,
-      );
-      expect(fetched.isError).toBe(false);
-      expect(fetched.text).toContain("hello runtime");
+      )).rejects.toThrow("unknown MCP tool: mcp__fetch__fetch");
 
-      const fs = await runtime.router.callTool(
+      await expect(runtime.router.callTool(
         id,
         "mcp__filesystem__read_file",
         { path: "notes.md" },
         run,
-      );
-      expect(fs.isError).toBe(true);
-      expect(fs.text).toContain("sandbox_unavailable");
+      )).rejects.toThrow("unknown MCP tool: mcp__filesystem__read_file");
     } finally {
       await runtime.shutdown();
     }
   });
 
-  it("activates only current rows and executes generic REST through pinned egress with redacted output", async () => {
+  it("withholds blocked original rows from activation and egress without fabricating readiness", async () => {
     const id = await seedUser("free");
     const connectionId = newId();
     const secret = "exa-plaintext-runtime-canary";
@@ -167,58 +401,19 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)("McpRuntime", () => {
         planMode: false,
         unattended: false,
       });
-      expect(root.operations.some((operation) => operation.modelName === "mcp__exa__search")).toBe(true);
+      expect(root.operations).toEqual([]);
       expect(JSON.stringify(root)).not.toContain(secret);
       const provider = createMcpToolProvider(runtime.router, {
         snapshotFor: async () => root,
         revalidate: (snapshot, call) => runtime.activation.revalidate(snapshot, call),
       });
-      const tools = await provider.tools(root);
+      expect(await provider.tools(root)).toEqual([]);
       expect(JSON.stringify(await provider.specs(root))).not.toContain(secret);
-      const search = tools.find((tool) => tool.name === "mcp__exa__search")!;
-      const result = await search.execute({ query: "typed search" }, {
-        uid: id,
-        sessionId: "session-root",
-        runId: "run-root",
-        mode: "auto",
-        planMode: false,
-        unattended: false,
-        isSubagent: false,
-        depth: 0,
-        callKey: "run-root:call-1",
-        signal: new AbortController().signal,
-      });
-      expect(result.isError).not.toBe(true);
-      expect(result.content).toContain("sanitized");
-      expect(result.content).not.toContain(secret);
-      expect(requests).toHaveLength(1);
-      expect(requests[0]).toMatchObject({
-        originKey: "exa",
-        method: "POST",
-        privileged: true,
-      });
-      expect(requests[0]!.url.origin).toBe("https://api.exa.ai");
-
-      await db.$client`
-        UPDATE mcp_servers
-        SET agent_enabled = false, config_version = config_version + 1
-        WHERE id = ${connectionId} AND user_id = ${id}`;
       expect(await runtime.activation.revalidate(root, {
         connectionId,
         operationId: "search",
-      })).toBe("stale");
-      const afterDisable = await runtime.activation.snapshotForRun({
-        userId: id,
-        runId: "run-after-disable",
-        sessionId: "session-root",
-        isSubagent: false,
-        allow: [],
-        deny: [],
-        mode: "auto",
-        planMode: false,
-        unattended: false,
-      });
-      expect(afterDisable.operations).toEqual([]);
+      })).toBe("denied");
+      expect(requests).toHaveLength(0);
     } finally {
       await runtime.shutdown();
     }

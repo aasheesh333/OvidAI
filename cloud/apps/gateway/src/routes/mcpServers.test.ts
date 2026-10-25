@@ -1,7 +1,14 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance, InjectOptions } from "fastify";
-import { newId, users, type Db } from "@ovid/db";
-import { KNOWN_PROVIDER_IDS, PRO_REQUIRED_MESSAGE, createEnvelopeCrypto, parseMcpConfig } from "@ovid/mcp";
+import { createConnectionHealthStore, newId, users, type Db } from "@ovid/db";
+import {
+  KNOWN_PROVIDER_IDS,
+  PRO_REQUIRED_MESSAGE,
+  createConnectionHealthInvocations,
+  createConnectionHealthLifecycle,
+  createEnvelopeCrypto,
+  parseMcpConfig,
+} from "@ovid/mcp";
 import { mcpServerDtoSchema, type McpServerDto } from "@ovid/shared";
 import type { EncryptedEnvelope } from "@ovid/mcp";
 import { buildGateway } from "../app.js";
@@ -101,9 +108,18 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp server routes (real postgres)"
 
   beforeAll(async () => {
     db = await openTestDb();
+    const connectionHealthInvocations = createConnectionHealthInvocations({
+      lifecycle: createConnectionHealthLifecycle({
+        store: createConnectionHealthStore(db),
+        providers: [],
+        open: async () => { throw new Error("provider probe not composed in this route fixture"); },
+      }),
+      revalidate: async () => "denied",
+    });
     const gatewayDeps = {
       system: stubSystemBus(),
       db,
+      connectionHealthInvocations,
       queues: stubQueues().queues,
       verifier: stubVerifier(),
       tickets: stubTickets(),

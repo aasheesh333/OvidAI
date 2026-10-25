@@ -32,13 +32,14 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { McpClient } from "./client.js";
 import type { McpClientHooks, McpToolCallResult, McpToolDef } from "./client.js";
 import type { CatalogEntry, CuratedCatalog } from "./catalog.js";
-import { CURATED_IDS } from "./catalog.js";
+import { RESERVED_PROVIDER_NAMESPACES } from "./providerProduction.js";
 import type { ImportedMcp } from "./configParse.js";
 import { createClientRequestHandler } from "./clientRequests.js";
 import type { SamplingRequest, SamplingResult } from "./clientRequests.js";
 import type { EncryptedEnvelope, EnvelopeCrypto } from "./crypto.js";
 import { McpReconnector } from "./backoff.js";
 import type { OAuthFlow } from "./oauth/flow.js";
+import type { ConnectionHealthInvocations } from "./healthInvocation.js";
 import type { GuardedFetch } from "./ssrf.js";
 import type { UserSystemBus } from "./systemBus.js";
 import type { McpTransport } from "./transport.js";
@@ -121,7 +122,9 @@ export interface McpRouterDeps {
   spawner: SandboxSpawner;
   workspace: WorkspaceFiles;
   fetchImpl: GuardedFetch;
-  oauth: Pick<OAuthFlow, "getAccessToken" | "start">;
+  oauth: Pick<OAuthFlow, "getAccessToken" | "start"> & {
+    cancelRefreshes?(uid: string, serverId: string): void;
+  };
   /** Default 64 simultaneous custom connections per uid (LRU-evicted). */
   maxCustomConnections?: number;
   /** Default 600_000 ms idle TTL for cached http/sse clients. */
@@ -130,6 +133,8 @@ export interface McpRouterDeps {
 }
 
 export interface McpRouter {
+  /** Optional selected-lazy health composition used by the legacy tool-provider path. */
+  connectionHealthInvocations?: ConnectionHealthInvocations;
   listServers(uid: string): Promise<McpServerSummary[]>;
   addServer(uid: string, input: AddServerInput): Promise<McpServerSummary>;
   updateServer(
@@ -138,6 +143,8 @@ export interface McpRouter {
     patch: { enabled?: boolean; secrets?: Record<string, unknown> },
   ): Promise<McpServerSummary>;
   removeServer(uid: string, serverId: string): Promise<void>;
+  /** Close all cached/per-run transports for one owned connection without deleting its row. */
+  disconnectServerTransports(uid: string, serverId: string): Promise<void>;
   listTools(uid: string, runCtx?: RunContext): Promise<McpToolListing[]>;
   /**
    * The optional `runCtx` is ADDITIVE (T16 threads the active run): with it,
@@ -169,6 +176,10 @@ interface DbServerRow {
   config: Record<string, unknown> | null;
   secretsSealed: EncryptedEnvelope | null;
   enabled: boolean;
+  authState: string;
+  healthState: string;
+  configVersion: number;
+  disconnectGeneration: number;
 }
 
 interface RouterDbRepos {
@@ -333,6 +344,19 @@ interface LiveEntry {
   closing: boolean;
 }
 
+interface OpeningTransport {
+  ref: ServerRef;
+  entry: LiveEntry;
+  epoch: number;
+}
+
+interface TransientTransport {
+  ref: ServerRef;
+  client: McpClient;
+  transport: McpTransport;
+  epoch: number;
+}
+
 interface ResolvedInternal {
   ref: ServerRef;
   def: McpToolDef;
@@ -347,6 +371,9 @@ const DEFAULT_IDLE_TTL_MS = 600_000;
 
 export function createMcpRouter(deps: McpRouterDeps): McpRouter {
   const entries = new Map<string, LiveEntry>();
+  const openingTransports = new Set<OpeningTransport>();
+  const transientTransports = new Set<TransientTransport>();
+  const closingEpochs = new Map<string, number>();
   const needsAuth = new Set<string>();
   /**
    * The run context of the CALL currently executing on this async chain. The
@@ -441,6 +468,64 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
 
   function rowEntryKey(row: DbServerRow, uid: string): string {
     return row.curatedId !== null ? curatedKey(row.curatedId, uid) : row.id;
+  }
+
+  function disconnectedError(): Error {
+    return new Error("connection_disconnected");
+  }
+
+  function connectionEpoch(ref: ServerRef): number {
+    return closingEpochs.get(baseEntryKey(ref)) ?? 0;
+  }
+
+  function assertNotClosing(ref: ServerRef, epoch?: number): void {
+    const base = baseEntryKey(ref);
+    if (closed || closingEpochs.has(base) || (epoch !== undefined && epoch !== connectionEpoch(ref))) {
+      throw disconnectedError();
+    }
+  }
+
+  function trackOpening(ref: ServerRef, entry: LiveEntry): OpeningTransport {
+    assertNotClosing(ref);
+    const opening = { ref, entry, epoch: connectionEpoch(ref) };
+    openingTransports.add(opening);
+    return opening;
+  }
+
+  async function closeOpening(opening: OpeningTransport): Promise<void> {
+    openingTransports.delete(opening);
+    await disposeEntry(opening.entry);
+  }
+
+  async function closeTransient(transient: TransientTransport): Promise<void> {
+    transientTransports.delete(transient);
+    await transient.client.close().catch(() => {});
+  }
+
+  /** Local closing plus the current persisted generation, immediately before dispatch. */
+  async function assertConnectionCurrent(ref: ServerRef): Promise<void> {
+    assertNotClosing(ref);
+    const expected = ref.row;
+    if (expected === null) return;
+    const current = await (await repos()).mcpServers.get(deps.db, expected.id, ref.uid);
+    if (current === null || !current.enabled || current.authState === "revoked" ||
+        current.healthState === "revoked" || current.configVersion !== expected.configVersion ||
+        current.disconnectGeneration !== expected.disconnectGeneration) {
+      throw disconnectedError();
+    }
+    assertNotClosing(ref);
+  }
+
+  async function closeConnectionTransports(uid: string, base: string): Promise<void> {
+    // Mark first so every late open fails instead of slipping behind this pass.
+    closingEpochs.set(base, (closingEpochs.get(base) ?? 0) + 1);
+    for (const opening of [...openingTransports]) {
+      if (opening.ref.uid === uid && opening.entry.baseKey === base) await closeOpening(opening);
+    }
+    for (const transient of [...transientTransports]) {
+      if (transient.ref.uid === uid && baseEntryKey(transient.ref) === base) await closeTransient(transient);
+    }
+    await disposeEntriesForBase(uid, base);
   }
 
   /**
@@ -795,6 +880,7 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
     ref: ServerRef,
     runCtx: RunContext | undefined,
   ): Promise<LiveEntry> {
+    assertNotClosing(ref);
     const row = ref.row!;
     const config = row.config ?? {};
     const secrets = customSecrets(row);
@@ -870,25 +956,33 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
       closing: false,
     };
     live.reconnector = makeReconnector(live);
+    const opening = trackOpening(ref, live);
 
     try {
+      await assertConnectionCurrent(ref);
       await transport.start();
+      assertNotClosing(ref, opening.epoch);
       await client.initialize();
+      assertNotClosing(ref, opening.epoch);
       if ("setProtocolVersion" in transport && typeof transport.setProtocolVersion === "function") {
         const version = client.protocolVersion;
         if (version !== null) transport.setProtocolVersion(version);
       }
       needsAuth.delete(live.baseKey);
+      await assertConnectionCurrent(ref);
+      live.lastUsed = nowMs();
+      return live;
     } catch (err) {
       if (isAuthRequired(err)) needsAuth.add(live.baseKey);
       await client.close().catch(() => {});
       throw err;
+    } finally {
+      openingTransports.delete(opening);
     }
-    live.lastUsed = nowMs();
-    return live;
   }
 
   async function ensureLive(ref: ServerRef, runCtx: RunContext | undefined): Promise<LiveEntry> {
+    await assertConnectionCurrent(ref);
     const key = entryKeyFor(ref, runCtx);
     const existing = entries.get(key);
     if (existing !== undefined) {
@@ -922,21 +1016,34 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
       ref.curated !== null
         ? buildNativeEntry(ref)
         : await createCustomEntry(ref, runCtx);
+    const opening = ref.curated !== null ? trackOpening(ref, entry) : undefined;
 
-    if (ref.curated !== null) {
-      await entry.transport.start();
-      await entry.client.initialize();
+    try {
+      if (ref.curated !== null) {
+        await entry.transport.start();
+        assertNotClosing(ref, opening?.epoch);
+        await entry.client.initialize();
+      }
+      assertNotClosing(ref, opening?.epoch);
+      if (runCtx !== undefined) entry.activeRun = runCtx;
+      entries.set(entry.key, entry);
+      await assertConnectionCurrent(ref);
+      return entry;
+    } catch (error) {
+      await disposeEntry(entry);
+      throw error;
+    } finally {
+      if (opening !== undefined) openingTransports.delete(opening);
     }
-    if (runCtx !== undefined) entry.activeRun = runCtx;
-    entries.set(entry.key, entry);
-    return entry;
   }
 
   // -- tool defs / listings ------------------------------------------------
 
   async function listDefs(entry: LiveEntry, refresh: boolean): Promise<McpToolDef[]> {
     if (refresh || entry.toolDefs === null) {
+      await assertConnectionCurrent(entry.ref);
       entry.toolDefs = await entry.client.listTools();
+      await assertConnectionCurrent(entry.ref);
     }
     return entry.toolDefs;
   }
@@ -947,6 +1054,7 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
    * there is no connection a listing may legitimately attach to.
    */
   async function transientCustomDefs(ref: ServerRef): Promise<McpToolDef[]> {
+    await assertConnectionCurrent(ref);
     const row = ref.row!;
     const config = row.config ?? {};
     const secrets = customSecrets(row);
@@ -978,12 +1086,23 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
     const client = new McpClient(transport, {
       hooks: clientHooks(ref, () => undefined),
     });
+    const transient: TransientTransport = {
+      ref,
+      client,
+      transport,
+      epoch: connectionEpoch(ref),
+    };
+    transientTransports.add(transient);
     try {
       await transport.start();
+      assertNotClosing(ref, transient.epoch);
       await client.initialize();
-      return await client.listTools();
+      await assertConnectionCurrent(ref);
+      const defs = await client.listTools();
+      await assertConnectionCurrent(ref);
+      return defs;
     } finally {
-      await client.close().catch(() => {});
+      await closeTransient(transient);
     }
   }
 
@@ -1110,8 +1229,9 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
   function namespaceTaken(rows: DbServerRow[], name: string): boolean {
     const safe = safeServerName(name);
     if (safe === "") return true; // unpublishable name
-    // CURATED_IDS is pure data — no handler is instantiated by this check.
-    if (CURATED_IDS.some((id) => safeServerName(id) === safe)) return true;
+    // The complete non-publishing inventory is pure data — no handler is
+    // instantiated by this check. Known unsupported IDs cannot become custom.
+    if (RESERVED_PROVIDER_NAMESPACES.has(safe)) return true;
     return rows.some(
       (r) => r.curatedId === null && safeServerName(r.name) === safe,
     );
@@ -1278,6 +1398,16 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
       return summaryFor(customRef(uid, updated));
     },
 
+    async disconnectServerTransports(uid: string, serverId: string): Promise<void> {
+      const rows = await listRows(uid);
+      const row = findRow(rows, serverId);
+      if (row === null) return;
+      // Same ownership/base identity as removeServer, but no row/token delete:
+      // the lifecycle's atomic disconnect store owns those mutations.
+      deps.oauth.cancelRefreshes?.(uid, row.id);
+      await closeConnectionTransports(uid, rowEntryKey(row, uid));
+    },
+
     async removeServer(uid: string, serverId: string): Promise<void> {
       const rows = await listRows(uid);
       const row = findRow(rows, serverId);
@@ -1286,7 +1416,12 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
         : serverId;
 
       // A custom stdio/SSE server may have one live incarnation per run.
-      await disposeEntriesForBase(uid, key);
+      if (row !== null) {
+        deps.oauth.cancelRefreshes?.(uid, row.id);
+        await closeConnectionTransports(uid, key);
+      } else {
+        await disposeEntriesForBase(uid, key);
+      }
 
       if (row === null) throw notFound();
       // Curated: this deletes only the user's credential row; the catalog
@@ -1371,6 +1506,9 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
         }
 
         const entry = await ensureLive(resolved.ref, runCtx);
+        // Final boundary: initial-open completion and disconnect cleanup may
+        // have raced resolution. Never dispatch on that old generation.
+        await assertConnectionCurrent(resolved.ref);
         entry.lastUsed = nowMs();
         return entry.client.callTool(resolved.def.name, args);
       });
@@ -1415,6 +1553,8 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
     async shutdown(): Promise<void> {
       if (closed) return;
       closed = true;
+      for (const opening of [...openingTransports]) await closeOpening(opening);
+      for (const transient of [...transientTransports]) await closeTransient(transient);
       const disposedHandlers = new Set<NativeMcpHandler>();
       for (const entry of [...entries.values()]) {
         entry.reconnector?.cancel();

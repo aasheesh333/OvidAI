@@ -13,6 +13,7 @@ import { createDb, migrate } from "../../db/src/client.js";
 import { mcpServers } from "../../db/src/repos.js";
 import { users } from "../../db/src/schema.js";
 import { createCuratedCatalog } from "./catalog.js";
+import { createTestProviderRegistry } from "./__fixtures__/providerRegistry.js";
 import { createEnvelopeCrypto } from "./crypto.js";
 import { createFetchHandler } from "./native/fetch.js";
 import {
@@ -36,6 +37,10 @@ const MASTER_KEY_HEX = "ab7d31c4e59f60a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5
 const RUN1: RunContext = { sessionId: "session-1", runId: "run-1" };
 const RUN2: RunContext = { sessionId: "session-1", runId: "run-2" };
 const RUN3: RunContext = { sessionId: "session-1", runId: "run-3" };
+
+// Router behavior is tested against explicit supported fixtures, never by
+// promoting production readiness. The real production registry stays empty.
+const routerTestRegistry = createTestProviderRegistry({ supported: ["fetch", "github"] });
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -390,6 +395,7 @@ function makeRouter(over: Partial<McpRouterDeps> = {}): McpRouter {
     createCuratedCatalog({
       fetchImpl,
       workspace,
+      registry: routerTestRegistry,
     });
   const router = createMcpRouter({
     db,
@@ -573,6 +579,39 @@ describe.skipIf(!TEST_DATABASE_URL)("McpRouter", () => {
         imported: { name: "Fetch!", transport: "http", url: "https://shadow.test/rpc" },
       }),
     ).rejects.toThrow("server_exists");
+    // Every batch's known unsupported IDs stay reserved even though none is
+    // production-published. Include blocked, candidate, deprecated, and legacy
+    // superseded IDs, plus sanitized spellings.
+    for (const name of [
+      "exa",
+      "vercel",
+      "Dropbox!",
+      "typeform",
+      "docusign",
+      "shopify",
+      "kubernetes",
+      "mongodb",
+      "freshdesk-v1",
+      "verceℓ!",
+      "fⓔtch",
+    ]) {
+      await expect(
+        router.addServer(proUid, {
+          imported: { name, transport: "http", url: "https://shadow.test/rpc" },
+        }),
+      ).rejects.toThrow("server_exists");
+    }
+
+    // Canonical Unicode equivalents also collide with an existing custom row;
+    // a genuinely different ASCII name remains independent.
+    await addHttpServer(router, proUid, "éclair");
+    await expect(
+      router.addServer(proUid, {
+        imported: { name: "e\u0301clair!", transport: "http", url: "https://unicode-shadow.test/rpc" },
+      }),
+    ).rejects.toThrow("server_exists");
+    await addHttpServer(router, proUid, "eclair");
+
     // Sanitized collision with another custom row.
     await addHttpServer(router, proUid, "acme");
     await expect(
@@ -634,13 +673,13 @@ describe.skipIf(!TEST_DATABASE_URL)("McpRouter", () => {
   // Listings + resolution
   // -------------------------------------------------------------------------
 
-  it("listServers merges 20 curated entries with the user's custom rows", async () => {
+  it("listServers merges the two supported test entries with the user's custom rows", async () => {
     const uid = await seedUser("pro");
     const router = makeRouter();
     await addHttpServer(router, uid, "acme");
 
     const servers = await router.listServers(uid);
-    expect(servers.filter((s) => s.curatedId !== null)).toHaveLength(20);
+    expect(servers.filter((s) => s.curatedId !== null)).toHaveLength(2);
     const fetchSummary = servers.find((s) => s.curatedId === "fetch")!;
     expect(fetchSummary).toMatchObject({
       id: "curated:fetch",
@@ -856,6 +895,107 @@ describe.skipIf(!TEST_DATABASE_URL)("McpRouter", () => {
     await router.removeServer(uid, server.id);
     await sleep(800); // longer than the 500ms first backoff step
     expect(spawner.calls).toHaveLength(spawnedBefore);
+  });
+
+  // UNEXECUTED round-2 regression: non-health transport close is connection-scoped.
+  it("disconnectServerTransports closes owned stdio and cancels reconnect without deleting the row", async () => {
+    const uid = await seedUser("pro");
+    const spawner = new FakeSpawner();
+    const router = makeRouter({ spawner });
+    const server = await addStdioServer(router, uid, "disconnect-owned-srv");
+    await router.connectForRun(uid, RUN1);
+    expect(spawner.processes[0]?.killed).not.toBe(true);
+
+    await router.disconnectServerTransports(uid, server.id);
+
+    expect(spawner.processes[0]?.killed).toBe(true);
+    const spawnedBefore = spawner.calls.length;
+    await sleep(800);
+    expect(spawner.calls).toHaveLength(spawnedBefore);
+    expect(await router.listServers(uid)).toEqual([
+      expect.objectContaining({ id: server.id, enabled: true }),
+    ]);
+  });
+
+  // UNEXECUTED round-3 regression: an initial open must not escape disconnect.
+  it("closes a late initial open instead of installing it and prevents post-disconnect dispatch", async () => {
+    const uid = await seedUser("pro");
+    const fakeFetch = new FakeMcpFetch();
+    let started!: () => void;
+    let release!: (response: Response) => void;
+    const requestStarted = new Promise<void>((resolve) => { started = resolve; });
+    const response = new Promise<Response>((resolve) => { release = resolve; });
+    let gated = false;
+    const gatedFetch: GuardedFetch = async (url, init) => {
+      if (!gated && init?.method === "POST" &&
+          (JSON.parse(requestBodyText(init.body)) as { method?: string }).method === "initialize") {
+        gated = true;
+        started();
+        return response;
+      }
+      return fakeFetch.impl(url, init);
+    };
+    const router = makeRouter({ fetchImpl: gatedFetch });
+    const server = await addHttpServer(router, uid, "late-initial-open");
+    fakeFetch.toolsByUrl.set("https://late-initial-open.mcp.test/rpc", [{ name: "delete_everything", description: "Mutation fixture." }]);
+    const pending = router.callTool(uid, toolNameFor("late-initial-open", "delete_everything"), {}, RUN1);
+    await requestStarted;
+
+    await router.disconnectServerTransports(uid, server.id);
+    release(jsonResponse({
+      jsonrpc: "2.0",
+      id: 1,
+      result: {
+        protocolVersion: "2025-06-18",
+        capabilities: { tools: {} },
+        serverInfo: { name: "late-open", version: "1.0.0" },
+      },
+    }));
+
+    await expect(pending).rejects.toThrow();
+    expect(fakeFetch.calls.filter((call) => {
+      try {
+        return (JSON.parse(requestBodyText(call.init?.body)) as { method?: string }).method === "tools/call";
+      } catch {
+        return false;
+      }
+    })).toHaveLength(0);
+  });
+
+  // UNEXECUTED round-3 regression: transient enumeration is also owned by disconnect.
+  it("closes a late transient enumeration client and does not dispatch tools/list after disconnect", async () => {
+    const uid = await seedUser("pro");
+    const spawner = new FakeSpawner();
+    const originalSpawn = spawner.spawn.bind(spawner);
+    let started!: () => void;
+    let release!: () => void;
+    const requestStarted = new Promise<void>((resolve) => { started = resolve; });
+    const response = new Promise<void>((resolve) => { release = resolve; });
+    spawner.spawn = async (spawnUid, spec) => {
+      const process = await originalSpawn(spawnUid, spec);
+      const writeLine = process.writeLine.bind(process);
+      process.writeLine = (line) => {
+        const message = JSON.parse(line) as { method?: string };
+        if (message.method === "initialize") {
+          started();
+          void response.then(() => writeLine(line));
+          return;
+        }
+        writeLine(line);
+      };
+      return process;
+    };
+    const router = makeRouter({ spawner });
+    const server = await addStdioServer(router, uid, "late-transient-enumeration");
+    const pending = router.listTools(uid);
+    await requestStarted;
+
+    await router.disconnectServerTransports(uid, server.id);
+    release();
+    const listings = await pending;
+
+    expect(listings.some((listing) => listing.serverId === server.id)).toBe(false);
+    expect(spawner.processes[0]?.killed).toBe(true);
   });
 
   // -------------------------------------------------------------------------
@@ -1167,6 +1307,7 @@ describe.skipIf(!TEST_DATABASE_URL)("McpRouter", () => {
     const catalog = createCuratedCatalog({
       fetchImpl: fakeFetch.impl,
       workspace,
+      registry: routerTestRegistry,
       handlerOverrides: {
         fetch: () => {
           instances.count++;

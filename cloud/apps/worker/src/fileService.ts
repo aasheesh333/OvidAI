@@ -30,7 +30,9 @@ import { assertSessionFileCapacity, ProjectFileLimitError, type Db } from "@ovid
 import type { EventLog } from "@ovid/events";
 import type { UiManifest } from "@ovid/shared";
 import { createInternalServiceAuth } from "./internalServiceAuth.js";
+import { registerConnectionHealthRoutes } from "./connectionHealthRoutes.js";
 import { registerStudioGitRoutes, type StudioGitRoutesDeps } from "./studioGitRoutes.js";
+import type { ConnectionHealthInvocations } from "@ovid/mcp";
 import {
   FileNotInArchiveError,
   FileTooLargeError,
@@ -100,6 +102,8 @@ export interface FileServiceDeps {
   cdn?: CdnConfig;
   /** Production-composed Studio git surface; optional only for legacy file-service tests. */
   studioGit?: StudioGitRoutesDeps;
+  /** Worker-owned health projection/refresh/disconnect lifecycle. */
+  connectionHealthInvocations?: ConnectionHealthInvocations;
 }
 
 interface ErrorEnvelope {
@@ -203,6 +207,7 @@ export function buildFileService(deps: FileServiceDeps): FastifyInstance {
   app.addHook("preHandler", createInternalServiceAuth(deps.internalToken));
 
   if (deps.studioGit !== undefined) registerStudioGitRoutes(app, deps.studioGit);
+  registerConnectionHealthRoutes(app, { invocations: deps.connectionHealthInvocations });
 
   // -- GET /internal/sessions/:sid/tree[?path=sub] ------------------------
   // ST-003: the agent workspace dir only exists once the agent has run a

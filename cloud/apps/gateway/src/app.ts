@@ -6,7 +6,7 @@ import Fastify, {
 import websocket from "@fastify/websocket";
 import type { Db } from "@ovid/db";
 import type { EventLog, SystemBus } from "@ovid/events";
-import type { EnvelopeCrypto, OAuthFlow } from "@ovid/mcp";
+import type { ConnectionHealthInvocations, EnvelopeCrypto, OAuthFlow } from "@ovid/mcp";
 import type { QueueServices } from "@ovid/queue";
 import type { InternalMintProvisioner, KeyProvider } from "@ovid/shared";
 import type { ApiError } from "@ovid/shared";
@@ -256,6 +256,8 @@ export interface GatewayDeps {
    * the connection health route then reports `unavailable`, never a fake ping.
    */
   connectionHealth?: ConnectionHealthAdapter;
+  /** Worker-owned explicit health projection/check/disconnect invocation surface. */
+  connectionHealthInvocations?: ConnectionHealthInvocations;
   /**
    * P5 Task 15: the Task-9 server-side OAuth flow (start/callback/disconnect).
    * main() wires createOAuthFlow with its system publisher routed through the

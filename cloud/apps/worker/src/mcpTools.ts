@@ -19,6 +19,7 @@ import {
 } from "@ovid/mcp";
 import { pluginSourceInputSchema } from "@ovid/shared";
 import type { ModelToolSpec } from "./tools/types.js";
+import { withLazyConnectionHealth } from "./connectionHealth.js";
 
 export interface ToolResult {
   content: string;
@@ -105,6 +106,60 @@ function gatedOrRethrow(err: unknown): ToolResult {
   throw err;
 }
 
+export interface McpOperationCall {
+  connectionId: string;
+  operationId: string;
+  /** The legacy per-operation adapter also pins its published model name. */
+  modelName?: string;
+}
+
+/** Shared exact-snapshot dispatch for legacy adapters and lazy integration_call. */
+export async function callMcpOperation(
+  router: McpRouter,
+  call: McpOperationCall,
+  args: Record<string, unknown>,
+  ctx: McpToolContext,
+  opts: McpToolProviderOptions,
+): Promise<ToolResult> {
+  const label = call.modelName ?? `${call.connectionId}/${call.operationId}`;
+  try {
+    const current = await opts.snapshotFor(ctx);
+    const operation = current?.operations.find(
+      (candidate) => (call.modelName === undefined || candidate.modelName === call.modelName) &&
+        candidate.connectionId === call.connectionId &&
+        candidate.operationId === call.operationId,
+    );
+    if (current === null || current === undefined || operation === undefined) {
+      return toolResult(`DENIED: ${label} is not available in this run.`, true);
+    }
+    const verdict = await opts.revalidate(current, {
+      connectionId: operation.connectionId,
+      operationId: operation.operationId,
+    });
+    if (verdict !== "current") {
+      return toolResult(
+        verdict === "stale"
+          ? `DENIED: ${label} is stale.`
+          : `DENIED: ${label} is not available in this run.`,
+        true,
+      );
+    }
+    const result = await router.callTool(
+      ctx.uid,
+      operation.modelName,
+      args,
+      runContext(ctx, operation, opts.samplerFor),
+    );
+    return toolResult(result.text, result.isError);
+  } catch (err) {
+    if (err instanceof ProRequiredError ||
+        (err as { code?: unknown } | null)?.code === "sandbox_unavailable") {
+      return gatedOrRethrow(err);
+    }
+    return toolResult("Provider operation failed.", true);
+  }
+}
+
 function toolForOperation(
   router: McpRouter,
   activated: ActivatedOperation,
@@ -114,44 +169,7 @@ function toolForOperation(
     name: activated.modelName,
     description: activated.definition.description,
     parameters: activated.definition.inputSchema,
-    async execute(args, ctx) {
-      try {
-        const current = await opts.snapshotFor(ctx);
-        const operation = current?.operations.find(
-          (candidate) => candidate.modelName === activated.modelName &&
-            candidate.connectionId === activated.connectionId &&
-            candidate.operationId === activated.operationId,
-        );
-        if (current === null || current === undefined || operation === undefined) {
-          return toolResult(`DENIED: ${activated.modelName} is not available in this run.`, true);
-        }
-        const verdict = await opts.revalidate(current, {
-          connectionId: operation.connectionId,
-          operationId: operation.operationId,
-        });
-        if (verdict !== "current") {
-          return toolResult(
-            verdict === "stale"
-              ? `DENIED: ${activated.modelName} is stale.`
-              : `DENIED: ${activated.modelName} is not available in this run.`,
-            true,
-          );
-        }
-        const result = await router.callTool(
-          ctx.uid,
-          operation.modelName,
-          args,
-          runContext(ctx, operation, opts.samplerFor),
-        );
-        return toolResult(result.text, result.isError);
-      } catch (err) {
-        if (err instanceof ProRequiredError ||
-            (err as { code?: unknown } | null)?.code === "sandbox_unavailable") {
-          return gatedOrRethrow(err);
-        }
-        return toolResult("Provider operation failed.", true);
-      }
-    },
+    execute: (args, ctx) => callMcpOperation(router, activated, args, ctx, opts),
   };
 }
 
@@ -177,7 +195,9 @@ export function createMcpToolProvider(
       }));
     },
   };
-  return provider;
+  return router.connectionHealthInvocations === undefined
+    ? provider
+    : withLazyConnectionHealth(provider, router.connectionHealthInvocations, opts);
 }
 
 /** Kept as a structural export for the existing worker barrel; no model tool enqueues installs. */

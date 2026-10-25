@@ -3,7 +3,6 @@ import { z } from "zod";
 import {
   ConnectionAdmissionError,
   createConnectionWithinCap,
-  disconnectConnection,
   lockCustomConnectorCreates,
   mcpOauthTokens,
   mcpServers as mcpServersRepo,
@@ -19,9 +18,11 @@ import {
   type TransitionConnectionPatch,
 } from "@ovid/db";
 import {
+  ConnectionHealthError,
   CURATED_IDS,
   CURATED_MANIFEST,
   KNOWN_PROVIDER_IDS,
+  defaultHealthOperationId,
   PRO_REQUIRED_MESSAGE,
   RESERVED_PROVIDER_NAMESPACES,
   parseMcpConfig,
@@ -91,6 +92,10 @@ const patchBodySchema = z
     secrets: z.record(z.string(), z.unknown()).optional(),
   })
   .strict();
+
+const connectionHealthBodySchema = z.object({
+  operationId: z.string().trim().min(1).max(128),
+}).strict();
 
 const connectionCreateBodySchema = z
   .object({
@@ -313,7 +318,12 @@ function readSealedConnectionSecrets(
 
 function toConnectionDto(
   row: McpConnectionRow,
-  projection: { authState?: ProviderAuthState; healthState?: ProviderHealthState } = {},
+  projection: {
+    authState?: ProviderAuthState;
+    healthState?: ProviderHealthState;
+    lastCheckedAt?: string | null;
+    lastSuccessAt?: string | null;
+  } = {},
 ): McpConnectionDto {
   return {
     connectionId: row.connectionId,
@@ -323,8 +333,8 @@ function toConnectionDto(
     agentEnabled: row.agentEnabled,
     authState: projection.authState ?? row.authState,
     healthState: projection.healthState ?? row.healthState,
-    lastCheckedAt: row.lastCheckedAt,
-    lastSuccessAt: row.lastSuccessAt,
+    lastCheckedAt: projection.lastCheckedAt === undefined ? row.lastCheckedAt : projection.lastCheckedAt,
+    lastSuccessAt: projection.lastSuccessAt === undefined ? row.lastSuccessAt : projection.lastSuccessAt,
     configVersion: row.configVersion,
     disconnectGeneration: row.disconnectGeneration,
     ...(row.approvedSourceId !== undefined ? { approvedSourceId: row.approvedSourceId } : {}),
@@ -355,10 +365,26 @@ async function connectionDtoFor(
       token !== null,
     );
   }
-  const projectedHealth = !raw.enabled && raw.healthState === "never_checked"
+  let projectedHealth = !raw.enabled && raw.healthState === "never_checked"
     ? "disabled"
     : row.healthState;
-  return toConnectionDto(row, { authState: projectedAuth, healthState: projectedHealth });
+  let lastCheckedAt = row.lastCheckedAt;
+  let lastSuccessAt = row.lastSuccessAt;
+  if (deps.connectionHealthInvocations !== undefined) {
+    const live = await deps.connectionHealthInvocations.getAuthenticated({
+      principal: { uid, authenticated: true },
+      connectionId: raw.id,
+    });
+    projectedHealth = live.healthState;
+    lastCheckedAt = live.lastCheckedAt;
+    lastSuccessAt = live.lastSuccessAt;
+  }
+  return toConnectionDto(row, {
+    authState: projectedAuth,
+    healthState: projectedHealth,
+    lastCheckedAt,
+    lastSuccessAt,
+  });
 }
 
 /** Return only authentication facts established without a network health probe. */
@@ -442,7 +468,7 @@ function validateConnectionTransport(
 
 async function notifyConnectionGeneration(
   deps: McpConnectionRouteDeps,
-  row: McpConnectionRow,
+  row: Pick<McpConnectionRow, "connectionId" | "userId" | "configVersion" | "disconnectGeneration">,
 ): Promise<void> {
   try {
     await deps.connectionGenerationListener?.invalidate({
@@ -468,6 +494,12 @@ async function notifyConnectionGeneration(
 
 function connectionChanged(reply: FastifyReply): FastifyReply {
   return sendError(reply, 409, "connection_changed", "The connection changed. Refresh and try again.");
+}
+
+function connectionHealthFailure(reply: FastifyReply, error: unknown): FastifyReply {
+  if (error instanceof ConnectionHealthError && error.code === "not_found") return mcpNotFound(reply);
+  if (error instanceof ConnectionHealthError && error.code === "connection_changed") return connectionChanged(reply);
+  return sendError(reply, 503, "unavailable", "Connection health is temporarily unavailable.");
 }
 
 function connectionAdmissionFailure(reply: FastifyReply, error: unknown): FastifyReply {
@@ -737,6 +769,31 @@ export function registerMcpServerRoutes(app: FastifyInstance, deps: GatewayDeps)
     if (!isUuid(id)) return mcpNotFound(reply);
     const raw = await mcpServersRepo.get(deps.db, id, uid);
     if (raw === null) return mcpNotFound(reply);
+
+    if (deps.connectionHealthInvocations !== undefined) {
+      let operationId = defaultHealthOperationId(providerIdOf(raw)) ?? "__unsupported__";
+      if (request.body !== undefined) {
+        const parsed = connectionHealthBodySchema.safeParse(request.body);
+        if (!parsed.success) return zodBadRequest(reply, parsed.error);
+        operationId = parsed.data.operationId;
+      }
+      try {
+        const result = await deps.connectionHealthInvocations.checkAuthenticated({
+          principal: { uid, authenticated: true },
+          connectionId: id,
+          operationId,
+        });
+        return toConnectionDto(toMcpConnectionRow(raw), {
+          authState: result.connection.authState,
+          healthState: result.to,
+          lastCheckedAt: result.lastCheckedAt,
+          lastSuccessAt: result.lastSuccessAt,
+        });
+      } catch (error) {
+        return connectionHealthFailure(reply, error);
+      }
+    }
+
     if (request.body !== undefined) {
       return badRequest(reply, "The health check request body must be empty.");
     }
@@ -904,10 +961,22 @@ export function registerMcpServerRoutes(app: FastifyInstance, deps: GatewayDeps)
     if (!isUuid(id)) return mcpNotFound(reply);
     const raw = await mcpServersRepo.get(deps.db, id, uid);
     if (raw === null) return mcpNotFound(reply);
-    const disconnected = await disconnectConnection(deps.db, id, uid, raw.configVersion);
-    if (disconnected === null) return connectionChanged(reply);
-    await notifyConnectionGeneration(connectionDeps, disconnected);
-    return reply.code(204).send();
+    if (deps.connectionHealthInvocations === undefined) {
+      return sendError(reply, 503, "unavailable", "Connection disconnect is temporarily unavailable.");
+    }
+    // This gateway owns a separate OAuthFlow from the worker. Cancel its
+    // token callbacks/readers before awaiting worker-owned disconnect cleanup.
+    deps.oauth?.cancelRefreshes(uid, id);
+    try {
+      const disconnected = await deps.connectionHealthInvocations.disconnectAuthenticated({
+        principal: { uid, authenticated: true },
+        connectionId: id,
+      });
+      await notifyConnectionGeneration(connectionDeps, disconnected);
+      return reply.code(204).send();
+    } catch (error) {
+      return connectionHealthFailure(reply, error);
+    }
   });
 
   app.post("/mcp/servers", async (request, reply) => {
@@ -1144,9 +1213,25 @@ export function registerMcpServerRoutes(app: FastifyInstance, deps: GatewayDeps)
     if (!isUuid(id)) return mcpNotFound(reply);
     const row = await mcpServersRepo.get(deps.db, id, uid);
     if (row === null) return mcpNotFound(reply);
-    const removed = await mcpServersRepo.remove(deps.db, id, uid);
-    if (!removed) return mcpNotFound(reply);
-    await notifyConnectionGeneration(connectionDeps, toMcpConnectionRow(row));
-    return reply.code(204).send();
+    if (deps.connectionHealthInvocations === undefined) {
+      return sendError(reply, 503, "unavailable", "Connection disconnect is temporarily unavailable.");
+    }
+    // The gateway and worker own different OAuthFlow instances; abort this
+    // process's callback/readers before worker disconnect and legacy removal.
+    deps.oauth?.cancelRefreshes(uid, id);
+    try {
+      const disconnected = await deps.connectionHealthInvocations.disconnectAuthenticated({
+        principal: { uid, authenticated: true },
+        connectionId: id,
+      });
+      await notifyConnectionGeneration(connectionDeps, disconnected);
+      // Only after worker-owned OAuth/transport cleanup may the legacy alias
+      // remove the row. Wrong-owner/missing rows still return the same 404.
+      const removed = await mcpServersRepo.remove(deps.db, id, uid);
+      if (!removed) return mcpNotFound(reply);
+      return reply.code(204).send();
+    } catch (error) {
+      return connectionHealthFailure(reply, error);
+    }
   });
 }
