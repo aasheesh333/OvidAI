@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "name": "collab50",
+  "series": "collab",
+  "kind": "collab",
+  "loadPoint": 50,
+  "runner": "observed",
+  "thresholds": "external",
+  "observationEnv": "RELEASE_COLLAB50_OBSERVATION"
+}

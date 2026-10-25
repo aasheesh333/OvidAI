@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "name": "beta25",
+  "series": "beta",
+  "kind": "agent",
+  "loadPoint": 25,
+  "runner": "scenario",
+  "thresholds": "smoke",
+  "observationEnv": "RELEASE_BETA25_OBSERVATION",
+  "target": {
+    "baseUrlEnv": "RELEASE_LOAD_BASE_URL",
+    "wsBaseEnv": "RELEASE_LOAD_WS_URL",
+    "databaseUrlEnv": "RELEASE_LOAD_DATABASE_URL",
+    "redisQUrlEnv": "RELEASE_LOAD_REDIS_Q_URL",
+    "mockLlmUrlEnv": "RELEASE_LOAD_MOCK_LLM_URL",
+    "queuePrefixEnv": "RELEASE_LOAD_QUEUE_PREFIX"
+  },
+  "scenario": {
+    "users": 25,
+    "durationMs": 900000,
+    "rampMs": 60000,
+    "runsPerUserEveryMs": 45000,
+    "sandboxDutyCycle": 0.3,
+    "browserUsers": 0,
+    "schedules": 0,
+    "reconnectEveryMs": 60000
+  }
+}

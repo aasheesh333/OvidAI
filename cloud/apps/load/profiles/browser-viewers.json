@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "name": "browser-viewers",
+  "series": "browser",
+  "kind": "browser",
+  "loadPoint": 10,
+  "runner": "capacity",
+  "thresholds": "external",
+  "observationEnv": "RELEASE_BROWSER_VIEWERS_OBSERVATION",
+  "target": {
+    "baseUrlEnv": "RELEASE_LOAD_BASE_URL",
+    "wsBaseEnv": "RELEASE_LOAD_WS_URL",
+    "databaseUrlEnv": "RELEASE_LOAD_DATABASE_URL",
+    "redisQUrlEnv": "RELEASE_LOAD_REDIS_Q_URL",
+    "mockLlmUrlEnv": "RELEASE_LOAD_MOCK_LLM_URL",
+    "queuePrefixEnv": "RELEASE_LOAD_QUEUE_PREFIX"
+  },
+  "capacity": {
+    "users": 10,
+    "rampMs": 60000,
+    "settleMs": 30000,
+    "measureMs": 600000,
+    "sendEveryMinMs": 30000,
+    "sendEveryMaxMs": 60000,
+    "toolShare": 0,
+    "studioUsers": 0,
+    "studioEveryMs": 15000,
+    "browserUsers": 10,
+    "runTimeoutMs": 90000
+  }
+}

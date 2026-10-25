@@ -59,6 +59,8 @@ export interface CapacityTarget {
 }
 
 export interface ShardResult {
+  /** Actual generated workload identity; optional for legacy shard fixtures. */
+  runId?: string;
   shard: number;
   users: number;
   connected: number;
@@ -557,6 +559,7 @@ export async function runCapacityShard(opts: {
   loop.disable();
 
   return {
+    runId: opts.runTag,
     shard: opts.shard,
     users: profile.users,
     connected: counters.connected!,

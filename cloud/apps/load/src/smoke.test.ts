@@ -269,6 +269,7 @@ async function startMockGateway(mockLlmUrl: string): Promise<MockGateway> {
           mode: "safe" as const,
           // W1: SessionDto.projectId is required (null = standalone chat).
           projectId: null,
+          pinnedAt: null,
           createdAt: now,
           updatedAt: now,
         };
@@ -617,8 +618,9 @@ describe("load harness (unit: self-contained mock gateway)", () => {
       eventLog: gateway.eventLog,
     };
 
-    const report = await runScenario(profile, target);
+    const report = await runScenario(profile, target, { runId: "smoke-release-provenance" });
 
+    expect(report.runId).toBe("smoke-release-provenance");
     expect(report.users).toBe(profile.users);
     expect(report.runsStarted).toBeGreaterThan(0);
     expect(report.runsFailed).toBe(0);

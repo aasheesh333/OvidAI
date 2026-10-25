@@ -57,6 +57,8 @@ export interface LoadTarget {
 }
 
 export interface LoadReport {
+  /** Actual generated workload identity; optional for legacy report fixtures. */
+  runId?: string;
   startedAt: string;
   durationMs: number;
   users: number;
@@ -320,9 +322,15 @@ function runIds(events: SessionEvent[]): {
   return { started, completed, failed, unattributedFailed };
 }
 
+export interface RunScenarioOptions {
+  /** Binds generated users/prompts and the report to one release evidence run. */
+  runId?: string;
+}
+
 export async function runScenario(
   profile: LoadProfile,
   target: LoadTarget,
+  options: RunScenarioOptions = {},
 ): Promise<LoadReport> {
   if (!Number.isInteger(profile.users) || profile.users <= 0) {
     throw new Error("runScenario: users must be a positive integer");
@@ -340,7 +348,8 @@ export async function runScenario(
   const startedAt = new Date().toISOString();
   const startedMs = Date.now();
   const stopAt = startedMs + profile.durationMs;
-  const runTag = `load-${startedMs.toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  const runTag = options.runId ?? `load-${startedMs.toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  if (runTag.trim() === "") throw new Error("runScenario: runId must be non-empty");
 
   const clients: Array<LoadClient | undefined> = [];
   const sessions: Array<string | undefined> = [];
@@ -956,6 +965,7 @@ export async function runScenario(
   const replayMax = replaySamples.length === 0 ? 0 : Math.max(...replaySamples);
 
   const report: LoadReport = {
+    runId: runTag,
     startedAt,
     durationMs: Date.now() - startedMs,
     users: profile.users,

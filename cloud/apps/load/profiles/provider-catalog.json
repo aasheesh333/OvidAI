@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "name": "provider-catalog",
+  "series": "provider",
+  "kind": "provider",
+  "loadPoint": 10,
+  "runner": "observed",
+  "thresholds": "external",
+  "observationEnv": "RELEASE_PROVIDER_CATALOG_OBSERVATION"
+}
