@@ -6,7 +6,6 @@ import 'package:flutter/services.dart';
 
 import '../../../core/chat_integration_ports.dart';
 import '../../../core/chat_pins.dart';
-import '../../../core/collaboration/models.dart';
 import '../../../core/collaboration/production.dart';
 import '../../../core/cloud/cloud_agent_facade.dart';
 import '../../../core/cloud/cloud_rest.dart';
@@ -15,6 +14,7 @@ import '../../../core/cloud/message_search.dart';
 import '../../../core/cloud/models.dart';
 import '../../../core/cloud/plan_tier.dart';
 import '../../../core/cloud/projects.dart';
+import '../../../core/cloud/static_rich_content.dart';
 import '../../../core/cloud_usage_store.dart';
 import '../../../core/composer_drafts.dart';
 import '../../../core/conversation_share_service.dart';
@@ -28,6 +28,8 @@ import '../../../core/session_artifacts.dart';
 import '../../../core/session_history_store.dart';
 import '../../../core/cloud/cloud_errors.dart';
 import '../../../core/state.dart';
+import '../../../core/voice_cache_store.dart';
+import '../../../core/voice_playback_controller.dart';
 import '../../../core/voice_reply_service.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
@@ -92,6 +94,7 @@ class _V2AppShellState extends State<V2AppShell> {
   final _tabObserver = _V2TabObserver();
   late final CloudUsageStore _usage;
   late final V2SettingsActions _settings;
+  late final VoicePlaybackController _voicePlayback;
   late final Listenable _listenable;
 
   /// The drawer's server message search, with the device index as its offline
@@ -109,16 +112,19 @@ class _V2AppShellState extends State<V2AppShell> {
     super.initState();
     _usage = CloudUsageStore.acquire(AppState.I);
     _settings = V2SettingsActions(_usage);
+    _voicePlayback = VoicePlaybackController(cache: VoiceCacheStore());
     _messageSearch = MessageSearchController(
       localSearch: _searchMessagesOnDevice,
     );
     _listenable = Listenable.merge([
       AppState.I,
       CloudAgentFacade.I,
+      CloudSessionStore.I,
       ChatPinsStore.I,
       ProjectsController.I,
       ConnectionService.I,
       _usage,
+      _voicePlayback,
     ]);
     v2DefaultMentionSource = const V2AppMentionSource();
     // `@` refs travel to the gateway as server session ids; local ids are not
@@ -156,6 +162,7 @@ class _V2AppShellState extends State<V2AppShell> {
     _settings.dispose();
     _usage.release();
     _messageSearch.dispose();
+    _voicePlayback.dispose();
     super.dispose();
   }
 
@@ -257,8 +264,8 @@ class _V2AppShellState extends State<V2AppShell> {
       // A search hit names the SERVER session. A chat created on this device
       // keeps its local id after its first send, so map the UUID back before
       // selecting; server-native chats already use their server id.
-      onMessageTap: (serverId) =>
-          _selectSession(CloudSessionStore.I.resolveLocalSessionId(serverId)),
+      onMessageTap: _openMessageSearchResult,
+      onSearchHit: (hit) => unawaited(openSearchHit(hit)),
       onSchedule: () => _withTab(
         V2NavTab.chat,
         () => V2WorkRoutes.openSchedules(context, _settings),
@@ -351,6 +358,8 @@ class _V2AppShellState extends State<V2AppShell> {
               unawaited(v2SaveTranscriptLink(routeContext, url)),
           onStartChat: _newChat,
           onRetry: _retry,
+          onLoadEarlier: (anchorMessageId) =>
+              _loadEarlier(sessionId!, anchorMessageId: anchorMessageId),
           onPermissionTap: () => unawaited(_openPermissionSheet(routeContext)),
           permissionLabel: CloudAgentFacade.I.mode.label,
           // Studio is gated on a bound repo here too (spec Screen 2).
@@ -360,6 +369,7 @@ class _V2AppShellState extends State<V2AppShell> {
           voiceService: const V2PlatformVoiceService(),
           voiceLanguage: app.voiceLanguage,
           onVoicePlay: _playVoiceReply,
+          onVoiceStop: _stopVoiceReply,
           onDraftChanged: (text) => ComposerDraftStore.I.put(sessionId!, text),
         );
       },
@@ -628,6 +638,8 @@ class _V2AppShellState extends State<V2AppShell> {
 
   V2LiveChatData _liveData(AppState app, ChatSession session) {
     final agent = CloudAgentFacade.I;
+    final store = CloudSessionStore.I;
+    final serverId = store.knownServerIdFor(session.id);
     final running = agent.busyFor(session.id);
     final queued = agent.queuedMessagesFor(session.id);
     // The durable outbox is the only truthful source for "waiting to send"
@@ -647,6 +659,7 @@ class _V2AppShellState extends State<V2AppShell> {
       modelLabel: _modelLabel(session),
       items: _items(session),
       running: running,
+      voicePlayback: _voicePlayback.state,
       statusLabel: stalled
           ? 'Still working…'
           : status != null && status.trim().isNotEmpty
@@ -663,6 +676,11 @@ class _V2AppShellState extends State<V2AppShell> {
       offline: ConnectionService.I.offline,
       waitingToSend: outbox.length,
       failedToSend: failedSends,
+      hasEarlier: serverId != null && store.hasEarlierTranscript(serverId),
+      targetMessageId: _searchTargetSessionId == session.id
+          ? _searchTargetMessageId
+          : null,
+      targetRequestId: _searchTargetRequestId,
       onRetryFailed: () => _retryFailedSend(session.id),
       onDiscardFailed: () => _discardFailedSend(session.id),
     );
@@ -728,6 +746,7 @@ class _V2AppShellState extends State<V2AppShell> {
               V2LiveAssistantMessage(
                 id: message.privateSyncId,
                 markdown: message.content,
+                source: message,
               ),
             );
           }
@@ -750,6 +769,11 @@ class _V2AppShellState extends State<V2AppShell> {
                 id: message.privateSyncId,
                 text: message.content,
                 timeLabel: _timeLabel(message.time),
+                attachments: message.attachments,
+                onOpenAttachment: (attachment) =>
+                    _openUserAttachment(session.id, attachment),
+                onDownloadAttachment: (attachment) =>
+                    _openUserAttachment(session.id, attachment, download: true),
               ),
             );
           } else if (message.content.trim().isNotEmpty) {
@@ -757,6 +781,8 @@ class _V2AppShellState extends State<V2AppShell> {
               V2LiveAssistantMessage(
                 id: message.privateSyncId,
                 markdown: message.content,
+                source: message,
+                settled: message.kind != MsgKind.streaming,
                 // Only a stored answer can be regenerated or branched; a turn
                 // tail or a streaming row has no address on the server.
                 serverMessageId: CloudAgentFacade.isServerMessage(message)
@@ -771,6 +797,41 @@ class _V2AppShellState extends State<V2AppShell> {
   }
 
   // ── Actions ─────────────────────────────────────────────────────────────
+
+  Future<void> _openUserAttachment(
+    String sessionId,
+    MessageAttachment attachment, {
+    bool download = false,
+  }) async {
+    if (attachment is! RichMessageAttachment) return;
+    final attachmentId = attachment.id;
+    final serverId = CloudSessionStore.I.knownServerIdFor(sessionId);
+    if (attachment.availability != MessageAttachmentAvailability.ready ||
+        attachmentId == null ||
+        serverId == null) {
+      return;
+    }
+    try {
+      final minted = await CloudRestClient.I.mintAttachmentCdnUrl(
+        serverId,
+        attachmentId,
+        download: download,
+      );
+      if (!mounted) return;
+      if (download) {
+        await v2SaveTranscriptLink(
+          _navContext,
+          minted.url,
+          suggestedName: attachment.name,
+        );
+      } else {
+        await v2OpenTranscriptLink(_navContext, minted.url);
+      }
+    } catch (error) {
+      Diag.swallow('v2.openUserAttachment', error);
+      if (mounted) _snack(_navContext, 'Attachment unavailable.');
+    }
+  }
 
   void _openDrawer() => _scaffoldKey.currentState?.openDrawer();
 
@@ -909,11 +970,82 @@ class _V2AppShellState extends State<V2AppShell> {
     AppState.I.newSession();
   }
 
-  void _selectSession(String id) {
+  String? _searchTargetSessionId;
+  String? _searchTargetMessageId;
+  int _searchTargetRequestId = 0;
+
+  void _selectSession(String id, {bool preserveSearchTarget = false}) {
+    if (!preserveSearchTarget) {
+      _searchTargetSessionId = null;
+      _searchTargetMessageId = null;
+    }
     AppState.I.selectSession(id);
     CloudAgentFacade.I.activateSession(id);
     unawaited(_loadTranscript(id));
     _scaffoldKey.currentState?.closeDrawer();
+  }
+
+  void _openMessageSearchResult(String serverId) {
+    final matches = <MessageSearchHit>[
+      for (final hit in _messageSearch.state.hits)
+        if (hit.sessionId == serverId && hit.messageId != null) hit,
+    ];
+    if (matches.length == 1) {
+      unawaited(openSearchHit(matches.single));
+      return;
+    }
+    // Local hits have no server message id. The legacy callback also cannot
+    // distinguish multiple server hits in one chat, so it opens only the chat
+    // rather than pretending a different message was the one tapped.
+    _selectSession(CloudSessionStore.I.resolveLocalSessionId(serverId));
+  }
+
+  /// Opens the exact account-owned server message, paging backward until that
+  /// row is present so the transcript can reveal its stable id.
+  Future<void> openSearchHit(MessageSearchHit hit) async {
+    final serverId = hit.sessionId?.trim() ?? '';
+    final messageId = hit.messageId?.trim() ?? '';
+    if (serverId.isEmpty || messageId.isEmpty) return;
+    final store = CloudSessionStore.I;
+    final localId = store.resolveLocalSessionId(serverId);
+    if (AppState.I.sessionById(localId) == null ||
+        store.knownServerIdFor(localId) != serverId) {
+      return;
+    }
+    _searchTargetSessionId = localId;
+    _searchTargetMessageId = messageId;
+    // Every tap is a new navigation request, even when the hit id is unchanged.
+    // The request also fences an older in-flight open from winning a later tap.
+    final requestId = ++_searchTargetRequestId;
+    _selectSession(localId, preserveSearchTarget: true);
+    try {
+      await _loadTranscript(localId);
+      for (var pages = 0; pages < 100; pages++) {
+        if (!mounted ||
+            AppState.I.activeSessionId != localId ||
+            _searchTargetRequestId != requestId ||
+            _searchTargetMessageId != messageId) {
+          return;
+        }
+        if (_messageById(messageId) != null) {
+          setState(() {});
+          return;
+        }
+        if (!store.hasEarlierTranscript(serverId)) break;
+        await store.loadEarlierTranscript(serverId);
+      }
+    } catch (error) {
+      Diag.swallow('v2.openSearchHit', error);
+    }
+    if (!mounted ||
+        _searchTargetRequestId != requestId ||
+        _searchTargetMessageId != messageId) {
+      return;
+    }
+    _searchTargetSessionId = null;
+    _searchTargetMessageId = null;
+    setState(() {});
+    _snack(_navContext, 'That message could not be opened.');
   }
 
   /// The offline fallback for message search: the device's own index (SQLite
@@ -954,10 +1086,25 @@ class _V2AppShellState extends State<V2AppShell> {
     unawaited(_loadTranscript(id));
   }
 
-  /// Pages [sessionId]'s transcript through the store: online it seeds the
-  /// projection (and the offline cache) from the server, offline it seeds
-  /// from that cache. A chat that never reached the server has no history.
-  Future<void> _loadTranscript(String sessionId) async {
+  final Map<String, Future<void>> _transcriptLoadOperations =
+      <String, Future<void>>{};
+
+  /// Pages [sessionId]'s transcript through the store and coalesces callers
+  /// (session selection and a search deep link often arrive together).
+  Future<void> _loadTranscript(String sessionId) {
+    final pending = _transcriptLoadOperations[sessionId];
+    if (pending != null) return pending;
+    late final Future<void> operation;
+    operation = _loadTranscriptNow(sessionId).whenComplete(() {
+      if (identical(_transcriptLoadOperations[sessionId], operation)) {
+        _transcriptLoadOperations.remove(sessionId);
+      }
+    });
+    _transcriptLoadOperations[sessionId] = operation;
+    return operation;
+  }
+
+  Future<void> _loadTranscriptNow(String sessionId) async {
     if (!_transcriptsLoaded.add(sessionId)) return;
     final store = CloudSessionStore.I;
     try {
@@ -971,6 +1118,27 @@ class _V2AppShellState extends State<V2AppShell> {
       _transcriptsLoaded.remove(sessionId);
       Diag.swallow('v2.loadTranscript', e);
     }
+  }
+
+  Future<PrependReceipt> _loadEarlier(
+    String sessionId, {
+    String? anchorMessageId,
+  }) async {
+    final store = CloudSessionStore.I;
+    final serverId = store.knownServerIdFor(sessionId);
+    if (serverId == null) {
+      return PrependReceipt(
+        previousOldestMessageId: null,
+        anchorMessageId: anchorMessageId,
+        insertedCount: 0,
+        nextCursor: null,
+        socketWatermark: null,
+      );
+    }
+    return store.loadEarlierTranscript(
+      serverId,
+      anchorMessageId: anchorMessageId,
+    );
   }
 
   Future<void> _submit(V2ComposerSubmission submission) async {
@@ -1567,21 +1735,47 @@ class _V2AppShellState extends State<V2AppShell> {
     };
   }
 
-  /// Speaks a voice reply with the on-device TTS engine.
+  /// Handles the answer's explicit play/pause/resume tap. Streaming text and
+  /// generated voice-summary titles are never candidates for synthesis.
   void _playVoiceReply(String id) {
+    final playback = _voicePlayback.state;
+    if (playback.messageId == id) {
+      if (playback.phase == VoicePlaybackPhase.starting ||
+          playback.phase == VoicePlaybackPhase.playing) {
+        unawaited(_voicePlayback.pause());
+        return;
+      }
+      if (playback.phase == VoicePlaybackPhase.paused) {
+        unawaited(_voicePlayback.resume());
+        return;
+      }
+    }
     final session = AppState.I.activeSession;
     if (session == null) return;
+    final sourceMessage = _messageById(id);
+    if (sourceMessage?.kind == MsgKind.streaming) return;
     for (final item in _items(session)) {
-      if (item is! V2LiveVoiceReply || item.id != id) continue;
-      final transcript = item.reply.transcript;
-      if (transcript == null || transcript.trim().isEmpty) return;
+      if (item.id != id) continue;
+      final text = switch (item) {
+        V2LiveAssistantMessage message => message.markdown,
+        V2LiveVoiceReply reply => reply.reply.transcript ?? '',
+        _ => '',
+      };
+      if (text.isEmpty) return;
       unawaited(
-        VoiceReplyService.I.speak(
-          transcript,
+        _voicePlayback.play(
+          messageId: id,
+          text: text,
           localeId: VoiceReplyService.localeFor(AppState.I.voiceLanguage),
         ),
       );
       return;
+    }
+  }
+
+  void _stopVoiceReply(String id) {
+    if (_voicePlayback.state.messageId == id) {
+      unawaited(_voicePlayback.stop());
     }
   }
 
@@ -2630,20 +2824,7 @@ class _ChatShareHostState extends State<_ChatShareHost> {
     if (collab == null) {
       throw StateError('Live chats are unavailable in this build.');
     }
-    final snapshot = ConversationSnapshot.fromSession(
-      _session,
-      messages: _messages,
-    );
-    await collab.startFromConversation(
-      sourceSessionId: _session.id,
-      seed: [
-        for (final message in snapshot.messages)
-          CollaborationSeedMessage(
-            message.role == 'user' ? MessageRole.user : MessageRole.assistant,
-            message.content,
-          ),
-      ],
-    );
+    await collab.startFromConversation(sourceSessionId: _session.id);
     final link = collab.shareLink;
     if (link == null) {
       throw StateError('We could not create an invite link.');

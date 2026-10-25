@@ -928,6 +928,7 @@ class CloudAgentFacade extends ChangeNotifier
 
   void _notify() {
     if (_disposed) return;
+    _syncPendingAttachments();
     for (final entry in _busyNotifiers.entries) {
       entry.value.value = busyFor(entry.key);
     }
@@ -1398,16 +1399,7 @@ class CloudAgentFacade extends ChangeNotifier
           content: entry.content,
           privateSyncId: rowId,
           time: entry.createdAt,
-          attachments: [
-            ..._readyAttachments(entry.attachmentIds),
-            for (final f in entry.attachmentFiles)
-              RichMessageAttachment(
-                name: f.name,
-                size: f.size,
-                path: f.path,
-                availability: MessageAttachmentAvailability.pending,
-              ),
-          ],
+          attachments: _pendingAttachments(entry),
         );
         _pendingRows.putIfAbsent(key, () => <Message>[]).add(row);
         state.projection.messages.add(row);
@@ -1435,10 +1427,35 @@ class CloudAgentFacade extends ChangeNotifier
     if (state == null) return;
     final messages = state.projection.messages;
     final index = messages.indexWhere((m) => m.privateSyncId == rowId);
-    final already = messages.any((m) => m.privateSyncId == userMessageId);
+    final confirmedIndex = messages.indexWhere(
+      (m) => m.privateSyncId == userMessageId,
+    );
+    final already = confirmedIndex >= 0;
+
+    void enrichConfirmedRow(List<MessageAttachment> previous) {
+      if (confirmedIndex < 0) return;
+      final existing = messages[confirmedIndex];
+      final ids = attachmentIds.isNotEmpty
+          ? attachmentIds
+          : <String>[
+              for (final attachment in existing.attachments)
+                if (attachment is RichMessageAttachment &&
+                    attachment.id != null)
+                  attachment.id!,
+            ];
+      if (ids.isEmpty) return;
+      existing.attachments = _readyAttachments(
+        ids,
+        sessionId: key,
+        previous: previous,
+        stagedFiles: stagedFiles,
+      );
+    }
+
     if (index >= 0) {
       final pending = messages[index];
       if (already) {
+        enrichConfirmedRow(pending.attachments);
         messages.removeAt(index);
       } else {
         messages[index] = Message(
@@ -1449,6 +1466,7 @@ class CloudAgentFacade extends ChangeNotifier
           time: pending.time,
           attachments: _readyAttachments(
             attachmentIds,
+            sessionId: key,
             previous: pending.attachments,
             stagedFiles: stagedFiles,
           ),
@@ -1463,41 +1481,137 @@ class CloudAgentFacade extends ChangeNotifier
           privateSyncId: userMessageId,
           attachments: _readyAttachments(
             attachmentIds,
+            sessionId: key,
             stagedFiles: stagedFiles,
           ),
         ),
       );
+    } else if (already) {
+      enrichConfirmedRow(messages[confirmedIndex].attachments);
     }
     state.projection.notifyListeners();
   }
 
   List<MessageAttachment> _readyAttachments(
     List<String> ids, {
+    required String sessionId,
     List<MessageAttachment> previous = const <MessageAttachment>[],
     List<OutboxFile> stagedFiles = const <OutboxFile>[],
+    MessageAttachmentAvailability availability =
+        MessageAttachmentAvailability.ready,
   }) {
     return <MessageAttachment>[
       for (var i = 0; i < ids.length; i++)
-        RichMessageAttachment(
-          id: ids[i],
-          name: i < previous.length
-              ? previous[i].name
-              : i < stagedFiles.length
-              ? stagedFiles[i].name
-              : 'Attachment',
-          size: i < previous.length
-              ? previous[i].size
-              : i < stagedFiles.length
-              ? stagedFiles[i].size
-              : 0,
-          path: i < previous.length
-              ? previous[i].path
-              : i < stagedFiles.length
-              ? stagedFiles[i].path
-              : null,
-          availability: MessageAttachmentAvailability.ready,
+        _readyAttachment(
+          sessionId,
+          ids[i],
+          i,
+          previous,
+          stagedFiles,
+          availability,
         ),
     ];
+  }
+
+  RichMessageAttachment _readyAttachment(
+    String sessionId,
+    String id,
+    int index,
+    List<MessageAttachment> previous,
+    List<OutboxFile> stagedFiles,
+    MessageAttachmentAvailability availability,
+  ) {
+    final old = index < previous.length ? previous[index] : null;
+    final staged = index < stagedFiles.length ? stagedFiles[index] : null;
+    final persisted = _store?.attachmentMetadataFor(sessionId, id);
+    final hasRealName = old != null && old.name != 'Attachment';
+    return RichMessageAttachment(
+      id: id,
+      name: hasRealName
+          ? old!.name
+          : staged?.name ?? persisted?.name ?? old?.name ?? 'Attachment',
+      size: old != null && old.size > 0
+          ? old.size
+          : staged?.size ?? persisted?.size ?? old?.size ?? 0,
+      path: old?.path ?? staged?.path ?? persisted?.path,
+      availability: availability,
+    );
+  }
+
+  List<MessageAttachment> _pendingAttachments(
+    OutboxEntry entry, {
+    List<MessageAttachment> previous = const <MessageAttachment>[],
+  }) {
+    final availability = entry.failed
+        ? MessageAttachmentAvailability.unavailable
+        : MessageAttachmentAvailability.pending;
+    return <MessageAttachment>[
+      ..._readyAttachments(
+        entry.attachmentIds,
+        sessionId: entry.sessionId,
+        previous: previous,
+        availability: availability,
+      ),
+      for (final file in entry.attachmentFiles)
+        RichMessageAttachment(
+          name: file.name,
+          size: file.size,
+          path: file.path,
+          availability: availability,
+        ),
+    ];
+  }
+
+  void _syncPendingAttachments() {
+    final store = _store;
+    if (store == null) return;
+    void sync(Message message) {
+      final clientMsgId = pendingClientMsgIdOf(message);
+      if (clientMsgId == null) return;
+      final entry = store.outboxEntry(clientMsgId);
+      if (entry == null) return;
+      final next = _pendingAttachments(
+        entry,
+        previous: message.attachments,
+      );
+      if (_sameAttachmentMetadata(message.attachments, next)) return;
+      message.attachments = next;
+    }
+
+    for (final rows in _pendingRows.values) {
+      for (final message in rows) {
+        sync(message);
+      }
+    }
+    for (final state in _sessions.values) {
+      for (final message in state.projection.messages) {
+        sync(message);
+      }
+    }
+  }
+
+  static bool _sameAttachmentMetadata(
+    List<MessageAttachment> a,
+    List<MessageAttachment> b,
+  ) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      final left = a[i];
+      final right = b[i];
+      if (left.name != right.name ||
+          left.size != right.size ||
+          left.path != right.path ||
+          left.url != right.url) {
+        return false;
+      }
+      final leftRich = left is RichMessageAttachment ? left : null;
+      final rightRich = right is RichMessageAttachment ? right : null;
+      if (leftRich?.id != rightRich?.id ||
+          leftRich?.availability != rightRich?.availability) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /// Drops a pending row (the user discarded the prompt).

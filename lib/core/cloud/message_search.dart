@@ -280,6 +280,9 @@ class MessageSearchState {
     this.hits = const <MessageSearchHit>[],
     this.total,
     this.local = false,
+    this.hasMore = false,
+    this.loadingMore = false,
+    this.moreError,
     this.error,
   });
 
@@ -300,6 +303,13 @@ class MessageSearchState {
   /// True when [hits] came from the on-device index because the gateway could
   /// not be reached. The drawer says so.
   final bool local;
+
+  /// Whether the gateway has another page for this exact settled query.
+  final bool hasMore;
+  final bool loadingMore;
+
+  /// A pagination failure keeps the already-loaded hits on screen.
+  final String? moreError;
 
   /// Short, already-human copy for [MessageSearchStatus.error].
   final String? error;
@@ -337,12 +347,14 @@ class MessageSearchController extends ChangeNotifier {
 
   Timer? _timer;
   int _generation = 0;
+  int _nextOffset = 0;
 
   /// Feed every keystroke here. A blank value clears at once and fences any
   /// in-flight answer, so a stale page can never land under an empty box.
   void query(String raw) {
     final normalized = normalizeMessageSearchQuery(raw);
     _timer?.cancel();
+    _nextOffset = 0;
     final generation = ++_generation;
     if (normalized.isEmpty) {
       _set(MessageSearchState.idle);
@@ -362,6 +374,7 @@ class MessageSearchController extends ChangeNotifier {
     final query = _state.query;
     if (query.isEmpty) return;
     _timer?.cancel();
+    _nextOffset = 0;
     final generation = ++_generation;
     _set(MessageSearchState(status: MessageSearchStatus.loading, query: query));
     await _run(query, generation);
@@ -371,6 +384,7 @@ class MessageSearchController extends ChangeNotifier {
     try {
       final page = await _source.search(query, limit: limit);
       if (generation != _generation) return;
+      _nextOffset = (page.offset ?? 0) + page.items.length;
       _set(
         MessageSearchState(
           status: page.items.isEmpty
@@ -379,6 +393,7 @@ class MessageSearchController extends ChangeNotifier {
           query: query,
           hits: page.items,
           total: page.total,
+          hasMore: _pageHasMore(page, _nextOffset),
         ),
       );
     } on CloudApiException catch (error) {
@@ -420,6 +435,73 @@ class MessageSearchController extends ChangeNotifier {
           status: MessageSearchStatus.error,
           query: query,
           error: 'Messages did not load.',
+        ),
+      );
+    }
+  }
+
+  bool _pageHasMore(MessageSearchPage page, int nextOffset) {
+    final total = page.total;
+    if (total != null) return nextOffset < total;
+    final pageLimit = page.limit ?? limit;
+    return page.items.isNotEmpty && page.items.length >= pageLimit;
+  }
+
+  /// Appends the next gateway page for the same query. No local ranking or
+  /// second search engine is involved, and a new query fences an old page.
+  Future<void> loadMore() async {
+    final current = _state;
+    if (current.status != MessageSearchStatus.content ||
+        current.local ||
+        !current.hasMore ||
+        current.loadingMore) {
+      return;
+    }
+    final generation = _generation;
+    final query = current.query;
+    final offset = _nextOffset;
+    _set(
+      MessageSearchState(
+        status: MessageSearchStatus.content,
+        query: current.query,
+        hits: current.hits,
+        total: current.total,
+        hasMore: current.hasMore,
+        loadingMore: true,
+      ),
+    );
+    try {
+      final page = await _source.search(query, limit: limit, offset: offset);
+      if (generation != _generation) return;
+      _nextOffset = (page.offset ?? offset) + page.items.length;
+      final seen = <String>{
+        for (final hit in current.hits)
+          '${hit.sessionId}\u0000${hit.messageId}',
+      };
+      final hits = <MessageSearchHit>[
+        ...current.hits,
+        for (final hit in page.items)
+          if (seen.add('${hit.sessionId}\u0000${hit.messageId}')) hit,
+      ];
+      _set(
+        MessageSearchState(
+          status: MessageSearchStatus.content,
+          query: query,
+          hits: hits,
+          total: page.total ?? current.total,
+          hasMore: _pageHasMore(page, _nextOffset),
+        ),
+      );
+    } catch (_) {
+      if (generation != _generation) return;
+      _set(
+        MessageSearchState(
+          status: MessageSearchStatus.content,
+          query: current.query,
+          hits: current.hits,
+          total: current.total,
+          hasMore: current.hasMore,
+          moreError: 'More messages did not load.',
         ),
       );
     }

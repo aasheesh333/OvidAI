@@ -40,6 +40,7 @@ dependencies:
   cupertino_icons: ^1.0.8
   flutter_markdown_plus: ^1.0.12
   markdown: 7.3.1
+  xml: 6.6.1
   http: ^1.2.2
   path_provider: ^2.1.4
   webview_flutter: 4.8.0
@@ -105,6 +106,8 @@ flutter:
   assets:
     - docs/legal/PRIVACY.md
     - docs/legal/TERMS.md
+    - assets/vendor/mermaid.min.js
+    - assets/vendor/MERMAID-LICENSE.txt
 
   # To add assets to your application, add an assets section, like this:
   #   - images/a_dot_burr.jpeg

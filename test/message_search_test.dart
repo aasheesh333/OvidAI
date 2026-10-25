@@ -131,6 +131,17 @@ void main() {
       expect(rest.calls.single.query, {'q': 'needle'});
     });
 
+    test(
+      'unicode and quoted phrases reach the same engine unchanged',
+      () async {
+        final rest = _FakeRest(
+          (path, query) async => {'items': <Object>[], 'total': 0},
+        );
+        await MessageSearchClient(rest: rest).search('  "λ 狐 🦊"  ');
+        expect(rest.calls.single.query, {'q': '"λ 狐 🦊"'});
+      },
+    );
+
     test('a blank query answers an empty page without a request', () async {
       final rest = _FakeRest(
         (path, query) async => throw StateError('no request expected'),
@@ -399,6 +410,97 @@ void main() {
 
       expect(controller.state.query, 'second');
       expect(controller.state.hits.single.messageId, 'new');
+    });
+
+    test(
+      'loadMore appends the real next page and stops at the server total',
+      () async {
+        final source = _FakeSource((query, {limit, offset, sessionId}) async {
+          if (offset == null) {
+            return MessageSearchPage(
+              items: [
+                _hit(messageId: 'm3'),
+                _hit(messageId: 'm2'),
+              ],
+              total: 3,
+              limit: 2,
+              offset: 0,
+            );
+          }
+          expect(offset, 2);
+          return MessageSearchPage(
+            items: [
+              _hit(messageId: 'm2'),
+              _hit(messageId: 'm1'),
+            ],
+            total: 3,
+            limit: 2,
+            offset: 2,
+          );
+        });
+        final controller = MessageSearchController(
+          source: source,
+          debounce: Duration.zero,
+          limit: 2,
+        );
+        addTearDown(controller.dispose);
+
+        controller.query('needle');
+        await _flush();
+        expect(controller.state.hasMore, isTrue);
+        await controller.loadMore();
+        expect(controller.state.hits.map((hit) => hit.messageId), [
+          'm3',
+          'm2',
+          'm1',
+        ]);
+        expect(controller.state.hasMore, isFalse);
+        expect(controller.state.loadingMore, isFalse);
+        expect(source.calls.map((call) => call.offset), [null, 2]);
+
+        await controller.loadMore();
+        expect(source.calls, hasLength(2));
+      },
+    );
+
+    test('a stale loadMore cannot append under a newer query', () async {
+      final olderMore = Completer<MessageSearchPage>();
+      final source = _FakeSource((query, {limit, offset, sessionId}) {
+        if (query == 'older' && offset != null) return olderMore.future;
+        return Future.value(
+          MessageSearchPage(
+            items: [_hit(messageId: '$query-initial')],
+            total: 3,
+            limit: 1,
+            offset: 0,
+          ),
+        );
+      });
+      final controller = MessageSearchController(
+        source: source,
+        debounce: Duration.zero,
+        limit: 1,
+      );
+      addTearDown(controller.dispose);
+
+      controller.query('older');
+      await _flush();
+      final pending = controller.loadMore();
+      controller.query('newer');
+      await _flush();
+      olderMore.complete(
+        MessageSearchPage(
+          items: [_hit(messageId: 'stale-more')],
+          total: 3,
+          limit: 1,
+          offset: 1,
+        ),
+      );
+      await pending;
+
+      expect(controller.state.query, 'newer');
+      expect(controller.state.hits.single.messageId, 'newer-initial');
+      expect(controller.state.loadingMore, isFalse);
     });
 
     test('retry asks again for the same query', () async {

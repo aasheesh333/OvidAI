@@ -4,10 +4,14 @@ import 'package:flutter/gestures.dart' show TapGestureRecognizer;
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
+import 'package:markdown/markdown.dart' as md;
 
+import '../../../core/cloud/static_rich_content.dart';
+import '../../../core/state.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'remote_attachment_tile.dart';
 import 'transcript_actions.dart';
 
 // TODO(l10n): move user-facing copy to ARB keys in the localization pass.
@@ -37,13 +41,17 @@ final class V2ParagraphBlock extends V2MessageBlock {
 }
 
 final class V2BulletItem {
-  const V2BulletItem({required this.text, this.depth = 0});
+  const V2BulletItem({required this.text, this.depth = 0, this.checked});
 
   final String text;
 
   /// Nesting depth, clamped by the parser so a stray indent cannot push text
   /// off a narrow screen.
   final int depth;
+
+  /// Null for an ordinary bullet; true/false for a settled GFM task item.
+  /// Tasks are read-only transcript content, never a second completion engine.
+  final bool? checked;
 }
 
 final class V2BulletListBlock extends V2MessageBlock {
@@ -85,10 +93,17 @@ final class V2CodeBlock extends V2MessageBlock {
 final class V2DiagramBlock extends V2MessageBlock {
   const V2DiagramBlock({required this.source});
 
-  /// The original Mermaid source. It is never rendered as a live diagram.
+  /// Original Mermaid source, sent only to the offline strict pixel renderer.
   final String source;
 
   String get title => _diagramTitle(source);
+}
+
+final class V2SvgBlock extends V2MessageBlock {
+  const V2SvgBlock({required this.source});
+
+  /// XML source, sanitized before it can reach the native pixel renderer.
+  final String source;
 }
 
 final class V2ImageBlock extends V2MessageBlock {
@@ -169,200 +184,311 @@ const Set<String> _artifactExtensions = {
 };
 
 final _inlinePattern = RegExp(
-  r'\*\*([^*]+)\*\*|`([^`]+)`|\*([^*\n]+)\*|\[([^\]]+)\]\(([^)\s]+)\)',
+  r'\*\*([^*]+)\*\*|`([^`]+)`|\*([^*\n]+)\*|\[([^\]]+)\]\(([^)\s]+)\)|~~([^~\n]+)~~',
 );
-final _fencePattern = RegExp(r'^(`{3,}|~{3,})(.*)$');
-final _headingPattern = RegExp(r'^(#{1,6})\s+(.+)$');
-final _bulletPattern = RegExp(r'^([ \t]*)([-*+•]|\d+[.)])[ \t]+(.+)$');
-final _rulePattern = RegExp(r'^([-*_])\1{2,}$');
-final _imagePattern = RegExp(
-  r'^!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)$',
-);
-final _linkPattern = RegExp(
-  r'^\[([^\]]+)\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)$',
-);
-final _bareUrlPattern = RegExp(r'^<?(https?://[^\s<>]+)>?$');
-final _tableSeparatorCell = RegExp(r'^:?-{3,}:?$');
 
-/// Parses the small markdown subset used in assistant messages.
+/// Parses settled assistant markdown through the existing GFM AST.
 ///
-/// Supported blocks:
-/// * ATX headings (`#`, `##`, `###`; deeper levels collapse to 3)
-/// * bullet and ordered lists (two-space nesting)
-/// * pipe tables with an alignment separator row
-/// * fenced code (```` ```lang ````), with `mermaid` becoming a diagram card
-/// * standalone images (`![alt](url)`)
-/// * standalone file links (`[report.pdf](url)`), rendered as artifact cards
-/// * standalone links (and bare URLs), rendered as a download/link row
-/// * rules (`---`, `***`, `___`)
-///
-/// Everything else is a paragraph. Inline bold, code and links are styled but
-/// intentionally not tappable; only standalone links become actions.
+/// Tables, task lists, strikethrough, headings, lists, fences, images, files
+/// and links become explicit Flutter blocks. Raw HTML stays plain md.Text;
+/// this renderer never creates a raw-HTML/platform node. Mermaid and SVG
+/// fences become static pixel-render requests, not interactive documents.
 List<V2MessageBlock> parseV2MessageBlocks(String markdown) {
-  final lines = markdown
-      .replaceAll('\r\n', '\n')
-      .replaceAll('\r', '\n')
-      .split('\n');
-  final blocks = <V2MessageBlock>[];
-  final paragraph = <String>[];
+  // A fresh document per message prevents link/footnote references from one
+  // transcript row leaking into another. Raw HTML remains md.Text; no HTML
+  // element is ever constructed for it by this renderer.
+  final document = md.Document(
+    extensionSet: md.ExtensionSet.gitHubFlavored,
+    encodeHtml: false,
+  );
+  return List<V2MessageBlock>.unmodifiable(
+    _blocksFromNodes(document.parse(markdown)),
+  );
+}
 
-  void flushParagraph() {
-    if (paragraph.isEmpty) return;
-    final text = paragraph.join(' ').trim();
-    paragraph.clear();
+List<V2MessageBlock> _blocksFromNodes(List<md.Node> nodes) {
+  final blocks = <V2MessageBlock>[];
+  for (final node in nodes) {
+    if (node is md.Text) {
+      final text = node.text.trim();
+      if (text.isNotEmpty) blocks.add(V2ParagraphBlock(text: text));
+      continue;
+    }
+    if (node is! md.Element) continue;
+    switch (node.tag) {
+      case 'h1' || 'h2' || 'h3' || 'h4' || 'h5' || 'h6':
+        final text = _inlineSource(node.children).trim();
+        if (text.isNotEmpty) {
+          final level = int.parse(node.tag.substring(1));
+          blocks.add(V2HeadingBlock(level: level > 3 ? 3 : level, text: text));
+        }
+      case 'p':
+        blocks.addAll(_paragraphBlocks(node));
+      case 'pre':
+        final code = node.children?.whereType<md.Element>().firstWhere(
+          (element) => element.tag == 'code',
+          orElse: () => md.Element.text('code', ''),
+        );
+        final languageClass = code?.attributes['class'] ?? '';
+        final match = RegExp(
+          r'(?:^|\s)language-([^\s]+)',
+        ).firstMatch(languageClass);
+        final language = match?.group(1)?.toLowerCase();
+        final source = (code?.textContent ?? node.textContent).replaceFirst(
+          RegExp(r'\n$'),
+          '',
+        );
+        if (language == 'mermaid') {
+          blocks.add(V2DiagramBlock(source: source));
+        } else if (language == 'svg') {
+          blocks.add(V2SvgBlock(source: source));
+        } else {
+          blocks.add(V2CodeBlock(code: source, language: language));
+        }
+      case 'ul' || 'ol':
+        blocks.add(_listBlock(node));
+      case 'table':
+        final table = _tableBlock(node);
+        if (table != null) blocks.add(table);
+      case 'hr':
+        blocks.add(const V2DividerBlock());
+      case 'blockquote' || 'section':
+        blocks.addAll(_blocksFromNodes(node.children ?? const <md.Node>[]));
+      default:
+        final text = _inlineSource(node.children).trim();
+        if (text.isNotEmpty) blocks.add(V2ParagraphBlock(text: text));
+    }
+  }
+  return blocks;
+}
+
+List<V2MessageBlock> _paragraphBlocks(md.Element paragraph) {
+  final blocks = <V2MessageBlock>[];
+  final pending = <md.Node>[];
+
+  void flush() {
+    final text = _inlineSource(
+      pending,
+    ).replaceAll(RegExp(r'\s*\n\s*'), ' ').trim();
+    pending.clear();
     if (text.isNotEmpty) blocks.add(V2ParagraphBlock(text: text));
   }
 
-  var i = 0;
-  while (i < lines.length) {
-    final raw = lines[i];
-    final line = raw.trim();
-
-    if (line.isEmpty) {
-      flushParagraph();
-      i++;
-      continue;
-    }
-
-    final fence = _fencePattern.firstMatch(raw.trimLeft());
-    if (fence != null) {
-      flushParagraph();
-      final marker = fence.group(1)!;
-      final fenceChar = marker[0];
-      final fenceLength = marker.length;
-      final info = fence.group(2)!.trim();
-      final language = info.isEmpty
-          ? null
-          : info.split(RegExp(r'\s+')).first.toLowerCase();
-      final codeLines = <String>[];
-      var j = i + 1;
-      while (j < lines.length &&
-          !_isFenceClose(lines[j], fenceChar, fenceLength)) {
-        codeLines.add(lines[j]);
-        j++;
+  final segments = <List<md.Node>>[<md.Node>[]];
+  for (final child in paragraph.children ?? const <md.Node>[]) {
+    if (child is md.Text && child.text.contains('\n')) {
+      final parts = child.text.split('\n');
+      for (var i = 0; i < parts.length; i++) {
+        if (parts[i].isNotEmpty) segments.last.add(md.Text(parts[i]));
+        if (i < parts.length - 1) segments.add(<md.Node>[]);
       }
-      final code = codeLines.join('\n');
-      if (language == 'mermaid') {
-        blocks.add(V2DiagramBlock(source: code));
-      } else {
-        blocks.add(V2CodeBlock(code: code, language: language));
-      }
-      i = j < lines.length ? j + 1 : j;
-      continue;
+    } else {
+      segments.last.add(child);
     }
+  }
 
-    final heading = _headingPattern.firstMatch(line);
-    if (heading != null) {
-      flushParagraph();
-      final text = heading
-          .group(2)!
-          .replaceFirst(RegExp(r'\s+#+\s*$'), '')
-          .trim();
-      if (text.isNotEmpty) {
-        final level = heading.group(1)!.length;
-        blocks.add(V2HeadingBlock(level: level > 3 ? 3 : level, text: text));
+  for (final segment in segments) {
+    final meaningful = segment
+        .where((node) => node is! md.Text || node.text.trim().isNotEmpty)
+        .toList();
+    if (meaningful.isEmpty) continue;
+    if (meaningful.length == 1 && meaningful.single is md.Element) {
+      final only = meaningful.single as md.Element;
+      if (only.tag == 'img') {
+        flush();
+        _appendImage(only, blocks);
+        continue;
       }
-      i++;
-      continue;
-    }
-
-    // A table is only a table when the next line is a separator with the same
-    // column count. A stray `|` line stays a paragraph, never a broken grid.
-    final tableHeader = _tableCells(raw);
-    if (tableHeader != null && i + 1 < lines.length) {
-      final separator = _tableCells(lines[i + 1]);
-      if (separator != null &&
-          separator.length == tableHeader.length &&
-          _isTableSeparator(separator)) {
-        flushParagraph();
-        final rows = <List<String>>[];
-        var j = i + 2;
-        while (j < lines.length) {
-          final cells = _tableCells(lines[j]);
-          if (cells == null) break;
-          rows.add(_normalizeTableRow(cells, tableHeader.length));
-          j++;
-        }
-        blocks.add(
-          V2TableBlock(
-            headers: List.unmodifiable(tableHeader),
-            rows: List.unmodifiable(rows),
-            align: List.unmodifiable(separator.map(_tableAlignOf)),
-          ),
-        );
-        i = j;
+      if (only.tag == 'a') {
+        flush();
+        _emitLinkBlocks(<_LinkEntry>[_linkEntry(only)], blocks);
         continue;
       }
     }
-
-    final image = _imagePattern.firstMatch(line);
-    if (image != null) {
-      flushParagraph();
-      blocks.add(
-        V2ImageBlock(alt: image.group(1)!.trim(), url: image.group(2)!),
-      );
-      i++;
-      continue;
-    }
-
-    if (_rulePattern.hasMatch(line)) {
-      flushParagraph();
-      blocks.add(const V2DividerBlock());
-      i++;
-      continue;
-    }
-
-    final bullet = _bulletPattern.firstMatch(raw);
-    if (bullet != null) {
-      flushParagraph();
-      final marker = bullet.group(2)!;
-      final ordered = RegExp(r'^\d').hasMatch(marker);
-      final items = <V2BulletItem>[];
-      var j = i;
-      while (j < lines.length) {
-        final next = _bulletPattern.firstMatch(lines[j]);
-        if (next == null) break;
-        final nextOrdered = RegExp(r'^\d').hasMatch(next.group(2)!);
-        if (nextOrdered != ordered) break;
-        final text = next.group(3)!.trim();
-        if (text.isNotEmpty) {
-          items.add(
-            V2BulletItem(text: text, depth: _indentDepth(next.group(1)!)),
-          );
-        }
-        j++;
+    for (final child in meaningful) {
+      if (child is md.Element && child.tag == 'img') {
+        flush();
+        _appendImage(child, blocks);
+      } else {
+        pending.add(child);
       }
-      if (items.isNotEmpty) {
-        blocks.add(
-          V2BulletListBlock(items: List.unmodifiable(items), ordered: ordered),
+    }
+    // Preserve CommonMark's soft line break inside one paragraph.
+    pending.add(md.Text('\n'));
+  }
+  flush();
+  final merged = <V2MessageBlock>[];
+  for (final block in blocks) {
+    if (block is V2DownloadLinksBlock &&
+        merged.isNotEmpty &&
+        merged.last is V2DownloadLinksBlock) {
+      final previous = merged.removeLast() as V2DownloadLinksBlock;
+      merged.add(
+        V2DownloadLinksBlock(
+          links: List<V2DownloadLink>.unmodifiable(<V2DownloadLink>[
+            ...previous.links,
+            ...block.links,
+          ]),
+        ),
+      );
+    } else {
+      merged.add(block);
+    }
+  }
+  return merged;
+}
+
+void _appendImage(md.Element image, List<V2MessageBlock> blocks) {
+  final url = image.attributes['src']?.trim() ?? '';
+  if (url.isEmpty) return;
+  blocks.add(
+    V2ImageBlock(alt: image.attributes['alt']?.trim() ?? '', url: url),
+  );
+}
+
+V2BulletListBlock _listBlock(md.Element list) {
+  final items = <V2BulletItem>[];
+
+  void walk(md.Element current, int depth) {
+    for (final item
+        in current.children?.whereType<md.Element>() ?? const <md.Element>[]) {
+      if (item.tag != 'li') continue;
+      var hasCheckbox = false;
+      var checked = false;
+
+      void findCheckbox(List<md.Node> nodes) {
+        for (final node in nodes) {
+          if (node is! md.Element) continue;
+          if (node.tag == 'input' && node.attributes['type'] == 'checkbox') {
+            hasCheckbox = true;
+            checked = node.attributes.containsKey('checked');
+          } else if (node.tag != 'ul' && node.tag != 'ol') {
+            findCheckbox(node.children ?? const <md.Node>[]);
+          }
+        }
+      }
+
+      findCheckbox(item.children ?? const <md.Node>[]);
+      final nested = <md.Element>[];
+      final content = <md.Node>[];
+      for (final child in item.children ?? const <md.Node>[]) {
+        if (child is md.Element && (child.tag == 'ul' || child.tag == 'ol')) {
+          nested.add(child);
+        } else {
+          content.add(child);
+        }
+      }
+      final text = _inlineSource(content).trim();
+      if (text.isNotEmpty) {
+        items.add(
+          V2BulletItem(
+            text: text,
+            depth: depth > 4 ? 4 : depth,
+            checked: hasCheckbox ? checked : null,
+          ),
         );
       }
-      i = j;
-      continue;
-    }
-
-    final standalone = _standaloneLink(line);
-    if (standalone != null) {
-      flushParagraph();
-      final entries = <_LinkEntry>[];
-      var j = i;
-      while (j < lines.length) {
-        final next = _standaloneLink(lines[j].trim());
-        if (next == null) break;
-        entries.add(next);
-        j++;
+      for (final child in nested) {
+        walk(child, depth + 1);
       }
-      _emitLinkBlocks(entries, blocks);
-      i = j;
+    }
+  }
+
+  walk(list, 0);
+  return V2BulletListBlock(
+    items: List<V2BulletItem>.unmodifiable(items),
+    ordered: list.tag == 'ol',
+  );
+}
+
+V2TableBlock? _tableBlock(md.Element table) {
+  md.Element? section(String name) {
+    for (final child
+        in table.children?.whereType<md.Element>() ?? const <md.Element>[]) {
+      if (child.tag == name) return child;
+    }
+    return null;
+  }
+
+  List<md.Element> rows(md.Element? parent) => <md.Element>[
+    for (final child
+        in parent?.children?.whereType<md.Element>() ?? const <md.Element>[])
+      if (child.tag == 'tr') child,
+  ];
+
+  List<md.Element> cells(md.Element row, String tag) => <md.Element>[
+    for (final child
+        in row.children?.whereType<md.Element>() ?? const <md.Element>[])
+      if (child.tag == tag) child,
+  ];
+
+  final head = rows(section('thead'));
+  if (head.isEmpty) return null;
+  final headerCells = cells(head.single, 'th');
+  if (headerCells.isEmpty) return null;
+  final bodyRows = rows(section('tbody'));
+  return V2TableBlock(
+    headers: List<String>.unmodifiable(
+      headerCells.map((cell) => _inlineSource(cell.children).trim()),
+    ),
+    rows: List<List<String>>.unmodifiable(
+      bodyRows.map(
+        (row) => List<String>.unmodifiable(
+          cells(row, 'td').map((cell) => _inlineSource(cell.children).trim()),
+        ),
+      ),
+    ),
+    align: List<V2TableAlign>.unmodifiable(
+      headerCells.map((cell) {
+        return switch (cell.attributes['align']) {
+          'right' => V2TableAlign.end,
+          'center' => V2TableAlign.center,
+          _ => V2TableAlign.start,
+        };
+      }),
+    ),
+  );
+}
+
+String _inlineSource(List<md.Node>? nodes) {
+  final out = StringBuffer();
+  for (final node in nodes ?? const <md.Node>[]) {
+    if (node is md.Text) {
+      out.write(node.text);
       continue;
     }
-
-    paragraph.add(line);
-    i++;
+    if (node is! md.Element) continue;
+    final content = _inlineSource(node.children);
+    switch (node.tag) {
+      case 'strong':
+        out.write('**$content**');
+      case 'em':
+        out.write('*$content*');
+      case 'del':
+        out.write('~~$content~~');
+      case 'code':
+        out.write('`$content`');
+      case 'a':
+        out.write('[$content](${node.attributes['href'] ?? ''})');
+      case 'img':
+        out.write(
+          '![${node.attributes['alt'] ?? ''}](${node.attributes['src'] ?? ''})',
+        );
+      case 'br':
+        out.write('\n');
+      case 'input':
+        break;
+      default:
+        out.write(content);
+    }
   }
-  flushParagraph();
-  return List.unmodifiable(blocks);
+  return out.toString();
 }
+
+_LinkEntry _linkEntry(md.Element link) => _LinkEntry(
+  _inlineSource(link.children).trim(),
+  link.attributes['href']?.trim() ?? '',
+);
 
 /// Bounded memo for [parseV2MessageBlocks].
 ///
@@ -412,83 +538,11 @@ String _diagramTitle(String source) {
   return 'Diagram';
 }
 
-bool _isFenceClose(String line, String char, int length) {
-  final text = line.trim();
-  if (text.length < length) return false;
-  for (var i = 0; i < text.length; i++) {
-    if (text[i] != char) return false;
-  }
-  return true;
-}
-
-/// Splits a `| a | b |` row into trimmed cells. `\|` is a literal pipe.
-/// Returns null when the line is not a pipe row.
-List<String>? _tableCells(String raw) {
-  final text = raw.trim();
-  if (text.length < 3 || !text.startsWith('|') || !text.endsWith('|')) {
-    return null;
-  }
-  final inner = text.substring(1, text.length - 1);
-  final cells = <String>[];
-  final buffer = StringBuffer();
-  for (var i = 0; i < inner.length; i++) {
-    final char = inner[i];
-    if (char == r'\' && i + 1 < inner.length && inner[i + 1] == '|') {
-      buffer.write('|');
-      i++;
-      continue;
-    }
-    if (char == '|') {
-      cells.add(buffer.toString().trim());
-      buffer.clear();
-      continue;
-    }
-    buffer.write(char);
-  }
-  cells.add(buffer.toString().trim());
-  return cells;
-}
-
-bool _isTableSeparator(List<String> cells) =>
-    cells.isNotEmpty &&
-    cells.every((cell) => _tableSeparatorCell.hasMatch(cell));
-
-V2TableAlign _tableAlignOf(String cell) {
-  final text = cell.trim();
-  final left = text.startsWith(':');
-  final right = text.endsWith(':');
-  if (left && right) return V2TableAlign.center;
-  if (right) return V2TableAlign.end;
-  return V2TableAlign.start;
-}
-
-/// Pads or trims a row to the header's column count, so every row lands under
-/// the right heading even when the markdown is ragged.
-List<String> _normalizeTableRow(List<String> cells, int columns) => [
-  for (var i = 0; i < columns; i++) i < cells.length ? cells[i] : '',
-];
-
-int _indentDepth(String indent) {
-  var width = 0;
-  for (final unit in indent.runes) {
-    width += unit == 0x09 ? 2 : 1;
-  }
-  return (width ~/ 2).clamp(0, 4).toInt();
-}
-
 final class _LinkEntry {
   const _LinkEntry(this.label, this.href);
 
   final String label;
   final String href;
-}
-
-_LinkEntry? _standaloneLink(String line) {
-  final link = _linkPattern.firstMatch(line);
-  if (link != null) return _LinkEntry(link.group(1)!.trim(), link.group(2)!);
-  final bare = _bareUrlPattern.firstMatch(line);
-  if (bare != null) return _LinkEntry(bare.group(1)!, bare.group(1)!);
-  return null;
 }
 
 void _emitLinkBlocks(List<_LinkEntry> entries, List<V2MessageBlock> blocks) {
@@ -584,21 +638,35 @@ String _linkHost(String url) {
   return url;
 }
 
-/// Renders a markdown message as lightweight chat blocks.
+final SettledContentCache<V2MessageBlock> _settledContentCache =
+    SettledContentCache<V2MessageBlock>(
+      parser: (message) => parseV2MessageBlocksCached(message.content),
+      limit: _parseCacheLimit,
+    );
+
+typedef V2StaticDiagramRenderer = Future<Uint8List> Function(String source);
+
+/// Renders a settled markdown message as lightweight chat blocks.
 ///
-/// Images are cards, not network image views: a transcript never blocks on a
-/// remote asset or a web view. File cards and link rows call back with the
-/// href so the host can open or download it.
+/// Streaming text has a deliberately plain path: no incomplete GFM parse,
+/// syntax highlighting, remote image, or diagram renderer runs per delta.
 class V2MessageBlocks extends StatelessWidget {
   const V2MessageBlocks({
     super.key,
     required this.markdown,
+    this.message,
+    this.settled = true,
     this.onCopyCode,
     this.onOpenLink,
     this.onDownload,
+    this.imageLoader,
+    this.mermaidRenderer,
+    this.svgRenderer,
   });
 
   final String markdown;
+  final Message? message;
+  final bool settled;
 
   /// Overrides clipboard copy for code blocks (tests and hosts that record it).
   final ValueChanged<String>? onCopyCode;
@@ -608,10 +676,23 @@ class V2MessageBlocks extends StatelessWidget {
 
   /// Download an artifact or a link whose label says "Download".
   final ValueChanged<String>? onDownload;
+  final RemoteImageLoader? imageLoader;
+  final V2StaticDiagramRenderer? mermaidRenderer;
+  final V2StaticDiagramRenderer? svgRenderer;
 
   @override
   Widget build(BuildContext context) {
-    final blocks = parseV2MessageBlocksCached(markdown);
+    final isSettled = settled && message?.kind != MsgKind.streaming;
+    if (!isSettled) {
+      return Text(
+        markdown,
+        style: OType.body.copyWith(color: OColors.of(context).text),
+      );
+    }
+    final sourceMessage = message;
+    final blocks = sourceMessage == null
+        ? parseV2MessageBlocksCached(markdown)
+        : _settledContentCache.blocksFor(sourceMessage);
     if (blocks.isEmpty) return const SizedBox.shrink();
     // A host that does not inject a handler still gets a working control: the
     // defaults open the real URL and save a real file.
@@ -659,9 +740,14 @@ class V2MessageBlocks extends StatelessWidget {
       V2BulletListBlock list => _BulletListView(block: list, onOpenLink: open),
       V2TableBlock table => _TableView(block: table, onOpenLink: open),
       V2CodeBlock code => _CodeBlockCard(block: code, onCopy: onCopyCode),
-      V2DiagramBlock diagram => _DiagramCard(block: diagram),
+      V2DiagramBlock diagram => _DiagramCard(
+        block: diagram,
+        renderer: mermaidRenderer,
+      ),
+      V2SvgBlock svg => _SvgCard(block: svg, renderer: svgRenderer),
       V2ImageBlock image => _ImageCard(
         block: image,
+        loader: imageLoader,
         onOpen: open,
         onDownload: (href) => download(href),
       ),
@@ -771,6 +857,13 @@ class _InlineTextState extends State<_InlineText> {
             style: style.copyWith(fontStyle: FontStyle.italic),
           ),
         );
+      } else if (match.group(6) != null) {
+        spans.add(
+          TextSpan(
+            text: match.group(6),
+            style: style.copyWith(decoration: TextDecoration.lineThrough),
+          ),
+        );
       } else {
         final href = match.group(5)!;
         spans.add(
@@ -844,7 +937,19 @@ class _BulletListView extends StatelessWidget {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                if (block.ordered)
+                if (block.items[i].checked != null)
+                  Semantics(
+                    label:
+                        '${block.items[i].checked! ? 'Completed' : 'Incomplete'} task: ${block.items[i].text}',
+                    child: Icon(
+                      block.items[i].checked!
+                          ? Icons.check_box_rounded
+                          : Icons.check_box_outline_blank_rounded,
+                      size: 18,
+                      color: c.textMuted,
+                    ),
+                  )
+                else if (block.ordered)
                   Text(
                     '${i + 1}.',
                     style: style.copyWith(
@@ -944,6 +1049,33 @@ class _TableView extends StatelessWidget {
       ),
     );
   }
+}
+
+final RegExp _codeTokenPattern = RegExp(
+  r'"(?:\\.|[^"\\])*"|//[^\n]*|\b(?:abstract|as|async|await|bool|break|case|catch|class|const|continue|def|do|double|else|enum|export|extends|final|finally|for|function|if|import|int|is|late|let|new|null|return|sealed|static|String|super|switch|this|throw|true|false|try|var|void|while|with|yield)\b|\b\d+(?:\.\d+)?\b',
+);
+
+TextSpan _highlightedCodeSpan(String code, OColors c) {
+  final base = OType.mono.copyWith(color: c.textMuted);
+  final spans = <TextSpan>[];
+  var offset = 0;
+  for (final match in _codeTokenPattern.allMatches(code)) {
+    if (match.start > offset) {
+      spans.add(TextSpan(text: code.substring(offset, match.start)));
+    }
+    final token = match.group(0)!;
+    final style = token.startsWith('//')
+        ? base.copyWith(color: c.textFaint, fontStyle: FontStyle.italic)
+        : token.startsWith('"')
+        ? base.copyWith(color: c.accent)
+        : RegExp(r'^\d').hasMatch(token)
+        ? base.copyWith(color: c.accent)
+        : base.copyWith(color: c.text, fontWeight: FontWeight.w600);
+    spans.add(TextSpan(text: token, style: style));
+    offset = match.end;
+  }
+  if (offset < code.length) spans.add(TextSpan(text: code.substring(offset)));
+  return TextSpan(style: base, children: spans);
 }
 
 class _CodeBlockCard extends StatefulWidget {
@@ -1047,10 +1179,7 @@ class _CodeBlockCardState extends State<_CodeBlockCard> {
               OSpace.m,
               OSpace.m,
             ),
-            child: Text(
-              widget.block.code,
-              style: OType.mono.copyWith(color: c.textMuted),
-            ),
+            child: Text.rich(_highlightedCodeSpan(widget.block.code, c)),
           ),
         ],
       ),
@@ -1059,9 +1188,119 @@ class _CodeBlockCardState extends State<_CodeBlockCard> {
 }
 
 class _DiagramCard extends StatelessWidget {
-  const _DiagramCard({required this.block});
+  const _DiagramCard({required this.block, this.renderer});
 
   final V2DiagramBlock block;
+  final V2StaticDiagramRenderer? renderer;
+
+  @override
+  Widget build(BuildContext context) {
+    return _StaticDiagramCard(
+      title: block.title,
+      source: block.source,
+      renderer: renderer ?? StaticRichContentRenderer.renderMermaidPng,
+      showSource: true,
+    );
+  }
+}
+
+class _SvgCard extends StatelessWidget {
+  const _SvgCard({required this.block, this.renderer});
+
+  final V2SvgBlock block;
+  final V2StaticDiagramRenderer? renderer;
+
+  @override
+  Widget build(BuildContext context) {
+    return _StaticDiagramCard(
+      title: 'SVG diagram',
+      source: block.source,
+      renderer: renderer ?? StaticRichContentRenderer.renderSvgPng,
+      showSource: false,
+    );
+  }
+}
+
+class _StaticDiagramCard extends StatefulWidget {
+  const _StaticDiagramCard({
+    required this.title,
+    required this.source,
+    required this.renderer,
+    required this.showSource,
+  });
+
+  final String title;
+  final String source;
+  final V2StaticDiagramRenderer renderer;
+  final bool showSource;
+
+  @override
+  State<_StaticDiagramCard> createState() => _StaticDiagramCardState();
+}
+
+class _StaticDiagramCardState extends State<_StaticDiagramCard> {
+  late Future<Uint8List> _pixels;
+  late String _requestId;
+  var _generation = 0;
+  var _nativeRender = false;
+
+  void _beginRender() {
+    _requestId = 'diagram-${identityHashCode(this)}-$_generation';
+    if (widget.renderer == StaticRichContentRenderer.renderMermaidPng) {
+      _nativeRender = true;
+      _pixels = StaticRichContentRenderer.renderMermaidPng(
+        widget.source,
+        requestId: _requestId,
+      );
+    } else if (widget.renderer == StaticRichContentRenderer.renderSvgPng) {
+      _nativeRender = true;
+      _pixels = StaticRichContentRenderer.renderSvgPng(
+        widget.source,
+        requestId: _requestId,
+      );
+    } else {
+      _nativeRender = false;
+      _pixels = widget.renderer(widget.source);
+    }
+  }
+
+  void _cancelRender() {
+    if (_nativeRender) unawaited(_cancelRenderSafely());
+  }
+
+  Future<void> _cancelRenderSafely() async {
+    try {
+      await StaticRichContentRenderer.cancelRender(_requestId);
+    } on MissingPluginException {
+      // Disposal is also valid before native registration completes.
+    } on StateError {
+      // A malformed outcome is not allowed as an outcome, but disposal must
+      // still finish without an unhandled asynchronous error.
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _beginRender();
+  }
+
+  @override
+  void didUpdateWidget(_StaticDiagramCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.source != widget.source ||
+        oldWidget.renderer != widget.renderer) {
+      _cancelRender();
+      _generation++;
+      _beginRender();
+    }
+  }
+
+  @override
+  void dispose() {
+    _cancelRender();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1083,7 +1322,7 @@ class _DiagramCard extends StatelessWidget {
               const SizedBox(width: OSpace.s),
               Expanded(
                 child: Text(
-                  block.title,
+                  widget.title,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: OType.bodyStrong.copyWith(color: c.text),
@@ -1092,23 +1331,54 @@ class _DiagramCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: OSpace.m),
-          // The source is the honest representation of the diagram: no fake
-          // preview, no "unavailable" copy.
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(OSpace.m),
-            decoration: BoxDecoration(
-              color: c.codeBg,
-              borderRadius: BorderRadius.circular(ORadius.m),
-            ),
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Text(
-                block.source,
-                style: OType.mono.copyWith(color: c.textMuted),
+          FutureBuilder<Uint8List>(
+            future: _pixels,
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return Text(
+                  'Rendering diagram…',
+                  style: OType.bodyMd.copyWith(color: c.textMuted),
+                );
+              }
+              final bytes = snapshot.data;
+              if (snapshot.hasError || bytes == null) {
+                return Text(
+                  'Diagram unavailable',
+                  style: OType.bodyMd.copyWith(color: c.textMuted),
+                );
+              }
+              return ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 480),
+                child: Image.memory(
+                  bytes,
+                  fit: BoxFit.contain,
+                  semanticLabel: widget.title,
+                  errorBuilder: (_, _, _) => Text(
+                    'Diagram unavailable',
+                    style: OType.bodyMd.copyWith(color: c.textMuted),
+                  ),
+                ),
+              );
+            },
+          ),
+          if (widget.showSource) ...[
+            const SizedBox(height: OSpace.m),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(OSpace.m),
+              decoration: BoxDecoration(
+                color: c.codeBg,
+                borderRadius: BorderRadius.circular(ORadius.m),
+              ),
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Text(
+                  widget.source,
+                  style: OType.mono.copyWith(color: c.textMuted),
+                ),
               ),
             ),
-          ),
+          ],
         ],
       ),
     );
@@ -1118,11 +1388,13 @@ class _DiagramCard extends StatelessWidget {
 class _ImageCard extends StatelessWidget {
   const _ImageCard({
     required this.block,
+    required this.loader,
     required this.onOpen,
     required this.onDownload,
   });
 
   final V2ImageBlock block;
+  final RemoteImageLoader? loader;
   final ValueChanged<String> onOpen;
   final ValueChanged<String> onDownload;
 
@@ -1131,8 +1403,6 @@ class _ImageCard extends StatelessWidget {
     final c = OColors.of(context);
     final alt = block.alt.isEmpty ? 'Image' : block.alt;
     final url = block.url;
-    // One row, like every other attachment. A fake 96 dp preview band added
-    // height without adding information.
     return Container(
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
@@ -1140,53 +1410,63 @@ class _ImageCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(ORadius.l),
         border: Border.all(color: c.hairline),
       ),
-      child: OPressable(
-        onTap: () => onOpen(url),
-        semanticLabel: 'Open image: $alt',
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(
-            OSpace.m,
-            OSpace.s,
-            OSpace.xs,
-            OSpace.s,
-          ),
-          child: Row(
-            children: [
-              Icon(Icons.image_rounded, size: 20, color: c.accent),
-              const SizedBox(width: OSpace.m),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      alt,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: OType.bodyMdStrong.copyWith(color: c.text),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          RemoteTranscriptImage(url: url, alt: alt, loader: loader),
+          OPressable(
+            onTap: () => onOpen(url),
+            semanticLabel: 'Open image: $alt',
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(
+                OSpace.m,
+                OSpace.s,
+                OSpace.xs,
+                OSpace.s,
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.image_rounded, size: 20, color: c.accent),
+                  const SizedBox(width: OSpace.m),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          alt,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: OType.bodyMdStrong.copyWith(color: c.text),
+                        ),
+                        if (url.isNotEmpty) ...[
+                          const SizedBox(height: OSpace.xxs),
+                          Text(
+                            _linkHost(url),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: OType.caption.copyWith(color: c.textMuted),
+                          ),
+                        ],
+                      ],
                     ),
-                    if (url.isNotEmpty) ...[
-                      const SizedBox(height: OSpace.xxs),
-                      Text(
-                        _linkHost(url),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ],
-                  ],
-                ),
+                  ),
+                  OIconButton(
+                    icon: Icons.download_rounded,
+                    semanticLabel: 'Download image',
+                    size: 20,
+                    onPressed: () => onDownload(url),
+                  ),
+                  Icon(
+                    Icons.chevron_right_rounded,
+                    size: 18,
+                    color: c.textFaint,
+                  ),
+                ],
               ),
-              OIconButton(
-                icon: Icons.download_rounded,
-                semanticLabel: 'Download image',
-                size: 20,
-                onPressed: () => onDownload(url),
-              ),
-              Icon(Icons.chevron_right_rounded, size: 18, color: c.textFaint),
-            ],
+            ),
           ),
-        ),
+        ],
       ),
     );
   }

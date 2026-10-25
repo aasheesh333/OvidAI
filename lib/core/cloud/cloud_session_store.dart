@@ -46,6 +46,7 @@ import 'cloud_rest.dart';
 import 'cloud_ws.dart';
 import 'event_projection.dart';
 import 'models.dart';
+import 'static_rich_content.dart';
 
 /// Receives cache loads from [CloudSessionStore] so the live projection can
 /// be seeded without the store importing `CloudAgentFacade`.
@@ -101,6 +102,47 @@ class _CachedTranscript {
   final String? cursor;
 }
 
+/// Result of prepending one older history page.
+///
+/// [previousOldestMessageId] is the oldest cached row before the prepend,
+/// not a claim about the viewport. [anchorMessageId] is the optional actual
+/// viewport anchor supplied by the UI and returned unchanged after paging.
+@immutable
+class PrependReceipt {
+  const PrependReceipt({
+    required this.previousOldestMessageId,
+    required this.anchorMessageId,
+    required this.insertedCount,
+    required this.nextCursor,
+    required this.socketWatermark,
+  });
+
+  final String? previousOldestMessageId;
+  final String? anchorMessageId;
+  final int insertedCount;
+  final String? nextCursor;
+  final String? socketWatermark;
+
+  bool get hasMore => nextCursor != null && nextCursor!.isNotEmpty;
+}
+
+/// Immutable metadata captured at upload completion. Reset/account switches may
+/// clear the lookup cache, but can never clear this deferred-write delta.
+@immutable
+class _AttachmentMetadataDelta {
+  const _AttachmentMetadataDelta({
+    required this.owner,
+    required this.sessionId,
+    required this.attachmentId,
+    required this.file,
+  });
+
+  final String owner;
+  final String sessionId;
+  final String attachmentId;
+  final OutboxFile file;
+}
+
 /// Session reconciliation + offline cache + prompt outbox (P8 Task 9).
 class CloudSessionStore extends ChangeNotifier {
   CloudSessionStore({
@@ -110,11 +152,12 @@ class CloudSessionStore extends ChangeNotifier {
     ConnectionService? connection,
     WsMultiplexer? ws,
     this.autoRetry = true,
-  })  : _rest = rest, // ignore: prefer_initializing_formals
-        _cache = cache, // ignore: prefer_initializing_formals
-        _prefs = prefs, // ignore: prefer_initializing_formals
-        _connection = connection ?? ConnectionService.I,
-        _ws = ws ?? WsMultiplexer.I {
+    this.attachmentMetadataWriteBarrier,
+  }) : _rest = rest, // ignore: prefer_initializing_formals
+       _cache = cache, // ignore: prefer_initializing_formals
+       _prefs = prefs, // ignore: prefer_initializing_formals
+       _connection = connection ?? ConnectionService.I,
+       _ws = ws ?? WsMultiplexer.I {
     _ready = _load();
     // Pins live on the server; this store owns the REST client and the
     // local→server id map, so it installs the writer once.
@@ -126,6 +169,10 @@ class CloudSessionStore extends ChangeNotifier {
   /// a prompt never waits for a connectivity flip that may never come
   /// (CH-009). Tests that drive the flush by hand turn it off.
   final bool autoRetry;
+
+  /// Deterministic async storage seam. Null in production; when supplied it is
+  /// awaited after the immutable write snapshot and before the queued callback.
+  final Future<void> Function()? attachmentMetadataWriteBarrier;
 
   // -------------------------------------------------------------------------
   // Persistence keys / namespaces
@@ -139,6 +186,10 @@ class CloudSessionStore extends ChangeNotifier {
   /// its queue on disk; this plain form is the GUEST key and the legacy
   /// pre-scoping key, read once for migration at [_load].
   static const String outboxKey = 'ovid_cloud_outbox';
+
+  /// Real gateway attachment id → local file metadata. Kept separate from the
+  /// outbox wire model so an upload checkpoint never discards name/path/size.
+  static const String attachmentMetadataKey = 'ovid_cloud_attachment_metadata';
 
   /// `SessionHistoryRepository` namespace holding the offline transcript
   /// cache. One row per server session (`id` = server id), so the repo's
@@ -174,6 +225,13 @@ class CloudSessionStore extends ChangeNotifier {
   final Set<String> _deletedServerIds = <String>{};
   final List<OutboxEntry> _outbox = <OutboxEntry>[];
 
+  /// account UID → server session ID → real attachment ID → local metadata.
+  /// No lookup may omit either the owner or the session boundary.
+  final Map<String, Map<String, Map<String, OutboxFile>>>
+  _attachmentMetadata = <String, Map<String, Map<String, OutboxFile>>>{};
+  final Set<String> _metadataLoadedAccounts = <String>{};
+  Future<void> _attachmentMetadataWriteTail = Future<void>.value();
+
   /// Every outbox prefs key this process has read or written (scoped and
   /// legacy forms), so a drained owner's key can be removed instead of
   /// resurrecting stale rows on the next load.
@@ -184,6 +242,12 @@ class CloudSessionStore extends ChangeNotifier {
   /// facade's pre-subscribe seeding from here.
   final Map<String, _CachedTranscript> _cacheMemory =
       <String, _CachedTranscript>{};
+
+  /// Server keyset cursors for the next OLDER page. Presence also records that
+  /// the newest page loaded; a null value is an exhausted, initialized page.
+  final Map<String, String?> _olderCursors = <String, String?>{};
+  final Map<String, Future<PrependReceipt>> _earlierInFlight =
+      <String, Future<PrependReceipt>>{};
 
   /// Concurrent [ensureServerSession] calls share one POST.
   final Map<String, Future<String>> _creating = <String, Future<String>>{};
@@ -197,10 +261,10 @@ class CloudSessionStore extends ChangeNotifier {
 
   /// The process-wide default (Task 10 wires the facade with it).
   static CloudSessionStore get I => _instance ??= CloudSessionStore(
-        rest: CloudRestClient.I,
-        cache: SessionHistoryRepository.I,
-        connection: ConnectionService.I,
-      );
+    rest: CloudRestClient.I,
+    cache: SessionHistoryRepository.I,
+    connection: ConnectionService.I,
+  );
 
   /// Replaces the singleton — test wiring only.
   @visibleForTesting
@@ -223,11 +287,12 @@ class CloudSessionStore extends ChangeNotifier {
     ConnectionService? connection,
     WsMultiplexer? ws,
     this.autoRetry = false,
-  })  : _rest = rest ?? CloudRestClient(),
-        _cache = cache ?? SessionHistoryRepository.I,
-        _prefs = null,
-        _connection = connection ?? ConnectionService.I,
-        _ws = ws ?? WsMultiplexer.I {
+  }) : attachmentMetadataWriteBarrier = null,
+       _rest = rest ?? CloudRestClient(),
+       _cache = cache ?? SessionHistoryRepository.I,
+       _prefs = null,
+       _connection = connection ?? ConnectionService.I,
+       _ws = ws ?? WsMultiplexer.I {
     _idMap.addAll(idMap);
     _knownServerIds.addAll(idMap.values);
     _loaded = true;
@@ -248,6 +313,7 @@ class CloudSessionStore extends ChangeNotifier {
     _knownServerIds.addAll(_idMap.values);
     _decodeKnownServerIds(prefs.getString(knownServerIdsKey));
     _decodeTombstones(prefs.getString(tombstonesKey));
+    await _loadAttachmentMetadata(prefs);
     await _loadOutbox(prefs);
     _loaded = true;
   }
@@ -265,8 +331,9 @@ class CloudSessionStore extends ChangeNotifier {
     final account = AppState.I.sessionAccountId;
     final scopedKey = AppState.I.accountScopedPrefKey(outboxKey);
     // Guest's scoped key IS the plain key; reading both would duplicate rows.
-    final legacyRaw =
-        scopedKey == outboxKey ? null : prefs.getString(outboxKey);
+    final legacyRaw = scopedKey == outboxKey
+        ? null
+        : prefs.getString(outboxKey);
     final hasLegacy = legacyRaw != null && legacyRaw.isNotEmpty;
 
     _outboxKeys.add(scopedKey);
@@ -284,6 +351,121 @@ class CloudSessionStore extends ChangeNotifier {
       await _persistOutbox();
       if (hasLegacy) await prefs.remove(outboxKey);
     }
+  }
+
+  Future<void> _loadAttachmentMetadata(SharedPreferences prefs) async {
+    _loadAttachmentMetadataForAccount(
+      prefs,
+      AppState.I.sessionAccountId,
+    );
+  }
+
+  void _loadAttachmentMetadataForAccount(
+    SharedPreferences prefs,
+    String owner,
+  ) {
+    if (!_metadataLoadedAccounts.add(owner)) return;
+    final key = AppState.I.accountScopedPrefKey(
+      attachmentMetadataKey,
+      owner,
+    );
+    final stored = _decodeAttachmentMetadata(prefs.getString(key), owner);
+    if (stored == null) return;
+    _mergeAttachmentMetadata(owner, stored);
+  }
+
+  /// Reads one exact owner's stamped namespace. Null means malformed, legacy,
+  /// or wrong-owner data; it is never attached to the current account.
+  Map<String, Map<String, OutboxFile>>? _decodeAttachmentMetadata(
+    String? raw,
+    String owner,
+  ) {
+    if (raw == null || raw.isEmpty) {
+      return <String, Map<String, OutboxFile>>{};
+    }
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map || decoded['account'] != owner) return null;
+      if (decoded.keys.any((key) => key != 'account' && key != 'sessions')) {
+        return null; // Forward-version root data is not safe to replace.
+      }
+      final sessions = decoded['sessions'];
+      if (sessions is! Map) return null;
+      final result = <String, Map<String, OutboxFile>>{};
+      for (final session in sessions.entries) {
+        if (session.key is! String || session.value is! Map) return null;
+        final files = <String, OutboxFile>{};
+        for (final attachment in (session.value as Map).entries) {
+          if (attachment.key is! String || attachment.value is! Map) {
+            return null;
+          }
+          final rawFile = attachment.value as Map;
+          if (rawFile.keys.any(
+            (key) => key != 'name' && key != 'path' && key != 'size',
+          )) {
+            return null; // Unknown nested/forward-version association.
+          }
+          if (rawFile['name'] is! String ||
+              rawFile['path'] is! String ||
+              rawFile['size'] is! num) {
+            return null;
+          }
+          files[attachment.key as String] = OutboxFile.fromJson(
+            Map<String, dynamic>.from(rawFile),
+          );
+        }
+        result[session.key as String] = files;
+      }
+      return result;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _mergeAttachmentMetadata(
+    String owner,
+    Map<String, Map<String, OutboxFile>> stored,
+  ) {
+    final sessions = _attachmentMetadata.putIfAbsent(
+      owner,
+      () => <String, Map<String, OutboxFile>>{},
+    );
+    for (final session in stored.entries) {
+      final files = sessions.putIfAbsent(
+        session.key,
+        () => <String, OutboxFile>{},
+      );
+      for (final attachment in session.value.entries) {
+        // In-memory data may be a newer completion; persisted associations
+        // fill unknown entries but never overwrite that newer local path.
+        files.putIfAbsent(attachment.key, () => attachment.value);
+      }
+    }
+  }
+
+  /// Captures a deep map snapshot synchronously. The deferred serializer never
+  /// enumerates mutable RAM after this point, so reset cannot erase a delta.
+  Map<String, Map<String, Map<String, OutboxFile>>>
+  _attachmentMetadataSnapshot([_AttachmentMetadataDelta? delta]) {
+    final snapshot = <String, Map<String, Map<String, OutboxFile>>>{
+      for (final owner in _attachmentMetadata.entries)
+        owner.key: <String, Map<String, OutboxFile>>{
+          for (final session in owner.value.entries)
+            session.key: Map<String, OutboxFile>.of(session.value),
+        },
+    };
+    if (delta != null) {
+      final sessions = snapshot.putIfAbsent(
+        delta.owner,
+        () => <String, Map<String, OutboxFile>>{},
+      );
+      final files = sessions.putIfAbsent(
+        delta.sessionId,
+        () => <String, OutboxFile>{},
+      );
+      files[delta.attachmentId] = delta.file;
+    }
+    return snapshot;
   }
 
   /// Completes once the persisted map/outbox are in memory. Every async API
@@ -502,20 +684,22 @@ class CloudSessionStore extends ChangeNotifier {
     _syncing = true;
     notifyListeners();
     late final Future<void> walk;
-    walk = _refreshSessions().then(
-      (_) {
-        _hasSynced = true;
-        _lastSyncError = null;
-      },
-      onError: (Object e, StackTrace st) {
-        _lastSyncError = e;
-        Error.throwWithStackTrace(e, st);
-      },
-    ).whenComplete(() {
-      if (identical(_refreshing, walk)) _refreshing = null;
-      _syncing = false;
-      notifyListeners();
-    });
+    walk = _refreshSessions()
+        .then(
+          (_) {
+            _hasSynced = true;
+            _lastSyncError = null;
+          },
+          onError: (Object e, StackTrace st) {
+            _lastSyncError = e;
+            Error.throwWithStackTrace(e, st);
+          },
+        )
+        .whenComplete(() {
+          if (identical(_refreshing, walk)) _refreshing = null;
+          _syncing = false;
+          notifyListeners();
+        });
     return _refreshing = walk;
   }
 
@@ -542,6 +726,12 @@ class CloudSessionStore extends ChangeNotifier {
     _hasSynced = false;
     _lastSyncError = null;
     _cacheMemory.clear();
+    _olderCursors.clear();
+    // Account switches reuse this store. Drop every RAM association so A's
+    // paths cannot be read or copied under B; each later lookup reloads only
+    // the current UID's persisted namespace.
+    _attachmentMetadata.clear();
+    _metadataLoadedAccounts.clear();
     // The previous account's server pin answers must not answer for the next.
     ChatPinsStore.I.clearServerPins();
     notifyListeners();
@@ -641,9 +831,11 @@ class CloudSessionStore extends ChangeNotifier {
       // this device has a real title — keep ours and heal the server copy
       // instead of reverting the sidebar to "New chat".
       final local = session.title;
-      unawaited(_rest
-          .patchSession(dto.id, title: local)
-          .then((_) {}, onError: (Object _) {}));
+      unawaited(
+        _rest
+            .patchSession(dto.id, title: local)
+            .then((_) {}, onError: (Object _) {}),
+      );
     }
     session.mode = dto.mode;
     session.projectId = dto.projectId;
@@ -690,6 +882,75 @@ class CloudSessionStore extends ChangeNotifier {
     await _writeCache(serverSessionId, entry);
   }
 
+  /// Whether another older server page exists for [serverSessionId].
+  bool hasEarlierTranscript(String serverSessionId) =>
+      _olderCursors[serverSessionId]?.isNotEmpty ?? false;
+
+  /// Loads and prepends the next older keyset page without touching the live
+  /// projector cursor or re-folding its active run. Concurrent callers share
+  /// one request, so reaching the top twice cannot duplicate a page.
+  Future<PrependReceipt> loadEarlierTranscript(
+    String serverSessionId, {
+    String? anchorMessageId,
+  }) {
+    final pending = _earlierInFlight[serverSessionId];
+    if (pending != null) return pending;
+    late final Future<PrependReceipt> operation;
+    operation =
+        _loadEarlierTranscript(
+          serverSessionId,
+          anchorMessageId: anchorMessageId,
+        ).whenComplete(() {
+          if (identical(_earlierInFlight[serverSessionId], operation)) {
+            _earlierInFlight.remove(serverSessionId);
+          }
+        });
+    _earlierInFlight[serverSessionId] = operation;
+    return operation;
+  }
+
+  Future<PrependReceipt> _loadEarlierTranscript(
+    String serverSessionId, {
+    String? anchorMessageId,
+  }) async {
+    if (!_loaded) await _ready;
+    if (!_olderCursors.containsKey(serverSessionId)) {
+      throw StateError('Load the newest transcript page before paging older');
+    }
+    final existing = _cacheMemory[serverSessionId];
+    final previousOldest = existing == null || existing.messages.isEmpty
+        ? null
+        : existing.messages.first.privateSyncId;
+    final watermark = await _ws.cursorFor(serverSessionId);
+    final cursor = _olderCursors[serverSessionId];
+    if (cursor == null || cursor.isEmpty) {
+      return PrependReceipt(
+        previousOldestMessageId: previousOldest,
+        anchorMessageId: anchorMessageId,
+        insertedCount: 0,
+        nextCursor: null,
+        socketWatermark: watermark,
+      );
+    }
+
+    final known = <String>{
+      for (final message in existing?.messages ?? const <Message>[])
+        message.privateSyncId,
+    };
+    await loadTranscript(serverSessionId, before: cursor);
+    final merged = _cacheMemory[serverSessionId]?.messages ?? const <Message>[];
+    final inserted = merged.where(
+      (message) => known.add(message.privateSyncId),
+    );
+    return PrependReceipt(
+      previousOldestMessageId: previousOldest,
+      anchorMessageId: anchorMessageId,
+      insertedCount: inserted.length,
+      nextCursor: _olderCursors[serverSessionId],
+      socketWatermark: watermark,
+    );
+  }
+
   /// Pages the session transcript (newest-first wire → oldest-first model),
   /// writes the offline cache and seeds the projection.
   ///
@@ -732,8 +993,13 @@ class CloudSessionStore extends ChangeNotifier {
       rethrow;
     }
 
-    // The server answered for this id: it is a server session.
+    // The server answered for this id: it is a server session. Record the
+    // keyset cursor only after a successful answer, before any return path.
     _knownServerIds.add(serverSessionId);
+    final nextOlder = page.nextCursor?.trim();
+    _olderCursors[serverSessionId] = nextOlder == null || nextOlder.isEmpty
+        ? null
+        : nextOlder;
 
     final fetched = <Message>[
       // The wire is newest-first; the transcript is oldest-first.
@@ -777,8 +1043,10 @@ class CloudSessionStore extends ChangeNotifier {
       final existing =
           await _readCache(serverSessionId) ?? _cacheMemory[serverSessionId];
       final merged = _dedupe(<Message>[...settled, ...?existing?.messages]);
-      final entry =
-          _CachedTranscript(messages: merged, cursor: existing?.cursor);
+      final entry = _CachedTranscript(
+        messages: merged,
+        cursor: existing?.cursor,
+      );
       await _writeCache(serverSessionId, entry);
       _cacheMemory[serverSessionId] = entry;
       _transcriptSink?.prependTranscript(serverSessionId, settled);
@@ -799,14 +1067,8 @@ class CloudSessionStore extends ChangeNotifier {
     final older = _dedupe(fetched);
     final existing =
         await _readCache(serverSessionId) ?? _cacheMemory[serverSessionId];
-    final merged = _dedupe(<Message>[
-      ...older,
-      ...?existing?.messages,
-    ]);
-    final entry = _CachedTranscript(
-      messages: merged,
-      cursor: existing?.cursor,
-    );
+    final merged = _dedupe(<Message>[...older, ...?existing?.messages]);
+    final entry = _CachedTranscript(messages: merged, cursor: existing?.cursor);
     await _writeCache(serverSessionId, entry);
     _cacheMemory[serverSessionId] = entry;
     _transcriptSink?.prependTranscript(serverSessionId, older);
@@ -825,22 +1087,43 @@ class CloudSessionStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  Message _messageFromDto(MessageDto dto) => Message(
-        role: dto.role,
-        kind: MsgKind.text,
-        content: dto.content,
-        // The server message id is the stable identity used for paging and
-        // replay dedupe (Task 4's userMessageId equals it).
-        privateSyncId: dto.id,
-        time: dto.createdAt,
-        // The stored thought the transcript renders above this answer.
-        reasoning: dto.reasoning,
-        // CH-006: the files sent with this prompt render as chips.
-        attachments: <MessageAttachment>[
-          for (final a in dto.attachments)
-            MessageAttachment(name: a.name, size: a.sizeBytes),
-        ],
-      );
+  Message _messageFromDto(MessageDto dto) {
+    final attachments = <MessageAttachment>[
+      for (final a in dto.attachments)
+        if (a.id.isNotEmpty)
+          _historyAttachment(dto.sessionId, a)
+        else
+          RichMessageAttachment(name: a.name, size: a.sizeBytes),
+    ];
+    return Message(
+      role: dto.role,
+      kind: MsgKind.text,
+      content: dto.content,
+      // The server message id is the stable identity used for paging and
+      // replay dedupe (Task 4's userMessageId equals it).
+      privateSyncId: dto.id,
+      time: dto.createdAt,
+      // The stored thought the transcript renders above this answer.
+      reasoning: dto.reasoning,
+      // CH-006: the files sent with this prompt render as chips.
+      attachments: attachments,
+    );
+  }
+
+  RichMessageAttachment _historyAttachment(
+    String sessionId,
+    MessageAttachmentDto dto,
+  ) {
+    final local = attachmentMetadataFor(sessionId, dto.id);
+    return RichMessageAttachment(
+      id: dto.id,
+      name: dto.name.isNotEmpty ? dto.name : local?.name ?? 'file',
+      size: dto.sizeBytes > 0 ? dto.sizeBytes : local?.size ?? 0,
+      // Only an authorized local association can restore a path. URL presence
+      // is never a path/identity substitute.
+      path: local?.path,
+    );
+  }
 
   static CloudSessionEvent? _decodeEvent(Map<String, dynamic> raw) {
     try {
@@ -891,7 +1174,8 @@ class CloudSessionStore extends ChangeNotifier {
         }
         final messages = <Message>[
           for (final m in (decoded['messages'] as List? ?? const <dynamic>[]))
-            if (m is Map<String, dynamic>) Message.fromJson(m),
+            if (m is Map<String, dynamic>)
+              _messageFromCacheJson(serverSessionId, m),
         ];
         return _CachedTranscript(
           messages: messages,
@@ -902,6 +1186,32 @@ class CloudSessionStore extends ChangeNotifier {
       }
     }
     return null;
+  }
+
+  Message _messageFromCacheJson(
+    String serverSessionId,
+    Map<String, dynamic> json,
+  ) {
+    final message = richMessageFromJson(json);
+    for (var i = 0; i < message.attachments.length; i++) {
+      final attachment = message.attachments[i];
+      if (attachment is! RichMessageAttachment ||
+          attachment.id == null ||
+          attachment.path != null) {
+        continue;
+      }
+      final local = attachmentMetadataFor(serverSessionId, attachment.id!);
+      if (local == null) continue;
+      message.attachments[i] = RichMessageAttachment(
+        id: attachment.id,
+        name: attachment.name,
+        size: attachment.size,
+        path: local.path,
+        url: attachment.url,
+        availability: attachment.availability,
+      );
+    }
+    return message;
   }
 
   Future<void> _writeCache(
@@ -946,10 +1256,12 @@ class CloudSessionStore extends ChangeNotifier {
       'id': serverSessionId,
       if (session?.title != null) 'title': session!.title,
       if (session?.model != null) 'model': session!.model,
-      'createdAt':
-          (session?.createdAt ?? DateTime.now()).toUtc().toIso8601String(),
-      'updatedAt':
-          (session?.updatedAt ?? DateTime.now()).toUtc().toIso8601String(),
+      'createdAt': (session?.createdAt ?? DateTime.now())
+          .toUtc()
+          .toIso8601String(),
+      'updatedAt': (session?.updatedAt ?? DateTime.now())
+          .toUtc()
+          .toIso8601String(),
       'cursor': entry.cursor,
       'messages': <Map<String, dynamic>>[
         for (final message in entry.messages) message.toJson(),
@@ -997,8 +1309,7 @@ class CloudSessionStore extends ChangeNotifier {
   /// NOW. Null never owns (fail-closed): post-migration every in-memory
   /// entry is stamped, so an unstamped row means the migration did not run.
   bool _ownedByCurrentAccount(OutboxEntry entry) =>
-      entry.account != null &&
-      entry.account == AppState.I.sessionAccountId;
+      entry.account != null && entry.account == AppState.I.sessionAccountId;
 
   Iterable<OutboxEntry> get _ownedOutboxView =>
       _outbox.where(_ownedByCurrentAccount);
@@ -1071,6 +1382,18 @@ class CloudSessionStore extends ChangeNotifier {
     return null;
   }
 
+  /// Local metadata retained when an upload checkpoint persists [attachmentId].
+  /// A missing row is unknown; the caller must not invent a name, size or path.
+  OutboxFile? attachmentMetadataFor(
+    String sessionId,
+    String attachmentId,
+  ) {
+    final owner = AppState.I.sessionAccountId;
+    final prefs = _prefs;
+    if (prefs != null) _loadAttachmentMetadataForAccount(prefs, owner);
+    return _attachmentMetadata[owner]?[sessionId]?[attachmentId];
+  }
+
   /// The server's answer for a prompt this process delivered (kept so a
   /// direct send can read its own outcome after the flush).
   SendMessageResponse? deliveredResponse(String clientMsgId) =>
@@ -1084,7 +1407,8 @@ class CloudSessionStore extends ChangeNotifier {
   Future<void> retryOutboxEntry(String clientMsgId) async {
     if (!_loaded) await _ready;
     final index = _outbox.indexWhere(
-        (e) => e.clientMsgId == clientMsgId && _ownedByCurrentAccount(e));
+      (e) => e.clientMsgId == clientMsgId && _ownedByCurrentAccount(e),
+    );
     if (index < 0) return;
     _outbox[index] = _outbox[index].copyWith(clearFailure: true, attempts: 0);
     await _persistOutbox();
@@ -1098,7 +1422,8 @@ class CloudSessionStore extends ChangeNotifier {
     if (!_loaded) await _ready;
     final before = _outbox.length;
     _outbox.removeWhere(
-        (e) => e.clientMsgId == clientMsgId && _ownedByCurrentAccount(e));
+      (e) => e.clientMsgId == clientMsgId && _ownedByCurrentAccount(e),
+    );
     if (_outbox.length == before) return;
     await _persistOutbox();
     if (_ownedOutboxView.every((e) => !e.failed)) _outboxError = null;
@@ -1112,8 +1437,9 @@ class CloudSessionStore extends ChangeNotifier {
     List<String> attachmentIds,
   ) async {
     if (!_loaded) await _ready;
-    final index =
-        _outbox.indexWhere((entry) => entry.clientMsgId == clientMsgId);
+    final index = _outbox.indexWhere(
+      (entry) => entry.clientMsgId == clientMsgId,
+    );
     if (index < 0) return;
     _outbox[index] = _outbox[index].copyWith(attachmentIds: attachmentIds);
     await _persistOutbox();
@@ -1219,15 +1545,33 @@ class CloudSessionStore extends ChangeNotifier {
         );
         final bytes = await File(file.path).readAsBytes();
         await _rest.uploadAttachmentBytes(upload, bytes);
+        // Save the association before the checkpoint removes this file from
+        // attachmentFiles. _replaceEntry persists metadata before the outbox.
+        final owner = entry.account ?? AppState.I.sessionAccountId;
+        final attachmentId = upload.attachmentId;
+        final delta = _AttachmentMetadataDelta(
+          owner: owner,
+          sessionId: serverId,
+          attachmentId: attachmentId,
+          file: file,
+        );
+        _attachmentMetadata
+            .putIfAbsent(owner, () => <String, Map<String, OutboxFile>>{})
+            .putIfAbsent(serverId, () => <String, OutboxFile>{})[attachmentId] =
+            file;
         entry = await _replaceEntry(
           entry,
           entry.copyWith(
-            attachmentIds: <String>[...entry.attachmentIds, upload.attachmentId],
+            attachmentIds: <String>[
+              ...entry.attachmentIds,
+              upload.attachmentId,
+            ],
             attachmentFiles: <OutboxFile>[
               for (final f in entry.attachmentFiles)
                 if (!identical(f, file)) f,
             ],
           ),
+          metadataDelta: delta,
         );
       }
       final response = await _rest.sendMessage(
@@ -1280,8 +1624,7 @@ class CloudSessionStore extends ChangeNotifier {
             current.copyWith(failedCode: code, failedMessage: message),
           );
           _outboxError = (code: code, message: message);
-          _lastFailureResetsAt =
-              e is CloudApiException ? e.resetsAt : null;
+          _lastFailureResetsAt = e is CloudApiException ? e.resetsAt : null;
           notifyListeners();
           return kind;
       }
@@ -1301,11 +1644,15 @@ class CloudSessionStore extends ChangeNotifier {
     return entry;
   }
 
-  Future<OutboxEntry> _replaceEntry(OutboxEntry old, OutboxEntry next) async {
+  Future<OutboxEntry> _replaceEntry(
+    OutboxEntry old,
+    OutboxEntry next, {
+    _AttachmentMetadataDelta? metadataDelta,
+  }) async {
     final index = _outbox.indexWhere((e) => e.clientMsgId == old.clientMsgId);
     if (index >= 0) {
       _outbox[index] = next;
-      await _persistOutbox();
+      await _persistOutbox(metadataDelta: metadataDelta);
     }
     return next;
   }
@@ -1313,7 +1660,11 @@ class CloudSessionStore extends ChangeNotifier {
   /// Exponential backoff: 2 s, 4 s, 8 s … capped at 60 s; a 429 with a
   /// reset instant waits until then (capped at 10 min).
   @visibleForTesting
-  static Duration retryDelay(int attempts, {DateTime? resetsAt, DateTime? now}) {
+  static Duration retryDelay(
+    int attempts, {
+    DateTime? resetsAt,
+    DateTime? now,
+  }) {
     final exp = Duration(seconds: min(60, 2 << (min(max(attempts, 1), 6) - 1)));
     if (resetsAt == null) return exp;
     final wait = resetsAt.difference(now ?? DateTime.now());
@@ -1402,8 +1753,7 @@ class CloudSessionStore extends ChangeNotifier {
               _outbox.add(entry);
             }
           } else if (item is Map) {
-            final entry =
-                OutboxEntry.fromJson(Map<String, dynamic>.from(item));
+            final entry = OutboxEntry.fromJson(Map<String, dynamic>.from(item));
             if (entry.clientMsgId.isNotEmpty && entry.sessionId.isNotEmpty) {
               _outbox.add(entry);
             }
@@ -1420,24 +1770,90 @@ class CloudSessionStore extends ChangeNotifier {
     if (prefs == null) return;
     await prefs.setString(idMapKey, jsonEncode(_idMap));
     await prefs.setString(
-        knownServerIdsKey, jsonEncode(_knownServerIds.toList()));
+      knownServerIdsKey,
+      jsonEncode(_knownServerIds.toList()),
+    );
     await prefs.setString(
-        tombstonesKey, jsonEncode(_deletedServerIds.toList()));
+      tombstonesKey,
+      jsonEncode(_deletedServerIds.toList()),
+    );
   }
 
   /// Writes the queue partitioned by owner: each account's entries go under
   /// THAT account's scoped key (P0 privacy), so one account's writes never
   /// clobber or carry another's prompts. A retained foreign entry survives a
   /// flush/persist by the current account intact, under its owner's key.
-  Future<void> _persistOutbox() async {
+  Future<void> _persistAttachmentMetadata(
+    SharedPreferences prefs, {
+    _AttachmentMetadataDelta? delta,
+  }) async {
+    // Snapshot before any await. The callback below never enumerates the
+    // mutable lookup cache, so a reset cannot remove a completed delta.
+    final snapshot = _attachmentMetadataSnapshot(delta);
+    await attachmentMetadataWriteBarrier?.call();
+    late final Future<void> operation;
+    operation = _attachmentMetadataWriteTail.then((_) async {
+      for (final update in snapshot.entries) {
+        final owner = update.key;
+        final key = AppState.I.accountScopedPrefKey(
+          attachmentMetadataKey,
+          owner,
+        );
+        final stored = _decodeAttachmentMetadata(
+          prefs.getString(key),
+          owner,
+        );
+        if (stored == null) {
+          // Never overwrite data whose owner/shape cannot be authenticated.
+          throw StateError('attachment_metadata_owner_mismatch');
+        }
+        final sessions = <String, Map<String, OutboxFile>>{
+          for (final session in stored.entries)
+            session.key: Map<String, OutboxFile>.of(session.value),
+        };
+        for (final session in update.value.entries) {
+          final files = sessions.putIfAbsent(
+            session.key,
+            () => <String, OutboxFile>{},
+          );
+          // The captured completion is newer than an unknown stored tuple.
+          files.addAll(session.value);
+        }
+        if (sessions.isEmpty) continue;
+        await prefs.setString(
+          key,
+          jsonEncode(<String, dynamic>{
+            'account': owner,
+            'sessions': <String, dynamic>{
+              for (final session in sessions.entries)
+                if (session.value.isNotEmpty)
+                  session.key: <String, dynamic>{
+                    for (final attachment in session.value.entries)
+                      attachment.key: attachment.value.toJson(),
+                  },
+            },
+          }),
+        );
+      }
+    });
+    _attachmentMetadataWriteTail = operation.catchError((_) {});
+    await operation;
+  }
+
+  Future<void> _persistOutbox({
+    _AttachmentMetadataDelta? metadataDelta,
+  }) async {
     final prefs = _prefs;
     if (prefs == null) return;
+    // This await is deliberately before the outbox write: a process stop can
+    // never persist a new attachment ID without its local metadata association.
+    await _persistAttachmentMetadata(prefs, delta: metadataDelta);
     final byAccount = <String, List<Map<String, dynamic>>>{};
     for (final entry in _outbox) {
       final owner = entry.account ?? AppState.I.sessionAccountId;
-      byAccount.putIfAbsent(owner, () => <Map<String, dynamic>>[]).add(
-        entry.toJson(),
-      );
+      byAccount
+          .putIfAbsent(owner, () => <Map<String, dynamic>>[])
+          .add(entry.toJson());
     }
     final written = <String>{};
     for (final owner in byAccount.keys) {

@@ -20,6 +20,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_motion.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
@@ -411,6 +412,51 @@ void main() {
       expect(parses, afterScroll);
     });
 
+    testWidgets('streaming deltas do no markdown parsing and leave no ticker', (
+      tester,
+    ) async {
+      _useScreen(tester, 800, height: 700);
+      final source = Message(
+        privateSyncId: 'live-rich',
+        role: 'assistant',
+        kind: MsgKind.streaming,
+        content: '```dart\nvoid main() {}',
+      );
+      var parses = 0;
+      v2MessageParseObserver = (_) => parses++;
+      addTearDown(() => v2MessageParseObserver = null);
+
+      Widget page() => _app(
+        V2LiveChatPage(
+          data: V2LiveChatData(
+            running: true,
+            items: [
+              V2LiveAssistantMessage(
+                id: source.privateSyncId,
+                markdown: source.content,
+                source: source,
+                settled: false,
+              ),
+            ],
+          ),
+        ),
+      );
+      await tester.pumpWidget(page());
+      await tester.pumpAndSettle();
+      parses = 0;
+
+      for (var i = 0; i < 25; i++) {
+        source.content = '${source.content}\n// delta $i';
+        await tester.pumpWidget(page());
+        await tester.pump();
+      }
+
+      expect(parses, 0);
+      expect(find.textContaining('// delta 24'), findsOneWidget);
+      expect(find.byType(OPulse), findsNothing);
+      expect(tester.binding.transientCallbackCount, 0);
+    });
+
     test('the parse cache returns the same block list for the same text', () {
       const markdown =
           '## Heading\n\nSome **bold** text with `code`.\n\n- a\n- b';
@@ -495,6 +541,63 @@ void main() {
       );
       expect(reduced, isTrue);
       expect(animated, isFalse);
+    });
+
+    testWidgets('reduced motion removes the pulse instead of shortening it', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: MediaQuery(
+            data: const MediaQueryData(disableAnimations: true),
+            child: const OPulse(child: Text('Working')),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(
+        find.descendant(
+          of: find.byType(OPulse),
+          matching: find.byType(FadeTransition),
+        ),
+        findsNothing,
+      );
+      expect(tester.binding.transientCallbackCount, 0);
+      await tester.pump(const Duration(seconds: 2));
+      expect(tester.binding.transientCallbackCount, 0);
+    });
+
+    testWidgets('a hidden route stops its pulse ticker', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: Column(
+                children: [
+                  const OPulse(child: Text('Working')),
+                  TextButton(
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) =>
+                            const Scaffold(body: Text('Visible page')),
+                      ),
+                    ),
+                    child: const Text('Next'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(tester.binding.transientCallbackCount, greaterThan(0));
+
+      await tester.tap(find.text('Next'));
+      await tester.pumpAndSettle();
+      expect(find.text('Visible page'), findsOneWidget);
+      expect(tester.binding.transientCallbackCount, 0);
     });
 
     test('OMove.reduced reads maybeDisableAnimationsOf, not MediaQuery.of', () {

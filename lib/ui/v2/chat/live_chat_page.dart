@@ -5,6 +5,10 @@ import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 
 import '../../../core/artifact_kind.dart';
+import '../../../core/cloud/cloud_session_store.dart';
+import '../../../core/cloud/static_rich_content.dart';
+import '../../../core/state.dart';
+import '../../../core/voice_playback_controller.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_screen.dart';
@@ -19,11 +23,26 @@ import 'composer_voice.dart';
 import 'message_blocks.dart';
 import 'model_chip.dart';
 import 'queue_dock.dart';
+import 'remote_attachment_tile.dart';
 import 'transcript_actions.dart';
 import 'transcript_tiles.dart';
 import 'voice_reply_card.dart';
 
 // TODO(l10n): move user-facing copy to ARB keys in the localization pass.
+
+/// Stable global row identity with value equality. Unlike a separately created
+/// [GlobalObjectKey] around an equal String, this also matches tests/hosts by
+/// value while retaining [GlobalKey.currentContext] for exact target scrolling.
+final class V2LiveRowKey extends GlobalObjectKey {
+  const V2LiveRowKey(String super.value);
+
+  @override
+  bool operator ==(Object other) =>
+      other is V2LiveRowKey && other.value == value;
+
+  @override
+  int get hashCode => value.hashCode;
+}
 
 /// Base type for every row in a live chat transcript.
 sealed class V2LiveChatItem {
@@ -32,14 +51,33 @@ sealed class V2LiveChatItem {
   final String id;
 }
 
+typedef V2LiveAttachmentAction =
+    Future<void> Function(MessageAttachment attachment);
+
+MessageAttachmentAvailability _liveAttachmentAvailability(
+  MessageAttachment attachment,
+) {
+  if (attachment is RichMessageAttachment) return attachment.availability;
+  // Legacy local files are staged/pending, never ready by path inference.
+  return attachment.path != null
+      ? MessageAttachmentAvailability.pending
+      : MessageAttachmentAvailability.unavailable;
+}
+
 class V2LiveUserMessage extends V2LiveChatItem {
   const V2LiveUserMessage({
     required super.id,
     required this.text,
     this.timeLabel,
+    this.attachments = const <MessageAttachment>[],
+    this.onOpenAttachment,
+    this.onDownloadAttachment,
   });
 
   final String text;
+  final List<MessageAttachment> attachments;
+  final V2LiveAttachmentAction? onOpenAttachment;
+  final V2LiveAttachmentAction? onDownloadAttachment;
 
   /// Kept for hosts that log or group by time. The transcript never draws a
   /// per-message timestamp: a message is its text, nothing else.
@@ -51,9 +89,13 @@ class V2LiveAssistantMessage extends V2LiveChatItem {
     required super.id,
     required this.markdown,
     this.serverMessageId,
+    this.source,
+    this.settled = true,
   });
 
   final String markdown;
+  final Message? source;
+  final bool settled;
 
   /// The server's message id when this row is a stored answer, else null.
   ///
@@ -177,6 +219,7 @@ class V2LiveChatData {
     this.modelLabel = 'Auto',
     this.items = const [],
     this.running = false,
+    this.voicePlayback = const VoicePlaybackState(),
     this.loading = false,
     this.errorMessage,
     this.sendError,
@@ -196,11 +239,14 @@ class V2LiveChatData {
     this.offline = false,
     this.waitingToSend = 0,
     this.failedToSend = 0,
+    this.hasEarlier = false,
+    this.targetMessageId,
+    this.targetRequestId = 0,
     this.onRetryFailed,
     this.onDiscardFailed,
-  })  : assert(subagentCount >= 0, 'subagentCount cannot be negative'),
-        assert(waitingToSend >= 0, 'waitingToSend cannot be negative'),
-        assert(failedToSend >= 0, 'failedToSend cannot be negative');
+  }) : assert(subagentCount >= 0, 'subagentCount cannot be negative'),
+       assert(waitingToSend >= 0, 'waitingToSend cannot be negative'),
+       assert(failedToSend >= 0, 'failedToSend cannot be negative');
 
   final String title;
   final String? sessionId;
@@ -208,6 +254,7 @@ class V2LiveChatData {
   final String modelLabel;
   final List<V2LiveChatItem> items;
   final bool running;
+  final VoicePlaybackState voicePlayback;
   final bool loading;
   final String? errorMessage;
 
@@ -251,6 +298,16 @@ class V2LiveChatData {
   /// chooses Retry or Discard. Without these controls a refused prompt would
   /// hold every later prompt in this chat forever.
   final int failedToSend;
+
+  /// True only when the server has another older keyset page.
+  final bool hasEarlier;
+
+  /// A specific server message to reveal after its history page is loaded.
+  final String? targetMessageId;
+
+  /// Changes for every explicit target activation, including the same hit.
+  /// Unrelated transcript rebuilds retain it and never force another scroll.
+  final int targetRequestId;
   final VoidCallback? onRetryFailed;
   final VoidCallback? onDiscardFailed;
 
@@ -263,6 +320,7 @@ class V2LiveChatData {
     modelLabel: modelLabel,
     items: items,
     running: running,
+    voicePlayback: voicePlayback,
     loading: loading,
     errorMessage: errorMessage,
     sendError: error,
@@ -282,6 +340,9 @@ class V2LiveChatData {
     offline: offline,
     waitingToSend: waitingToSend,
     failedToSend: failedToSend,
+    hasEarlier: hasEarlier,
+    targetMessageId: targetMessageId,
+    targetRequestId: targetRequestId,
     onRetryFailed: onRetryFailed,
     onDiscardFailed: onDiscardFailed,
   );
@@ -310,6 +371,7 @@ class V2LiveChatPage extends StatefulWidget {
     this.onArtifactTap,
     this.onStartChat,
     this.onRetry,
+    this.onLoadEarlier,
     this.onSendErrorAction,
     this.onDismissSendError,
     this.onAttach,
@@ -324,6 +386,7 @@ class V2LiveChatPage extends StatefulWidget {
     this.onDismissQueued,
     this.onSubmit,
     this.onVoicePlay,
+    this.onVoiceStop,
     this.onVoiceSeek,
     this.onVoiceAction,
     this.onVoiceTranscriptToggle,
@@ -378,6 +441,10 @@ class V2LiveChatPage extends StatefulWidget {
   final VoidCallback? onStartChat;
   final VoidCallback? onRetry;
 
+  /// Loads the next older page through the cloud store. Null removes the
+  /// pagination control entirely; the host still owns the transcript list.
+  final Future<PrependReceipt> Function(String? anchorMessageId)? onLoadEarlier;
+
   /// Runs the action on [V2LiveChatData.sendError].
   final VoidCallback? onSendErrorAction;
   final VoidCallback? onDismissSendError;
@@ -404,8 +471,7 @@ class V2LiveChatPage extends StatefulWidget {
 
   /// Spec Screen 2: Studio may not send until a folder is selected.
   bool get studioFolderMissing =>
-      permissionLabel == 'Studio' &&
-      (studioFolder ?? '').trim().isEmpty;
+      permissionLabel == 'Studio' && (studioFolder ?? '').trim().isEmpty;
 
   final ValueChanged<String>? onDraftChanged;
 
@@ -420,8 +486,11 @@ class V2LiveChatPage extends StatefulWidget {
   /// When provided it replaces [onSend].
   final ValueChanged<V2ComposerSubmission>? onSubmit;
 
-  /// Play or pause a voice reply, by item id.
+  /// Play, pause or resume an exact answer, by item id and user activation.
   final ValueChanged<String>? onVoicePlay;
+
+  /// Stop the active answer utterance, by item id.
+  final ValueChanged<String>? onVoiceStop;
 
   /// Seek inside a voice reply, by item id and position.
   final void Function(String id, Duration position)? onVoiceSeek;
@@ -462,6 +531,21 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
   /// Owns the transcript viewport so an appended row can follow the tail
   /// without resetting a reader who scrolled up to read earlier messages.
   late final ScrollController _transcriptController;
+  final GlobalKey _transcriptViewportKey = GlobalKey();
+  final Map<String, GlobalObjectKey> _rowKeys = <String, GlobalObjectKey>{};
+  _TranscriptAnchor? _pendingAnchor;
+  int _anchorAttempts = 0;
+  bool _rowCleanupScheduled = false;
+  bool _loadingEarlier = false;
+  bool _targetScheduled = false;
+  String? _handledTargetMessageId;
+  int _handledTargetRequest = -1;
+  int _targetAttempts = 0;
+
+  bool get _hasActiveTarget =>
+      widget.data.targetMessageId != null &&
+      (_handledTargetRequest != widget.data.targetRequestId ||
+          _handledTargetMessageId != widget.data.targetMessageId);
 
   /// How close to the bottom still counts as "reading the tail".
   static const double _tailSlop = 96;
@@ -520,6 +604,7 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
     _knownItemIds.addAll(widget.data.items.map((item) => item.id));
     _initialItemIds.addAll(_knownItemIds);
     _refreshMentions();
+    _scheduleTargetScroll();
   }
 
   @override
@@ -563,7 +648,9 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
         widget.data.items.isNotEmpty &&
         oldWidget.data.items.isNotEmpty &&
         !identical(widget.data.items.last, oldWidget.data.items.last);
-    if ((grew || tailChanged) && _wasAtTail()) _pinToTail();
+    if ((grew || tailChanged) && !_hasActiveTarget && _wasAtTail()) {
+      _pinToTail();
+    }
     if (widget.data.draft != oldWidget.data.draft &&
         widget.data.draft != _controller.text) {
       _syncingDraft = true;
@@ -574,6 +661,33 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
       _syncingDraft = false;
       _lastDraft = _controller.text;
       _refreshMentions();
+    }
+    final target = widget.data.targetMessageId;
+    final targetRequest = widget.data.targetRequestId;
+    final targetChanged =
+        target != oldWidget.data.targetMessageId ||
+        targetRequest != oldWidget.data.targetRequestId;
+    if (targetChanged) {
+      _targetAttempts = 0;
+      // Let the new request schedule even if an older callback is queued; that
+      // callback checks the request identity and exits without scrolling.
+      _targetScheduled = false;
+      // Exact navigation supersedes any reader-anchor retry already queued.
+      _pendingAnchor = null;
+      _anchorAttempts = 0;
+    }
+    if (_isPrepend(oldWidget.data.items, widget.data.items) &&
+        !_hasActiveTarget &&
+        _pendingAnchor == null) {
+      _pendingAnchor = _capturePrependAnchor(oldWidget.data.items);
+      _anchorAttempts = 0;
+      _scheduleAnchorRestore();
+    }
+    if (target != null &&
+        _hasActiveTarget &&
+        (targetChanged ||
+            widget.data.items.length != oldWidget.data.items.length)) {
+      _scheduleTargetScroll();
     }
   }
 
@@ -590,6 +704,157 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
     super.dispose();
   }
 
+  static bool _isPrepend(
+    List<V2LiveChatItem> oldItems,
+    List<V2LiveChatItem> newItems,
+  ) {
+    if (oldItems.isEmpty || newItems.length <= oldItems.length) return false;
+    final delta = newItems.length - oldItems.length;
+    for (var i = 0; i < oldItems.length; i++) {
+      if (oldItems[i].id != newItems[i + delta].id) return false;
+    }
+    return true;
+  }
+
+  _TranscriptAnchor? _capturePrependAnchor(List<V2LiveChatItem> oldItems) {
+    if (!_transcriptController.hasClients) return null;
+    final position = _transcriptController.position;
+    if (!position.hasContentDimensions) return null;
+    final viewport = _transcriptViewportKey.currentContext?.findRenderObject();
+    if (viewport is! RenderBox || !viewport.attached) return null;
+    final top = viewport.localToGlobal(Offset.zero).dy;
+    for (final item in oldItems) {
+      final render = _rowKeys[item.id]?.currentContext?.findRenderObject();
+      if (render is! RenderBox || !render.attached) continue;
+      final dy = render.localToGlobal(Offset.zero).dy;
+      if (dy + render.size.height <= top + 1) continue;
+      return _TranscriptAnchor(
+        id: item.id,
+        dy: dy,
+        pixels: position.pixels,
+        maxExtent: position.maxScrollExtent,
+      );
+    }
+    return null;
+  }
+
+  void _scheduleAnchorRestore() {
+    if (_pendingAnchor == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final anchor = _pendingAnchor;
+      if (!mounted || anchor == null || !_transcriptController.hasClients) {
+        return;
+      }
+      if (_hasActiveTarget) {
+        _pendingAnchor = null;
+        return;
+      }
+      final position = _transcriptController.position;
+      if (!position.hasContentDimensions) return;
+      final render = _rowKeys[anchor.id]?.currentContext?.findRenderObject();
+      if (render is RenderBox && render.attached) {
+        final dy = render.localToGlobal(Offset.zero).dy;
+        final correction = dy - anchor.dy;
+        if (correction.abs() > 0.01) {
+          _transcriptController.jumpTo(position.pixels + correction);
+        }
+      } else {
+        final extentDelta = position.maxScrollExtent - anchor.maxExtent;
+        if (extentDelta > 0) {
+          final target = (anchor.pixels + extentDelta).clamp(
+            0.0,
+            position.maxScrollExtent,
+          );
+          _transcriptController.jumpTo(target.toDouble());
+        }
+      }
+      _anchorAttempts++;
+      if (_anchorAttempts >= 5) {
+        _pendingAnchor = null;
+      } else {
+        _scheduleAnchorRestore();
+      }
+    });
+  }
+
+  void _scheduleRowKeyCleanup() {
+    if (_rowCleanupScheduled) return;
+    _rowCleanupScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _rowCleanupScheduled = false;
+      if (!mounted) return;
+      _rowKeys.removeWhere((_, key) => key.currentContext == null);
+    });
+  }
+
+  Future<void> _loadEarlier() async {
+    final handler = widget.onLoadEarlier;
+    if (handler == null || _loadingEarlier) return;
+    final captured = _capturePrependAnchor(widget.data.items);
+    setState(() => _loadingEarlier = true);
+    try {
+      final receipt = await handler(captured?.id);
+      if (!_hasActiveTarget &&
+          captured != null &&
+          receipt.anchorMessageId == captured.id) {
+        _pendingAnchor = captured;
+        _anchorAttempts = 0;
+        _scheduleAnchorRestore();
+      }
+    } catch (_) {
+      if (mounted) _notify('Could not load earlier messages.');
+    } finally {
+      if (mounted) setState(() => _loadingEarlier = false);
+    }
+  }
+
+  void _scheduleTargetScroll() {
+    final target = widget.data.targetMessageId;
+    final request = widget.data.targetRequestId;
+    if (target == null || !_hasActiveTarget || _targetScheduled) return;
+    // A pending exact target has precedence over ordinary prepend restoration.
+    _pendingAnchor = null;
+    _anchorAttempts = 0;
+    _targetScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      _targetScheduled = false;
+      if (!mounted ||
+          target != widget.data.targetMessageId ||
+          request != widget.data.targetRequestId) {
+        return;
+      }
+      final items = widget.data.items;
+      final index = items.indexWhere((item) => item.id == target);
+      if (index < 0) return;
+      final rowContext = _rowKeys[target]?.currentContext;
+      if (rowContext == null) {
+        if (!_transcriptController.hasClients || _targetAttempts >= 8) return;
+        _targetAttempts++;
+        final position = _transcriptController.position;
+        if (!position.hasContentDimensions) {
+          _scheduleTargetScroll();
+          return;
+        }
+        final fraction = items.length <= 1 ? 0.0 : index / (items.length - 1);
+        _transcriptController.jumpTo(position.maxScrollExtent * fraction);
+        _scheduleTargetScroll();
+        return;
+      }
+      await Scrollable.ensureVisible(
+        rowContext,
+        alignment: 0.08,
+        duration: Duration.zero,
+      );
+      if (mounted &&
+          target == widget.data.targetMessageId &&
+          request == widget.data.targetRequestId) {
+        _handledTargetMessageId = target;
+        _handledTargetRequest = request;
+        _targetAttempts = 0;
+      }
+    });
+  }
+
   /// True when the viewport sits at (or within [_tailSlop] of) the newest row
   /// in the *current* layout. Read before an append is laid out, this is the
   /// reader's intent: following the tail, or deliberately reading further up.
@@ -604,10 +869,19 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
   /// was already following the tail. A jump (not an animation) means a
   /// streaming token never fights the scroll physics or loses the offset.
   void _pinToTail() {
+    final targetMessage = widget.data.targetMessageId;
+    final targetRequest = widget.data.targetRequestId;
     var attempts = 0;
     void settle() {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted || !_transcriptController.hasClients) return;
+        // Exact navigation owns the viewport until its request settles; a
+        // queued tail follow must not resurrect an older scrolling decision.
+        if (_hasActiveTarget ||
+            targetMessage != widget.data.targetMessageId ||
+            targetRequest != widget.data.targetRequestId) {
+          return;
+        }
         final position = _transcriptController.position;
         if (!position.hasContentDimensions) return;
         if (position.maxScrollExtent <= 0) return;
@@ -649,8 +923,7 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
   static int _messageCountAfter(List<V2LiveChatItem> items, int index) {
     var count = 0;
     for (var i = index + 1; i < items.length; i++) {
-      if (items[i] is V2LiveUserMessage ||
-          items[i] is V2LiveAssistantMessage) {
+      if (items[i] is V2LiveUserMessage || items[i] is V2LiveAssistantMessage) {
         count++;
       }
     }
@@ -988,9 +1261,8 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
-  /// An answer plus its one quiet action affordance: a muted ⋯ at the right
-  /// edge. Copy, Branch and Regenerate live in that menu, so the transcript
-  /// stays text rather than three rows of buttons.
+  /// An answer plus quiet playback and action affordances. Playback starts
+  /// only from its button; appending or rebuilding an answer never speaks it.
   Widget _assistantMessage(
     V2LiveAssistantMessage message, {
     required bool isLastAssistant,
@@ -999,6 +1271,8 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
   }) {
     final blocks = V2MessageBlocks(
       markdown: message.markdown,
+      message: message.source,
+      settled: message.settled,
       onCopyCode: widget.onCopyCode,
       onOpenLink: _handleOpenLink,
       onDownload: _handleDownloadLink,
@@ -1010,29 +1284,67 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
         message.serverMessageId != null &&
         widget.onReportMessage != null &&
         message.markdown.trim().isNotEmpty;
-    // Regenerate only on the newest answer of a settled run: an older one
-    // would delete everything after it, and a running one would race the live
-    // answer.
     final canRegenerate =
         isLastAssistant &&
         !widget.data.running &&
         message.serverMessageId != null &&
         widget.onRegenerateMessage != null;
-    if (!canBranch &&
-        !canRegenerate &&
-        !canReport &&
-        message.markdown.trim().isEmpty) {
-      return blocks;
-    }
+    final playback = widget.data.voicePlayback.messageId == message.id
+        ? widget.data.voicePlayback
+        : null;
+    final canPlay =
+        widget.onVoicePlay != null &&
+        message.markdown.trim().isNotEmpty &&
+        (!(isLastAssistant && widget.data.running) || playback != null);
+    final hasMenu =
+        busy ||
+        message.markdown.trim().isNotEmpty ||
+        canBranch ||
+        canRegenerate ||
+        canReport;
+    if (!hasMenu && !canPlay) return blocks;
+
+    final active =
+        playback?.phase == VoicePlaybackPhase.starting ||
+        playback?.phase == VoicePlaybackPhase.playing;
+    final paused = playback?.phase == VoicePlaybackPhase.paused;
+    final c = OColors.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: [
         blocks,
+        if (playback?.phase == VoicePlaybackPhase.unavailable &&
+            playback?.reason != null)
+          Text(
+            playback!.reason!,
+            style: OType.caption.copyWith(color: c.textMuted),
+          ),
         Align(
           alignment: Alignment.centerRight,
-          child: busy
-              ? Semantics(
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (canPlay)
+                OIconButton(
+                  icon: active ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                  semanticLabel: active
+                      ? 'Pause answer'
+                      : paused
+                      ? 'Resume answer'
+                      : 'Play answer',
+                  size: 18,
+                  onPressed: () => widget.onVoicePlay!(message.id),
+                ),
+              if ((active || paused) && widget.onVoiceStop != null)
+                OIconButton(
+                  icon: Icons.stop_rounded,
+                  semanticLabel: 'Stop answer playback',
+                  size: 18,
+                  onPressed: () => widget.onVoiceStop!(message.id),
+                ),
+              if (busy)
+                Semantics(
                   label: 'Working on this message',
                   liveRegion: true,
                   child: const SizedBox(
@@ -1047,7 +1359,8 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
                     ),
                   ),
                 )
-              : OIconButton(
+              else if (hasMenu)
+                OIconButton(
                   icon: Icons.more_horiz_rounded,
                   semanticLabel: 'Actions',
                   size: 18,
@@ -1061,6 +1374,8 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
                     ),
                   ),
                 ),
+            ],
+          ),
         ),
       ],
     );
@@ -1230,6 +1545,7 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
   @override
   Widget build(BuildContext context) {
     final data = widget.data;
+    _scheduleRowKeyCleanup();
     final canUseComposer = !data.running && !data.loading;
     return OScaffold(
       appBar: _LiveTopBar(
@@ -1395,6 +1711,7 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
     // Lazy list: a 5,000-message session builds only the rows in (and just
     // around) the viewport instead of the whole transcript every frame.
     final firstCount = items.length < 6 ? items.length : 6;
+    final showEarlier = data.hasEarlier && widget.onLoadEarlier != null;
     return Align(
       alignment: Alignment.topCenter,
       // At 600 dp+ the transcript keeps a readable line length and centres.
@@ -1402,65 +1719,88 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
         constraints: BoxConstraints(
           maxWidth: OResponsive.of(context).maxContentWidth,
         ),
-        child: ListView.builder(
-          key: const ValueKey<String>('v2-live-transcript'),
-          controller: _transcriptController,
-          padding: EdgeInsets.fromLTRB(gutter, OSpace.l, gutter, OSpace.xl),
-          itemCount: items.length,
-          itemBuilder: (context, index) {
-            final item = items[index];
-            final isLastAssistant = index == lastAssistant;
-            // What a regenerate from this answer would also remove. Only the
-            // newest answer can be regenerated, so only it pays for the scan.
-            final laterMessages = isLastAssistant
-                ? _messageCountAfter(items, index)
-                : 0;
-            // Files and tool rows after the answer are deleted with it too,
-            // even when no later message exists.
-            final laterRows = isLastAssistant ? items.length - index - 1 : 0;
-            final hasActions =
-                item is V2LiveAssistantMessage &&
-                item.markdown.trim().isNotEmpty;
-            final row = Padding(
-              // The id is the row's identity: a rebuild reuses the element
-              // instead of re-creating it, and a host that prepends history
-              // cannot shift state onto the wrong message.
-              key: ValueKey('live-item-${item.id}'),
-              padding: EdgeInsets.only(
-                // An answer's action menu is its footer: it already adds the
-                // 48 dp control box, so the row's own gap shrinks to keep the
-                // transcript's rhythm.
-                bottom: hasActions ? OSpace.s : OSpace.xl,
-              ),
-              child: _buildItem(
-                context,
-                item,
-                isTail: index == items.length - 1,
-                isLastAssistant: isLastAssistant,
-                laterMessages: laterMessages,
-                laterRows: laterRows,
-              ),
-            );
-            // A message that just arrived fades in once, in under 200 ms.
-            if (_freshItemIds.contains(item.id)) {
-              return _FadeInOnce(child: row);
-            }
-            if (index >= firstCount || !_initialItemIds.contains(item.id)) {
-              return row;
-            }
-            // A short entrance for the first screenful only. Delay plus
-            // duration stays within 200 ms, so the transcript is still before
-            // the user can read past the first row.
-            final stagger = OMotion.stagger * index;
-            final delay = stagger > const Duration(milliseconds: 80)
-                ? const Duration(milliseconds: 80)
-                : stagger;
-            return OFadeSlide(
-              duration: OMotion.base - delay,
-              delay: delay,
-              child: row,
-            );
-          },
+        child: Container(
+          key: _transcriptViewportKey,
+          child: ListView.builder(
+            key: const ValueKey<String>('v2-live-transcript'),
+            controller: _transcriptController,
+            padding: EdgeInsets.fromLTRB(gutter, OSpace.l, gutter, OSpace.xl),
+            itemCount: items.length + (showEarlier ? 1 : 0),
+            itemBuilder: (context, index) {
+              if (showEarlier && index == 0) {
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: OSpace.m),
+                  child: Center(
+                    child: OButton(
+                      label: _loadingEarlier
+                          ? 'Loading earlier…'
+                          : 'Load earlier messages',
+                      onPressed: _loadingEarlier ? null : _loadEarlier,
+                    ),
+                  ),
+                );
+              }
+              final itemIndex = showEarlier ? index - 1 : index;
+              final item = items[itemIndex];
+              final isLastAssistant = itemIndex == lastAssistant;
+              // What a regenerate from this answer would also remove. Only the
+              // newest answer can be regenerated, so only it pays for the scan.
+              final laterMessages = isLastAssistant
+                  ? _messageCountAfter(items, itemIndex)
+                  : 0;
+              // Files and tool rows after the answer are deleted with it too,
+              // even when no later message exists.
+              final laterRows = isLastAssistant
+                  ? items.length - itemIndex - 1
+                  : 0;
+              final hasActions =
+                  item is V2LiveAssistantMessage &&
+                  item.markdown.trim().isNotEmpty;
+              final row = Padding(
+                // The id is the row's identity: a rebuild reuses the element
+                // instead of re-creating it, and a host that prepends history
+                // cannot shift state onto the wrong message.
+                key: _rowKeys.putIfAbsent(
+                  item.id,
+                  () => V2LiveRowKey('live-item-${item.id}'),
+                ),
+                padding: EdgeInsets.only(
+                  // An answer's action menu is its footer: it already adds the
+                  // 48 dp control box, so the row's own gap shrinks to keep the
+                  // transcript's rhythm.
+                  bottom: hasActions ? OSpace.s : OSpace.xl,
+                ),
+                child: _buildItem(
+                  context,
+                  item,
+                  isTail: itemIndex == items.length - 1,
+                  isLastAssistant: isLastAssistant,
+                  laterMessages: laterMessages,
+                  laterRows: laterRows,
+                ),
+              );
+              // A message that just arrived fades in once, in under 200 ms.
+              if (_freshItemIds.contains(item.id)) {
+                return _FadeInOnce(child: row);
+              }
+              if (itemIndex >= firstCount ||
+                  !_initialItemIds.contains(item.id)) {
+                return row;
+              }
+              // A short entrance for the first screenful only. Delay plus
+              // duration stays within 200 ms, so the transcript is still before
+              // the user can read past the first row.
+              final stagger = OMotion.stagger * itemIndex;
+              final delay = stagger > const Duration(milliseconds: 80)
+                  ? const Duration(milliseconds: 80)
+                  : stagger;
+              return OFadeSlide(
+                duration: OMotion.base - delay,
+                delay: delay,
+                child: row,
+              );
+            },
+          ),
         ),
       ),
     );
@@ -1561,6 +1901,20 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
       ),
     };
   }
+}
+
+final class _TranscriptAnchor {
+  const _TranscriptAnchor({
+    required this.id,
+    required this.dy,
+    required this.pixels,
+    required this.maxExtent,
+  });
+
+  final String id;
+  final double dy;
+  final double pixels;
+  final double maxExtent;
 }
 
 /// Title, one line of copy and the single next action. No icon medallion and
@@ -1829,17 +2183,30 @@ class _UserBubble extends StatelessWidget {
     // The transcript never draws a timestamp, but the time the host already
     // holds is still useful to a screen reader. One node keeps the speaker,
     // the time and the text in reading order.
-    final spoken = time.isEmpty
+    final baseSpoken = time.isEmpty
         ? 'You. ${item.text}'
         : 'You, $time. ${item.text}';
+    final attachmentSpoken = item.attachments.isEmpty
+        ? ''
+        : ' Attachments: ${item.attachments.map((attachment) {
+            final availability = _liveAttachmentAvailability(attachment);
+            final state = switch (availability) {
+              MessageAttachmentAvailability.pending => 'uploading',
+              MessageAttachmentAvailability.ready => 'ready',
+              MessageAttachmentAvailability.unavailable => 'unavailable',
+            };
+            return '${attachment.name}, $state';
+          }).join(', ')}.';
+    final spoken = '$baseSpoken$attachmentSpoken';
     return LayoutBuilder(
       builder: (context, constraints) {
         // 78 % of the column on a phone, 560 dp absolute cap on a tablet.
         final cap = constraints.maxWidth * 0.78;
         return Semantics(
           container: true,
-          label: spoken,
-          excludeSemantics: true,
+          label: item.attachments.isEmpty ? spoken : null,
+          excludeSemantics: item.attachments.isEmpty,
+          explicitChildNodes: item.attachments.isNotEmpty,
           child: Align(
             alignment: Alignment.centerRight,
             child: ConstrainedBox(
@@ -1855,9 +2222,56 @@ class _UserBubble extends StatelessWidget {
                   color: c.surfaceAlt,
                   borderRadius: BorderRadius.circular(ORadius.l),
                 ),
-                child: Text(
-                  item.text,
-                  style: OType.body.copyWith(color: c.text),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (item.attachments.isEmpty)
+                      Text(item.text, style: OType.body.copyWith(color: c.text))
+                    else
+                      Semantics(
+                        label: spoken,
+                        child: Text(
+                          item.text,
+                          style: OType.body.copyWith(color: c.text),
+                        ),
+                      ),
+                    for (final attachment in item.attachments) ...[
+                      const SizedBox(height: OSpace.s),
+                      RemoteAttachmentTile(
+                        attachment: attachment,
+                        state: switch (_liveAttachmentAvailability(
+                          attachment,
+                        )) {
+                          MessageAttachmentAvailability.pending =>
+                            RemoteAttachmentState.loading,
+                          MessageAttachmentAvailability.ready =>
+                            RemoteAttachmentState.ready,
+                          MessageAttachmentAvailability.unavailable =>
+                            RemoteAttachmentState.error,
+                        },
+                        onOpen:
+                            attachment is RichMessageAttachment &&
+                                attachment.availability ==
+                                    MessageAttachmentAvailability.ready &&
+                                attachment.id != null &&
+                                item.onOpenAttachment != null
+                            ? () =>
+                                  unawaited(item.onOpenAttachment!(attachment))
+                            : null,
+                        onDownload:
+                            attachment is RichMessageAttachment &&
+                                attachment.availability ==
+                                    MessageAttachmentAvailability.ready &&
+                                attachment.id != null &&
+                                item.onDownloadAttachment != null
+                            ? () => unawaited(
+                                item.onDownloadAttachment!(attachment),
+                              )
+                            : null,
+                      ),
+                    ],
+                  ],
                 ),
               ),
             ),
@@ -2060,9 +2474,7 @@ class _OutboxNotice extends StatelessWidget {
           bottom: OSpace.xxs,
         ),
         decoration: BoxDecoration(
-          color: danger
-              ? c.danger.withValues(alpha: 0.08)
-              : c.surfaceAlt,
+          color: danger ? c.danger.withValues(alpha: 0.08) : c.surfaceAlt,
           borderRadius: BorderRadius.circular(ORadius.pill),
           border: Border.all(
             color: danger ? c.danger.withValues(alpha: 0.28) : c.hairline,
@@ -2134,10 +2546,7 @@ class _OutboxNotice extends StatelessWidget {
                 message,
                 Row(
                   mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    ?retryButton,
-                    ?discardButton,
-                  ],
+                  children: [?retryButton, ?discardButton],
                 ),
               ],
             );
