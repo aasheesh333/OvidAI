@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { users, type Db } from "@ovid/db";
 import { CURATED_IDS, createEnvelopeCrypto } from "@ovid/mcp";
@@ -15,6 +15,65 @@ import {
   stubVerifier,
   stubSystemBus,
 } from "../test/stubs.js";
+
+// Explicit test-only support: no production readiness row is promoted to make
+// this route's configured-flag and DTO projection fixtures executable.
+vi.mock("@ovid/mcp", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@ovid/mcp")>();
+  return {
+    ...actual,
+    CURATED_IDS: ["github", "fetch"],
+    COMMERCE_INFRA_MANIFEST: [
+      {
+        curatedId: "blocked-commerce",
+        displayName: "Blocked commerce candidate",
+        description: "Must not cross the supported-only catalog boundary",
+        credentialFields: [],
+        tools: [{
+          name: "charge_customer",
+          description: "Unsupported operation",
+          effect: "financial",
+          approval: "per_action",
+          requiredScopes: ["payments:write"],
+        }],
+      },
+    ],
+    CURATED_MANIFEST: [
+      {
+        curatedId: "github",
+        displayName: "GitHub",
+        description: "Supported test GitHub entry",
+        credentialFields: [{ key: "GITHUB_TOKEN", label: "GitHub token", secret: true }],
+        tools: [{
+          name: "list_issues",
+          description: "List issues",
+          effect: "read",
+          approval: "mode",
+          requiredScopes: ["repo:read", "issues:read"],
+          inputSchema: {
+            type: "object",
+            properties: { token: { type: "string", default: "fixture-input-secret" } },
+          },
+          request: {
+            originKey: "github",
+            method: "GET",
+            pathTemplate: "https://raw.internal.example/issues?token=fixture-request-secret",
+          },
+          config: { apiToken: "fixture-config-secret" },
+          authToken: "fixture-auth-token",
+          handler: () => "fixture-handler-result",
+        }],
+      },
+      {
+        curatedId: "fetch",
+        displayName: "Fetch",
+        description: "Supported test Fetch entry",
+        credentialFields: [],
+        tools: [{ name: "fetch", description: "Fetch a public page" }],
+      },
+    ],
+  };
+});
 
 // Curated catalog route (P5 Task 15): CURATED_MANIFEST served as pure data
 // with the caller's configured flags. No crypto dep needed — the catalog is
@@ -49,7 +108,7 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp catalog route (real postgres)"
     await closeDb(db);
   });
 
-  it("GET /mcp/catalog → 20 entries with tools + credential fields, all unconfigured", async () => {
+  it("GET /mcp/catalog preserves the legacy envelope and adds only validated operation metadata", async () => {
     const uid = testUid("cat-bare");
     const res = await app.inject({
       method: "GET",
@@ -58,18 +117,49 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp catalog route (real postgres)"
     });
     expect(res.statusCode).toBe(200);
     const body = res.json() as { items: unknown[] };
-    expect(body.items.length).toBe(20);
-    expect(body.items.map((i) => catalogServerDtoSchema.parse(i).curatedId)).toEqual([
+    // Existing consumers can still parse every legacy DTO field unchanged.
+    expect(body.items.map((item) => catalogServerDtoSchema.parse(item).curatedId)).toEqual([
       ...CURATED_IDS,
     ]);
-    for (const raw of body.items) {
-      const item = catalogServerDtoSchema.parse(raw);
-      expect(item.displayName.length).toBeGreaterThan(0);
-      expect(item.description.length).toBeGreaterThan(0);
-      expect(Array.isArray(item.credentialFields)).toBe(true);
-      expect(item.tools.length).toBeGreaterThan(0);
-      for (const tool of item.tools) expect(tool.name.length).toBeGreaterThan(0);
-      expect(item.configured).toBe(false);
+    // Exact raw response: additive operation fields only, no internal config,
+    // credentials, request URLs, handlers, or unsupported candidate entries.
+    expect(body).toEqual({
+      items: [
+        {
+          curatedId: "github",
+          displayName: "GitHub",
+          description: "Supported test GitHub entry",
+          credentialFields: [{ key: "GITHUB_TOKEN", label: "GitHub token", secret: true }],
+          tools: [{
+            name: "list_issues",
+            description: "List issues",
+            effect: "read",
+            approval: "mode",
+            requiredScopes: ["repo:read", "issues:read"],
+          }],
+          configured: false,
+        },
+        {
+          curatedId: "fetch",
+          displayName: "Fetch",
+          description: "Supported test Fetch entry",
+          credentialFields: [],
+          // Unknown legacy operation metadata stays absent, never defaulted.
+          tools: [{ name: "fetch", description: "Fetch a public page" }],
+          configured: false,
+        },
+      ],
+    });
+    for (const forbidden of [
+      "blocked-commerce",
+      "fixture-input-secret",
+      "fixture-request-secret",
+      "fixture-config-secret",
+      "fixture-auth-token",
+      "fixture-handler-result",
+      "raw.internal.example",
+    ]) {
+      expect(res.body).not.toContain(forbidden);
     }
   });
 

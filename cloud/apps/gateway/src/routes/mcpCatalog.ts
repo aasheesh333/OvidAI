@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { mcpServers as mcpServersRepo } from "@ovid/db";
-import { CURATED_MANIFEST } from "@ovid/mcp";
+import { CURATED_MANIFEST, type ApprovalPolicy, type Effect } from "@ovid/mcp";
 import type { CatalogServerDto } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
 
@@ -27,12 +27,24 @@ export function registerMcpCatalogRoutes(app: FastifyInstance, deps: GatewayDeps
         secret: field.secret,
         ...(field.hint !== undefined ? { hint: field.hint } : {}),
       })),
-      // Tool defs are served name+description only (input schemas are large
-      // and belong to the runtime, not the catalog surface).
-      tools: entry.tools.map((tool) => ({
-        name: tool.name,
-        ...(tool.description !== undefined ? { description: tool.description } : {}),
-      })),
+      // Input schemas and runtime wiring stay internal; expose only the
+      // validated operation metadata already present on the supported manifest.
+      tools: entry.tools.map((tool) => {
+        const operation = tool as typeof tool & {
+          effect?: Effect;
+          approval?: ApprovalPolicy;
+          requiredScopes?: readonly string[];
+        };
+        return {
+          name: tool.name,
+          ...(tool.description !== undefined ? { description: tool.description } : {}),
+          ...(operation.effect !== undefined ? { effect: operation.effect } : {}),
+          ...(operation.approval !== undefined ? { approval: operation.approval } : {}),
+          ...(operation.requiredScopes !== undefined
+            ? { requiredScopes: [...operation.requiredScopes] }
+            : {}),
+        };
+      }),
       configured: configured.has(entry.curatedId),
     }));
 
