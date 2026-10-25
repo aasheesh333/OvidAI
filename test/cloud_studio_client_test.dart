@@ -9,6 +9,7 @@ import 'package:http/testing.dart';
 import 'package:ovid_ai/core/cloud/cloud_rest.dart';
 import 'package:ovid_ai/core/cloud/cloud_session_store.dart';
 import 'package:ovid_ai/core/cloud/studio_files.dart';
+import 'package:ovid_ai/core/cloud/studio_preview_client.dart';
 import 'package:ovid_ai/core/cloud/studio_remote_client.dart';
 import 'package:ovid_ai/core/studio_drafts.dart';
 import 'package:ovid_ai/core/theme.dart';
@@ -19,9 +20,9 @@ const String _session = 's1';
 
 String _sha(String text) => sha256.convert(utf8.encode(text)).toString();
 
-String _treeJson() => jsonEncode({
+String _treeJson([String state = 'warm']) => jsonEncode({
       'sessionId': _session,
-      'state': 'warm',
+      'state': state,
       'generation': 3,
       'source': 'live',
       'tree': {
@@ -67,22 +68,39 @@ class _FakeRest {
   _FakeRest({
     this.reads = const [],
     this.putStatus = 200,
+    this.treeState = 'warm',
   });
 
   /// Contents returned by successive GET file calls (last one repeats).
   final List<String> reads;
   final int putStatus;
+  final String treeState;
 
   int getFileCalls = 0;
   int putCalls = 0;
+  int deleteCalls = 0;
   Map<String, dynamic>? lastPutBody;
 
   CloudRestClient client() {
     final mock = MockClient((request) async {
       final path = request.url.path;
+      if (request.method == 'DELETE' &&
+          path.endsWith('/sessions/$_session/workspace/file')) {
+        deleteCalls++;
+        return http.Response(
+          jsonEncode({
+            'path': request.url.queryParameters['path'],
+            'type': request.url.queryParameters['recursive'] == 'true'
+                ? 'dir'
+                : 'file',
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
       if (request.method == 'GET' &&
           path.endsWith('/sessions/$_session/workspace/tree')) {
-        return http.Response(_treeJson(), 200,
+        return http.Response(_treeJson(treeState), 200,
             headers: {'content-type': 'application/json'});
       }
       if (request.method == 'GET' &&
@@ -130,6 +148,52 @@ class _FakeRest {
       restBase: _base,
     );
   }
+}
+
+List<http.Request> _installPreviewGateway() {
+  final requests = <http.Request>[];
+  final rest = CloudRestClient(
+    httpClient: MockClient((request) async {
+      requests.add(request);
+      if (request.method == 'POST' && request.url.path.endsWith('/previews')) {
+        return http.Response(
+          jsonEncode({
+            'id': 'preview-app',
+            'kind': 'dev_server',
+            'status': 'running',
+            'generation': 1,
+            'expiresAt': '2026-10-24T20:00:00.000Z',
+            'lastAccessAt': null,
+            'logAvailable': false,
+          }),
+          201,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      return http.Response(
+        jsonEncode({
+          'id': 'preview-app',
+          'kind': 'dev_server',
+          'status': 'stopped',
+          'generation': 1,
+          'expiresAt': null,
+          'lastAccessAt': null,
+          'logAvailable': false,
+        }),
+        200,
+        headers: {'content-type': 'application/json'},
+      );
+    }),
+    headers: CloudHeaders.forTest(),
+    restBase: _base,
+  );
+  StudioPreviewClient.installForTest(
+    StudioPreviewClient(
+      rest: rest,
+      sessions: CloudSessionStore.forTest(idMap: const {_session: _session}),
+    ),
+  );
+  return requests;
 }
 
 StudioRemoteClient _remote(_FakeRest fake) {
@@ -312,6 +376,47 @@ void main() {
   });
 
   group('StudioRemoteClient', () {
+    tearDown(() => StudioPreviewClient.installForTest(null));
+
+    test('deleting a registered project stops its preview', () async {
+      final previewRequests = _installPreviewGateway();
+      await StudioPreviewClient.I.create(
+        _session,
+        projectDir: 'app',
+        startScriptId: 'dev',
+      );
+      final fake = _FakeRest(reads: ['void main() {}']);
+      final remote = _remote(fake);
+
+      await remote.deleteStudioPath(_session, 'app', isFolder: true);
+
+      expect(fake.deleteCalls, 1);
+      expect(
+        previewRequests.where((request) => request.url.path.endsWith('/stop')),
+        hasLength(1),
+      );
+    });
+
+    test('a hibernating workspace stops registered previews once', () async {
+      final previewRequests = _installPreviewGateway();
+      await StudioPreviewClient.I.create(
+        _session,
+        projectDir: 'app',
+        startScriptId: 'dev',
+      );
+      final fake = _FakeRest(treeState: 'cold');
+      final remote = _remote(fake);
+
+      await remote.refreshWorkspace(_session);
+      await remote.refreshWorkspace(_session);
+
+      expect(
+        previewRequests.where((request) => request.url.path.endsWith('/stop')),
+        hasLength(1),
+      );
+      remote.dispose();
+    });
+
     test('openStudioFile lazily fetches once and fills buffer + baseline',
         () async {
       final fake = _FakeRest(reads: ['void main() {}']);

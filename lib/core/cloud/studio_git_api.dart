@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import '../cloud/cloud_rest.dart';
 import 'cloud_session_store.dart';
 
@@ -336,9 +338,9 @@ class StudioSyncResult {
 
   /// `up_to_date`, `synced` or `needs_merge`.
   final String status;
-  final bool dirty;
-  final int behind;
-  final int ahead;
+  final bool? dirty;
+  final int? behind;
+  final int? ahead;
   final String branch;
   final String message;
 
@@ -359,15 +361,208 @@ class StudioSyncResult {
     final reason = raw['reason'];
     return StudioSyncResult(
       status: status,
-      dirty: raw['dirty'] == true,
-      behind: behind is num ? behind.toInt() : 0,
-      ahead: ahead is num ? ahead.toInt() : 0,
+      dirty: raw['dirty'] is bool ? raw['dirty'] as bool : null,
+      behind: behind is num ? behind.toInt() : null,
+      ahead: ahead is num ? ahead.toInt() : null,
       branch: branch,
       message: message is String ? message : '',
       reason: reason is String && reason.isNotEmpty ? reason : null,
     );
   }
 }
+
+/// Read-only repository state from `POST …/git/preflight` or
+/// `GET …/git/status`. Missing server values stay null; they are never
+/// presented as a clean tree or a real zero.
+class StudioGitStatus {
+  const StudioGitStatus({
+    required this.branch,
+    required this.headSha,
+    required this.upstream,
+    required this.dirty,
+    required this.ahead,
+    required this.behind,
+    required this.reason,
+    required this.fetchedAt,
+  });
+
+  final String branch;
+  final String headSha;
+  final String? upstream;
+  final bool? dirty;
+  final int? ahead;
+  final int? behind;
+  final String? reason;
+  final DateTime? fetchedAt;
+
+  static StudioGitStatus? tryParse(Object? raw) {
+    if (raw is! Map) return null;
+    final branch = raw['branch'];
+    final headSha = raw['headSha'];
+    if (branch is! String || headSha is! String) return null;
+    final upstream = raw['upstream'];
+    final ahead = raw['ahead'];
+    final behind = raw['behind'];
+    final reason = raw['reason'];
+    final fetchedAt = raw['fetchedAt'];
+    return StudioGitStatus(
+      branch: branch,
+      headSha: headSha,
+      upstream: upstream is String && upstream.isNotEmpty ? upstream : null,
+      dirty: raw['dirty'] is bool ? raw['dirty'] as bool : null,
+      ahead: ahead is num ? ahead.toInt() : null,
+      behind: behind is num ? behind.toInt() : null,
+      reason: reason is String && reason.isNotEmpty ? reason : null,
+      fetchedAt: fetchedAt is String ? DateTime.tryParse(fetchedAt) : null,
+    );
+  }
+}
+
+/// One source patch used to build a combined changeset. [staged] records the
+/// actual gateway query, not an inferred Git state.
+class StudioDiffPart {
+  const StudioDiffPart({required this.patch, required this.staged});
+
+  final String patch;
+  final bool staged;
+}
+
+/// The gateway's bounded unified diff. [parts] is populated only by
+/// [StudioGitApi.combinedDiff], so the UI can merge same-path records with
+/// explicit staged/unstaged semantics instead of displaying duplicates.
+/// Joining those parts with `\n` reproduces [patch] exactly, within the same
+/// 256-KiB budget as the scoped content the mapper consumes.
+class StudioDiff {
+  const StudioDiff({
+    required this.patch,
+    required this.truncated,
+    this.parts = const <StudioDiffPart>[],
+  });
+
+  final String patch;
+  final bool truncated;
+  final List<StudioDiffPart> parts;
+
+  static StudioDiff? tryParse(Object? raw) {
+    if (raw is! Map || raw['patch'] is! String) return null;
+    final original = raw['patch'] as String;
+    final tooLong = utf8.encode(original).length > studioDiffMaxBytes;
+    final redacted = _redactStudioText(original);
+    final bounded = _boundedStudioUtf8(redacted, studioDiffMaxBytes);
+    return StudioDiff(
+      patch: bounded.value,
+      truncated: raw['truncated'] == true || tooLong || bounded.truncated,
+    );
+  }
+}
+
+class StudioRunLogRecord {
+  const StudioRunLogRecord({
+    required this.sha,
+    required this.subject,
+    required this.authoredAt,
+  });
+
+  final String sha;
+  final String subject;
+  final DateTime? authoredAt;
+}
+
+/// One bounded commit-log page. The current Task 4 gateway exposes `limit`
+/// but no cursor, so [nextCursor] remains null unless a later server supplies
+/// one; non-null client cursors are refused rather than silently ignored.
+class StudioRunLogPage {
+  const StudioRunLogPage({
+    required this.items,
+    required this.nextCursor,
+    required this.truncated,
+  });
+
+  final List<StudioRunLogRecord> items;
+  final String? nextCursor;
+  final bool truncated;
+
+  static StudioRunLogPage parse(Object? raw) {
+    if (raw is! Map) {
+      throw _unreadableStudioResult('log');
+    }
+    final rawItems = raw['items'];
+    if (rawItems is! List) throw _unreadableStudioResult('log');
+    final items = <StudioRunLogRecord>[];
+    var truncated =
+        raw['truncated'] == true || rawItems.length > studioLogLimit;
+    for (final item in rawItems.take(studioLogLimit)) {
+      if (item is! Map) continue;
+      final sha = item['sha'];
+      final subject = item['subject'];
+      if (sha is! String || subject is! String) continue;
+      final bounded = _boundedStudioUtf8(
+        _redactStudioText(subject),
+        studioLogSubjectMaxBytes,
+      );
+      truncated = truncated || bounded.truncated;
+      final authoredAt = item['authoredAt'];
+      items.add(
+        StudioRunLogRecord(
+          sha: sha,
+          subject: bounded.value,
+          authoredAt: authoredAt is String
+              ? DateTime.tryParse(authoredAt)
+              : null,
+        ),
+      );
+    }
+    final cursor = raw['nextCursor'];
+    return StudioRunLogPage(
+      items: List<StudioRunLogRecord>.unmodifiable(items),
+      nextCursor: cursor is String && cursor.isNotEmpty ? cursor : null,
+      truncated: truncated,
+    );
+  }
+}
+
+class StudioPathSearchMatch {
+  const StudioPathSearchMatch({required this.path, required this.name});
+
+  final String path;
+  final String name;
+}
+
+class StudioPathSearchPage {
+  const StudioPathSearchPage({required this.items, required this.truncated});
+
+  final List<StudioPathSearchMatch> items;
+  final bool truncated;
+
+  static StudioPathSearchPage parse(Object? raw) {
+    if (raw is! Map || raw['items'] is! List) {
+      throw _unreadableStudioResult('search');
+    }
+    final rawItems = raw['items'] as List;
+    final items = <StudioPathSearchMatch>[];
+    for (final item in rawItems.take(studioSearchLimit)) {
+      if (item is! Map || item['path'] is! String || item['name'] is! String) {
+        continue;
+      }
+      items.add(
+        StudioPathSearchMatch(
+          path: _redactStudioText(item['path'] as String),
+          name: _redactStudioText(item['name'] as String),
+        ),
+      );
+    }
+    return StudioPathSearchPage(
+      items: List<StudioPathSearchMatch>.unmodifiable(items),
+      truncated:
+          raw['truncated'] == true || rawItems.length > studioSearchLimit,
+    );
+  }
+}
+
+const int studioDiffMaxBytes = 256 * 1024;
+const int studioLogLimit = 50;
+const int studioLogSubjectMaxBytes = 4 * 1024;
+const int studioSearchLimit = 100;
 
 /// The deployment has no git transport yet (`503 studio_git_unavailable`).
 ///
@@ -459,6 +654,134 @@ class StudioGitApi {
     return StudioSessionGit.tryParse(json);
   }
 
+  /// Fetch-only inspection. The worker updates remote refs only; it never
+  /// fast-forwards, resets, stashes, or rewrites the checked-out worktree.
+  Future<StudioGitStatus> inspect(String sessionId) async {
+    final serverId = await _requireServerId(sessionId);
+    final json = await _gitPost(
+      '/studio/sessions/$serverId/git/preflight',
+      body: const <String, Object>{},
+    );
+    final result = StudioGitStatus.tryParse(json);
+    if (result == null) throw _unreadableStudioResult('status');
+    return result;
+  }
+
+  /// Local repository status only; unlike [inspect], this performs no fetch.
+  Future<StudioGitStatus> status(String sessionId) async {
+    final serverId = await _requireServerId(sessionId);
+    final json = await _gitGet('/studio/sessions/$serverId/git/status');
+    final result = StudioGitStatus.tryParse(json);
+    if (result == null) throw _unreadableStudioResult('status');
+    return result;
+  }
+
+  /// The server's unified diff, capped at 256 KiB before it reaches widgets.
+  /// [staged] selects `git diff --cached`; untracked files need a separate
+  /// server capability and are never claimed by this response.
+  Future<StudioDiff> diff(
+    String sessionId, {
+    String? path,
+    bool staged = false,
+  }) async {
+    if (path != null && path.trim().isEmpty) {
+      throw CloudApiException(
+        status: 400,
+        code: 'bad_request',
+        message: 'A diff path must not be empty.',
+      );
+    }
+    final serverId = await _requireServerId(sessionId);
+    final json = await _gitGet(
+      '/studio/sessions/$serverId/git/diff',
+      query: <String, String>{
+        if (staged) 'staged': 'true',
+        if (path != null) 'path': path.trim(),
+      },
+    );
+    final result = StudioDiff.tryParse(json);
+    if (result == null) throw _unreadableStudioResult('diff');
+    return result;
+  }
+
+  /// Reads both staged and unstaged patches without changing the worktree.
+  /// The current gateway has no untracked-file diff operation, so callers must
+  /// use `status.dirty` to keep coverage/totals unknown when appropriate.
+  Future<StudioDiff> combinedDiff(String sessionId, {String? path}) async {
+    final unstaged = await diff(sessionId, path: path);
+    final staged = await diff(sessionId, path: path, staged: true);
+    final bounded = _boundedCombinedDiffParts(<StudioDiffPart>[
+      if (unstaged.patch.isNotEmpty)
+        StudioDiffPart(patch: unstaged.patch, staged: false),
+      if (staged.patch.isNotEmpty)
+        StudioDiffPart(patch: staged.patch, staged: true),
+    ], truncated: unstaged.truncated || staged.truncated);
+    return StudioDiff(
+      // The mapper joins these exact parts with the same newline separator.
+      // One shared budget therefore covers both representations; no scoped
+      // content outside this bounded patch can leak into parsing/rendering.
+      patch: <String>[for (final part in bounded.parts) part.patch].join('\n'),
+      truncated: bounded.truncated,
+      parts: bounded.parts,
+    );
+  }
+
+  /// Bounded commit history. Task 4 has no cursor query, so a caller cannot
+  /// accidentally send an unsupported cursor or mistake a partial page for a
+  /// complete history.
+  Future<StudioRunLogPage> logs(
+    String sessionId, {
+    String? cursor,
+    int limit = 20,
+  }) async {
+    if (cursor != null) {
+      throw CloudApiException(
+        status: 400,
+        code: 'unsupported_cursor',
+        message: 'This deployment does not support older git log pages.',
+      );
+    }
+    final boundedLimit = limit < 1
+        ? 1
+        : (limit > studioLogLimit ? studioLogLimit : limit);
+    final serverId = await _requireServerId(sessionId);
+    final json = await _gitGet(
+      '/studio/sessions/$serverId/git/logs',
+      query: <String, String>{'limit': '$boundedLimit'},
+    );
+    return StudioRunLogPage.parse(json);
+  }
+
+  /// Read-only file search below the server-side repository binding.
+  Future<StudioPathSearchPage> search(
+    String sessionId, {
+    required String query,
+    String? path,
+    int limit = 50,
+  }) async {
+    final needle = query.trim();
+    if (needle.isEmpty || (path != null && path.trim().isEmpty)) {
+      throw CloudApiException(
+        status: 400,
+        code: 'bad_request',
+        message: 'Enter a file search and a valid path.',
+      );
+    }
+    final boundedLimit = limit < 1
+        ? 1
+        : (limit > studioSearchLimit ? studioSearchLimit : limit);
+    final serverId = await _requireServerId(sessionId);
+    final json = await _gitGet(
+      '/studio/sessions/$serverId/files/search',
+      query: <String, String>{
+        'q': needle,
+        if (path != null) 'path': path.trim(),
+        'limit': '$boundedLimit',
+      },
+    );
+    return StudioPathSearchPage.parse(json);
+  }
+
   /// `POST /studio/sessions/:id/git/clone`.
   Future<StudioCloneResult> clone(
     String sessionId, {
@@ -522,6 +845,20 @@ class StudioGitApi {
     return result;
   }
 
+  Future<Map<String, dynamic>> _gitGet(
+    String path, {
+    Map<String, String>? query,
+  }) async {
+    try {
+      return await _rest.getJson(path, query: query);
+    } on CloudApiException catch (error) {
+      if (error.code == 'studio_git_unavailable') {
+        throw StudioGitUnavailableException(error.message);
+      }
+      rethrow;
+    }
+  }
+
   /// A git mutation: the one place the honest 503 refusal is recognised.
   Future<Map<String, dynamic>> _gitPost(String path, {Object? body}) async {
     try {
@@ -533,4 +870,73 @@ class StudioGitApi {
       rethrow;
     }
   }
+}
+
+CloudApiException _unreadableStudioResult(String operation) =>
+    CloudApiException(
+      status: 200,
+      code: 'internal',
+      message: 'Ovid Cloud returned an unreadable Studio $operation result.',
+    );
+
+final RegExp _githubCredentialPattern = RegExp(
+  r'(?:github_pat_[A-Za-z0-9_]{10,}|gh[pousr]_[A-Za-z0-9]{20,})',
+);
+final RegExp _authorizationCredentialPattern = RegExp(
+  r'\b(?:bearer|token)\s+[A-Za-z0-9._~+/=-]{8,}',
+  caseSensitive: false,
+);
+
+String _redactStudioText(String value) => value
+    .replaceAll(_githubCredentialPattern, '[redacted]')
+    .replaceAll(_authorizationCredentialPattern, '[redacted]');
+
+({List<StudioDiffPart> parts, bool truncated}) _boundedCombinedDiffParts(
+  List<StudioDiffPart> source, {
+  required bool truncated,
+}) {
+  final parts = <StudioDiffPart>[];
+  var remaining = studioDiffMaxBytes;
+  for (final part in source) {
+    if (remaining <= 0) {
+      truncated = true;
+      break;
+    }
+    if (parts.isNotEmpty) {
+      // Joining nonempty scoped parts costs one separator byte. Reserve it
+      // only when content from the next part can actually be retained.
+      remaining--;
+      if (remaining <= 0) {
+        truncated = true;
+        break;
+      }
+    }
+    final bounded = _boundedStudioUtf8(part.patch, remaining);
+    if (bounded.value.isEmpty && part.patch.isNotEmpty) {
+      truncated = true;
+      break;
+    }
+    parts.add(StudioDiffPart(patch: bounded.value, staged: part.staged));
+    remaining -= utf8.encode(bounded.value).length;
+    truncated = truncated || bounded.truncated;
+    if (bounded.truncated) break;
+  }
+  if (parts.length != source.length) truncated = true;
+  return (
+    parts: List<StudioDiffPart>.unmodifiable(parts),
+    truncated: truncated,
+  );
+}
+
+({String value, bool truncated}) _boundedStudioUtf8(
+  String value,
+  int maxBytes,
+) {
+  final bytes = utf8.encode(value);
+  if (bytes.length <= maxBytes) return (value: value, truncated: false);
+  var end = maxBytes;
+  while (end > 0 && (bytes[end] & 0xC0) == 0x80) {
+    end--;
+  }
+  return (value: utf8.decode(bytes.sublist(0, end)), truncated: true);
 }

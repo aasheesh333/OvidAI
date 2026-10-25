@@ -64,10 +64,10 @@ class V2StudioWorkspaceData {
   final V2WorkspaceStatus status;
   final String repoName;
   final String branch;
-  final int filesChanged;
-  final int additions;
-  final int deletions;
-  final int syncCount;
+  final int? filesChanged;
+  final int? additions;
+  final int? deletions;
+  final int? syncCount;
   final List<V2FileNode> fileTree;
   final String openFileName;
   final String openFilePath;
@@ -346,7 +346,7 @@ class _HeaderActions extends StatelessWidget {
   });
 
   final String branch;
-  final int syncCount;
+  final int? syncCount;
 
   /// False when the deployment has no git transport: the sync control is not
   /// drawn and the branch chip is informational only.
@@ -399,9 +399,9 @@ class _HeaderActions extends StatelessWidget {
             semanticLabel: 'Sync changes',
             tooltip: 'Sync',
             onPressed: onSync,
-            badge: syncCount > 0
+            badge: syncCount == null || (syncCount ?? 0) > 0
                 ? Text(
-                    '$syncCount',
+                    syncCount?.toString() ?? '—',
                     style: OType.caption.copyWith(
                       color: OColors.of(context).onAccent,
                       fontWeight: FontWeight.w600,

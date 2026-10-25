@@ -33,10 +33,18 @@ class V2DiffLine {
 /// A contiguous hunk inside one changed file.
 @immutable
 class V2DiffHunk {
-  const V2DiffHunk({required this.header, required this.lines});
+  const V2DiffHunk({
+    required this.header,
+    required this.lines,
+    this.scopeLabel,
+  });
 
   final String header;
   final List<V2DiffLine> lines;
+
+  /// Actual source query for this hunk (`Staged` or `Unstaged`), when the
+  /// host supplied separate patches. Null for an ordinary single diff.
+  final String? scopeLabel;
 }
 
 /// One changed file.
@@ -45,18 +53,23 @@ class V2ChangedFile {
   const V2ChangedFile({
     required this.path,
     this.directory = '',
-    this.additions = 0,
-    this.deletions = 0,
+    this.additions,
+    this.deletions,
     this.hunks = const <V2DiffHunk>[],
     this.initiallyExpanded = false,
+    this.scopeLabel,
   });
 
   final String path;
   final String directory;
-  final int additions;
-  final int deletions;
+  final int? additions;
+  final int? deletions;
   final List<V2DiffHunk> hunks;
   final bool initiallyExpanded;
+
+  /// Real patch scope(s) represented by this one file row. A same-path staged
+  /// and unstaged pair is merged once and labeled `Staged + unstaged`.
+  final String? scopeLabel;
 
   /// A file is only expandable when the wiring layer supplied real hunks.
   /// Otherwise the row must not offer a chevron that reveals an empty box.
@@ -77,21 +90,48 @@ class V2ChangesData {
     this.status = V2ChangesStatus.content,
     this.files = const <V2ChangedFile>[],
     this.commitMessage = '',
-    this.behindCount = 0,
+    this.behindCount,
     this.branchLabel,
     this.errorMessage,
-  });
+    bool? totalsKnown,
+    this.coverageWarning,
+  }) : _totalsKnown = totalsKnown;
 
   final V2ChangesStatus status;
   final List<V2ChangedFile> files;
   final String commitMessage;
-  final int behindCount;
+  final int? behindCount;
   final String? branchLabel;
   final String? errorMessage;
 
-  int get additions => files.fold(0, (total, file) => total + file.additions);
+  /// False when staged/untracked coverage is incomplete, even if individual
+  /// patch rows have real line counts. Overall totals then stay unknown.
+  final bool? _totalsKnown;
 
-  int get deletions => files.fold(0, (total, file) => total + file.deletions);
+  /// Defaults conservatively: loading/error/empty/unfetched data has no known
+  /// total. Legacy complete content fixtures with real file records may omit
+  /// the flag; every mapper-owned partial state passes false explicitly.
+  bool get totalsKnown =>
+      _totalsKnown ?? (status == V2ChangesStatus.content && files.isNotEmpty);
+
+  /// Visible whenever real rows are only a partial view of the change set.
+  /// For example, the current gateway cannot supply untracked files/content.
+  final String? coverageWarning;
+
+  int? get additions =>
+      totalsKnown ? _knownTotal(files.map((file) => file.additions)) : null;
+
+  int? get deletions =>
+      totalsKnown ? _knownTotal(files.map((file) => file.deletions)) : null;
+
+  static int? _knownTotal(Iterable<int?> values) {
+    var total = 0;
+    for (final value in values) {
+      if (value == null) return null;
+      total += value;
+    }
+    return total;
+  }
 }
 
 /// Review local changes and commit them.
@@ -143,6 +183,20 @@ class _V2ChangesPageState extends State<V2ChangesPage> {
     );
   }
 
+  @override
+  void didUpdateWidget(covariant V2ChangesPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.data.files != widget.data.files) {
+      _expanded
+        ..clear()
+        ..addAll(
+          widget.data.files
+              .where((file) => file.initiallyExpanded)
+              .map((file) => file.path),
+        );
+    }
+  }
+
   void _toggleFile(V2ChangedFile file) {
     setState(() {
       if (!_expanded.add(file.path)) {
@@ -155,7 +209,15 @@ class _V2ChangesPageState extends State<V2ChangesPage> {
   /// diff review; the sheet owns the message and the final commit action.
   Future<void> _openCommitSheet() async {
     final data = widget.data;
-    if (data.files.isEmpty || !widget.canCommit) return;
+    if (data.files.isEmpty ||
+        !widget.canCommit ||
+        !data.totalsKnown ||
+        data.behindCount == null ||
+        data.files.any(
+          (file) => file.additions == null || file.deletions == null,
+        )) {
+      return;
+    }
     final message = await showOSheet<String>(
       context,
       builder: (sheetContext) => V2CommitSheet(
@@ -164,13 +226,13 @@ class _V2ChangesPageState extends State<V2ChangesPage> {
             for (final file in data.files)
               V2CommitFile(
                 path: _commitPath(file),
-                additions: file.additions,
-                deletions: file.deletions,
+                additions: file.additions!,
+                deletions: file.deletions!,
               ),
           ],
           initialMessage: data.commitMessage,
           branchLabel: data.branchLabel,
-          behindCount: data.behindCount,
+          behindCount: data.behindCount!,
         ),
         showHandle: false,
         onSync: widget.onSync,
@@ -217,7 +279,14 @@ class _V2ChangesPageState extends State<V2ChangesPage> {
         data.status == V2ChangesStatus.content && data.files.isNotEmpty;
     // No diff source means no commit control. A permanently disabled check
     // mark would imply a commit path that does not exist.
-    final commitable = hasContent && widget.canCommit;
+    final commitable =
+        hasContent &&
+        widget.canCommit &&
+        data.totalsKnown &&
+        data.behindCount != null &&
+        data.files.every(
+          (file) => file.additions != null && file.deletions != null,
+        );
     return OScreen(
       title: 'Changes',
       padding: false,
@@ -268,6 +337,8 @@ class _V2ChangesPageState extends State<V2ChangesPage> {
 
   Widget _buildContent(BuildContext context) {
     final files = widget.data.files;
+    final warning = widget.data.coverageWarning?.trim();
+    final hasWarning = warning != null && warning.isNotEmpty;
     return ListView.builder(
       padding: const EdgeInsets.fromLTRB(
         OSpace.l,
@@ -275,9 +346,12 @@ class _V2ChangesPageState extends State<V2ChangesPage> {
         OSpace.l,
         OSpace.xl,
       ),
-      itemCount: files.length,
+      itemCount: files.length + (hasWarning ? 1 : 0),
       itemBuilder: (context, index) {
-        final file = files[index];
+        if (hasWarning && index == 0) {
+          return _DiffCoverageWarning(message: warning!);
+        }
+        final file = files[index - (hasWarning ? 1 : 0)];
         return _DiffFileRow(
           file: file,
           path: _commitPath(file),
@@ -286,6 +360,39 @@ class _V2ChangesPageState extends State<V2ChangesPage> {
           onCopyDiff: () => widget.onCopyDiff?.call(file.path),
         );
       },
+    );
+  }
+}
+
+String _diffCount(int? value) => value?.toString() ?? '—';
+
+class _DiffCoverageWarning extends StatelessWidget {
+  const _DiffCoverageWarning({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = OColors.of(context);
+    return ColoredBox(
+      key: const Key('studio-diff-scope-warning'),
+      color: colors.surfaceAlt,
+      child: Padding(
+        padding: const EdgeInsets.all(OSpace.m),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.warning_amber_rounded, size: 18, color: colors.warn),
+            const SizedBox(width: OSpace.s),
+            Expanded(
+              child: Text(
+                message,
+                style: OType.caption.copyWith(color: colors.textMuted),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -331,16 +438,28 @@ class _DiffFileRow extends StatelessWidget {
             Icon(_icon, size: 18, color: c.textMuted),
             const SizedBox(width: OSpace.s),
             Expanded(
-              child: Text(
-                path,
-                style: OType.bodySm.copyWith(color: c.text),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    path,
+                    style: OType.bodySm.copyWith(color: c.text),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  if (file.scopeLabel != null)
+                    Text(
+                      file.scopeLabel!,
+                      style: OType.caption.copyWith(color: c.textMuted),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                ],
               ),
             ),
             const SizedBox(width: OSpace.s),
             Text(
-              '+${file.additions}',
+              '+${_diffCount(file.additions)}',
               style: OType.caption.copyWith(
                 color: c.success,
                 fontWeight: FontWeight.w600,
@@ -348,7 +467,7 @@ class _DiffFileRow extends StatelessWidget {
             ),
             const SizedBox(width: OSpace.xs),
             Text(
-              '−${file.deletions}',
+              '−${_diffCount(file.deletions)}',
               style: OType.caption.copyWith(
                 color: c.danger,
                 fontWeight: FontWeight.w600,
@@ -381,7 +500,8 @@ class _DiffFileRow extends StatelessWidget {
               child: Semantics(
                 container: true,
                 excludeSemantics: true,
-                label: '$path, +${file.additions} −${file.deletions}',
+                label:
+                    '$path${file.scopeLabel == null ? '' : ', ${file.scopeLabel}'}, +${_diffCount(file.additions)} −${_diffCount(file.deletions)}',
                 button: true,
                 enabled: true,
                 expanded: expanded,
@@ -394,7 +514,8 @@ class _DiffFileRow extends StatelessWidget {
           Semantics(
             container: true,
             excludeSemantics: true,
-            label: '$path, +${file.additions} −${file.deletions}',
+            label:
+                '$path${file.scopeLabel == null ? '' : ', ${file.scopeLabel}'}, +${_diffCount(file.additions)} −${_diffCount(file.deletions)}',
             child: row,
           ),
         if (file.canExpand && expanded)
@@ -425,6 +546,14 @@ class _DiffBody extends StatelessWidget {
               padding: const EdgeInsets.only(left: OSpace.m),
               child: Row(
                 children: [
+                  if (hunk.scopeLabel != null)
+                    Padding(
+                      padding: const EdgeInsets.only(right: OSpace.s),
+                      child: Text(
+                        hunk.scopeLabel!,
+                        style: OType.caption.copyWith(color: c.textMuted),
+                      ),
+                    ),
                   Expanded(
                     child: Semantics(
                       header: true,

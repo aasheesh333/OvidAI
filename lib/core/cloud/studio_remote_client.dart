@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import '../studio_drafts.dart';
 import 'cloud_rest.dart';
 import 'studio_files.dart';
+import 'studio_preview_client.dart';
 
 /// One Studio bucket's tab view — the shape the editor/tree widgets bind to.
 @immutable
@@ -142,6 +143,7 @@ class _SessionStudioState {
   /// Waking a cold workspace (ST-013).
   bool waking = false;
   bool wakeTimedOut = false;
+  bool previewsStoppedForSleep = false;
   Timer? wakeTimer;
   DateTime? wakeStartedAt;
 
@@ -360,10 +362,15 @@ class StudioRemoteClient extends ChangeNotifier {
       state.treeFailure = null;
       state.subtreeLoaded.clear();
       if (snapshot.state == 'warm') {
+        state.previewsStoppedForSleep = false;
         _stopWaking(state);
         await _refreshOpenFiles(state);
         _retryPendingSaves(state);
       } else {
+        if (!state.previewsStoppedForSleep) {
+          state.previewsStoppedForSleep = true;
+          await _stopPreviews(StudioPreviewClient.I.stopAll);
+        }
         _startWaking(state, callHydrate: snapshot.state == 'cold');
       }
       return snapshot;
@@ -833,6 +840,16 @@ class StudioRemoteClient extends ChangeNotifier {
     _scheduleDraftPersist(state);
   }
 
+  Future<void> _stopPreviews(Future<void> Function() stop) async {
+    try {
+      await stop();
+    } catch (_) {
+      // Server-side TTL/hibernate cleanup remains authoritative. A refused
+      // best-effort stop must not turn a completed file operation into an
+      // error or leave the workspace permanently asleep.
+    }
+  }
+
   // -------------------------------------------------------------------------
   // File management (ST-008)
   // -------------------------------------------------------------------------
@@ -844,6 +861,7 @@ class StudioRemoteClient extends ChangeNotifier {
       {bool isFolder = false}) async {
     final state = _stateFor(sessionId);
     await _files.deletePath(sessionId, path, recursive: isFolder);
+    await _stopPreviews(() => StudioPreviewClient.I.stopProject(path));
     for (final p in _pathsUnder(state, path)) {
       _forget(state, p);
     }
@@ -1038,6 +1056,7 @@ class StudioRemoteClient extends ChangeNotifier {
       state.waking = false;
       state.wakeTimedOut = false;
       state.wakeStartedAt = null;
+      state.previewsStoppedForSleep = false;
       state.subtreeLoading.clear();
       state.subtreeLoaded.clear();
       state.tabs.value = StudioTabsState.empty;

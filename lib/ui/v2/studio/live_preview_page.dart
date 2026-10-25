@@ -87,8 +87,8 @@ enum V2PreviewStatus {
 /// Everything the live preview needs to render.
 ///
 /// The frame is the only page-shaped surface: there is no synthesized site
-/// copy and no sample content. A host either supplies a real [ImageProvider]
-/// and a real [url], or the screen says plainly that no preview source exists.
+/// copy and no sample content. A host supplies either a real [ImageProvider]
+/// or an isolated native [webView], or the screen says no preview exists.
 @immutable
 class V2LivePreviewData {
   const V2LivePreviewData({
@@ -96,6 +96,7 @@ class V2LivePreviewData {
     this.siteName = '',
     this.url = '',
     this.frame,
+    this.webView,
     this.expiresAt,
     this.errorMessage,
     this.unavailableReason = '',
@@ -115,6 +116,12 @@ class V2LivePreviewData {
   /// Real pixels from the sandbox. Null means there is nothing to show, not
   /// that a blank page should be painted.
   final ImageProvider? frame;
+
+  /// A live, isolated native preview. This is an alternative to [frame] for
+  /// real WebView content, never a placeholder painted over an absent source.
+  final Widget? webView;
+
+  bool get hasVisual => frame != null || webView != null;
 
   /// When the preview URL stops working. The countdown is derived from this
   /// deadline; when it reaches zero the screen moves to [V2PreviewStatus.expired].
@@ -166,6 +173,7 @@ class V2LivePreviewPage extends StatefulWidget {
     this.onReconnect,
     this.onStart,
     this.onRetry,
+    this.onExpired,
     @Deprecated('Use onCopyUrl') this.onShareLink,
   });
 
@@ -195,6 +203,10 @@ class V2LivePreviewPage extends StatefulWidget {
   /// Retry a failed preview or a failed start.
   final VoidCallback? onRetry;
 
+  /// The real preview/cookie deadline elapsed or the server marked it expired.
+  /// The host stops the old registration before offering a fresh start.
+  final VoidCallback? onExpired;
+
   /// Old name for [onCopyUrl]. Kept so existing hosts compile while they move
   /// to the explicit copy action.
   @Deprecated('Use onCopyUrl')
@@ -209,6 +221,7 @@ class _V2LivePreviewPageState extends State<V2LivePreviewPage>
   Timer? _timer;
   Duration _remaining = Duration.zero;
   bool _expired = false;
+  bool _expiryNotified = false;
 
   VoidCallback? get _reload => widget.onReload;
   VoidCallback? get _copyUrl => widget.onCopyUrl ?? widget.onShareLink;
@@ -227,7 +240,8 @@ class _V2LivePreviewPageState extends State<V2LivePreviewPage>
     final data = widget.data;
     if (oldData.expiresAt != data.expiresAt ||
         oldData.status != data.status ||
-        (oldData.frame == null) != (data.frame == null)) {
+        (oldData.frame == null) != (data.frame == null) ||
+        oldData.webView != data.webView) {
       _syncCountdown();
     }
   }
@@ -260,6 +274,7 @@ class _V2LivePreviewPageState extends State<V2LivePreviewPage>
   void _syncCountdown() {
     _timer?.cancel();
     _timer = null;
+    final wasExpired = _expired;
 
     final deadline = widget.data.expiresAt;
     final status = widget.data.status;
@@ -267,7 +282,7 @@ class _V2LivePreviewPageState extends State<V2LivePreviewPage>
         deadline != null &&
         switch (status) {
           V2PreviewStatus.connecting => true,
-          V2PreviewStatus.live => widget.data.frame != null,
+          V2PreviewStatus.live => widget.data.hasVisual,
           V2PreviewStatus.lost => true,
           V2PreviewStatus.error ||
           V2PreviewStatus.expired ||
@@ -280,8 +295,20 @@ class _V2LivePreviewPageState extends State<V2LivePreviewPage>
         status == V2PreviewStatus.expired ||
         (needsClock && _remaining <= Duration.zero);
 
+    if (!_expired) _expiryNotified = false;
+    if (_expired && !wasExpired) _notifyExpired();
     if (!needsClock || _expired) return;
     _timer = Timer.periodic(const Duration(seconds: 1), _tick);
+  }
+
+  void _notifyExpired() {
+    if (_expiryNotified) return;
+    _expiryNotified = true;
+    final callback = widget.onExpired;
+    if (callback == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _expired) callback();
+    });
   }
 
   void _tick(Timer timer) {
@@ -300,6 +327,7 @@ class _V2LivePreviewPageState extends State<V2LivePreviewPage>
         _remaining = Duration.zero;
         _expired = true;
       });
+      _notifyExpired();
       return;
     }
     setState(() => _remaining = next);
@@ -320,7 +348,7 @@ class _V2LivePreviewPageState extends State<V2LivePreviewPage>
         return _expired ? V2PreviewStatus.expired : V2PreviewStatus.lost;
       case V2PreviewStatus.live:
         if (_expired) return V2PreviewStatus.expired;
-        if (data.frame == null) return V2PreviewStatus.unavailable;
+        if (!data.hasVisual) return V2PreviewStatus.unavailable;
         return V2PreviewStatus.live;
     }
   }
@@ -368,14 +396,22 @@ class _V2LivePreviewPageState extends State<V2LivePreviewPage>
           Expanded(
             child: _FrameArea(
               aspectRatio: data.safeFrameAspectRatio,
-              child: _LiveFrame(
-                frame: data.frame!,
-                url: data.url,
-                origin: data.origin,
-                timeLeft: _timeLeft,
-                semanticLabel: _statusSemantics('Live'),
-                onTryAgain: widget.onRetry,
-              ),
+              child: data.webView != null
+                  ? _WebPreviewFrame(
+                      webView: data.webView!,
+                      status: V2PreviewStatus.live,
+                      origin: data.origin,
+                      timeLeft: _timeLeft,
+                      semanticLabel: _statusSemantics('Live'),
+                    )
+                  : _LiveFrame(
+                      frame: data.frame!,
+                      url: data.url,
+                      origin: data.origin,
+                      timeLeft: _timeLeft,
+                      semanticLabel: _statusSemantics('Live'),
+                      onTryAgain: widget.onRetry,
+                    ),
             ),
           ),
           if (actions != null) ...[const SizedBox(height: OSpace.xs), actions],
@@ -438,11 +474,19 @@ class _V2LivePreviewPageState extends State<V2LivePreviewPage>
           Expanded(
             child: _FrameArea(
               aspectRatio: data.safeFrameAspectRatio,
-              child: _ConnectingFrame(
-                origin: data.origin,
-                timeLeft: _timeLeft,
-                semanticLabel: _statusSemantics('Connecting'),
-              ),
+              child: data.webView != null
+                  ? _WebPreviewFrame(
+                      webView: data.webView!,
+                      status: V2PreviewStatus.connecting,
+                      origin: data.origin,
+                      timeLeft: _timeLeft,
+                      semanticLabel: _statusSemantics('Connecting'),
+                    )
+                  : _ConnectingFrame(
+                      origin: data.origin,
+                      timeLeft: _timeLeft,
+                      semanticLabel: _statusSemantics('Connecting'),
+                    ),
             ),
           ),
           if (cancel != null) ...[
@@ -681,6 +725,56 @@ class _FrameShell extends StatelessWidget {
       ),
       clipBehavior: Clip.antiAlias,
       child: child,
+    );
+  }
+}
+
+class _WebPreviewFrame extends StatelessWidget {
+  const _WebPreviewFrame({
+    required this.webView,
+    required this.status,
+    required this.origin,
+    required this.timeLeft,
+    required this.semanticLabel,
+  });
+
+  final Widget webView;
+  final V2PreviewStatus status;
+  final String origin;
+  final Duration? timeLeft;
+  final String semanticLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    return _FrameShell(
+      // Keep one native-view identity while the status pill changes from
+      // connecting to live. Recreating it would consume the ticket twice.
+      frameKey: const Key('preview-frame'),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          Semantics(
+            label: status == V2PreviewStatus.live
+                ? 'Live preview of $origin'
+                : 'Connecting preview of $origin',
+            child: webView,
+          ),
+          Positioned(
+            left: OSpace.s,
+            top: OSpace.s,
+            right: OSpace.s,
+            child: Align(
+              alignment: Alignment.topLeft,
+              child: _FrameStatus(
+                status: status,
+                origin: origin,
+                timeLeft: timeLeft,
+                semanticLabel: semanticLabel,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
