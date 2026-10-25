@@ -10,6 +10,7 @@ import {
   createLifecycle,
   createNoopR2Deleter,
   createPostgresDeletionStore,
+  type AccountDataDeleter,
 } from "@ovid/account";
 import { createRedisEventLog, createRedisSystemBus } from "@ovid/events";
 import {
@@ -67,6 +68,7 @@ import {
   type GitHubApiPort,
 } from "@ovid/agent-core";
 import type { KeyResolver } from "@ovid/shared";
+import { createSecretRedactor } from "@ovid/mcp";
 import { createByokKeyProvider, createEnvelopeCrypto } from "@ovid/escrow";
 import {
   createFullAgentRunProcessor,
@@ -434,8 +436,6 @@ export function createProductionAgentRunProcessor(
   return createFullAgentRunProcessor({ ...deps, storage });
 }
 
-/**
- * Composition root — intentionally untested-thin (Task 10's e2e exercises the
 const STUDIO_PREVIEW_SWEEP_INTERVAL_MS = 30_000;
 const STUDIO_PREVIEW_TERMINAL_STATUSES = new Set(["stopped", "failed", "expired"]);
 
@@ -562,6 +562,8 @@ export async function closeStudioPreviewResources(deps: {
   await deps.closeManager();
 }
 
+/**
+ * Composition root — intentionally untested-thin (Task 10's e2e exercises the
  * wiring): env → real deps → BullMQ worker on "agent-runs" → graceful
  * shutdown. Not invoked at import; `node dist/main.js` invokes it.
  */
@@ -759,6 +761,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
 
   const studioGit = createStudioGitService({
     manager,
+    masterKey: studioMasterKey,
+    listServers: (userId) => mcpServersRepo.list(db, userId),
+    allowedHosts: parseStudioGitAllowedHosts(env.OVID_GIT_ALLOWED_HOSTS),
+  });
+
   // 0041 is an explicit deployment gate, never an implicit migration. Routes,
   // hibernation cleanup and the preview sweeper all share this one manager; an
   // absent table disables only previews and leaves the rest of the worker up.
@@ -785,11 +792,6 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       "[worker] Studio previews disabled — studio_previews is absent (apply migration 0041 explicitly)",
     );
   }
-
-    masterKey: studioMasterKey,
-    listServers: (userId) => mcpServersRepo.list(db, userId),
-    allowedHosts: parseStudioGitAllowedHosts(env.OVID_GIT_ALLOWED_HOSTS),
-  });
 
   // P3 Task 16: the production processor is the FULL engine. Egress is the
   // SSRF-guarded fetch at every construction site (T5-I1 / M-4): model
@@ -1386,9 +1388,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
         redisQueue: redisQ,
         litellm: accountKeyAdmin,
         r2: r2Deleter ?? createNoopR2Deleter(),
+        studioPreviews: createStudioPreviewAccountCleanup({ db, previews }),
         images: {
           deleteAccount: async (uid) => {
-        studioPreviews: createStudioPreviewAccountCleanup({ db, previews }),
             await db.transaction(async (tx) => {
               await imagesRepo.insertDeleted(tx, uid, Math.floor(Date.now() / 1000));
               await imagesRepo.clearAccount(tx, uid);
@@ -1415,6 +1417,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   let shuttingDown: Promise<void> | null = null;
   const shutdown = (): Promise<void> => {
     shuttingDown ??= (async () => {
+      const previewSweepStopped = previewSweeper?.stop() ?? null;
       clearInterval(sweeper);
       clearInterval(warmSweeper);
       clearInterval(oauthFlowSweeper);
@@ -1445,7 +1448,6 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       await mcpRuntime?.shutdown();
       // P2 Task 12 pin: manager.close() BEFORE the drain — sandbox envs (their
       // cgroup trees, live leaves and admission slots) tear down first.
-      await manager.close();
       // P6 Task 14 pin: browser state is flushed BEFORE the run worker drains
       // — close() releases every live session (capture → persistence.flush →
       // context close) so logins survive the restart, then tears down the
@@ -1465,7 +1467,6 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       // P7 Task 11: stop storage consumers before their producer queues.
       await hibernateWorker.close();
       await hydrateWorker.close();
-      await fileService.close();
       await queues.agentRuns.close();
       await queues.hibernate.close();
       await queues.hydrate.close();

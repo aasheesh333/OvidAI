@@ -49,6 +49,8 @@ const h = vi.hoisted(() => {
 vi.mock("@ovid/db", () => ({
   createDb: h.createDb,
   createStorageQuotaRepos: h.createStorageQuotaRepos,
+  createStudioPreviewPostgresStore: vi.fn(),
+  createStudioPreviewStore: vi.fn(),
   assertSessionFileCapacity: vi.fn(),
   dbPoolOptionsFromEnv: vi.fn(() => ({})),
   byokKeysRepo: {},
@@ -137,6 +139,9 @@ vi.mock("@ovid/agent-core", () => ({
   createGuardedEgressFetch: vi.fn(() => vi.fn()),
   createSsrfGuard: vi.fn(() => ({})),
 }));
+vi.mock("@ovid/mcp", () => ({
+  createSecretRedactor: vi.fn(),
+}));
 vi.mock("@ovid/escrow", () => ({
   createByokKeyProvider: vi.fn(() => ({})),
   createEnvelopeCrypto: vi.fn(() => ({})),
@@ -145,8 +150,15 @@ vi.mock("./studioGitRoutes.js", () => ({
   createStudioGitService: h.createStudioGitService,
   parseStudioGitAllowedHosts: h.parseStudioGitAllowedHosts,
 }));
+vi.mock("./studioPreview.js", () => ({
+  createStudioPreviewManager: vi.fn(),
+  createJailedStudioPreviewProcessRunner: vi.fn(),
+}));
 vi.mock("./fileService.js", () => ({ buildFileService: h.buildFileService }));
 vi.mock("./mcpRuntime.js", () => ({ createMcpRuntime: h.createMcpRuntime }));
+vi.mock("./fetchEgressPolicy.js", () => ({
+  createFetchEgressPolicy: vi.fn(() => vi.fn()),
+}));
 vi.mock("./runProcessor.js", () => ({
   createFullAgentRunProcessor: h.createFullAgentRunProcessor,
 }));
