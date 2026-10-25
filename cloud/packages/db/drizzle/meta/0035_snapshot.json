@@ -5528,6 +5528,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "temperature": {
+          "name": "temperature",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
         "state": {
           "name": "state",
           "type": "text",

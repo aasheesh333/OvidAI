@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS "subagent_dispatches" (
 	"requested_model" text,
 	"byok_key_id" text,
 	"byok_model" text,
+	"temperature" double precision,
 	"actor_user_id" text NOT NULL,
 	"state" text NOT NULL,
 	"defer_reason" text,
@@ -651,4 +652,5 @@ CREATE INDEX IF NOT EXISTS "subagent_workers_root_idx" ON "subagent_logical_work
 CREATE INDEX IF NOT EXISTS "subagent_reports_session_cursor_idx" ON "subagent_reports" USING btree ("session_id","id");--> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "subagent_root_finalizations_epoch_uq" ON "subagent_root_finalizations" USING btree ("root_task_run_id","execution_epoch");--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "subagent_root_finalizations_session_idx" ON "subagent_root_finalizations" USING btree ("session_id","created_at");--> statement-breakpoint
-CREATE INDEX IF NOT EXISTS "subagent_roots_session_idx" ON "subagent_roots" USING btree ("session_id");
+CREATE INDEX IF NOT EXISTS "subagent_roots_session_idx" ON "subagent_roots" USING btree ("session_id");--> statement-breakpoint
+ALTER TABLE "subagent_dispatches" ADD COLUMN IF NOT EXISTS "temperature" double precision;

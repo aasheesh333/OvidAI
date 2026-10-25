@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS "usage_run_admissions" (
 	"source" text NOT NULL,
 	"run_id" char(36) NOT NULL,
 	"idempotency_key" text NOT NULL,
+	"billing_class" text DEFAULT 'ovid_allowance' NOT NULL,
 	"created_at" timestamp (3) with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "usage_run_admissions_actor_user_id_users_uid_fk" FOREIGN KEY ("actor_user_id") REFERENCES "users"("uid") ON DELETE cascade,
 	CONSTRAINT "usage_run_admissions_source_check" CHECK ("source" IN ('interactive','schedule_create','schedule_run_now','schedule_tick','schedule_retry','parent_wake','subagent','collab'))
@@ -46,6 +47,7 @@ CREATE TABLE IF NOT EXISTS "usage_quota_reservations" (
 	"actual_cache_write_tokens" bigint,
 	"cost_usd" numeric(38, 10),
 	"cost_source" text,
+	"billing_class" text DEFAULT 'ovid_allowance' NOT NULL,
 	"day_window_start" timestamp (3) with time zone NOT NULL,
 	"month_window_start" timestamp (3) with time zone NOT NULL,
 	"run_usage_id" char(36),
@@ -59,6 +61,9 @@ CREATE TABLE IF NOT EXISTS "usage_quota_reservations" (
 	CONSTRAINT "usage_quota_reservations_tokens_check" CHECK ("input_tokens" >= 0 AND "max_output_tokens" >= 0 AND ("actual_input_tokens" IS NULL OR "actual_input_tokens" >= 0) AND ("actual_output_tokens" IS NULL OR "actual_output_tokens" >= 0)),
 	CONSTRAINT "usage_quota_reservations_usd_check" CHECK ("reserved_cost_usd" >= 0 AND ("cost_usd" IS NULL OR "cost_usd" >= 0))
 );--> statement-breakpoint
+
+ALTER TABLE "usage_run_admissions" ADD COLUMN IF NOT EXISTS "billing_class" text DEFAULT 'ovid_allowance' NOT NULL;--> statement-breakpoint
+ALTER TABLE "usage_quota_reservations" ADD COLUMN IF NOT EXISTS "billing_class" text DEFAULT 'ovid_allowance' NOT NULL;--> statement-breakpoint
 
 CREATE TABLE IF NOT EXISTS "upload_window_counters" (
 	"actor_user_id" text NOT NULL,
@@ -127,6 +132,7 @@ ALTER TABLE "run_usage" ADD COLUMN IF NOT EXISTS "requested_model" text;--> stat
 ALTER TABLE "run_usage" ADD COLUMN IF NOT EXISTS "provider_model" text;--> statement-breakpoint
 ALTER TABLE "run_usage" ADD COLUMN IF NOT EXISTS "cost_usd" numeric(38, 10);--> statement-breakpoint
 ALTER TABLE "run_usage" ADD COLUMN IF NOT EXISTS "cost_source" text;--> statement-breakpoint
+ALTER TABLE "run_usage" ADD COLUMN IF NOT EXISTS "billing_class" text DEFAULT 'ovid_allowance' NOT NULL;--> statement-breakpoint
 
 CREATE UNIQUE INDEX IF NOT EXISTS "usage_run_admissions_actor_key_uq" ON "usage_run_admissions" ("actor_user_id", "idempotency_key");--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "usage_run_admissions_run_idx" ON "usage_run_admissions" ("actor_user_id", "run_id");--> statement-breakpoint

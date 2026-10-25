@@ -3556,6 +3556,13 @@
           "primaryKey": false,
           "notNull": false
         },
+        "billing_class": {
+          "name": "billing_class",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'ovid_allowance'"
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp (3) with time zone",
@@ -6033,6 +6040,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "temperature": {
+          "name": "temperature",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
+        },
         "state": {
           "name": "state",
           "type": "text",
@@ -7704,6 +7717,13 @@
           "primaryKey": false,
           "notNull": false
         },
+        "billing_class": {
+          "name": "billing_class",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'ovid_allowance'"
+        },
         "day_window_start": {
           "name": "day_window_start",
           "type": "timestamp (3) with time zone",
@@ -7900,6 +7920,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "billing_class": {
+          "name": "billing_class",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'ovid_allowance'"
         },
         "created_at": {
           "name": "created_at",
