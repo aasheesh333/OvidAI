@@ -1318,13 +1318,6 @@ export const attachments = {
         return { row: failed!, error: new AttachmentFinalizeError(code, message) };
       }
 
-      const [ready] = await tx
-        .update(attachmentsTable)
-        .set({
-          uploadStatus: "ready",
-          actualBytes: input.actualBytes,
-          actualContentType: input.actualContentType,
-          finalizedAt: new Date(),
       // A matching declaration is necessary but not sufficient: the shared
       // 0038 reservation must already carry the same actual HEAD bytes. This
       // fence applies to gateway, worker, and direct repository callers alike.
@@ -1349,6 +1342,13 @@ export const attachments = {
         return { row: current };
       }
 
+      const [ready] = await tx
+        .update(attachmentsTable)
+        .set({
+          uploadStatus: "ready",
+          actualBytes: input.actualBytes,
+          actualContentType: input.actualContentType,
+          finalizedAt: new Date(),
         })
         .where(eq(attachmentsTable.id, current.id))
         .returning();

@@ -575,139 +575,6 @@ export interface StorageReservationInput {
   sessionId: string;
   declaredBytes: number;
   objectId?: string | null;
-}
-
-export interface StorageFinalizeInput {
-  reservationId: string;
-  actualBytes: number;
-  contentType: string | null;
-  etag: string | null;
-}
-
-export interface StorageQuotaExhausted {
-  ok: false;
-  scope: "upload" | "storage";
-  resetsAt: Date | null;
-}
-
-export type StorageQuotaReservationResult =
-  | { ok: true; reservationId: string }
-  | StorageQuotaExhausted;
-
-export interface StorageReservationStoreOptions {
-  now?: () => Date;
-  /** Test/forward-compatible override; defaults to the host's canonical plan. */
-  storageBytes?: number;
-  /** Test/forward-compatible override; defaults to the actor's canonical plan. */
-  uploads?: { count: number; windowHours: number };
-}
-
-interface UploadCounter extends Row {
-  used_uploads: number;
-  reserved_uploads: number;
-  oldest_at: Date | null;
-}
-
-async function storageCounter(tx: Tx, ownerUserId: string): Promise<Row> {
-  await tx.execute(sql`
-    INSERT INTO storage_usage_counters (owner_user_id) VALUES (${ownerUserId})
-    ON CONFLICT (owner_user_id) DO NOTHING`);
-  const found = await rows<Row>(tx, sql`
-    SELECT * FROM storage_usage_counters WHERE owner_user_id = ${ownerUserId} FOR UPDATE`);
-  return found[0]!;
-}
-
-async function refreshUploadCounter(
-  tx: Tx,
-  actorUserId: string,
-  windowHours: number,
-  now: Date,
-): Promise<UploadCounter> {
-  const start = new Date(now.getTime() - windowHours * 3_600_000);
-  const found = await rows<UploadCounter>(tx, sql`
-    SELECT
-      count(*) FILTER (WHERE state = 'finalized')::int AS used_uploads,
-      count(*) FILTER (WHERE state = 'reserved')::int AS reserved_uploads,
-      min(reserved_at) AS oldest_at
-    FROM storage_reservations
-    WHERE actor_user_id = ${actorUserId}
-      AND state IN ('reserved', 'finalized')
-      AND reserved_at >= ${start.toISOString()}::timestamptz
-      AND reserved_at <= ${now.toISOString()}::timestamptz`);
-  const counter = found[0] ?? { used_uploads: 0, reserved_uploads: 0, oldest_at: null };
-  await tx.execute(sql`
-    INSERT INTO upload_window_counters
-      (actor_user_id, window_hours, window_start, window_end,
-       used_uploads, reserved_uploads, updated_at)
-    VALUES
-      (${actorUserId}, ${windowHours}, ${start.toISOString()}::timestamptz,
-       ${now.toISOString()}::timestamptz, ${counter.used_uploads},
-       ${counter.reserved_uploads}, ${now.toISOString()}::timestamptz)
-    ON CONFLICT (actor_user_id, window_hours) DO UPDATE SET
-      window_start = EXCLUDED.window_start, window_end = EXCLUDED.window_end,
-      used_uploads = EXCLUDED.used_uploads,
-      reserved_uploads = EXCLUDED.reserved_uploads,
-      updated_at = EXCLUDED.updated_at`);
-  await rows<Row>(tx, sql`
-    SELECT * FROM upload_window_counters
-     WHERE actor_user_id = ${actorUserId} AND window_hours = ${windowHours}
-     FOR UPDATE`);
-  return counter;
-}
-
-export class StorageReservationStore {
-  constructor(
-    private readonly db: Db,
-    private readonly options: StorageReservationStoreOptions = {},
-  ) {}
-
-  private now(): Date {
-    const value = this.options.now?.() ?? new Date();
-    if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
-      throw new RangeError("storage clock returned an invalid Date");
-    }
-    return new Date(value.getTime());
-  }
-
-  private uploadPlan(tier: string): { count: number; windowHours: number } {
-    const plan = this.options.uploads ?? planFor(tier).uploads;
-    if (!Number.isInteger(plan.windowHours) || plan.windowHours <= 0) {
-      throw new RangeError("upload windowHours must be a positive integer");
-    }
-    return plan;
-  }
-
-  private storagePlan(tier: string): number {
-    const bytes = this.options.storageBytes ?? planStorageBytes(tier);
-    if (!Number.isSafeInteger(bytes) || bytes < 0) {
-      throw new RangeError("storage byte cap must be a non-negative safe integer");
-    }
-    return bytes;
-  }
-
-  async reserve(input: StorageReservationInput): Promise<StorageReservationResult> {
-    requiredId(input.reservationId, "reservationId");
-    requiredId(input.ownerUserId, "ownerUserId");
-    requiredId(input.uploaderUserId, "uploaderUserId");
-    requiredId(input.sessionId, "sessionId");
-    byteCount(input.declaredBytes, "declaredBytes");
-    const objectId = input.objectId ?? null;
-    return this.db.transaction(async (tx) => {
-      const tiers = await lockUsers(tx, [input.ownerUserId, input.uploaderUserId]);
-      const existingRows = await rows<Row>(tx, sql`
-        SELECT * FROM storage_reservations WHERE id = ${input.reservationId} FOR UPDATE`);
-      const existing = existingRows[0];
-      if (existing !== undefined) {
-        const unchanged =
-          existing.owner_user_id === input.ownerUserId &&
-          existing.actor_user_id === input.uploaderUserId &&
-          existing.session_id === input.sessionId &&
-          Number(existing.declared_bytes) === input.declaredBytes &&
-          (existing.object_id ?? null) === objectId;
-        if (!unchanged) throw new QuotaContractError("idempotency_conflict");
-        if (existing.state === "released") throw new QuotaContractError("reservation_released");
-        return { ok: true as const, reservationId: input.reservationId };
-      }
   /** Explicitly marks an ordinary attachment; other object kinds skip this fence. */
   attachment?: boolean;
   /** Current HEAD evidence from the caller's reservation/finalize transaction. */
@@ -834,26 +701,26 @@ async function lockAttachmentForUploadTx(
   if (options.allowFailed !== true && attachment.uploadStatus === "failed") {
     throw new QuotaContractError("attachment_failed");
   }
+}
 
-      const now = this.now();
-      const upload = this.uploadPlan(tiers.get(input.uploaderUserId)!);
-      const window = await refreshUploadCounter(tx, input.uploaderUserId, upload.windowHours, now);
-      if (
-        Number.isFinite(upload.count) && upload.count > 0 &&
-        Number(window.used_uploads) + Number(window.reserved_uploads) + 1 > upload.count
+export interface StorageFinalizeInput {
+  reservationId: string;
+  actualBytes: number;
+  contentType: string | null;
+  etag: string | null;
   attachment?: boolean;
-      ) {
-        const oldest = window.oldest_at === null ? null : new Date(window.oldest_at);
-        return {
-          ok: false as const,
-          scope: "upload" as const,
-          resetsAt: oldest === null
-            ? new Date(now.getTime() + upload.windowHours * 3_600_000)
-            : new Date(oldest.getTime() + upload.windowHours * 3_600_000),
-        };
-      }
-      const counter = await storageCounter(tx, input.ownerUserId);
-      const storageCap = this.storagePlan(tiers.get(input.ownerUserId)!);
+}
+
+export interface StorageQuotaExhausted {
+  ok: false;
+  scope: "upload" | "storage";
+  resetsAt: Date | null;
+}
+
+export type StorageQuotaReservationResult =
+  | { ok: true; reservationId: string }
+  | StorageQuotaExhausted;
+
 export type StorageReservationResult =
   | StorageQuotaReservationResult
   | {
@@ -864,31 +731,31 @@ export type StorageReservationResult =
       resetsAt: null;
     };
 
-      if (Number(counter.used_bytes) + Number(counter.reserved_bytes) + input.declaredBytes > storageCap) {
-        return { ok: false as const, scope: "storage" as const, resetsAt: null };
-      }
-      await tx.execute(sql`
-        INSERT INTO storage_reservations
-          (id, actor_user_id, owner_user_id, session_id, object_id, state,
+export interface StorageReservationStoreOptions {
+  now?: () => Date;
+  /** Test/forward-compatible override; defaults to the host's canonical plan. */
+  storageBytes?: number;
+  /** Test/forward-compatible override; defaults to the actor's canonical plan. */
+  uploads?: { count: number; windowHours: number };
   /** Internal deterministic lock-order synchronization; production leaves it undefined. */
   afterAttachmentLock?(operation: "finalize" | "release", reservationId: string): Promise<void>;
-           declared_bytes, reserved_at, created_at, updated_at)
-        VALUES
-          (${input.reservationId}, ${input.uploaderUserId}, ${input.ownerUserId},
-           ${input.sessionId}, ${objectId}, 'reserved', ${input.declaredBytes},
-           ${now.toISOString()}::timestamptz, ${now.toISOString()}::timestamptz,
-           ${now.toISOString()}::timestamptz)`);
-      await tx.execute(sql`
-        UPDATE storage_usage_counters
-           SET reserved_bytes = reserved_bytes + ${input.declaredBytes},
-               updated_at = ${now.toISOString()}::timestamptz
-         WHERE owner_user_id = ${input.ownerUserId}`);
-      await refreshUploadCounter(tx, input.uploaderUserId, upload.windowHours, now);
-      return { ok: true as const, reservationId: input.reservationId };
-    });
-  }
+}
 
-  async finalize(input: StorageFinalizeInput): Promise<StorageQuotaReservationResult> {
+interface UploadCounter extends Row {
+  used_uploads: number;
+  reserved_uploads: number;
+  oldest_at: Date | null;
+}
+
+async function storageCounter(tx: Tx, ownerUserId: string): Promise<Row> {
+  await tx.execute(sql`
+    INSERT INTO storage_usage_counters (owner_user_id) VALUES (${ownerUserId})
+    ON CONFLICT (owner_user_id) DO NOTHING`);
+  const found = await rows<Row>(tx, sql`
+    SELECT * FROM storage_usage_counters WHERE owner_user_id = ${ownerUserId} FOR UPDATE`);
+  return found[0]!;
+}
+
 /**
  * Idempotent pre-0038/actual-byte reconciliation. Live reservations are the
  * authority for objects they cover; ready legacy attachments and active
@@ -1010,6 +877,169 @@ export async function sweepAbandonedStorageReservations(
   return released;
 }
 
+async function refreshUploadCounter(
+  tx: Tx,
+  actorUserId: string,
+  windowHours: number,
+  now: Date,
+): Promise<UploadCounter> {
+  const start = new Date(now.getTime() - windowHours * 3_600_000);
+  const found = await rows<UploadCounter>(tx, sql`
+    SELECT
+      count(*) FILTER (WHERE state = 'finalized')::int AS used_uploads,
+      count(*) FILTER (WHERE state = 'reserved')::int AS reserved_uploads,
+      min(reserved_at) AS oldest_at
+    FROM storage_reservations
+    WHERE actor_user_id = ${actorUserId}
+      AND state IN ('reserved', 'finalized')
+      -- Internal immutable-share charges/grants are not uploads. Real upload
+      -- and artifact reservations use their canonical object id (or legacy
+      -- NULL); only the explicit artifact-shares key namespace is excluded.
+      AND (
+        object_id IS NULL OR (
+          object_id NOT LIKE 'charge:%'
+          AND object_id NOT LIKE 'users/%/artifact-shares/%'
+        )
+      )
+      AND reserved_at >= ${start.toISOString()}::timestamptz
+      AND reserved_at <= ${now.toISOString()}::timestamptz`);
+  const counter = found[0] ?? { used_uploads: 0, reserved_uploads: 0, oldest_at: null };
+  await tx.execute(sql`
+    INSERT INTO upload_window_counters
+      (actor_user_id, window_hours, window_start, window_end,
+       used_uploads, reserved_uploads, updated_at)
+    VALUES
+      (${actorUserId}, ${windowHours}, ${start.toISOString()}::timestamptz,
+       ${now.toISOString()}::timestamptz, ${counter.used_uploads},
+       ${counter.reserved_uploads}, ${now.toISOString()}::timestamptz)
+    ON CONFLICT (actor_user_id, window_hours) DO UPDATE SET
+      window_start = EXCLUDED.window_start, window_end = EXCLUDED.window_end,
+      used_uploads = EXCLUDED.used_uploads,
+      reserved_uploads = EXCLUDED.reserved_uploads,
+      updated_at = EXCLUDED.updated_at`);
+  await rows<Row>(tx, sql`
+    SELECT * FROM upload_window_counters
+     WHERE actor_user_id = ${actorUserId} AND window_hours = ${windowHours}
+     FOR UPDATE`);
+  return counter;
+}
+
+export class StorageReservationStore {
+  constructor(
+    private readonly db: Db,
+    private readonly options: StorageReservationStoreOptions = {},
+  ) {}
+
+  private now(): Date {
+    const value = this.options.now?.() ?? new Date();
+    if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
+      throw new RangeError("storage clock returned an invalid Date");
+    }
+    return new Date(value.getTime());
+  }
+
+  private uploadPlan(tier: string): { count: number; windowHours: number } {
+    const plan = this.options.uploads ?? planFor(tier).uploads;
+    if (!Number.isInteger(plan.windowHours) || plan.windowHours <= 0) {
+      throw new RangeError("upload windowHours must be a positive integer");
+    }
+    return plan;
+  }
+
+  private storagePlan(tier: string): number {
+    const bytes = this.options.storageBytes ?? planStorageBytes(tier);
+    if (!Number.isSafeInteger(bytes) || bytes < 0) {
+      throw new RangeError("storage byte cap must be a non-negative safe integer");
+    }
+    return bytes;
+  }
+
+  async reserve(input: StorageReservationInput): Promise<StorageReservationResult> {
+    requiredId(input.reservationId, "reservationId");
+    requiredId(input.ownerUserId, "ownerUserId");
+    requiredId(input.uploaderUserId, "uploaderUserId");
+    requiredId(input.sessionId, "sessionId");
+    byteCount(input.declaredBytes, "declaredBytes");
+    const objectId = input.objectId ?? null;
+    return this.db.transaction(async (tx) => {
+      const tiers = await lockUsers(tx, [input.ownerUserId, input.uploaderUserId]);
+      if (input.attachment === true && input.head !== undefined) {
+        const legacy = await reconcileLegacyAttachmentTx(tx, input, this.now());
+        if (legacy.outcome === "failed") {
+          // Return a committed refusal. Throwing here would roll back the
+          // failed status/tombstone and reopen stale-HEAD recovery.
+          return {
+            ok: false as const,
+            scope: "attachment" as const,
+            code: "attachment_failed" as const,
+            resetsAt: null,
+          };
+        }
+        if (legacy.outcome === "preserved") {
+          const now = this.now();
+          const upload = this.uploadPlan(tiers.get(input.uploaderUserId)!);
+          await refreshUploadCounter(tx, input.uploaderUserId, upload.windowHours, now);
+          return { ok: true as const, reservationId: input.reservationId };
+        }
+      }
+      await lockAttachmentForUploadTx(tx, input);
+      const existingRows = await rows<Row>(tx, sql`
+        SELECT * FROM storage_reservations WHERE id = ${input.reservationId} FOR UPDATE`);
+      const existing = existingRows[0];
+      if (existing !== undefined) {
+        const unchanged =
+          existing.owner_user_id === input.ownerUserId &&
+          existing.actor_user_id === input.uploaderUserId &&
+          existing.session_id === input.sessionId &&
+          Number(existing.declared_bytes) === input.declaredBytes &&
+          (existing.object_id ?? null) === objectId;
+        if (!unchanged) throw new QuotaContractError("idempotency_conflict");
+        if (existing.state === "released") throw new QuotaContractError("reservation_released");
+        return { ok: true as const, reservationId: input.reservationId };
+      }
+
+      const now = this.now();
+      const upload = this.uploadPlan(tiers.get(input.uploaderUserId)!);
+      const window = await refreshUploadCounter(tx, input.uploaderUserId, upload.windowHours, now);
+      if (
+        Number.isFinite(upload.count) && upload.count > 0 &&
+        Number(window.used_uploads) + Number(window.reserved_uploads) + 1 > upload.count
+      ) {
+        const oldest = window.oldest_at === null ? null : new Date(window.oldest_at);
+        return {
+          ok: false as const,
+          scope: "upload" as const,
+          resetsAt: oldest === null
+            ? new Date(now.getTime() + upload.windowHours * 3_600_000)
+            : new Date(oldest.getTime() + upload.windowHours * 3_600_000),
+        };
+      }
+      await reconcileStorageUsageTx(tx, input.ownerUserId, now);
+      const counter = await storageCounter(tx, input.ownerUserId);
+      const storageCap = this.storagePlan(tiers.get(input.ownerUserId)!);
+      if (Number(counter.used_bytes) + Number(counter.reserved_bytes) + input.declaredBytes > storageCap) {
+        return { ok: false as const, scope: "storage" as const, resetsAt: null };
+      }
+      await tx.execute(sql`
+        INSERT INTO storage_reservations
+          (id, actor_user_id, owner_user_id, session_id, object_id, state,
+           declared_bytes, reserved_at, created_at, updated_at)
+        VALUES
+          (${input.reservationId}, ${input.uploaderUserId}, ${input.ownerUserId},
+           ${input.sessionId}, ${objectId}, 'reserved', ${input.declaredBytes},
+           ${now.toISOString()}::timestamptz, ${now.toISOString()}::timestamptz,
+           ${now.toISOString()}::timestamptz)`);
+      await tx.execute(sql`
+        UPDATE storage_usage_counters
+           SET reserved_bytes = reserved_bytes + ${input.declaredBytes},
+               updated_at = ${now.toISOString()}::timestamptz
+         WHERE owner_user_id = ${input.ownerUserId}`);
+      await refreshUploadCounter(tx, input.uploaderUserId, upload.windowHours, now);
+      return { ok: true as const, reservationId: input.reservationId };
+    });
+  }
+
+  async finalize(input: StorageFinalizeInput): Promise<StorageQuotaReservationResult> {
     requiredId(input.reservationId, "reservationId");
     byteCount(input.actualBytes, "actualBytes");
     if (input.contentType !== null && input.contentType.trim().length === 0) {
@@ -1021,19 +1051,23 @@ export async function sweepAbandonedStorageReservations(
           FROM storage_reservations WHERE id = ${input.reservationId} LIMIT 1`);
       if (identity[0] === undefined) throw new QuotaContractError("reservation_not_found");
       const tiers = await lockUsers(tx, [String(identity[0].owner_user_id), String(identity[0].actor_user_id)]);
+      const reservationIdentity = identity[0]!;
+      await lockAttachmentForUploadTx(tx, {
+        reservationId: input.reservationId,
+        ownerUserId: String(reservationIdentity.owner_user_id),
+        uploaderUserId: String(reservationIdentity.actor_user_id),
+        sessionId: String(reservationIdentity.session_id),
+        declaredBytes: 0,
+        objectId: reservationIdentity.object_id === null
+          ? null
+          : String(reservationIdentity.object_id),
+        attachment: input.attachment === true,
+      }, { requirePresent: true });
+      await this.options.afterAttachmentLock?.("finalize", input.reservationId);
       const found = await rows<Row>(tx, sql`
         SELECT * FROM storage_reservations WHERE id = ${input.reservationId} FOR UPDATE`);
       const reservation = found[0]!;
       if (reservation.state === "released") throw new QuotaContractError("reservation_released");
-      -- Internal immutable-share charges/grants are not uploads. Real upload
-      -- and artifact reservations use their canonical object id (or legacy
-      -- NULL); only the explicit artifact-shares key namespace is excluded.
-      AND (
-        object_id IS NULL OR (
-          object_id NOT LIKE 'charge:%'
-          AND object_id NOT LIKE 'users/%/artifact-shares/%'
-        )
-      )
       if (reservation.state === "finalized") {
         const unchanged =
           Number(reservation.actual_bytes) === input.actualBytes &&
@@ -1048,6 +1082,7 @@ export async function sweepAbandonedStorageReservations(
       const ownerUserId = String(reservation.owner_user_id);
       const actorUserId = String(reservation.actor_user_id);
       const declared = Number(reservation.declared_bytes);
+      await reconcileStorageUsageTx(tx, ownerUserId, now);
       const counter = await storageCounter(tx, ownerUserId);
       const storageCap = this.storagePlan(tiers.get(ownerUserId)!);
       const projected =
@@ -1082,67 +1117,6 @@ export async function sweepAbandonedStorageReservations(
           FROM storage_reservations WHERE id = ${input.reservationId} LIMIT 1`);
       if (identity[0] === undefined) throw new QuotaContractError("reservation_not_found");
       const tiers = await lockUsers(tx, [String(identity[0].owner_user_id), String(identity[0].actor_user_id)]);
-      const found = await rows<Row>(tx, sql`
-        SELECT * FROM storage_reservations WHERE id = ${input.reservationId} FOR UPDATE`);
-      const reservation = found[0]!;
-      if (reservation.state === "released") return;
-      if (reservation.state === "finalized") throw new QuotaContractError("reservation_finalized");
-      if (reservation.state !== "reserved") throw new QuotaContractError("invalid_reservation_state");
-      const now = this.now();
-      const ownerUserId = String(reservation.owner_user_id);
-      const actorUserId = String(reservation.actor_user_id);
-      const declared = Number(reservation.declared_bytes);
-      await storageCounter(tx, ownerUserId);
-      await tx.execute(sql`
-        UPDATE storage_usage_counters
-           SET reserved_bytes = reserved_bytes - ${declared},
-      if (input.attachment === true && input.head !== undefined) {
-        const legacy = await reconcileLegacyAttachmentTx(tx, input, this.now());
-        if (legacy.outcome === "failed") {
-          // Return a committed refusal. Throwing here would roll back the
-          // failed status/tombstone and reopen stale-HEAD recovery.
-          return {
-            ok: false as const,
-            scope: "attachment" as const,
-            code: "attachment_failed" as const,
-            resetsAt: null,
-          };
-        }
-        if (legacy.outcome === "preserved") {
-          const now = this.now();
-          const upload = this.uploadPlan(tiers.get(input.uploaderUserId)!);
-          await refreshUploadCounter(tx, input.uploaderUserId, upload.windowHours, now);
-          return { ok: true as const, reservationId: input.reservationId };
-        }
-      }
-      await lockAttachmentForUploadTx(tx, input);
-               updated_at = ${now.toISOString()}::timestamptz
-         WHERE owner_user_id = ${ownerUserId}`);
-      await tx.execute(sql`
-        UPDATE storage_reservations
-           SET state = 'released', released_at = ${now.toISOString()}::timestamptz,
-               updated_at = ${now.toISOString()}::timestamptz
-         WHERE id = ${input.reservationId}`);
-      const upload = this.uploadPlan(tiers.get(actorUserId)!);
-      await refreshUploadCounter(tx, actorUserId, upload.windowHours, now);
-    });
-  }
-}
-      await reconcileStorageUsageTx(tx, input.ownerUserId, now);
-      const reservationIdentity = identity[0]!;
-      await lockAttachmentForUploadTx(tx, {
-        reservationId: input.reservationId,
-        ownerUserId: String(reservationIdentity.owner_user_id),
-        uploaderUserId: String(reservationIdentity.actor_user_id),
-        sessionId: String(reservationIdentity.session_id),
-        declaredBytes: 0,
-        objectId: reservationIdentity.object_id === null
-          ? null
-          : String(reservationIdentity.object_id),
-        attachment: input.attachment === true,
-      }, { requirePresent: true });
-      await this.options.afterAttachmentLock?.("finalize", input.reservationId);
-      await reconcileStorageUsageTx(tx, ownerUserId, now);
       const reservationIdentity = identity[0]!;
       await lockAttachmentForUploadTx(tx, {
         reservationId: input.reservationId,
@@ -1156,6 +1130,9 @@ export async function sweepAbandonedStorageReservations(
         attachment: reservationIdentity.object_id === input.reservationId,
       }, { allowFailed: true });
       await this.options.afterAttachmentLock?.("release", input.reservationId);
+      const found = await rows<Row>(tx, sql`
+        SELECT * FROM storage_reservations WHERE id = ${input.reservationId} FOR UPDATE`);
+      const reservation = found[0]!;
       // Releasing a pending upload revokes its application-level finalize
       // capability. A presigned late PUT may still create an orphan, but the
       // failed row cannot finalize or mint a download. Replay also repairs
@@ -1167,3 +1144,26 @@ export async function sweepAbandonedStorageReservations(
                  actual_content_type = NULL, finalized_at = NULL
            WHERE id = ${reservation.object_id} AND upload_status = 'pending'`);
       }
+      if (reservation.state === "released") return;
+      if (reservation.state === "finalized") throw new QuotaContractError("reservation_finalized");
+      if (reservation.state !== "reserved") throw new QuotaContractError("invalid_reservation_state");
+      const now = this.now();
+      const ownerUserId = String(reservation.owner_user_id);
+      const actorUserId = String(reservation.actor_user_id);
+      const declared = Number(reservation.declared_bytes);
+      await storageCounter(tx, ownerUserId);
+      await tx.execute(sql`
+        UPDATE storage_usage_counters
+           SET reserved_bytes = reserved_bytes - ${declared},
+               updated_at = ${now.toISOString()}::timestamptz
+         WHERE owner_user_id = ${ownerUserId}`);
+      await tx.execute(sql`
+        UPDATE storage_reservations
+           SET state = 'released', released_at = ${now.toISOString()}::timestamptz,
+               updated_at = ${now.toISOString()}::timestamptz
+         WHERE id = ${input.reservationId}`);
+      const upload = this.uploadPlan(tiers.get(actorUserId)!);
+      await refreshUploadCounter(tx, actorUserId, upload.windowHours, now);
+    });
+  }
+}
