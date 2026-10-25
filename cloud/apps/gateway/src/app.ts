@@ -75,6 +75,18 @@ import type { BrowserChannelDeps } from "./browserChannel.js";
 import { PtyBridgeError, type PtyBridge } from "./wsPty.js";
 import type { SystemHub } from "./systemChannel.js";
 import type { IpAnomalyGuard } from "./ipAnomalyGuard.js";
+import { registerCollabRoutes } from "./collab/routes.js";
+import type { CollabMembership } from "./collab/membership.js";
+import type { CollabProjection } from "./collab/projection.js";
+import type { CollabLongPollOptions } from "./collab/longPoll.js";
+import {
+  createCollabObjectStore,
+  createCollabReservationPort,
+  registerCollabObjectRoutes,
+  type CollabObjectStore,
+  type CollabReservationPort,
+  type CollabReservedRelease,
+} from "./collab/objects.js";
 import {
   createRateLimitPreHandler,
   registerRateLimitInternalRoute,
@@ -317,6 +329,22 @@ export interface GatewayDeps {
    * main() wires it when OVID_ACCOUNT_FIREBASE_APP_IDS is configured.
    */
   account?: AccountRouteDeps;
+  /** Root /chat stays unmounted unless the complete opt-in composition exists. */
+  collab?: {
+    membership: CollabMembership;
+    projection: CollabProjection;
+    longPoll?: CollabLongPollOptions;
+    /** Optional test overrides; production and default composition use canonical stores. */
+    objects?: CollabObjectStore;
+    reservations?: CollabReservationPort;
+    reservedRelease?: CollabReservedRelease;
+    orphanSweepMs?: number;
+    orphanRescanMs?: number;
+    recoveryBatchLimit?: number;
+    recoveryDeadlineMs?: number;
+    recoveryReservedGroupsPerPass?: number;
+    recoveryReservedReleaseLimit?: number;
+  };
 }
 
 export interface BuildGatewayOptions {
@@ -628,6 +656,49 @@ export function buildGateway(
       db: deps.db,
       verifier: deps.verifier,
       ...deps.reports,
+    });
+  }
+  if (deps.collab !== undefined) {
+    app.register(async (scope) => {
+      registerCollabRoutes(scope, {
+        membership: deps.collab!.membership,
+        projection: deps.collab!.projection,
+        verifier: deps.verifier,
+        ...(deps.collab!.longPoll !== undefined ? { longPoll: deps.collab!.longPoll } : {}),
+      });
+      registerCollabObjectRoutes(scope, {
+        membership: deps.collab!.membership,
+        objects: deps.collab!.objects ?? createCollabObjectStore(deps.db, { now: deps.clock }),
+        reservations: deps.collab!.reservations ?? createCollabReservationPort(
+          deps.db,
+          undefined,
+          { now: deps.clock },
+        ),
+        ...(deps.collab!.reservedRelease !== undefined
+          ? { reservedRelease: deps.collab!.reservedRelease }
+          : {}),
+        ...(deps.collab!.recoveryReservedGroupsPerPass !== undefined
+          ? { recoveryReservedGroupsPerPass: deps.collab!.recoveryReservedGroupsPerPass }
+          : {}),
+        ...(deps.collab!.recoveryReservedReleaseLimit !== undefined
+          ? { recoveryReservedReleaseLimit: deps.collab!.recoveryReservedReleaseLimit }
+          : {}),
+        storage: deps.storage,
+        clock: deps.clock,
+        downloadTtlSeconds: deps.presignTtlSeconds,
+        ...(deps.collab!.orphanSweepMs !== undefined
+          ? { orphanSweepMs: deps.collab!.orphanSweepMs }
+          : {}),
+        ...(deps.collab!.orphanRescanMs !== undefined
+          ? { orphanRescanMs: deps.collab!.orphanRescanMs }
+          : {}),
+        ...(deps.collab!.recoveryBatchLimit !== undefined
+          ? { recoveryBatchLimit: deps.collab!.recoveryBatchLimit }
+          : {}),
+        ...(deps.collab!.recoveryDeadlineMs !== undefined
+          ? { recoveryDeadlineMs: deps.collab!.recoveryDeadlineMs }
+          : {}),
+      });
     });
   }
 
