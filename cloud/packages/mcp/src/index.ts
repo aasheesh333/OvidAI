@@ -50,6 +50,22 @@ export * from "./configParse.js";
 // the exports map blocks deep imports, so both surfaces must ride the barrel
 // (Task 6 review I1 carry, closed here).
 export * from "./catalog.js";
+export {
+  KNOWN_PROVIDER_IDS,
+  PRODUCTION_PROVIDER_REGISTRY,
+  RESERVED_PROVIDER_NAMESPACES,
+} from "./providerProduction.js";
+export {
+  assertValidLiveEvidence,
+  createProviderRegistry,
+  type AuthProfile,
+  type CredentialState,
+  type LiveEvidence,
+  type ProviderReadinessRow,
+  type ProviderRegistration,
+  type ProviderRegistry,
+} from "./providers/registry.js";
+export { createSecretRedactor, type SecretRedactor } from "./egress/redactor.js";
 export * from "./rest/engine.js";
 export * from "./activation.js";
 export * from "./health.js";

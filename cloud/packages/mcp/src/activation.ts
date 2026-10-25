@@ -11,10 +11,11 @@ import {
 import { canonicalToolId, toolNameFor } from "./toolNames.js";
 import type { SecretRedactor } from "./egress/redactor.js";
 import type { ProviderEgress } from "./egress/providerEgress.js";
-import type { CuratedCatalogDeps } from "./catalog.js";
-import { createRestHandler, restToolDefs } from "./rest/engine.js";
-import { CURATED_DESCRIPTORS } from "./rest/descriptors/index.js";
+import { createCuratedCatalogProjection, type CuratedCatalogDeps } from "./catalog.js";
+import { createRestHandler } from "./rest/engine.js";
 import type { NativeMcpHandler } from "./transports/native.js";
+import { PRODUCTION_PROVIDER_REGISTRY } from "./providerProduction.js";
+import type { ProviderRegistry } from "./providers/registry.js";
 
 /** The exact non-secret operation record carried by a root or child run. */
 export interface ActivatedOperation {
@@ -277,23 +278,9 @@ export function createActivationService(deps: ActivationServiceDeps): Activation
   };
 }
 
-/**
- * Current generic-REST runtime support. This is deliberately not the later
- * live-readiness matrix: special native handlers, dynamic tenant origins and
- * descriptors with known auth/retirement gates stay out of the run registry.
- */
-const LATER_PROVIDER_GATES: ReadonlySet<string> = new Set([
-  "linear",
-  "firebase",
-  "mongodb",
-  "s3",
-  "google-drive",
-  "gitlab",
-  "jira",
-  "supabase",
-]);
-
+/** Runtime support is projected exclusively from validated readiness rows. */
 export interface CuratedProviderSupport {
+  registry: ProviderRegistry;
   definitions: readonly ActivationProvider[];
   origins: Readonly<Record<string, readonly URL[]>>;
   handlerOverrides(
@@ -302,48 +289,16 @@ export interface CuratedProviderSupport {
   ): CuratedCatalogDeps["handlerOverrides"];
 }
 
-export function createCuratedProviderSupport(): CuratedProviderSupport {
-  const descriptors = CURATED_DESCRIPTORS.filter(
-    (descriptor) => !LATER_PROVIDER_GATES.has(descriptor.curatedId),
-  );
-  const definitions: ActivationProvider[] = [];
-  const origins: Record<string, readonly URL[]> = {};
-
-  for (const descriptor of descriptors) {
-    const operations: ProviderOperation[] = restToolDefs(descriptor).map((operation) => ({
-      name: operation.name,
-      description: operation.description ?? operation.name,
-      effect: operation.effect,
-      approval: operation.approval,
-      requiredScopes: operation.requiredScopes,
-      inputSchema: operation.inputSchema ?? {
-        type: "object",
-        properties: {},
-        additionalProperties: false,
-        maxProperties: 0,
-      },
-      outputPolicy: operation.outputPolicy,
-      request: operation.request,
-      limits: operation.limits,
-    }));
-    if (operations.length === 0) continue;
-    const origin = new URL(descriptor.baseUrl).origin;
-    if (operations.some((operation) => operation.request.originKey !== descriptor.curatedId)) {
-      throw new Error(`provider_origin_mismatch:${descriptor.curatedId}`);
-    }
-    definitions.push({
-      providerId: descriptor.curatedId,
-      operations,
-      readiness: "supported",
-    });
-    origins[descriptor.curatedId] = Object.freeze([new URL(origin)]);
-  }
-
+export function createCuratedProviderSupport(
+  registry: ProviderRegistry = PRODUCTION_PROVIDER_REGISTRY,
+): CuratedProviderSupport {
+  const projection = createCuratedCatalogProjection(registry);
   return {
-    definitions: Object.freeze(definitions),
-    origins: Object.freeze(origins),
+    registry,
+    definitions: projection.definitions,
+    origins: projection.origins,
     handlerOverrides(egress, redactor) {
-      return Object.fromEntries(descriptors.map((descriptor) => [
+      return Object.fromEntries(projection.genericDescriptors.map((descriptor) => [
         descriptor.curatedId,
         (): NativeMcpHandler => createRestHandler(descriptor, {
           providerEgress: egress,

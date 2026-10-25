@@ -288,28 +288,14 @@ describe("per-run activation snapshots", () => {
     await expect(collision.service.snapshotForRun(rootInput)).rejects.toThrow("model_name_collision");
   });
 
-  it("builds pinned generic REST support while leaving special, dynamic and unreviewed handlers unrostered", () => {
+  it("derives activation support only from validated original readiness, never descriptors", () => {
     const support = createCuratedProviderSupport();
-    const ids = support.definitions.map((provider) => provider.providerId);
-    expect(ids).toContain("exa");
-    for (const excluded of [
-      "linear",
-      "firebase",
-      "mongodb",
-      "s3",
-      "google-drive",
-      "gitlab",
-      "jira",
-      "supabase",
-    ]) {
-      expect(ids).not.toContain(excluded);
-    }
-    expect(support.origins.exa?.map((url) => url.origin)).toEqual(["https://api.exa.ai"]);
-    const exa = support.definitions.find((provider) => provider.providerId === "exa");
-    expect(exa?.operations.some((operation) => operation.name === "search")).toBe(true);
-    expect(exa?.operations.every((operation) =>
-      operation.inputSchema.additionalProperties === false &&
-      operation.request.originKey === "exa"
-    )).toBe(true);
+    // Every original is blocked/deprecated in the real registry. No test may
+    // promote one merely to make production composition appear operational.
+    expect(support.definitions).toEqual([]);
+    expect(support.origins).toEqual({});
+    expect(support.definitions.some((provider) => provider.providerId === "exa")).toBe(false);
+    expect(support.definitions.some((provider) => provider.providerId === "github")).toBe(false);
+    expect(support.handlerOverrides).toBeTypeOf("function");
   });
 });

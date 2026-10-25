@@ -14,7 +14,13 @@
  *    `requireHost` branch. The Dart tool paths already carry `/rest/api/3/…`.
  */
 
-import type { RestServiceDescriptor } from "../engine.js";
+import {
+  createRestHandler,
+  type RestHandlerOptions,
+  type RestServiceDescriptor,
+} from "../engine.js";
+import type { McpToolCallResult } from "../../client.js";
+import type { McpCallContext, NativeMcpHandler } from "../../transports/native.js";
 
 export const GITLAB_DESCRIPTOR: RestServiceDescriptor = {
   curatedId: "gitlab",
@@ -63,24 +69,6 @@ export const GITLAB_DESCRIPTOR: RestServiceDescriptor = {
       queryArgs: ["state"],
       required: ["project_id"],
     },
-    {
-      name: "create_issue",
-      description:
-        "Create a project issue (title + description travel as request parameters, which GitLab accepts on this method).",
-      method: "POST",
-      path: "/projects/{project_id}/issues",
-      inputSchema: {
-        type: "object",
-        properties: {
-          project_id: { type: "string" },
-          title: { type: "string" },
-          description: { type: "string" },
-        },
-        required: ["project_id", "title"],
-      },
-      queryArgs: ["title", "description"],
-      required: ["project_id", "title"],
-    },
   ],
 };
 
@@ -110,65 +98,42 @@ export const JIRA_DESCRIPTOR: RestServiceDescriptor = {
   tools: [
     {
       name: "search",
-      description:
-        'Search issues with JQL. body is the search JSON, e.g. {"jql": "project = PROJ", "maxResults": 20}.',
+      description: "Search issues through enhanced JQL with bounded results and opaque page tokens.",
       method: "POST",
       path: "/rest/api/3/search/jql",
+      effect: "read",
+      bodyTemplate: {
+        jql: "arg:jql",
+        maxResults: "int:maxResults:50",
+        nextPageToken: "arg:nextPageToken",
+        "fields.0": 'const:"summary"',
+        "fields.1": 'const:"status"',
+      },
       inputSchema: {
         type: "object",
         properties: {
-          body: { type: "object" },
+          jql: { type: "string", minLength: 1, maxLength: 4_000 },
+          maxResults: { type: "integer", minimum: 1, maximum: 100, default: 50 },
+          nextPageToken: { type: "string", maxLength: 8_192 },
         },
-        required: ["body"],
+        required: ["jql"],
       },
-      jsonBodyArg: "body",
-      required: ["body"],
+      required: ["jql"],
     },
     {
       name: "get_issue",
       description: "Fetch one issue by key (e.g. PROJ-123).",
       method: "GET",
       path: "/rest/api/3/issue/{key}",
+      effect: "read",
       inputSchema: {
         type: "object",
         properties: {
-          key: { type: "string" },
+          key: { type: "string", minLength: 1, maxLength: 128 },
         },
         required: ["key"],
       },
       required: ["key"],
-    },
-    {
-      name: "create_issue",
-      description:
-        'Create an issue. body is the Jira issue JSON, e.g. {"fields": {"project": {"key": "PROJ"}, "summary": "New bug", "issuetype": {"name": "Task"}}}.',
-      method: "POST",
-      path: "/rest/api/3/issue",
-      inputSchema: {
-        type: "object",
-        properties: {
-          body: { type: "object" },
-        },
-        required: ["body"],
-      },
-      jsonBodyArg: "body",
-      required: ["body"],
-    },
-    {
-      name: "add_comment",
-      description: 'Comment on an issue. body is the comment JSON, e.g. {"body": "looks good"}.',
-      method: "POST",
-      path: "/rest/api/3/issue/{key}/comment",
-      inputSchema: {
-        type: "object",
-        properties: {
-          key: { type: "string" },
-          body: { type: "object" },
-        },
-        required: ["key", "body"],
-      },
-      jsonBodyArg: "body",
-      required: ["key", "body"],
     },
   ],
 };
@@ -176,40 +141,34 @@ export const JIRA_DESCRIPTOR: RestServiceDescriptor = {
 export const LINEAR_DESCRIPTOR: RestServiceDescriptor = {
   curatedId: "linear",
   displayName: "Linear Sync",
-  description: "Linear issues and teams over the GraphQL API.",
+  description: "Read Linear issues, teams, and viewer identity through fixed GraphQL documents.",
   baseUrl: "https://api.linear.app/graphql",
   auth: "bearer",
-  authPrefix: "Bearer ",
-  credentialKey: "api_key",
-  credentialLabel: "Linear API key",
+  authPrefix: "",
+  credentialKey: "personal_api_key",
+  credentialLabel: "Linear personal API key",
+  extraConfig: [{ key: "oauth_access_token", label: "Linear OAuth access token", secret: true }],
   tools: [
     {
-      name: "list_issues",
-      description:
-        'List issues via GraphQL. body is the GraphQL JSON, e.g. {"query": "query { issues(first: 20) { nodes { id title } } }"}',
+      name: "get_viewer",
+      description: "Read the authenticated Linear viewer with a server-owned GraphQL document.",
       method: "POST",
       path: "",
-      inputSchema: {
-        type: "object",
-        properties: {
-          body: { type: "object" },
-        },
-        required: ["body"],
-      },
-      jsonBodyArg: "body",
-      required: ["body"],
+      effect: "read",
+      bodyTemplate: { query: 'const:"query OvidViewer { viewer { id name email } }"' },
+      outputPolicy: { kind: "redacted_json", maxBytes: 65_536 },
+      inputSchema: { type: "object", properties: {} },
     },
     {
-      name: "create_issue",
-      description:
-        'Create an issue via GraphQL. body is the GraphQL JSON, e.g. {"query": "mutation … issueCreate …", "variables": {"input": {"teamId": "T1", "title": "Bug"}}}.',
+      name: "list_issues",
+      description: "List issues with a server-owned GraphQL document and typed pagination.",
       method: "POST",
       path: "",
+      effect: "read",
+      outputPolicy: { kind: "redacted_json", maxBytes: 65_536 },
       inputSchema: {
         type: "object",
-        properties: {
-          body: { type: "object" },
-        },
+        properties: { body: { type: "object" } },
         required: ["body"],
       },
       jsonBodyArg: "body",
@@ -217,14 +176,14 @@ export const LINEAR_DESCRIPTOR: RestServiceDescriptor = {
     },
     {
       name: "list_teams",
-      description: 'List teams via GraphQL. body is the GraphQL JSON, e.g. {"query": "query { teams { nodes { id name } } }"}',
+      description: "List teams with a server-owned GraphQL document.",
       method: "POST",
       path: "",
+      effect: "read",
+      outputPolicy: { kind: "redacted_json", maxBytes: 65_536 },
       inputSchema: {
         type: "object",
-        properties: {
-          body: { type: "object" },
-        },
+        properties: { body: { type: "object" } },
         required: ["body"],
       },
       jsonBodyArg: "body",
@@ -232,6 +191,50 @@ export const LINEAR_DESCRIPTOR: RestServiceDescriptor = {
     },
   ],
 };
+
+function result(text: string, isError: boolean): McpToolCallResult {
+  return { text, isError, content: [{ type: "text", text }] };
+}
+
+function checkGraphQlEnvelope(value: McpToolCallResult): McpToolCallResult {
+  if (value.isError) return value;
+  try {
+    const parsed = JSON.parse(value.text) as { errors?: unknown };
+    if (typeof parsed === "object" && parsed !== null && Array.isArray(parsed.errors) && parsed.errors.length > 0) {
+      return result("Provider returned GraphQL errors.", true);
+    }
+  } catch {
+    return result("Provider returned an invalid GraphQL response.", true);
+  }
+  return value;
+}
+
+/** Selects the official personal-key or OAuth header without persisting either token. */
+export function createLinearHandler(
+  options: Omit<RestHandlerOptions, "resolveConnectionConfig"> = {},
+): NativeMcpHandler {
+  const personal = createRestHandler(LINEAR_DESCRIPTOR, options);
+  const oauth = createRestHandler({
+    ...LINEAR_DESCRIPTOR,
+    credentialKey: "oauth_access_token",
+    credentialLabel: "Linear OAuth access token",
+    authPrefix: "Bearer ",
+    extraConfig: [{ key: "personal_api_key", label: "Linear personal API key", secret: true }],
+  }, options);
+  return {
+    initialize: (params) => personal.initialize(params),
+    listTools: () => personal.listTools(),
+    async callTool(name, args, ctx: McpCallContext) {
+      const personalKey = (ctx.secrets.personal_api_key ?? "").trim();
+      const oauthToken = (ctx.secrets.oauth_access_token ?? "").trim();
+      if ((personalKey === "") === (oauthToken === "")) {
+        return result("Configure exactly one Linear personal API key or OAuth access token first.", true);
+      }
+      const handler = personalKey !== "" ? personal : oauth;
+      return checkGraphQlEnvelope(await handler.callTool(name, args, ctx));
+    },
+  };
+}
 
 export const FIGMA_DESCRIPTOR: RestServiceDescriptor = {
   curatedId: "figma",
@@ -270,22 +273,6 @@ export const FIGMA_DESCRIPTOR: RestServiceDescriptor = {
         required: ["file_key"],
       },
       required: ["file_key"],
-    },
-    {
-      name: "post_comment",
-      description: 'Comment on a Figma file. body is the comment JSON, e.g. {"message": "Nice work"}.',
-      method: "POST",
-      path: "/files/{file_key}/comments",
-      inputSchema: {
-        type: "object",
-        properties: {
-          file_key: { type: "string" },
-          body: { type: "object" },
-        },
-        required: ["file_key", "body"],
-      },
-      jsonBodyArg: "body",
-      required: ["file_key", "body"],
     },
   ],
 };

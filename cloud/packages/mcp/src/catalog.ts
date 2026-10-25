@@ -1,46 +1,65 @@
-/**
- * The curated MCP catalog — THE lineup decision (spec §16 builder's latitude).
- *
- * 20 curated servers = 4 native (`github, filesystem, fetch, memory`) + 16
- * REST (dev: `gitlab, jira, linear, figma, sentry, exa`; data: `notion,
- * google-drive, airtable, supabase, firebase, mongodb, s3`; comms: `slack,
- * discord, telegram`).
- *
- * **Excluded, with reasons:** bitbucket/trello (GitHub+Jira cover the
- * demand); stripe (money surface is P9's); the whole infra family —
- * vercel/railway/heroku/digitalocean/cloudflare/docker/kubernetes/terraform/
- * zapier/make (write-heavy deploy/mutate actions on the Free tier are an
- * incident risk; revisit as a post-launch curated expansion); redis (raw TCP
- * RESP client from the worker to arbitrary user hosts — SSRF surface beyond
- * HTTP; excluded until a jailed proxy exists); obsidian (local-vault concept
- * doesn't exist in cloud workspaces); dall-e/elevenlabs/youtube (billable
- * media generation belongs to P9's images pipeline); firebase-adjacent niches
- * appwrite/pocketbase/vector-db (low usage); cal.com/twilio/whatsapp
- * (cost/PII-heavy comms); discord-bot-builder (duplicate of discord).
- *
- * `CURATED_MANIFEST` is pure data — the gateway serves it without
- * instantiating a single handler. The Task 5 handler modules export `*_TOOLS`
- * name lists, not tool defs, so the four native tool tables are mirrored
- * here verbatim and pinned drift-free against each live handler's
- * `listTools()` by a parity test in catalog.test.ts.
- *
- * `createCuratedCatalog` instantiates each handler EXACTLY ONCE (lazily,
- * memoized per id) — one shared singleton per curated server per worker
- * process. Per-user data (decrypted secrets, workspace, SSRF-guarded fetch)
- * is injected per call through McpCallContext, never stored on the handler.
- */
+/** Production catalog: only fully evidenced supported readiness rows may be materialized. */
 
 import type { McpToolDef } from "./client.js";
 import type { NativeMcpHandler } from "./transports/native.js";
 import type { GuardedFetch } from "./ssrf.js";
 import type { WorkspaceFiles } from "./workspace.js";
-import { createRestHandler, restToolDefs, type CredentialField } from "./rest/engine.js";
-import { CURATED_DESCRIPTORS } from "./rest/descriptors/index.js";
-import { createS3Handler, createGoogleDriveHandler } from "./rest/descriptors/data.js";
+import type { ProviderEgress } from "./egress/responseLimits.js";
+import {
+  createRestHandler,
+  type CredentialField,
+  type RestHandlerOptions,
+  type RestServiceDescriptor,
+} from "./rest/engine.js";
+import {
+  COMMERCE_INFRA_DESCRIPTORS,
+  COMMERCE_INFRA_PROVIDERS,
+  CURATED_DESCRIPTORS,
+  DATA_SEARCH_DESCRIPTORS,
+  DATA_SEARCH_PROVIDERS,
+} from "./rest/descriptors/index.js";
+import {
+  createS3Handler,
+  createGoogleDriveHandler,
+  createSupabaseHandler,
+} from "./rest/descriptors/data.js";
+import { createLinearHandler } from "./rest/descriptors/dev.js";
+import {
+  createDiscordHandler,
+  createSlackHandler,
+  createTelegramHandler,
+} from "./rest/descriptors/comms.js";
 import { createFetchHandler } from "./native/fetch.js";
 import { createFilesystemHandler } from "./native/filesystem.js";
 import { createMemoryHandler } from "./native/memory.js";
 import { createGitHubHandler } from "./native/github.js";
+import {
+  createProviderRegistry,
+  type ProviderRegistry,
+} from "./providers/registry.js";
+import type { ProviderDefinition } from "./providers/types.js";
+import { FILES_SUITES_PROVIDERS } from "./rest/descriptors/filesSuites.js";
+import {
+  createDevWorkHandler,
+  DEV_WORK_CANDIDATE_IDS,
+  DEV_WORK_CONTRACT_DEFINITIONS,
+  DEV_WORK_CONTRACT_DESCRIPTORS,
+} from "./rest/descriptors/devWork.js";
+import {
+  DATA_SEARCH_PROVIDERS as DATA_SEARCH_SPECIAL_HANDLERS,
+  createDataSearchHandler,
+} from "./rest/descriptors/dataSearch.js";
+import {
+  COMMERCE_INFRA_PROVIDERS as COMMERCE_INFRA_SPECIAL_HANDLERS,
+  createCommerceInfraHandler,
+} from "./rest/descriptors/commerceInfra.js";
+import {
+  KNOWN_PROVIDER_IDS,
+  PRODUCTION_PROVIDER_REGISTRY,
+  RESERVED_PROVIDER_NAMESPACES,
+} from "./providerProduction.js";
+
+export { KNOWN_PROVIDER_IDS, PRODUCTION_PROVIDER_REGISTRY, RESERVED_PROVIDER_NAMESPACES };
 
 export interface CatalogManifestEntry {
   curatedId: string;
@@ -50,499 +69,144 @@ export interface CatalogManifestEntry {
   tools: McpToolDef[];
 }
 
-/** The 20 curated ids, pinned, in this order. */
-export const CURATED_IDS: readonly string[] = [
+function credentialFieldsFor(definition: ProviderDefinition): CredentialField[] {
+  if (definition.providerId === "github") {
+    return [{ key: "GITHUB_TOKEN", label: "GitHub token", secret: true }];
+  }
+  if (["filesystem", "fetch", "memory", "mongodb"].includes(definition.providerId)) return [];
+  const descriptor = CURATED_DESCRIPTORS.find((candidate) => candidate.curatedId === definition.providerId) ??
+    DEV_WORK_CONTRACT_DESCRIPTORS.find((candidate) => candidate.curatedId === definition.providerId) ??
+    DATA_SEARCH_DESCRIPTORS.find((candidate) => candidate.curatedId === definition.providerId) ??
+    COMMERCE_INFRA_DESCRIPTORS.find((candidate) => candidate.curatedId === definition.providerId);
+  if (descriptor === undefined) return [];
+  const fields: CredentialField[] = descriptor.credentialKey === ""
+    ? []
+    : [{ key: descriptor.credentialKey, label: descriptor.credentialLabel, secret: true }];
+  fields.push(...(descriptor.extraConfig ?? []));
+  return fields;
+}
+
+function manifestEntry(definition: ProviderDefinition): CatalogManifestEntry {
+  return {
+    curatedId: definition.providerId,
+    displayName: definition.displayName,
+    description: definition.description,
+    credentialFields: credentialFieldsFor(definition),
+    tools: definition.operations.map((operation) => ({ ...operation, inputSchema: { ...operation.inputSchema } })),
+  };
+}
+
+const SPECIAL_HANDLER_PROVIDER_IDS = new Set([
   "github",
   "filesystem",
   "fetch",
   "memory",
-  "gitlab",
-  "jira",
-  "linear",
-  "figma",
-  "sentry",
-  "exa",
-  "notion",
-  "google-drive",
-  "airtable",
-  "supabase",
-  "firebase",
   "mongodb",
+  "linear",
+  "google-drive",
+  "supabase",
   "s3",
   "slack",
   "discord",
   "telegram",
-];
+  ...DEV_WORK_CANDIDATE_IDS,
+  ...DATA_SEARCH_SPECIAL_HANDLERS.map((definition) => definition.providerId),
+  ...COMMERCE_INFRA_SPECIAL_HANDLERS.map((definition) => definition.providerId),
+]);
 
-// ---------------------------------------------------------------------------
-// Native tool-def mirrors (Task 5 modules own the live tables; these copies
-// are byte-for-byte the same defs and parity-pinned by catalog.test.ts)
-// ---------------------------------------------------------------------------
-
-const FETCH_TOOL_DEFS: readonly McpToolDef[] = [
-  {
-    name: "fetch",
-    description: "Fetch web page content and convert HTML to markdown/text.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        url: { type: "string", description: "The URL to fetch." },
-        max_length: { type: "integer", description: "Maximum character length of returned text." },
-        raw: { type: "boolean", description: "If true, return raw content without markdown conversion." },
-      },
-      required: ["url"],
-    },
-  },
-];
-
-const FILESYSTEM_TOOL_DEFS: readonly McpToolDef[] = [
-  {
-    name: "read_file",
-    description: "Read the contents of a file.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        path: { type: "string", description: "Path to the file." },
-      },
-      required: ["path"],
-    },
-  },
-  {
-    name: "write_file",
-    description: "Create or overwrite a file with given contents.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        path: { type: "string", description: "Path to the file." },
-        content: { type: "string", description: "Content to write." },
-      },
-      required: ["path", "content"],
-    },
-  },
-  {
-    name: "create_or_update_file",
-    description: "Create or update a file with given contents.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        path: { type: "string", description: "Path to the file." },
-        content: { type: "string", description: "Content to write." },
-      },
-      required: ["path", "content"],
-    },
-  },
-  {
-    name: "delete_file",
-    description: "Delete a file or directory.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        path: { type: "string", description: "Path to delete." },
-      },
-      required: ["path"],
-    },
-  },
-  {
-    name: "list_directory",
-    description: "List contents of a directory.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        path: { type: "string", description: "Path to directory (default: root)." },
-      },
-    },
-  },
-  {
-    name: "get_file_info",
-    description: "Get file or directory metadata (size, modified time, etc.).",
-    inputSchema: {
-      type: "object",
-      properties: {
-        path: { type: "string", description: "Path to file or directory." },
-      },
-      required: ["path"],
-    },
-  },
-  {
-    name: "search_files",
-    description: "Recursively search for files matching a pattern.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        path: { type: "string", description: "Starting path (default: root)." },
-        pattern: { type: "string", description: "Filename search pattern or substring." },
-      },
-      required: ["pattern"],
-    },
-  },
-];
-
-const MEMORY_TOOL_DEFS: readonly McpToolDef[] = [
-  {
-    name: "create_entities",
-    description: "Create multiple new entities in the knowledge graph.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        entities: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              name: { type: "string" },
-              entityType: { type: "string" },
-              observations: {
-                type: "array",
-                items: { type: "string" },
-              },
-            },
-            required: ["name", "entityType", "observations"],
-          },
-        },
-      },
-      required: ["entities"],
-    },
-  },
-  {
-    name: "create_relations",
-    description: "Create relations between entities in the knowledge graph.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        relations: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              from: { type: "string" },
-              to: { type: "string" },
-              relationType: { type: "string" },
-            },
-            required: ["from", "to", "relationType"],
-          },
-        },
-      },
-      required: ["relations"],
-    },
-  },
-  {
-    name: "add_observations",
-    description: "Add observations to existing entities in the graph.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        observations: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              entityName: { type: "string" },
-              contents: {
-                type: "array",
-                items: { type: "string" },
-              },
-            },
-            required: ["entityName", "contents"],
-          },
-        },
-      },
-      required: ["observations"],
-    },
-  },
-  {
-    name: "read_graph",
-    description: "Read the entire knowledge graph.",
-    inputSchema: {
-      type: "object",
-      properties: {},
-    },
-  },
-  {
-    name: "search_nodes",
-    description: "Search for nodes in the knowledge graph matching a query.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        query: { type: "string", description: "Query string." },
-      },
-      required: ["query"],
-    },
-  },
-  {
-    name: "open_nodes",
-    description: "Retrieve specific nodes by their names along with their relations.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        names: {
-          type: "array",
-          items: { type: "string" },
-          description: "Names of entities to open.",
-        },
-      },
-      required: ["names"],
-    },
-  },
-];
-
-const GITHUB_TOOL_DEFS: readonly McpToolDef[] = [
-  {
-    name: "search_repositories",
-    description: "Search for GitHub repositories by query.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        query: { type: "string", description: "The search query." },
-        per_page: { type: "integer", description: "Results per page (default: 30)." },
-        page: { type: "integer", description: "Page number." },
-      },
-      required: ["query"],
-    },
-  },
-  {
-    name: "get_file_contents",
-    description: "Get contents of a file or directory in a repository.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        owner: { type: "string", description: "Repository owner." },
-        repo: { type: "string", description: "Repository name." },
-        path: { type: "string", description: "File path within the repository." },
-        ref: { type: "string", description: "Branch, tag, or commit ref." },
-      },
-      required: ["owner", "repo", "path"],
-    },
-  },
-  {
-    name: "create_or_update_file",
-    description: "Create or update a file in a repository.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        owner: { type: "string", description: "Repository owner." },
-        repo: { type: "string", description: "Repository name." },
-        path: { type: "string", description: "File path within repository." },
-        content: { type: "string", description: "File content." },
-        message: { type: "string", description: "Commit message." },
-        branch: { type: "string", description: "Branch to commit to." },
-        sha: { type: "string", description: "Blob SHA if updating an existing file." },
-      },
-      required: ["owner", "repo", "path", "content", "message"],
-    },
-  },
-  {
-    name: "create_issue",
-    description: "Create an issue in a repository.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        owner: { type: "string", description: "Repository owner." },
-        repo: { type: "string", description: "Repository name." },
-        title: { type: "string", description: "Issue title." },
-        body: { type: "string", description: "Issue body markdown." },
-        labels: {
-          type: "array",
-          items: { type: "string" },
-          description: "List of label names.",
-        },
-        assignees: {
-          type: "array",
-          items: { type: "string" },
-          description: "List of GitHub usernames.",
-        },
-      },
-      required: ["owner", "repo", "title"],
-    },
-  },
-  {
-    name: "list_issues",
-    description: "List issues in a repository.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        owner: { type: "string" },
-        repo: { type: "string" },
-        state: { type: "string", enum: ["open", "closed", "all"] },
-        per_page: { type: "integer" },
-        page: { type: "integer" },
-      },
-      required: ["owner", "repo"],
-    },
-  },
-  {
-    name: "get_issue",
-    description: "Get details of a specific issue.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        owner: { type: "string", description: "Repository owner." },
-        repo: { type: "string", description: "Repository name." },
-        issue_number: { type: "integer", description: "Issue number." },
-      },
-      required: ["owner", "repo", "issue_number"],
-    },
-  },
-  {
-    name: "add_issue_comment",
-    description: "Add a comment to an existing issue.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        owner: { type: "string", description: "Repository owner." },
-        repo: { type: "string", description: "Repository name." },
-        issue_number: { type: "integer", description: "Issue number." },
-        body: { type: "string", description: "Comment body." },
-      },
-      required: ["owner", "repo", "issue_number", "body"],
-    },
-  },
-  {
-    name: "create_pull_request",
-    description: "Create a new pull request.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        owner: { type: "string", description: "Repository owner." },
-        repo: { type: "string", description: "Repository name." },
-        title: { type: "string", description: "PR title." },
-        head: { type: "string", description: "Branch with changes." },
-        base: { type: "string", description: "Target branch to merge into." },
-        body: { type: "string", description: "PR body markdown." },
-      },
-      required: ["owner", "repo", "title", "head", "base"],
-    },
-  },
-  {
-    name: "list_pull_requests",
-    description: "List pull requests in a repository.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        owner: { type: "string" },
-        repo: { type: "string" },
-        state: { type: "string", enum: ["open", "closed", "all"] },
-        per_page: { type: "integer" },
-        page: { type: "integer" },
-      },
-      required: ["owner", "repo"],
-    },
-  },
-  {
-    name: "fork_repository",
-    description: "Fork a repository.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        owner: { type: "string", description: "Repository owner." },
-        repo: { type: "string", description: "Repository name." },
-        organization: { type: "string", description: "Optional target organization." },
-      },
-      required: ["owner", "repo"],
-    },
-  },
-  {
-    name: "list_commits",
-    description: "List commits in a repository.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        owner: { type: "string" },
-        repo: { type: "string" },
-        page: { type: "integer" },
-        per_page: { type: "integer" },
-      },
-      required: ["owner", "repo"],
-    },
-  },
-  {
-    name: "get_user",
-    description: "Get profile information for a GitHub user.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        username: {
-          type: "string",
-          description: "GitHub username (optional, defaults to authenticated user).",
-        },
-      },
-    },
-  },
-];
-
-// ---------------------------------------------------------------------------
-// The manifest (pure data, module load, no handler construction)
-// ---------------------------------------------------------------------------
-
-interface NativeManifestSpec {
-  displayName: string;
-  description: string;
-  credentialFields: CredentialField[];
-  tools: readonly McpToolDef[];
+function concreteOrigins(origins: readonly string[]): URL[] {
+  const result = new Map<string, URL>();
+  for (const value of origins) {
+    if (!value.startsWith("https://") || /[{}*<>]/.test(value)) continue;
+    try {
+      const parsed = new URL(value);
+      if (parsed.username === "" && parsed.password === "") result.set(parsed.origin, new URL(parsed.origin));
+    } catch {
+      // Native, dynamic-tenant, and malformed origins cannot enter a static pin map.
+    }
+  }
+  return [...result.values()];
 }
 
-const NATIVE_SPECS: Record<string, NativeManifestSpec> = {
-  github: {
-    displayName: "GitHub",
-    description: "GitHub repositories, issues, PRs and files over the REST API.",
-    credentialFields: [{ key: "GITHUB_TOKEN", label: "GitHub token", secret: true }],
-    tools: GITHUB_TOOL_DEFS,
-  },
-  filesystem: {
-    displayName: "Filesystem",
-    description: "Read, write, search and delete files in the user's cloud workspace.",
-    credentialFields: [],
-    tools: FILESYSTEM_TOOL_DEFS,
-  },
-  fetch: {
-    displayName: "Fetch",
-    description: "Fetch web pages as markdown/text through the SSRF-guarded gateway.",
-    credentialFields: [],
-    tools: FETCH_TOOL_DEFS,
-  },
-  memory: {
-    displayName: "Memory",
-    description: "A per-user knowledge graph persisted in the user's workspace.",
-    credentialFields: [],
-    tools: MEMORY_TOOL_DEFS,
-  },
-};
+export interface CuratedCatalogProjection {
+  definitions: readonly ProviderDefinition[];
+  origins: Readonly<Record<string, readonly URL[]>>;
+  /** Only descriptors whose default factory is genuinely generic REST. */
+  genericDescriptors: readonly RestServiceDescriptor[];
+}
 
-function restManifestEntry(id: string): CatalogManifestEntry {
-  const d = CURATED_DESCRIPTORS.find((x) => x.curatedId === id);
-  if (d === undefined) throw new Error(`curated descriptor missing: ${id}`);
-  const credentialFields: CredentialField[] = [];
-  if (d.credentialKey !== "") {
-    credentialFields.push({ key: d.credentialKey, label: d.credentialLabel, secret: true });
+/** One support projection for static metadata, worker catalog/origins, and activation. */
+export function createCuratedCatalogProjection(
+  registry: ProviderRegistry = PRODUCTION_PROVIDER_REGISTRY,
+): CuratedCatalogProjection {
+  const definitions: ProviderDefinition[] = [];
+  const origins: Record<string, readonly URL[]> = {};
+  const genericDescriptors = new Map<string, RestServiceDescriptor>();
+
+  for (const definition of registry.catalogDefinitions()) {
+    const registration = registry.get(definition.providerId);
+    if (registration === undefined || registration.row.releaseState !== "supported") continue;
+    const descriptor = CURATED_DESCRIPTORS.find((candidate) => candidate.curatedId === definition.providerId);
+    const providerOrigins = concreteOrigins(registration.row.auth.tenantOrigins);
+    // Dynamic generic REST tenants need per-connection composition. Exclude
+    // them from BOTH metadata and activation until that composition exists.
+    if (descriptor !== undefined && providerOrigins.length === 0) continue;
+    if (providerOrigins.length > 0) origins[definition.providerId] = Object.freeze(providerOrigins);
+    definitions.push(definition);
+    if (descriptor !== undefined && !SPECIAL_HANDLER_PROVIDER_IDS.has(definition.providerId)) {
+      genericDescriptors.set(definition.providerId, descriptor);
+    }
   }
-  credentialFields.push(...(d.extraConfig ?? []));
+
   return {
-    curatedId: d.curatedId,
-    displayName: d.displayName,
-    description: d.description,
-    credentialFields,
-    tools: restToolDefs(d),
+    definitions: Object.freeze(definitions),
+    origins: Object.freeze(origins),
+    genericDescriptors: Object.freeze([...genericDescriptors.values()]),
   };
 }
 
-function manifestEntry(id: string): CatalogManifestEntry {
-  const native = NATIVE_SPECS[id];
-  if (native !== undefined) {
-    return {
-      curatedId: id,
-      displayName: native.displayName,
-      description: native.description,
-      credentialFields: [...native.credentialFields],
-      tools: native.tools.map((t) => ({ ...t, inputSchema: { ...t.inputSchema } })),
-    };
-  }
-  return restManifestEntry(id);
+export function createCuratedManifest(
+  registry: ProviderRegistry = PRODUCTION_PROVIDER_REGISTRY,
+): readonly CatalogManifestEntry[] {
+  return createCuratedCatalogProjection(registry).definitions.map(manifestEntry);
 }
 
-export const CURATED_MANIFEST: readonly CatalogManifestEntry[] = CURATED_IDS.map(manifestEntry);
+function assertDefaultCatalogCallable(providerId: string): void {
+  PRODUCTION_PROVIDER_REGISTRY.assertCatalogCallable(providerId);
+}
 
-// ---------------------------------------------------------------------------
-// The catalog (one handler instance per curated server, shared by all users)
-// ---------------------------------------------------------------------------
+const DEFAULT_CATALOG_PROJECTION = createCuratedCatalogProjection();
+export const CURATED_IDS: readonly string[] = DEFAULT_CATALOG_PROJECTION.definitions.map(
+  (definition) => definition.providerId,
+);
+export const CURATED_MANIFEST: readonly CatalogManifestEntry[] =
+  DEFAULT_CATALOG_PROJECTION.definitions.map(manifestEntry);
+
+/** Blocked files/suites candidates never become production manifest entries. */
+export const FILES_SUITES_CATALOG_MANIFEST: readonly CatalogManifestEntry[] =
+  FILES_SUITES_PROVIDERS.map(manifestEntry);
+
+/** Internal Task 9 candidates only; never included in the production catalog projection. */
+export const DATA_SEARCH_CANDIDATE_IDS: readonly string[] = DATA_SEARCH_PROVIDERS.map(
+  (definition) => definition.providerId,
+);
+export const DATA_SEARCH_CANDIDATE_MANIFEST: readonly CatalogManifestEntry[] =
+  DATA_SEARCH_CANDIDATE_IDS.map((providerId) => {
+    const definition = DATA_SEARCH_PROVIDERS.find((candidate) => candidate.providerId === providerId);
+    if (definition === undefined) throw new Error(`Missing data/search candidate: ${providerId}`);
+    return manifestEntry(definition);
+  });
+
+/** Internal Task 10 candidates only; never included in the production catalog projection. */
+export const COMMERCE_INFRA_PROVIDER_IDS: readonly string[] = COMMERCE_INFRA_PROVIDERS.map(
+  (definition) => definition.providerId,
+);
+export const COMMERCE_INFRA_MANIFEST: readonly CatalogManifestEntry[] =
+  COMMERCE_INFRA_PROVIDER_IDS.map((providerId) => {
+    const definition = COMMERCE_INFRA_PROVIDERS.find((candidate) => candidate.providerId === providerId);
+    if (definition === undefined) throw new Error(`Missing commerce/infrastructure candidate: ${providerId}`);
+    return manifestEntry(definition);
+  });
 
 export interface CatalogEntry extends CatalogManifestEntry {
   handler: NativeMcpHandler;
@@ -554,25 +218,34 @@ export interface CuratedCatalog {
 }
 
 export interface CuratedCatalogDeps {
-  /** Kept for the pinned seam: REST/native handlers source their fetch from
-   * ctx.fetchImpl per call; the worker's ctxProvider injects this one. */
   fetchImpl: GuardedFetch;
-  /** Same rule as fetchImpl: filesystem/memory reach the workspace through
-   * ctx.workspace (the Task 16 worker seam adapts @ovid/sandbox to it). */
   workspace: WorkspaceFiles;
   githubApiBase?: string;
-  /** Test seam: per-id handler factory overrides (the singleton-proof test
-   * wraps a factory with a construction counter). */
+  providerEgress?: ProviderEgress;
+  /** Defaults to the shared evidence-gated production registry; tests may supply isolated rows. */
+  registry?: ProviderRegistry;
   handlerOverrides?: Partial<Record<string, () => NativeMcpHandler>>;
 }
 
 export function createCuratedCatalog(deps: CuratedCatalogDeps): CuratedCatalog {
   const cache = new Map<string, CatalogEntry>();
+  const definitions = createCuratedCatalogProjection(deps.registry).definitions;
+  const restOptions: RestHandlerOptions = deps.providerEgress === undefined
+    ? {}
+    : { providerEgress: deps.providerEgress };
 
   function defaultFactory(id: string): NativeMcpHandler {
+    if (DEV_WORK_CONTRACT_DEFINITIONS.some((definition) => definition.providerId === id)) {
+      return createDevWorkHandler(id, restOptions);
+    }
+    const dataSearchDescriptor = DATA_SEARCH_DESCRIPTORS.find((candidate) => candidate.curatedId === id);
+    if (dataSearchDescriptor !== undefined) return createDataSearchHandler(dataSearchDescriptor, restOptions);
+    if (COMMERCE_INFRA_SPECIAL_HANDLERS.some((definition) => definition.providerId === id)) {
+      return createCommerceInfraHandler(id);
+    }
     switch (id) {
       case "github":
-        return createGitHubHandler({ apiBase: deps.githubApiBase });
+        return createGitHubHandler({ apiBase: deps.githubApiBase, providerEgress: deps.providerEgress });
       case "filesystem":
         return createFilesystemHandler();
       case "fetch":
@@ -580,34 +253,49 @@ export function createCuratedCatalog(deps: CuratedCatalogDeps): CuratedCatalog {
       case "memory":
         return createMemoryHandler();
       case "s3":
-        return createS3Handler();
+        return createS3Handler(undefined, restOptions);
       case "google-drive":
-        return createGoogleDriveHandler();
+        return createGoogleDriveHandler(undefined, restOptions);
+      case "supabase":
+        return createSupabaseHandler(restOptions);
+      case "linear":
+        return createLinearHandler(restOptions);
+      case "slack":
+        return createSlackHandler(restOptions);
+      case "discord":
+        return createDiscordHandler(restOptions);
+      case "telegram":
+        return createTelegramHandler(restOptions);
       default: {
-        const d = CURATED_DESCRIPTORS.find((x) => x.curatedId === id);
-        if (d === undefined) throw new Error(`unknown curated id: ${id}`);
-        return createRestHandler(d);
+        const descriptor = CURATED_DESCRIPTORS.find((candidate) => candidate.curatedId === id);
+        if (descriptor === undefined) throw new Error(`unknown curated id: ${id}`);
+        return createRestHandler(descriptor, restOptions);
       }
     }
   }
 
   function entry(id: string): CatalogEntry {
+    if (deps.registry !== undefined) deps.registry.assertCatalogCallable(id);
+    else assertDefaultCatalogCallable(id);
     let cached = cache.get(id);
     if (cached === undefined) {
+      const definition = definitions.find((candidate) => candidate.providerId === id);
+      if (definition === undefined) throw new Error(`Supported provider is unavailable: ${id}`);
       const override = deps.handlerOverrides?.[id];
       const handler = override !== undefined ? override() : defaultFactory(id);
-      cached = { ...manifestEntry(id), handler };
+      cached = { ...manifestEntry(definition), handler };
       cache.set(id, cached);
     }
     return cached;
   }
 
   return {
-    entries(): readonly CatalogEntry[] {
-      return CURATED_IDS.map(entry);
-    },
+    entries: () => definitions.map((definition) => entry(definition.providerId)),
     get(curatedId: string): CatalogEntry | undefined {
-      return CURATED_IDS.includes(curatedId) ? entry(curatedId) : undefined;
+      return definitions.some((definition) => definition.providerId === curatedId) ? entry(curatedId) : undefined;
     },
   };
 }
+
+/** Isolated registry construction is useful to other contract tests without exposing candidates. */
+export { createProviderRegistry, type ProviderRegistry };

@@ -1,14 +1,14 @@
 /**
- * Tool-name parity with the Dart client (`McpConnectedTool._safe` /
- * `legacyToolName` / `canonicalId`). The published (legacy) name is what the
- * model sees and what the agent loop calls back with, so the sanitization
- * rules are pinned exactly.
+ * Tool-name NFKC normalization plus the existing Dart safe-character
+ * projection. The published (legacy) name is what the model sees and what the
+ * agent loop calls back with, so normalization and sanitization agree with
+ * transactional admission.
  */
 
 import { describe, expect, it } from "vitest";
 import { canonicalToolId, safeServerName, toolNameFor } from "./toolNames.js";
 
-describe("safeServerName (Dart _safe parity)", () => {
+describe("safeServerName (NFKC + Dart safe-character projection)", () => {
   it("lowercases and collapses non-[a-z0-9_-] runs to a single underscore", () => {
     expect(safeServerName("My Server!")).toBe("my_server");
     expect(safeServerName("a  b!!c")).toBe("a_b_c");
@@ -23,6 +23,17 @@ describe("safeServerName (Dart _safe parity)", () => {
   it("keeps hyphens and underscores (they are already safe)", () => {
     expect(safeServerName("Google-Drive_2")).toBe("google-drive_2");
     expect(safeServerName("fetch")).toBe("fetch");
+  });
+
+  it("normalizes NFKC before case folding and sanitization without merging distinct names", () => {
+    expect(safeServerName("éclair")).toBe("clair");
+    expect(safeServerName("e\u0301clair")).toBe("clair");
+    expect(safeServerName("verceℓ")).toBe("vercel");
+    expect(safeServerName("fⓔtch!")).toBe("fetch");
+    expect(toolNameFor("e\u0301clair", "read")).toBe(toolNameFor("éclair", "read"));
+    expect(safeServerName("eclair")).not.toBe(safeServerName("éclair"));
+    expect(safeServerName("e-clair")).not.toBe(safeServerName("éclair"));
+    expect(safeServerName("e clair")).not.toBe(safeServerName("éclair"));
   });
 
   it("an all-unsafe name sanitizes to the empty string (Dart parity)", () => {

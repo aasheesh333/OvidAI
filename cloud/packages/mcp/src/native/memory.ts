@@ -14,6 +14,14 @@
 import { trimToolResult, type McpToolDef, type McpToolCallResult } from "../client.js";
 import type { McpCallContext, NativeMcpHandler } from "../transports/native.js";
 import { resolveWorkspacePath, WORKSPACE_ROOT, type WorkspaceFiles } from "../workspace.js";
+import {
+  authorizeProviderOperation,
+  snapshotProviderArgs,
+  validateProviderArgs,
+  type Effect,
+  type ProviderOperation,
+  type ToolContext,
+} from "../providers/types.js";
 
 export const MEMORY_TOOLS: readonly string[] = [
   "create_entities",
@@ -25,6 +33,12 @@ export const MEMORY_TOOLS: readonly string[] = [
 ];
 
 const DEFAULT_DIR = ".ovid/memory";
+export const MEMORY_MAX_STORED_BYTES = 1_048_576;
+export const MEMORY_STORAGE_PATH = "/workspace/.ovid/memory/memory.json";
+const MUTATION_TOOLS = new Set(["create_entities", "create_relations", "add_observations"]);
+const MAX_PENDING_MUTATION_QUEUES = 1_024;
+/** Process-wide per-uid lock shared by every Memory handler instance. */
+const MUTATION_QUEUES = new Map<string, Promise<void>>();
 
 interface MemoryEntity {
   name: string;
@@ -164,6 +178,79 @@ const TOOLS: McpToolDef[] = [
   },
 ];
 
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function schemaValue(value: unknown): Record<string, unknown> {
+  return isObjectRecord(value) ? value : {};
+}
+
+function boundedMemorySchema(schema: Record<string, unknown>): Record<string, unknown> {
+  if (schema.type === "string") return { ...schema, minLength: 1, maxLength: 16_384 };
+  if (schema.type === "array") {
+    return {
+      ...schema,
+      maxItems: 1_000,
+      items: boundedMemorySchema(schemaValue(schema.items)),
+    };
+  }
+  const properties = Object.fromEntries(Object.entries(schema.properties ?? {}).map(([name, value]) => [
+    name,
+    boundedMemorySchema(schemaValue(value)),
+  ]));
+  return {
+    ...schema,
+    properties,
+    additionalProperties: false,
+    maxProperties: Object.keys(properties).length,
+  };
+}
+
+const MEMORY_EFFECTS: Readonly<Record<string, Effect>> = {
+  create_entities: "write",
+  create_relations: "write",
+  add_observations: "write",
+  read_graph: "read",
+  search_nodes: "read",
+  open_nodes: "read",
+};
+
+export const MEMORY_OPERATIONS: readonly ProviderOperation[] = TOOLS.map((tool) => ({
+  name: tool.name,
+  description: tool.description ?? `Memory operation ${tool.name}.`,
+  inputSchema: boundedMemorySchema(schemaValue(tool.inputSchema)),
+  effect: MEMORY_EFFECTS[tool.name] ?? "write",
+  approval: "mode",
+  requiredScopes: [],
+  request: {
+    originKey: "memory",
+    method: MEMORY_EFFECTS[tool.name] === "read" ? "GET" : "POST",
+    pathTemplate: `/${tool.name}`,
+  },
+  limits: { timeoutMs: 30_000, responseBytes: 65_536, frameBytes: 65_536, pageBytes: 65_536 },
+  outputPolicy: { kind: "redacted_json", maxBytes: 65_536 },
+}));
+
+function memoryAuthorizationContext(ctx: McpCallContext): ToolContext {
+  const candidate = ctx as unknown as Partial<ToolContext>;
+  return {
+    ...candidate,
+    sessionId: candidate.sessionId ?? "",
+    runId: candidate.runId ?? "",
+    userId: candidate.userId ?? ctx.uid,
+    connectionId: candidate.connectionId ?? "",
+    providerId: "memory",
+    mode: candidate.mode ?? "safe",
+    planMode: candidate.planMode ?? false,
+    unattended: candidate.unattended ?? true,
+    isSubagent: candidate.isSubagent ?? false,
+    depth: candidate.depth ?? 0,
+    callKey: candidate.callKey ?? "",
+    signal: candidate.signal ?? new AbortController().signal,
+  } as ToolContext;
+}
+
 function stringList(v: unknown): string[] {
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
 }
@@ -181,35 +268,51 @@ export function createMemoryHandler(deps: { dir?: string } = {}): NativeMcpHandl
 
   async function load(ws: WorkspaceFiles, uid: string): Promise<MemoryGraph> {
     const graph: MemoryGraph = { entities: new Map(), relations: [] };
+    const metadata = await ws.stat(uid, storagePath);
+    if (metadata !== null && metadata.size > MEMORY_MAX_STORED_BYTES) {
+      throw new Error("Stored memory graph exceeds the 1 MiB pre-read bound.");
+    }
     const stored = await ws.read(uid, storagePath);
     if (stored === null) return graph;
+    if (Buffer.byteLength(stored.content, "utf8") > MEMORY_MAX_STORED_BYTES) {
+      throw new Error("Stored memory graph exceeds the 1 MiB bound.");
+    }
+    let json: Record<string, unknown>;
     try {
-      const json = JSON.parse(stored.content) as Record<string, unknown>;
-      for (const item of Array.isArray(json.entities) ? json.entities : []) {
-        if (typeof item === "object" && item !== null) {
-          const j = item as Record<string, unknown>;
-          const e: MemoryEntity = {
-            name: typeof j.name === "string" ? j.name : "",
-            entityType: typeof j.entityType === "string" ? j.entityType : "Concept",
-            observations: stringList(j.observations),
-          };
-          if (e.name !== "") graph.entities.set(e.name, e);
-        }
+      const parsed = JSON.parse(stored.content) as unknown;
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("not an object");
+      json = parsed as Record<string, unknown>;
+      if (!Array.isArray(json.entities) || !Array.isArray(json.relations) ||
+          json.entities.length > 100_000 || json.relations.length > 100_000) {
+        throw new Error("invalid graph arrays");
       }
-      for (const item of Array.isArray(json.relations) ? json.relations : []) {
-        if (typeof item === "object" && item !== null) {
-          const j = item as Record<string, unknown>;
-          if (typeof j.from === "string" && typeof j.to === "string") {
-            graph.relations.push({
-              from: j.from,
-              to: j.to,
-              relationType: typeof j.relationType === "string" ? j.relationType : "related_to",
-            });
-          }
+      for (const item of json.entities) {
+        if (typeof item !== "object" || item === null || Array.isArray(item)) throw new Error("invalid entity");
+        const entry = item as Record<string, unknown>;
+        if (typeof entry.name !== "string" || entry.name === "" ||
+            typeof entry.entityType !== "string" || entry.entityType === "" ||
+            !Array.isArray(entry.observations) || entry.observations.length > 10_000 ||
+            entry.observations.some((observation) => typeof observation !== "string")) {
+          throw new Error("invalid entity fields");
         }
+        graph.entities.set(entry.name, {
+          name: entry.name,
+          entityType: entry.entityType,
+          observations: [...entry.observations] as string[],
+        });
+      }
+      for (const item of json.relations) {
+        if (typeof item !== "object" || item === null || Array.isArray(item)) throw new Error("invalid relation");
+        const relation = item as Record<string, unknown>;
+        if (typeof relation.from !== "string" || relation.from === "" ||
+            typeof relation.to !== "string" || relation.to === "" ||
+            typeof relation.relationType !== "string" || relation.relationType === "") {
+          throw new Error("invalid relation fields");
+        }
+        graph.relations.push({ from: relation.from, to: relation.to, relationType: relation.relationType });
       }
     } catch {
-      // corrupt storage starts empty (Dart parity: Diag.swallow on load)
+      throw new Error("Stored memory graph is corrupt or invalid; refusing to replace it.");
     }
     return graph;
   }
@@ -219,7 +322,11 @@ export function createMemoryHandler(deps: { dir?: string } = {}): NativeMcpHandl
       entities: [...graph.entities.values()].map(entityToJson),
       relations: graph.relations.map(relationToJson),
     };
-    await ws.write(uid, storagePath, JSON.stringify(json));
+    const serialized = JSON.stringify(json);
+    if (Buffer.byteLength(serialized, "utf8") > MEMORY_MAX_STORED_BYTES) {
+      throw new Error("Memory graph exceeds the 1 MiB storage bound; the previous file was not changed.");
+    }
+    await ws.write(uid, storagePath, serialized);
   }
 
   function graphJson(graph: MemoryGraph): string {
@@ -229,7 +336,7 @@ export function createMemoryHandler(deps: { dir?: string } = {}): NativeMcpHandl
     });
   }
 
-  return {
+  const executeHandler: NativeMcpHandler = {
     async initialize(): Promise<Record<string, unknown>> {
       return {
         protocolVersion: "2024-11-05",
@@ -239,7 +346,7 @@ export function createMemoryHandler(deps: { dir?: string } = {}): NativeMcpHandl
     },
 
     async listTools(): Promise<McpToolDef[]> {
-      return TOOLS.map((t) => ({ ...t, inputSchema: { ...t.inputSchema } }));
+      return MEMORY_OPERATIONS.map((operation) => ({ ...operation, inputSchema: { ...operation.inputSchema } }));
     },
 
     async callTool(name: string, args: Record<string, unknown>, ctx: McpCallContext): Promise<McpToolCallResult> {
@@ -374,6 +481,42 @@ export function createMemoryHandler(deps: { dir?: string } = {}): NativeMcpHandl
         const message = err instanceof Error ? err.message : String(err);
         return toolResult(`Memory error: ${message}`, true);
       }
+    },
+  };
+
+  async function serializedMutation<T>(uid: string, run: () => Promise<T>): Promise<T> {
+    const previous = MUTATION_QUEUES.get(uid);
+    if (previous === undefined && MUTATION_QUEUES.size >= MAX_PENDING_MUTATION_QUEUES) {
+      throw new Error("Memory mutation queue limit exceeded; retry after pending mutations settle.");
+    }
+    const next = (previous ?? Promise.resolve()).catch(() => {}).then(run);
+    const tail = next.then(() => undefined, () => undefined);
+    MUTATION_QUEUES.set(uid, tail);
+    try {
+      return await next;
+    } finally {
+      if (MUTATION_QUEUES.get(uid) === tail) MUTATION_QUEUES.delete(uid);
+    }
+  }
+
+  return {
+    initialize: (params) => executeHandler.initialize(params),
+    listTools: () => executeHandler.listTools(),
+    async callTool(name, args, ctx) {
+      const operation = MEMORY_OPERATIONS.find((candidate) => candidate.name === name);
+      if (operation === undefined) return toolResult(`Unknown tool "${name}" for memory MCP`, true);
+      try {
+        args = snapshotProviderArgs(args);
+      } catch {
+        return toolResult("Invalid operation arguments.", true);
+      }
+      if (!validateProviderArgs(operation.inputSchema, args).ok) {
+        return toolResult("Invalid operation arguments.", true);
+      }
+      const authorization = await authorizeProviderOperation(memoryAuthorizationContext(ctx), operation, args);
+      if (authorization.kind === "deny") return toolResult(`Operation denied (${authorization.code}).`, true);
+      if (!MUTATION_TOOLS.has(name)) return executeHandler.callTool(name, args, ctx);
+      return serializedMutation(ctx.uid, () => executeHandler.callTool(name, args, ctx));
     },
   };
 }

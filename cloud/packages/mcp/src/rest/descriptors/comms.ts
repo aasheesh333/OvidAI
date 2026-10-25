@@ -1,164 +1,217 @@
-/**
- * Comms REST descriptors — a data port of the Dart
- * `rest_descriptors_comms.dart` for the three curated comms services:
- * Slack, Discord, Telegram (Cal.com, Twilio, WhatsApp and the Discord bot
- * builder were cut by the Task 6 lineup decision). All three are fully
- * declarative — no Dart routing capability was needed:
- *  - Slack `send_message` and Telegram `send_message` keep pure scalars
- *    because both APIs honestly accept the parameters as URL query
- *    arguments on the send call.
- *  - Telegram carries its secret in the path (`/bot{bot_token}/…`) with
- *    `auth: none`; the engine fills the placeholder from stored config and
- *    the configure-first gate still applies.
- */
+/** Read-first official comms providers. Provider envelopes are checked even on HTTP 200. */
 
-import type { RestServiceDescriptor } from "../engine.js";
+import {
+  createRestHandler,
+  createSecretRedactor,
+  type RestHandlerOptions,
+  type RestServiceDescriptor,
+} from "../engine.js";
+import { trimToolResult, type McpToolCallResult } from "../../client.js";
+import type { NativeMcpHandler } from "../../transports/native.js";
 
 export const SLACK_DESCRIPTOR: RestServiceDescriptor = {
   curatedId: "slack",
-  displayName: "Slack Notify",
-  description: "Post messages and read channels over the Slack Web API.",
+  displayName: "Slack MCP",
+  description: "Read Slack conversations with an OAuth user token and the Web API response envelope.",
   baseUrl: "https://slack.com/api",
   auth: "bearer",
   authPrefix: "Bearer ",
-  credentialKey: "bot_token",
-  credentialLabel: "Slack bot token",
+  credentialKey: "user_token",
+  credentialLabel: "Slack OAuth user token",
   tools: [
     {
-      name: "send_message",
-      description:
-        "Post a message to a Slack channel (channel + text travel as request parameters, which Slack accepts on this method).",
-      method: "POST",
-      path: "/chat.postMessage",
-      inputSchema: {
-        type: "object",
-        properties: {
-          channel: { type: "string" },
-          text: { type: "string" },
-        },
-        required: ["channel", "text"],
-      },
-      queryArgs: ["channel", "text"],
-      required: ["channel", "text"],
-    },
-    {
       name: "list_channels",
-      description: "List the workspace channels (conversations.list).",
+      description: "List public channels through conversations.list with bounded cursor pagination.",
       method: "GET",
       path: "/conversations.list",
-      inputSchema: { type: "object" },
+      effect: "read",
+      queryArgMap: { cursor: "cursor" },
+      fixedQuery: { types: "public_channel", limit: "100" },
+      outputPolicy: { kind: "redacted_json", maxBytes: 65_536 },
+      inputSchema: {
+        type: "object",
+        properties: { cursor: { type: "string", maxLength: 8_192 } },
+      },
     },
     {
       name: "history",
-      description: "Read recent messages from a channel.",
+      description: "Read recent public-channel messages through conversations.history.",
       method: "GET",
       path: "/conversations.history",
+      effect: "read",
+      queryArgs: ["channel"],
+      queryArgMap: { limit: "limit:100", oldest: "oldest" },
+      outputPolicy: { kind: "redacted_json", maxBytes: 65_536 },
       inputSchema: {
         type: "object",
         properties: {
-          channel: { type: "string" },
-          limit: { type: "number" },
+          channel: { type: "string", minLength: 1, maxLength: 128 },
+          limit: { type: "integer", minimum: 1, maximum: 200, default: 100 },
+          oldest: { type: "string", maxLength: 64 },
         },
         required: ["channel"],
       },
-      queryArgs: ["channel", "limit"],
       required: ["channel"],
     },
   ],
 };
 
+function boundedResult(text: string, isError: boolean): McpToolCallResult {
+  const bounded = trimToolResult(text);
+  return { text: bounded, isError, content: [{ type: "text", text: bounded }] };
+}
+
+/** Slack's top-level ok boolean is authoritative independently of HTTP status. */
+export function createSlackHandler(options: RestHandlerOptions = {}): NativeMcpHandler {
+  const rest = createRestHandler(SLACK_DESCRIPTOR, options);
+  const redactor = options.redactor ?? createSecretRedactor();
+  return {
+    initialize: (params) => rest.initialize(params),
+    listTools: () => rest.listTools(),
+    async callTool(name, args, ctx) {
+      const token = (ctx.secrets.user_token ?? "").trim();
+      if (!token.startsWith("xoxp-")) {
+        return boundedResult("Configure a Slack OAuth user token (xoxp) first; bot tokens are not accepted.", true);
+      }
+      const result = await rest.callTool(name, args, ctx);
+      if (result.isError) return result;
+      const secrets = Object.values(ctx.secrets ?? {});
+      try {
+        const envelope = JSON.parse(result.text) as { ok?: unknown; error?: unknown };
+        if (envelope.ok === true) return result;
+        const code = typeof envelope.error === "string" && /^[a-z0-9_:-]{1,128}$/.test(envelope.error)
+          ? envelope.error
+          : "unknown_error";
+        return boundedResult(redactor.text(`Slack API error: ${code}`, secrets), true);
+      } catch {
+        return boundedResult("Provider returned an invalid Slack response.", true);
+      }
+    },
+  };
+}
+
 export const DISCORD_DESCRIPTOR: RestServiceDescriptor = {
   curatedId: "discord",
   displayName: "Discord MCP",
-  description: "Send messages and list guilds/channels over the Discord bot API.",
+  description: "Read OAuth-user identity and guilds through Discord API v10; bot authority is a separate model.",
   baseUrl: "https://discord.com/api/v10",
   auth: "bearer",
-  authPrefix: "Bot ",
-  credentialKey: "bot_token",
-  credentialLabel: "Discord bot token",
+  authPrefix: "Bearer ",
+  credentialKey: "access_token",
+  credentialLabel: "Discord OAuth user access token",
+  staticHeaders: { "User-Agent": "DiscordBot (https://ovidsi.com, 1.0)" },
   tools: [
     {
-      name: "send_message",
-      description: 'Send a message to a Discord channel. body is the Discord message JSON, e.g. {"content": "hello"}.',
-      method: "POST",
-      path: "/channels/{channel_id}/messages",
-      inputSchema: {
-        type: "object",
-        properties: {
-          channel_id: { type: "string" },
-          body: { type: "object" },
-        },
-        required: ["channel_id", "body"],
-      },
-      jsonBodyArg: "body",
-      required: ["channel_id", "body"],
+      name: "get_current_user",
+      description: "Read the current OAuth user through /users/@me (identify scope).",
+      method: "GET",
+      path: "/users/@me",
+      effect: "read",
+      outputPolicy: { kind: "redacted_json", maxBytes: 65_536 },
+      inputSchema: { type: "object", properties: {} },
     },
     {
       name: "list_guilds",
-      description: "List the servers (guilds) the bot belongs to.",
+      description: "List guilds visible to the current OAuth user (guilds scope), not bot guilds.",
       method: "GET",
       path: "/users/@me/guilds",
-      inputSchema: { type: "object" },
-    },
-    {
-      name: "list_channels",
-      description: "List the channels of a guild (server).",
-      method: "GET",
-      path: "/guilds/{guild_id}/channels",
+      effect: "read",
+      queryArgMap: { after: "after", limit: "limit:100" },
+      outputPolicy: { kind: "redacted_json", maxBytes: 65_536 },
       inputSchema: {
         type: "object",
         properties: {
-          guild_id: { type: "string" },
+          after: { type: "string", maxLength: 64 },
+          limit: { type: "integer", minimum: 1, maximum: 200, default: 100 },
         },
-        required: ["guild_id"],
       },
-      required: ["guild_id"],
     },
   ],
 };
 
+export function createDiscordHandler(options: RestHandlerOptions = {}): NativeMcpHandler {
+  return createRestHandler(DISCORD_DESCRIPTOR, options);
+}
+
 export const TELEGRAM_DESCRIPTOR: RestServiceDescriptor = {
   curatedId: "telegram",
   displayName: "Telegram MCP",
-  description: "Send messages and poll updates over the Telegram Bot API.",
+  description: "Read bot-scoped identity/chat/webhook metadata; arbitrary user history and update acknowledgement are unavailable.",
   baseUrl: "https://api.telegram.org",
   auth: "none",
   credentialKey: "bot_token",
   credentialLabel: "Telegram bot token",
+  extraConfig: [{ key: "allowed_chat_ids", label: "Allowed Telegram chat IDs (comma-separated)", secret: false }],
   tools: [
     {
-      name: "send_message",
-      description:
-        "Send a message via the Telegram Bot API (chat_id + text travel as request parameters, which Telegram accepts).",
-      method: "GET",
-      path: "/bot{bot_token}/sendMessage",
+      name: "get_me",
+      description: "Read the bot identity with getMe; this does not grant end-user account access.",
+      method: "POST",
+      path: "/bot{bot_token}/getMe",
+      effect: "read",
+      bodyTemplate: {},
+      outputPolicy: { kind: "redacted_json", maxBytes: 65_536 },
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "get_chat",
+      description: "Read metadata for an explicitly allowed chat through getChat.",
+      method: "POST",
+      path: "/bot{bot_token}/getChat",
+      effect: "read",
+      bodyTemplate: { chat_id: "arg:chat_id" },
+      outputPolicy: { kind: "redacted_json", maxBytes: 65_536 },
       inputSchema: {
         type: "object",
-        properties: {
-          chat_id: { type: "string" },
-          text: { type: "string" },
-        },
-        required: ["chat_id", "text"],
+        properties: { chat_id: { type: "string", minLength: 1, maxLength: 128 } },
+        required: ["chat_id"],
       },
-      queryArgs: ["chat_id", "text"],
-      required: ["chat_id", "text"],
+      required: ["chat_id"],
     },
     {
-      name: "get_updates",
-      description: "Poll pending updates for the bot (getUpdates).",
-      method: "GET",
-      path: "/bot{bot_token}/getUpdates",
-      inputSchema: { type: "object" },
-    },
-    {
-      name: "get_me",
-      description: "Return the bot identity (getMe).",
-      method: "GET",
-      path: "/bot{bot_token}/getMe",
-      inputSchema: { type: "object" },
+      name: "get_webhook_info",
+      description: "Read bot webhook state without acknowledging or discarding updates.",
+      method: "POST",
+      path: "/bot{bot_token}/getWebhookInfo",
+      effect: "read",
+      bodyTemplate: {},
+      outputPolicy: { kind: "redacted_json", maxBytes: 65_536 },
+      inputSchema: { type: "object", properties: {} },
     },
   ],
 };
+
+/** Redacts the complete token-bearing URL path, including percent-encoded forms. */
+export function createTelegramHandler(options: RestHandlerOptions = {}): NativeMcpHandler {
+  const rest = createRestHandler(TELEGRAM_DESCRIPTOR, options);
+  const redactor = options.redactor ?? createSecretRedactor();
+  return {
+    initialize: (params) => rest.initialize(params),
+    listTools: () => rest.listTools(),
+    async callTool(name, args, ctx) {
+      if (name === "get_chat") {
+        const allowed = (ctx.secrets.allowed_chat_ids ?? "").split(",").map((entry) => entry.trim());
+        if (typeof args.chat_id !== "string" || !allowed.includes(args.chat_id)) {
+          return boundedResult("Telegram chat is not allowlisted for this connection.", true);
+        }
+      }
+      const result = await rest.callTool(name, args, ctx);
+      const secrets = Object.values(ctx.secrets ?? {});
+      if (result.isError) {
+        // Never echo engine/upstream text that could contain bot<token> in its path.
+        return boundedResult(redactor.text("Telegram API request failed.", secrets), true);
+      }
+      try {
+        const envelope = JSON.parse(result.text) as { ok?: unknown; result?: unknown };
+        if (envelope.ok !== true) return boundedResult("Telegram API request failed.", true);
+        const sanitized = redactor.json(envelope, secrets);
+        return boundedResult(redactor.text(JSON.stringify(sanitized), secrets), false);
+      } catch {
+        return boundedResult(redactor.text("Provider returned an invalid Telegram response.", secrets), true);
+      }
+    },
+  };
+}
 
 export const COMMS_DESCRIPTORS: readonly RestServiceDescriptor[] = [
   SLACK_DESCRIPTOR,

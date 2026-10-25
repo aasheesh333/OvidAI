@@ -40,7 +40,7 @@ class FakeWorkspace {
     throw new Error("not needed by the memory handler");
   }
 
-  async stat(): Promise<null> {
+  async stat(): Promise<{ type: "file" | "dir"; size: number; mtime: string } | null> {
     return null;
   }
 
@@ -57,7 +57,10 @@ function makeCtx(ws: FakeWorkspace, uid: string): McpCallContext {
     // real surface is workspace.ts and the worker seam (Task 16) adapts to it.
     workspace: ws as unknown as McpCallContext["workspace"],
     fetchImpl: async () => new Response(""),
-  };
+    mode: "auto",
+    planMode: false,
+    unattended: false,
+  } as McpCallContext;
 }
 
 const entity = (name: string, entityType: string, observations: string[]) => ({
@@ -211,13 +214,102 @@ describe("createMemoryHandler", () => {
     expect(ws.files.get("u-1")?.has(MEMORY_PATH)).toBeFalsy();
   });
 
-  it("corrupt stored graph → starts empty, not an error", async () => {
+  it("fails closed on corrupt stored graphs without overwriting the only copy", async () => {
     const ws = new FakeWorkspace();
     await ws.write("u-1", MEMORY_PATH, "{not json");
     const handler = createMemoryHandler();
-    const res = await handler.callTool("read_graph", {}, makeCtx(ws, "u-1"));
-    expect(res.isError).toBe(false);
-    expect(JSON.parse(res.text)).toEqual({ entities: [], relations: [] });
+    const read = await handler.callTool("read_graph", {}, makeCtx(ws, "u-1"));
+    expect(read.isError).toBe(true);
+    expect(read.text).toMatch(/corrupt|invalid|stored/i);
+    const mutation = await handler.callTool("create_entities", entity("New", "Thing", []), makeCtx(ws, "u-1"));
+    expect(mutation.isError).toBe(true);
+    expect((await ws.read("u-1", MEMORY_PATH))?.content).toBe("{not json");
+  });
+
+  it("serializes each uid's load-mutate-write cycle so concurrent updates are not lost", async () => {
+    class DelayedWorkspace extends FakeWorkspace {
+      override async read(uid: string, path: string): Promise<{ content: string; bytes: number } | null> {
+        const snapshot = await super.read(uid, path);
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        return snapshot;
+      }
+    }
+    const ws = new DelayedWorkspace();
+    const handler = createMemoryHandler();
+    const [first, second] = await Promise.all([
+      handler.callTool("create_entities", entity("First", "Thing", ["one"]), makeCtx(ws, "u-1")),
+      handler.callTool("create_entities", entity("Second", "Thing", ["two"]), makeCtx(ws, "u-1")),
+    ]);
+    expect(first.isError).toBe(false);
+    expect(second.isError).toBe(false);
+    const graph = JSON.parse((await handler.callTool("read_graph", {}, makeCtx(ws, "u-1"))).text);
+    expect(graph.entities.map((entry: { name: string }) => entry.name).sort()).toEqual(["First", "Second"]);
+  });
+
+  it("serializes one uid across different handler instances", async () => {
+    class DelayedWorkspace extends FakeWorkspace {
+      override async read(uid: string, path: string): Promise<{ content: string; bytes: number } | null> {
+        const snapshot = await super.read(uid, path);
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        return snapshot;
+      }
+    }
+    const ws = new DelayedWorkspace();
+    const firstHandler = createMemoryHandler();
+    const secondHandler = createMemoryHandler();
+    const [first, second] = await Promise.all([
+      firstHandler.callTool("create_entities", entity("First", "Thing", ["one"]), makeCtx(ws, "u-1")),
+      secondHandler.callTool("create_entities", entity("Second", "Thing", ["two"]), makeCtx(ws, "u-1")),
+    ]);
+    expect(first.isError).toBe(false);
+    expect(second.isError).toBe(false);
+    const graph = JSON.parse((await firstHandler.callTool("read_graph", {}, makeCtx(ws, "u-1"))).text);
+    expect(graph.entities.map((entry: { name: string }) => entry.name).sort()).toEqual(["First", "Second"]);
+  });
+
+  it("checks actual pre-read metadata before reading an oversized graph", async () => {
+    const ws = new FakeWorkspace();
+    await ws.write("u-1", MEMORY_PATH, "x".repeat(1_100_000));
+    let reads = 0;
+    const originalRead = ws.read.bind(ws);
+    ws.read = async (uid, path) => { reads++; return originalRead(uid, path); };
+    ws.stat = async () => ({ type: "file", size: 1_100_000, mtime: "2026-10-24T00:00:00.000Z" });
+    const result = await createMemoryHandler().callTool("read_graph", {}, makeCtx(ws, "u-1"));
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/1 MiB|exceeds|bound/i);
+    expect(reads).toBe(0);
+  });
+
+  it("rejects oversized or malformed stored graphs and unknown operation args before mutation", async () => {
+    const ws = new FakeWorkspace();
+    await ws.write("u-1", MEMORY_PATH, JSON.stringify({ entities: "not-an-array", relations: [] }));
+    const handler = createMemoryHandler();
+    const malformed = await handler.callTool("create_entities", entity("New", "Thing", []), makeCtx(ws, "u-1"));
+    expect(malformed.isError).toBe(true);
+
+    const valid = new FakeWorkspace();
+    let reads = 0;
+    const originalRead = valid.read.bind(valid);
+    valid.read = async (uid, path) => { reads++; return originalRead(uid, path); };
+    const unknown = await handler.callTool("read_graph", { unexpected: true }, makeCtx(valid, "u-1"));
+    expect(unknown.isError).toBe(true);
+    expect(reads).toBe(0);
+
+    await valid.write("u-1", MEMORY_PATH, JSON.stringify({ entities: [], relations: [], padding: "x".repeat(1_100_000) }));
+    const oversized = await handler.callTool("read_graph", {}, makeCtx(valid, "u-1"));
+    expect(oversized.isError).toBe(true);
+  });
+
+  it("refuses to persist a graph beyond the storage bound without overwriting valid data", async () => {
+    const ws = new FakeWorkspace();
+    const handler = createMemoryHandler();
+    const original = JSON.stringify({ entities: [{ name: "Keep", entityType: "Thing", observations: ["safe"] }], relations: [] });
+    await ws.write("u-1", MEMORY_PATH, original);
+    const result = await handler.callTool("create_entities", {
+      entities: [{ name: "Huge", entityType: "Thing", observations: Array.from({ length: 70 }, () => "x".repeat(16_000)) }],
+    }, makeCtx(ws, "u-1"));
+    expect(result.isError).toBe(true);
+    expect((await ws.read("u-1", MEMORY_PATH))?.content).toBe(original);
   });
 
   it("unknown tool → isError \"Unknown tool … for memory MCP\"", async () => {
@@ -235,9 +327,11 @@ describe("createMemoryHandler", () => {
     expect(search?.inputSchema).toEqual({
       type: "object",
       properties: {
-        query: { type: "string", description: "Query string." },
+        query: { type: "string", minLength: 1, maxLength: 16_384, description: "Query string." },
       },
       required: ["query"],
+      additionalProperties: false,
+      maxProperties: 1,
     });
   });
 

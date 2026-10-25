@@ -25,7 +25,7 @@ import {
   DATA_DESCRIPTORS,
   DEV_DESCRIPTORS,
 } from "./descriptors/index.js";
-import { createGoogleDriveHandler, createS3Handler } from "./descriptors/data.js";
+import { createGoogleDriveHandler, createS3Handler, createSupabaseHandler } from "./descriptors/data.js";
 import type { McpCallContext } from "../transports/native.js";
 import type { GuardedFetch } from "../ssrf.js";
 import type { ProviderEgress } from "../egress/responseLimits.js";
@@ -89,6 +89,33 @@ function headersOf(c: Call): Record<string, string> {
   return (c.init?.headers ?? {}) as Record<string, string>;
 }
 
+/** Engine-only high-risk fixture; production Slack exports read-first operations. */
+function externalCommunicationDescriptor(): RestServiceDescriptor {
+  return {
+    ...byId("slack"),
+    credentialKey: "user_token",
+    credentialLabel: "Slack user token",
+    tools: [{
+      name: "send_message",
+      description: "Engine approval fixture for one external message.",
+      method: "POST",
+      path: "/chat.postMessage",
+      effect: "external_communication",
+      approval: "per_action",
+      inputSchema: {
+        type: "object",
+        properties: {
+          channel: { type: "string", minLength: 1, maxLength: 128 },
+          text: { type: "string", minLength: 1, maxLength: 4_000 },
+        },
+        required: ["channel", "text"],
+      },
+      required: ["channel", "text"],
+      bodyTemplate: { channel: "arg:channel", text: "arg:text" },
+    }],
+  };
+}
+
 describe("rest engine", () => {
   it("substitutes path and query args (gitlab list_projects)", async () => {
     const { calls, impl } = fakeFetch();
@@ -120,7 +147,7 @@ describe("rest engine", () => {
     const r = await createRestHandler(byId("linear")).callTool(
       "list_issues",
       { body },
-      makeCtx({ api_key: "lin_1" }, impl),
+      makeCtx({ personal_api_key: "lin_1" }, impl),
     );
     expect(r.isError).toBe(true);
     expect(r.text).toMatch(/unavailable|invalid/i);
@@ -151,17 +178,17 @@ describe("rest engine", () => {
     );
   });
 
-  it("appends the queryKey secret param (firebase) and keeps multi-segment document paths", async () => {
+  it("uses Firestore Bearer authorization and keeps multi-segment document paths", async () => {
     const { calls, impl } = fakeFetch();
     await createRestHandler(byId("firebase")).callTool(
       "get_document",
       { path: "users/u1" },
-      makeCtx({ api_key: "K", project_id: "P" }, impl),
+      makeCtx({ access_token: "oauth-token", project_id: "P" }, impl),
     );
     expect(calls[0].url).toBe(
-      "https://firestore.googleapis.com/v1/projects/P/databases/(default)/documents/users/u1?key=K",
+      "https://firestore.googleapis.com/v1/projects/P/databases/(default)/documents/users/u1",
     );
-    expect(headersOf(calls[0]).Authorization).toBeUndefined();
+    expect(headersOf(calls[0]).Authorization).toBe("Bearer oauth-token");
   });
 
   it("returns the configure-first message for a missing jira host without fetching", async () => {
@@ -238,7 +265,7 @@ describe("rest engine", () => {
     const r = await createRestHandler(byId("slack")).callTool(
       "list_channels",
       { timeout_seconds: "abc" },
-      makeCtx({ bot_token: "xoxb-1" }, impl),
+      makeCtx({ user_token: "xoxp-1" }, impl),
     );
     expect(r.isError).toBe(true);
     expect(r.text).toBe("Invalid operation arguments.");
@@ -250,7 +277,7 @@ describe("rest engine", () => {
     const r = await createRestHandler(byId("slack")).callTool(
       "list_channels",
       { timeout_seconds: 999 },
-      makeCtx({ bot_token: "xoxb-1" }, impl),
+      makeCtx({ user_token: "xoxp-1" }, impl),
     );
     expect(r.isError).toBe(true);
     expect(r.text).toBe("Invalid operation arguments.");
@@ -258,16 +285,16 @@ describe("rest engine", () => {
   });
 
   it("non-2xx responses expose only a bounded status error", async () => {
-    const { calls, impl } = fakeFetch(404, '{"ok":false,"error":"channel_not_found","echo":"xoxb-1"}');
+    const { calls, impl } = fakeFetch(404, '{"ok":false,"error":"channel_not_found","echo":"xoxp-1"}');
     const r = await createRestHandler(byId("slack")).callTool(
       "history",
       { channel: "C1" },
-      makeCtx({ bot_token: "xoxb-1" }, impl),
+      makeCtx({ user_token: "xoxp-1" }, impl),
     );
     expect(r.isError).toBe(true);
     expect(r.text).toBe("Provider request failed (HTTP 404).");
     expect(r.text).not.toContain("channel_not_found");
-    expect(r.text).not.toContain("xoxb-1");
+    expect(r.text).not.toContain("xoxp-1");
     expect(calls).toHaveLength(1);
   });
 
@@ -295,8 +322,8 @@ describe("rest engine", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("substitutes path placeholders from stored config (telegram bot token)", async () => {
-    const { calls, impl } = fakeFetch();
+  it("substitutes and redacts Telegram path credentials", async () => {
+    const { calls, impl } = fakeFetch(200, '{"ok":true,"result":{}}');
     await createRestHandler(byId("telegram")).callTool(
       "get_me",
       {},
@@ -306,80 +333,44 @@ describe("rest engine", () => {
     expect(headersOf(calls[0]).Authorization).toBeUndefined();
   });
 
-  it("rejects open query-map passthrough before fetching", async () => {
+  it("rejects Supabase open queries and every unfiltered mutation before fetching", async () => {
+    for (const [name, args] of [
+      ["select", { table: "tasks", query: { select: "*", status: "eq.done" } }],
+      ["update", { table: "tasks", query: {}, patch_json: { done: true } }],
+      ["delete", { table: "tasks", query: {} }],
+    ] as const) {
+      const { calls, impl } = fakeFetch();
+      const r = await createSupabaseHandler().callTool(name, args, makeCtx({
+        publishable_key: "sb_publishable_test",
+        user_jwt: "header.eyJyb2xlIjoiYXV0aGVudGljYXRlZCJ9.signature",
+        base_url: "https://xyz.supabase.co",
+        allowed_tables: "tasks",
+        allowed_columns: "id,title",
+      }, impl));
+      expect(r.isError).toBe(true);
+      expect(calls).toHaveLength(0);
+    }
+  });
+
+  it("keeps retired MongoDB legacy calls unexecutable", async () => {
     const { calls, impl } = fakeFetch();
-    const r = await createRestHandler(byId("supabase")).callTool(
-      "select",
-      { table: "tasks", query: { select: "*", status: "eq.done" } },
-      makeCtx({ service_key: "sk", base_url: "https://xyz.supabase.co" }, impl),
-    );
+    const r = await createRestHandler(byId("mongodb")).callTool("find", {}, makeCtx({}, impl));
     expect(r.isError).toBe(true);
-    expect(r.text).toMatch(/unavailable|invalid/i);
+    expect(r.text).toBe("Unknown provider operation.");
     expect(calls).toHaveLength(0);
   });
 
-  it("quarantines supabase arbitrary-body writes, including unfiltered attempts", async () => {
-    const { calls, impl } = fakeFetch();
-    const r = await createRestHandler(byId("supabase")).callTool(
-      "update",
-      { table: "tasks", query: {}, patch_json: { done: true } },
-      makeCtx({ service_key: "sk", base_url: "https://xyz.supabase.co" }, impl),
-    );
-    expect(r.isError).toBe(true);
-    expect(r.text).toMatch(/unavailable|invalid/i);
-    expect(calls).toHaveLength(0);
-  });
-
-  it("rejects raw JSON strings and wrong scalar types in typed body fields", async () => {
-    const { calls, impl } = fakeFetch();
-    const r = await createRestHandler(byId("mongodb")).callTool(
-      "find",
-      { db: "mydb", coll: "things", filter_json: '{"status":"open"}', limit: "7" },
-      makeCtx(
-        {
-          api_key: "K",
-          data_api_base: "https://data.mongodb-api.com/app/x/endpoint/data/v1",
-          data_source: "Cluster0",
-        },
-        impl,
-      ),
-    );
-    expect(r.isError).toBe(true);
-    expect(r.text).toBe("Invalid operation arguments.");
-    expect(calls).toHaveLength(0);
-  });
-
-  it("builds nested notion create_page bodies and omits absent children", async () => {
-    const { calls, impl } = fakeFetch();
+  it("uses the current Notion data-source read and version", async () => {
+    const { calls, impl } = fakeFetch(200, '{"results":[]}');
     await createRestHandler(byId("notion")).callTool(
-      "create_page",
-      { parent_id: "db1", title: "T", text: "hello" },
+      "query_data_source",
+      { data_source_id: "ds1", page_size: 10 },
       makeCtx({ api_key: "nt_1" }, impl),
     );
-    expect(JSON.parse(calls[0].init?.body as string)).toEqual({
-      parent: { database_id: "db1" },
-      properties: { title: { title: [{ text: { content: "T" } }] } },
-      children: [
-        {
-          object: "block",
-          type: "paragraph",
-          paragraph: { rich_text: [{ type: "text", text: { content: "hello" } }] },
-        },
-      ],
-    });
-    expect(headersOf(calls[0])["Notion-Version"]).toBe("2022-06-28");
+    expect(JSON.parse(calls[0].init?.body as string)).toEqual({ page_size: 10 });
+    expect(headersOf(calls[0])["Notion-Version"]).toBe("2026-03-11");
     expect(headersOf(calls[0]).Authorization).toBe("Bearer nt_1");
-
-    const second = fakeFetch();
-    await createRestHandler(byId("notion")).callTool(
-      "create_page",
-      { parent_id: "db1", title: "T2" },
-      makeCtx({ api_key: "nt_1" }, second.impl),
-    );
-    expect(JSON.parse(second.calls[0].init?.body as string)).toEqual({
-      parent: { database_id: "db1" },
-      properties: { title: { title: [{ text: { content: "T2" } }] } },
-    });
+    expect(new URL(calls[0].url).pathname).toBe("/v1/data_sources/ds1/query");
   });
 
   it("maps google drive search args onto drive params (arg rename + default)", async () => {
@@ -396,50 +387,23 @@ describe("rest engine", () => {
     expect(headersOf(calls[0]).Authorization).toBe("Bearer t");
   });
 
-  it("gets google drive metadata with fields=* and raw content with alt=media", async () => {
+  it("separates Drive binary alt=media from native export", async () => {
     const meta = fakeFetch();
     await createGoogleDriveHandler().callTool("get_file", { id: "f1" }, makeCtx({ access_token: "t" }, meta.impl));
-    expect(new URL(meta.calls[0].url).searchParams.get("fields")).toBe("*");
+    expect(new URL(meta.calls[0].url).searchParams.get("fields")).toBe("id,name,mimeType,capabilities.canDownload");
 
     const raw = fakeFetch(200, "plain text body");
-    await createGoogleDriveHandler().callTool(
-      "download_text",
-      { id: "f2" },
-      makeCtx({ access_token: "t" }, raw.impl),
-    );
+    await createGoogleDriveHandler().callTool("download_file", { id: "f2" }, makeCtx({ access_token: "t" }, raw.impl));
     expect(new URL(raw.calls[0].url).searchParams.get("alt")).toBe("media");
-  });
 
-  it("uploads google drive text as a multipart/related body", async () => {
-    const { calls, impl } = fakeFetch();
-    const r = await createGoogleDriveHandler().callTool(
-      "upload_text",
-      { name: "n.txt", text: "hi", folder_id: "fold1" },
-      makeCtx({ access_token: "t" }, impl),
+    const exported = fakeFetch(200, "exported");
+    await createGoogleDriveHandler().callTool(
+      "export_native",
+      { id: "f3", mime_type: "text/plain" },
+      makeCtx({ access_token: "t" }, exported.impl),
     );
-    expect(r.isError).toBe(false);
-    expect(calls[0].url).toBe(
-      "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
-    );
-    expect(headersOf(calls[0])["content-type"]).toContain("multipart/related; boundary=");
-    const body = calls[0].init?.body as string;
-    expect(body).toContain("Content-Type: application/json; charset=UTF-8");
-    expect(body).toContain('"name":"n.txt"');
-    expect(body).toContain('"parents":["fold1"]');
-    expect(body).toContain("Content-Type: text/plain");
-    expect(body.endsWith("--\r\n") || body.includes("--")).toBe(true);
-  });
-
-  it("surfaces missing google drive metadata-name arguments as errors", async () => {
-    const { calls, impl } = fakeFetch();
-    const r = await createGoogleDriveHandler().callTool(
-      "upload_text",
-      { text: "hi" },
-      makeCtx({ access_token: "t" }, impl),
-    );
-    expect(r.isError).toBe(true);
-    expect(r.text).toBe("Missing required argument: name");
-    expect(calls).toHaveLength(0);
+    expect(new URL(exported.calls[0].url).pathname).toBe("/drive/v3/files/f3/export");
+    expect(new URL(exported.calls[0].url).searchParams.get("mimeType")).toBe("text/plain");
   });
 });
 
@@ -498,10 +462,10 @@ describe("typed provider execution boundaries", () => {
   it("requires an exactly bound per-action approval before an external communication", async () => {
     let prompts = 0;
     const { calls, impl } = fakeFetch(200, '{"ok":true}');
-    const result = await createRestHandler(byId("slack")).callTool(
+    const result = await createRestHandler(externalCommunicationDescriptor()).callTool(
       "send_message",
       { channel: "C1", text: "hello" },
-      approvalCtx({ bot_token: "xoxb-1" }, impl, async (approval) => {
+      approvalCtx({ user_token: "xoxp-1" }, impl, async (approval) => {
         prompts++;
         expect(approval.operationId).toBe("send_message");
         expect(approval.connectionId).toBe("connection-1");
@@ -520,7 +484,7 @@ describe("typed provider execution boundaries", () => {
       async () => ({ decision: "deny" as const }),
     ]) {
       const { calls, impl } = fakeFetch();
-      const base = makeCtx({ bot_token: "xoxb-1" }, impl);
+      const base = makeCtx({ user_token: "xoxp-1" }, impl);
       const ctx = {
         ...base,
         sessionId: "session-1",
@@ -530,7 +494,7 @@ describe("typed provider execution boundaries", () => {
         providerId: "slack",
         approveProvider: approve,
       } as McpCallContext;
-      const result = await createRestHandler(byId("slack")).callTool(
+      const result = await createRestHandler(externalCommunicationDescriptor()).callTool(
         "send_message",
         { channel: "C1", text: "hello" },
         ctx,
@@ -541,14 +505,14 @@ describe("typed provider execution boundaries", () => {
   });
 
   it("redacts echoed credentials and secret-bearing URLs from successful output", async () => {
-    const { impl } = fakeFetch(200, '{"echo":"xoxb-1","url":"https://slack.com/api?token=xoxb-1"}');
+    const { impl } = fakeFetch(200, '{"echo":"xoxp-1","url":"https://slack.com/api?token=xoxp-1"}');
     const result = await createRestHandler(byId("slack")).callTool(
       "history",
       { channel: "C1" },
-      makeCtx({ bot_token: "xoxb-1" }, impl),
+      makeCtx({ user_token: "xoxp-1" }, impl),
     );
     expect(result.isError).toBe(false);
-    expect(result.text).not.toContain("xoxb-1");
+    expect(result.text).not.toContain("xoxp-1");
     expect(result.text).toContain("[REDACTED]");
   });
 
@@ -586,7 +550,7 @@ describe("typed provider execution boundaries", () => {
     const result = await createRestHandler(byId("linear")).callTool(
       "list_issues",
       { first: 2 },
-      makeCtx({ api_key: "lin_1" }, impl),
+      makeCtx({ personal_api_key: "lin_1" }, impl),
     );
     expect(result.isError).toBe(false);
     expect(calls).toHaveLength(1);
@@ -616,35 +580,33 @@ describe("typed provider execution boundaries", () => {
     expect((search as { effect?: string } | undefined)?.effect).toBe("read");
   });
 
-  it("rejects empty and whitespace-only required legacy strings before writes", async () => {
-    for (const title of ["", " \t "]) {
+  it("rejects empty and whitespace-only required strings before writes", async () => {
+    for (const text of ["", " \t "]) {
       const { calls, impl } = fakeFetch();
-      const result = await createRestHandler(byId("gitlab")).callTool(
-        "create_issue",
-        { project_id: "P", title },
-        makeCtx({ token: "tok" }, impl),
+      const result = await createRestHandler(externalCommunicationDescriptor()).callTool(
+        "send_message",
+        { channel: "C1", text },
+        makeCtx({ user_token: "tok" }, impl),
       );
-      expect(result.isError, JSON.stringify(title)).toBe(true);
-      expect(calls, JSON.stringify(title)).toHaveLength(0);
+      expect(result.isError, JSON.stringify(text)).toBe(true);
+      expect(calls, JSON.stringify(text)).toHaveLength(0);
     }
   });
 
   it("executes the approval snapshot when caller args mutate after the approval await", async () => {
     const { calls, impl } = fakeFetch(200, '{"ok":true}');
     const args = { channel: "C-original", text: "before-approval" };
-    const pending = createRestHandler(byId("slack")).callTool(
+    const pending = createRestHandler(externalCommunicationDescriptor()).callTool(
       "send_message",
       args,
-      approvalCtx({ bot_token: "xoxb-1" }, impl, async (approval) => ({ decision: "allow", approval })),
+      approvalCtx({ user_token: "xoxp-1" }, impl, async (approval) => ({ decision: "allow", approval })),
     );
     args.channel = "C-attacker";
     args.text = "after-approval";
     const result = await pending;
     expect(result.isError).toBe(false);
     expect(calls).toHaveLength(1);
-    const url = new URL(calls[0].url);
-    expect(url.searchParams.get("channel")).toBe("C-original");
-    expect(url.searchParams.get("text")).toBe("before-approval");
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({ channel: "C-original", text: "before-approval" });
   });
 
   it("uses the same deep args snapshot after connection resolution awaits", async () => {
@@ -659,9 +621,28 @@ describe("typed provider execution boundaries", () => {
       limit: 7,
     };
     const descriptor: RestServiceDescriptor = {
-      ...byId("mongodb"),
+      curatedId: "snapshot-fixture",
+      displayName: "Snapshot fixture",
+      description: "Generic typed snapshot fixture.",
+      baseUrl: "https://api.acme.test",
+      auth: "bearer",
+      authPrefix: "Bearer ",
+      credentialKey: "token",
+      credentialLabel: "Fixture token",
+      extraConfig: [{ key: "data_source", label: "Fixture data source", secret: false }],
       tools: [{
-        ...byId("mongodb").tools[0],
+        name: "find",
+        description: "Typed snapshot read.",
+        method: "POST",
+        path: "/action/find",
+        effect: "read",
+        bodyTemplate: {
+          dataSource: "config:data_source",
+          database: "arg:db",
+          collection: "arg:coll",
+          filter: "json:filter_json",
+          limit: "int:limit:20",
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -685,11 +666,7 @@ describe("typed provider execution boundaries", () => {
       resolveConnectionConfig: async () => {
         entered();
         await resolverGate;
-        return {
-          api_key: "K",
-          data_api_base: "https://data.mongodb-api.com/app/x/endpoint/data/v1",
-          data_source: "Cluster0",
-        };
+        return { token: "K", data_source: "Cluster0" };
       },
     }).callTool("find", args, makeCtx({}, impl));
     await enteredResolver;
@@ -729,7 +706,7 @@ describe("typed provider execution boundaries", () => {
   });
 
   it("publishes closed schemas plus effect, approval, request, limits, and output metadata", async () => {
-    const tools = await createRestHandler(byId("slack")).listTools();
+    const tools = await createRestHandler(externalCommunicationDescriptor()).listTools();
     const send = tools.find((tool) => tool.name === "send_message") as typeof tools[number] & {
       effect: string;
       approval: string;
@@ -847,6 +824,7 @@ describe("s3 handler", () => {
     access_key_id: "AKIDEXAMPLE",
     region: "us-east-1",
     bucket: "mybucket",
+    session_token: "sts-session-token",
   };
 
   /** Recomputes the expected SigV4 header from the captured request and
@@ -854,6 +832,7 @@ describe("s3 handler", () => {
   function expectValidSignature(call: Call, opts: { rawPath: string; body: Uint8Array | string }): void {
     const url = new URL(call.url);
     const amzDate = headersOf(call)["x-amz-date"];
+    const payloadHash = sha256Hex(typeof opts.body === "string" ? Buffer.from(opts.body, "utf8") : opts.body);
     const expected = s3Authorization({
       accessKeyId: "AKIDEXAMPLE",
       secretAccessKey: "aws-secret",
@@ -861,8 +840,13 @@ describe("s3 handler", () => {
       method: call.init?.method ?? "GET",
       canonicalUri: opts.rawPath,
       queryParameters: Object.fromEntries(url.searchParams),
-      headers: { host: url.host, "x-amz-date": amzDate },
-      payloadHash: sha256Hex(typeof opts.body === "string" ? Buffer.from(opts.body, "utf8") : opts.body),
+      headers: {
+        host: url.host,
+        "x-amz-date": amzDate,
+        "x-amz-content-sha256": payloadHash,
+        "x-amz-security-token": "sts-session-token",
+      },
+      payloadHash,
       amzDate: parseAmzDate(amzDate),
     });
     expect(headersOf(call).Authorization).toBe(expected);
@@ -898,46 +882,27 @@ describe("s3 handler", () => {
     const r = await createS3Handler().callTool("get_object", { key: "bin" }, makeCtx(s3secrets, impl));
     expect(r.isError).toBe(false);
     expect(r.text).toContain("3 bytes");
-    expect(r.text).toContain("presign_get");
     expect(r.text).toContain("mybucket/bin");
+    expect(r.text).not.toContain("presign_get");
   });
 
-  it("put_object PUTs text with a payload-signed header", async () => {
-    const { calls, impl } = fakeFetch(200, "");
-    const r = await createS3Handler().callTool(
-      "put_object",
-      { key: "notes/hi.txt", text: "hello" },
-      makeCtx(s3secrets, impl),
-    );
-    expect(r.isError).toBe(false);
-    expect(r.text).toBe('Put 5 bytes to "notes/hi.txt" in bucket "mybucket".');
-    expect(calls[0].init?.method).toBe("PUT");
-    expect(new URL(calls[0].url).pathname).toBe("/notes/hi.txt");
-    expect(Buffer.from(calls[0].init?.body as unknown as Uint8Array).toString("utf8")).toBe("hello");
-    expect(headersOf(calls[0])["content-type"]).toBe("text/plain; charset=utf-8");
-    expectValidSignature(calls[0], { rawPath: "/notes/hi.txt", body: Buffer.from("hello", "utf8") });
+  it("keeps unproven S3 writes and credential minting absent", async () => {
+    const tools = await createS3Handler().listTools();
+    expect(tools.map((tool) => tool.name)).toEqual(["list_objects", "get_object"]);
+    for (const name of ["put_object", "delete_object", "presign_get"]) {
+      const { calls, impl } = fakeFetch();
+      const result = await createS3Handler().callTool(name, { key: "x", text: "x" }, makeCtx(s3secrets, impl));
+      expect(result.isError).toBe(true);
+      expect(calls).toHaveLength(0);
+    }
   });
 
-  it("delete_object DELETEs the key", async () => {
-    const { calls, impl } = fakeFetch(204, "");
-    const r = await createS3Handler().callTool("delete_object", { key: "old.txt" }, makeCtx(s3secrets, impl));
-    expect(r.isError).toBe(false);
-    expect(r.text).toBe('Deleted "old.txt" from bucket "mybucket".');
-    expect(calls[0].init?.method).toBe("DELETE");
-    expectValidSignature(calls[0], { rawPath: "/old.txt", body: "" });
-  });
-
-  it("presign_get signs purely without any network", async () => {
+  it("requires an STS session token before any S3 egress", async () => {
     const { calls, impl } = fakeFetch();
-    const r = await createS3Handler().callTool("presign_get", { key: "a/b.txt" }, makeCtx(s3secrets, impl));
+    const result = await createS3Handler().callTool("list_objects", {}, makeCtx({ ...s3secrets, session_token: "" }, impl));
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("session token");
     expect(calls).toHaveLength(0);
-    const uri = new URL(r.text.trim());
-    expect(uri.host).toBe("mybucket.s3.us-east-1.amazonaws.com");
-    expect(uri.pathname).toBe("/a/b.txt");
-    expect(uri.searchParams.get("X-Amz-Algorithm")).toBe("AWS4-HMAC-SHA256");
-    expect(uri.searchParams.get("X-Amz-Expires")).toBe("3600");
-    expect(uri.searchParams.get("X-Amz-Credential")).toMatch(/^AKIDEXAMPLE\//);
-    expect(uri.searchParams.get("X-Amz-Signature")).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it("missing config gates with configure-first and never fetches", async () => {
@@ -952,11 +917,12 @@ describe("s3 handler", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("non-2xx comes back verbatim with the status line", async () => {
+  it("non-2xx returns a bounded status-only error", async () => {
     const { impl } = fakeFetch(403, "<Error><Code>AccessDenied</Code></Error>");
     const r = await createS3Handler().callTool("get_object", { key: "x" }, makeCtx(s3secrets, impl));
     expect(r.isError).toBe(true);
-    expect(r.text).toBe("HTTP 403\n<Error><Code>AccessDenied</Code></Error>");
+    expect(r.text).toBe("Provider request failed (HTTP 403).");
+    expect(r.text).not.toContain("AccessDenied");
   });
 });
 
@@ -988,7 +954,8 @@ describe("curated descriptor data", () => {
     for (const d of ALL_DESCRIPTORS) {
       expect(d.displayName).toBeTruthy();
       expect(d.description).toBeTruthy();
-      expect(d.tools.length).toBeGreaterThan(0);
+      if (d.curatedId === "mongodb") expect(d.tools).toEqual([]);
+      else expect(d.tools.length).toBeGreaterThan(0);
       for (const t of d.tools) {
         expect(t.name).toBeTruthy();
         expect(t.description).toBeTruthy();

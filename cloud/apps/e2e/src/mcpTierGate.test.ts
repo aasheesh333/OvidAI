@@ -6,11 +6,14 @@
  * - sandbox → a fake SandboxManager handle for the plugin-install flow (and a
  *   fake stdio spawner for the custom stdio server);
  * - model sampling → never exercised (these are router-level flows);
- * - egress → a fixture HTTP server on 127.0.0.1 reached through an injected
- *   GuardedFetch (the production SSRF guard is a package unit concern).
+ * - egress → separate fixture HTTP (custom MCP) and HTTPS (curated Fetch)
+ *   servers on loopback; curated Fetch uses an injected GuardedFetch whose
+ *   test-only trust and SSRF boundaries are documented below.
+ *
+ * This corrected fixture and all flows remain UNEXECUTED.
  *
  * Pinned flows:
- *   ① free: catalog lists 20 curated; fetch works; a stored custom server is
+ *   ① free: an explicit supported test catalog lists fetch; a stored custom server is
  *      refused with `pro_required` BEFORE any dial; addServer throws.
  *   ② pro: custom Streamable-HTTP server connects/lists/calls; custom stdio
  *      server (fake spawner) lists/calls.
@@ -27,7 +30,12 @@
  * @ovid/gateway's REST surface.
  */
 
-import { createServer, type Server } from "node:http";
+import {
+  createServer as createHttpServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
+import { createServer as createHttpsServer, request as httpsRequest } from "node:https";
 import type { AddressInfo } from "node:net";
 import { cp, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -43,6 +51,7 @@ import {
   createCuratedCatalog,
   createEnvelopeCrypto,
   createFetchHandler,
+  createGuardedFetch,
   createMcpRouter,
   createPluginInstaller,
   createRedisSystemBus,
@@ -58,6 +67,7 @@ import {
 } from "@ovid/mcp";
 import { createSandboxSeam } from "@ovid/worker";
 import type { SandboxHandle, SandboxManager } from "@ovid/sandbox";
+import { createTestProviderRegistry } from "../../../packages/mcp/src/__fixtures__/providerRegistry.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const TEST_REDIS_URL = process.env.TEST_REDIS_URL;
@@ -86,20 +96,155 @@ function run(prefix: string): { sessionId: string; runId: string } {
 }
 
 // ---------------------------------------------------------------------------
-// Fixture HTTP server: curated fetch GETs + a scripted Streamable-HTTP MCP
+// Fixture HTTP MCP + HTTPS Fetch servers
 // ---------------------------------------------------------------------------
 
+// Existing clearly test-only pair copied from
+// packages/mcp/src/egress/providerEgress.security.test.ts. Its SAN includes
+// 127.0.0.1. It is never installed in a system/global trust store.
+const TEST_CERT = `-----BEGIN CERTIFICATE-----
+MIIDPTCCAiWgAwIBAgIUbGtBeXoFz8OV08DCCHWlWCN3K5owDQYJKoZIhvcNAQEL
+BQAwGDEWMBQGA1UEAwwNcHJvdmlkZXIudGVzdDAeFw0yNjEwMjQxMDM1MjBaFw0z
+NjEwMjExMDM1MjBaMBgxFjAUBgNVBAMMDXByb3ZpZGVyLnRlc3QwggEiMA0GCSqG
+SIb3DQEBAQUAA4IBDwAwggEKAoIBAQCU6ROAfv1Mu7d3sQpTNAPEy0PgGGhkfDQ/
+m0Qgjb3XEKNRpMMVBFI2wwpbzwFZUxDzUba8/l4kHgY5uDZC1ogKF0+b4YhsXNTo
+p4jmv96jJwbZlmQYCVmBkb5RccnZMVB526Ou3QbsqOYXkgoUwofYaFQy57Gyu53b
+2xlqSGs26uI+0vSxAb8uoTkbFbptoJ1LJrQCj+YuDGBhsNFyQDVdtD0lurBVWa4z
+htvgMvnybEvnOPycpNnZ5ljKU0Y/jPImRUwz52/hvbMNyurSFO7oszxktRZ6vTBy
+1UR8LPi9+X3OBtmv4/oNGtbx9nOQrIxj4IE9KqgJ7vlIISJ/fk/VAgMBAAGjfzB9
+MB0GA1UdDgQWBBT4oqOuoDEKt25SaCZ5+twbfXJjRjAfBgNVHSMEGDAWgBT4oqOu
+oDEKt25SaCZ5+twbfXJjRjAPBgNVHRMBAf8EBTADAQH/MCoGA1UdEQQjMCGCDXBy
+b3ZpZGVyLnRlc3SCCm90aGVyLnRlc3SHBH8AAAEwDQYJKoZIhvcNAQELBQADggEB
+AHWPdQ4rn5flO3ic9l10FDhvMUUqs9bbUgKigu0ZDtG1A7t8xLz7oOTx+Foxes3C
+UAVSg+XxtWSEN3TAip+arpn3eDj4kL/z72jr7AhtnFdfIH629ORCMhjzbf8kvOaG
+hiV/LCFJ4E45mmr8TTbx0w0zgRvETQF0sPVQq2S+23wusXSK/nK3mUp89qtqRe9g
+Py7ZLN2d5xRqmbgcFonDcKYVkasxj4qoteYf3H0bgvlzc18Et1nVTp1DYCxfj6eO
+CbCZDiafdeUpSv5Zvpg42HI7IIdjvt5OoKnYIRct55RG/SLYgcBu7D24XwSuX6pT
+Je7FW1EpGbX81125anwXhxg=
+-----END CERTIFICATE-----`;
+const TEST_KEY = `-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCU6ROAfv1Mu7d3
+sQpTNAPEy0PgGGhkfDQ/m0Qgjb3XEKNRpMMVBFI2wwpbzwFZUxDzUba8/l4kHgY5
+uDZC1ogKF0+b4YhsXNTop4jmv96jJwbZlmQYCVmBkb5RccnZMVB526Ou3QbsqOYX
+kgoUwofYaFQy57Gyu53b2xlqSGs26uI+0vSxAb8uoTkbFbptoJ1LJrQCj+YuDGBh
+sNFyQDVdtD0lurBVWa4zhtvgMvnybEvnOPycpNnZ5ljKU0Y/jPImRUwz52/hvbMN
+yurSFO7oszxktRZ6vTBy1UR8LPi9+X3OBtmv4/oNGtbx9nOQrIxj4IE9KqgJ7vlI
+ISJ/fk/VAgMBAAECggEAGcq1/0Vfi6Ue3bsbIfaqKXGYf83SdQcjSJoUxnuudDv0
+Qb2jMXZ2Y/hLyMOVxPozfyV53InFVgWiR+iNc22zkeXgOsxpQ/WfRe3Qs0Dr57/o
+epMHIrep2lybRYGLN9SIDxc5Jl4vpxmJAu+fUeGwxE2rucZyO5Yt/SjZodRJx7DL
+HLNT8BaH63YsJosRpdT0odc0G/RNYh4OfA2AGbayknGCFhTvyvLsMsupR6zlrA78
+0XWwqzhKkLRpaNHvuGqhbGAp15k4jRE2pw+k+QlHvJ+LibJQpWMV44X7Hg2HpCTn
+1D7/WlUxUqF9c8eySoNTXtVsqtnsmpimBXQFvBgaSQKBgQDEFoL+RBIcLPzf/oG6
+jQ83AF+MYopMUN3iaEWpKeqCZaWW5L76ban1W3V9IRldH9wumcFyzv0akUdZlbIo
+AWzv9we61sFN6zBhggDVziv28E9RqLHv/EW2Ij+T/PNq7+rfGCIvx6w74D0X5rAQ
+4kt7bee1XxN7nUk04zAW2mdCWQKBgQDCaHbrR+N2vGGEQWg80QhU2L0nYn05PUBX
+FHQuOdlqqYb+tt11iACR2e/vJ4O281+UFSW28cHYayqg7jlDOJBEgvQnfZEeZh/9
+bKM3s+S2GKr/wO0ruL41LtrJkazWnh1qQWP3FInGPeXKPyAoQQThKxZ7LfEG37dl
+Hl4wqv8x3QKBgQCEMLzsVs1yqy1qf/PK5I9uP9UqGcAsBJQgrrTPfs92SrogCGNr
+BgT+wEJrMaYcrn7L96F/GWVtxKS6Ev3AlH1xJDLU1TQJqFS8V1zixhPDbGu8nCIg
+rAv+5gXAaVVcMRNAhM9/MHe/AcON2lm1eCj0s7nx/n9u5TDV85aWwXO9OQKBgBcO
+xtP/EcZ6b2J9U3yrGj7d+gla0Bli32e0oFb/O39AHifFzpxrBg5GeAO4fxHK6dIp
+c/Cv2druUv8FYjtL0SifE5A/f1/IoxCuuukXaBAE+vscicS+w6iRJxfzNDm8RSbe
+HJookHK30rJbLFg55fdC4ga4GzdCf4D5yhghn+TtAoGAMe8b/Z9UOFgmwgSs2M2i
+j12zaVrMSjwQ8XpMe+dnlhX+qnGUt2mNTiHZw4tHUeUm/8DSLHN+vLQ+IYaVIl96
+X5zfAq99vBWY/bKRW/UvVj67w9D1FWmudjN7Xu2QI98D6ZrApsDTxowz1GKhyie9
+IRTSUB3FPU0ntf+TfIjEkIw=
+-----END PRIVATE KEY-----`;
+
+const FIXTURE_FETCH_ORIGIN = "https://127.0.0.1";
+
 interface FixtureServer {
+  /** Existing custom Streamable-HTTP MCP origin. */
   url: string;
+  /** Port-default HTTPS origin accepted by the real Fetch operation policy. */
+  fetchUrl: string;
+  fetchImpl: GuardedFetch;
   getCount(): number;
   postCount(): number;
   close(): Promise<void>;
 }
 
+// UNEXECUTED test-only transport boundary. The real GuardedFetch retains its
+// normal scheme/port/address classification and non-production literal-loopback
+// exemption. The wire then refuses every origin except https://127.0.0.1,
+// trusts only TEST_CERT with normal TLS hostname verification, and maps that
+// URL's default HTTPS port to this harness's ephemeral loopback listener. No
+// rejectUnauthorized:false, global CA, NODE_TLS override, DNS rewrite, external
+// provider access, production Fetch policy edit, or production SSRF edit exists.
+function createFixtureFetch(httpsPort: number): GuardedFetch {
+  const wire: typeof fetch = async (input, init) => {
+    const rawUrl = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const parsed = new URL(rawUrl);
+    if (
+      parsed.protocol !== "https:" ||
+      parsed.origin !== FIXTURE_FETCH_ORIGIN ||
+      parsed.username !== "" ||
+      parsed.password !== "" ||
+      parsed.port !== ""
+    ) {
+      throw new Error("Fixture Fetch refused a non-fixture URL.");
+    }
+    const method = init?.method ?? (input instanceof Request ? input.method : "GET");
+    if (method !== "GET" || init?.body != null) {
+      throw new Error("Fixture Fetch accepts only GET requests without a body.");
+    }
+    const headers = Object.fromEntries(new Headers(init?.headers).entries());
+    return new Promise<Response>((resolve, reject) => {
+      const request = httpsRequest(parsed, {
+        port: httpsPort,
+        method,
+        headers,
+        ca: TEST_CERT,
+        agent: false,
+        rejectUnauthorized: true,
+        signal: init?.signal ?? undefined,
+      }, (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("error", reject);
+        response.on("end", () => {
+          const responseHeaders = new Headers();
+          for (let index = 0; index < response.rawHeaders.length; index += 2) {
+            const name = response.rawHeaders[index];
+            const value = response.rawHeaders[index + 1];
+            if (name !== undefined && value !== undefined) responseHeaders.append(name, value);
+          }
+          resolve(new Response(Buffer.concat(chunks), {
+            status: response.statusCode ?? 500,
+            headers: responseHeaders,
+          }));
+        });
+      });
+      request.on("error", reject);
+      request.end();
+    });
+  };
+  return createGuardedFetch({ allowedPorts: [443], fetchImpl: wire });
+}
+
+// The custom MCP side keeps the original ordinary-fetch HTTP transport, but
+// only for this harness's exact credential-free loopback origin. Both custom
+// HTTP and SSE pass redirect:"manual"; their methods, headers, and JSON-RPC
+// bodies are forwarded unchanged. There is no unrestricted fallback.
+function createCustomFixtureFetch(origin: string): GuardedFetch {
+  return (url, init) => {
+    const parsed = new URL(url);
+    if (
+      parsed.protocol !== "http:" ||
+      parsed.origin !== origin ||
+      parsed.username !== "" ||
+      parsed.password !== ""
+    ) {
+      throw new Error("Custom fixture MCP refused a non-fixture URL.");
+    }
+    return fetch(url, init);
+  };
+}
+
 async function startFixtureServer(): Promise<FixtureServer> {
   let gets = 0;
   let posts = 0;
-  const server: Server = createServer((req, res) => {
+  const handleRequest = (req: IncomingMessage, res: ServerResponse): void => {
     if (req.method === "GET") {
       gets += 1;
       res.writeHead(200, { "content-type": "text/html" });
@@ -173,15 +318,33 @@ async function startFixtureServer(): Promise<FixtureServer> {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result }));
     });
-  });
+  };
 
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const port = (server.address() as AddressInfo).port;
+  const httpServer = createHttpServer(handleRequest);
+  const httpsServer = createHttpsServer({ key: TEST_KEY, cert: TEST_CERT }, handleRequest);
+  await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  try {
+    await new Promise<void>((resolve) => httpsServer.listen(0, "127.0.0.1", resolve));
+  } catch (error) {
+    httpServer.close();
+    throw error;
+  }
+  const httpPort = (httpServer.address() as AddressInfo).port;
+  const httpsPort = (httpsServer.address() as AddressInfo).port;
   return {
-    url: `http://127.0.0.1:${port}`,
+    url: `http://127.0.0.1:${httpPort}`,
+    fetchUrl: FIXTURE_FETCH_ORIGIN,
+    fetchImpl: createFixtureFetch(httpsPort),
     getCount: () => gets,
     postCount: () => posts,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: async () => {
+      httpServer.closeAllConnections();
+      httpsServer.closeAllConnections();
+      await Promise.all([
+        new Promise<void>((resolve) => httpServer.close(() => resolve())),
+        new Promise<void>((resolve) => httpsServer.close(() => resolve())),
+      ]);
+    },
   };
 }
 
@@ -276,10 +439,6 @@ const workspace: WorkspaceFiles = {
   async remove() {},
 };
 
-// The fixture server is on loopback; the injected fetch bypasses the
-// production SSRF guard (that guard has its own package unit tests).
-const fetchImpl: GuardedFetch = (url, init) => fetch(url, init);
-
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
@@ -304,11 +463,24 @@ interface Harness {
 
 async function makeHarness(): Promise<Harness> {
   const server = await startFixtureServer();
+  const fetchImpl = server.fetchImpl;
+  const customFetchImpl = createCustomFixtureFetch(server.url);
+  // The router dependency also supplies native handlers' per-call context, so
+  // dispatch between the two exact fixture origins instead of replacing the
+  // curated guard. Unknown origins fall into the custom wire and are refused.
+  // Custom stdio never uses either fetch path.
+  const routerFetchImpl: GuardedFetch = (url, init) => {
+    const parsed = new URL(url);
+    return parsed.origin === FIXTURE_FETCH_ORIGIN
+      ? fetchImpl(url, init)
+      : customFetchImpl(url, init);
+  };
   const spawner = new FakeSpawner();
   let factories = 0;
   const catalog = createCuratedCatalog({
     fetchImpl,
     workspace,
+    registry: createTestProviderRegistry({ supported: ["fetch"] }),
     handlerOverrides: {
       fetch: () => {
         factories += 1;
@@ -329,7 +501,7 @@ async function makeHarness(): Promise<Harness> {
     },
     spawner,
     workspace,
-    fetchImpl,
+    fetchImpl: routerFetchImpl,
     oauth: {
       getAccessToken: async () => null,
       start: async () => ({ authorizeUrl: "" }),
@@ -376,19 +548,19 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)("MCP tier gate (router-le
     await db?.$client.end({ timeout: 5 });
   });
 
-  it("① free: 20 curated servers, fetch works, custom is pro_required before any dial", async () => {
+  it("① free: supported test fetch works, custom is pro_required before any dial", async () => {
     const h = await makeHarness();
     try {
       const id = await seedUser("free");
 
       const servers = await h.router.listServers(id);
-      expect(servers.filter((s) => s.curatedId !== null)).toHaveLength(20);
+      expect(servers.filter((s) => s.curatedId !== null).map((s) => s.curatedId)).toEqual(["fetch"]);
 
       const getsBefore = h.server.getCount();
       const fetched = await h.router.callTool(
         id,
         "mcp__fetch__fetch",
-        { url: `${h.server.url}/page` },
+        { url: `${h.server.fetchUrl}/page` },
         run(id),
       );
       expect(fetched.isError).toBe(false);
@@ -430,6 +602,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)("MCP tier gate (router-le
       const httpTools = await h.router.listTools(id);
       expect(httpTools.some((t) => t.name === "mcp__fixture-http__echo")).toBe(true);
 
+      const postsBeforeCall = h.server.postCount();
       const httpCall = await h.router.callTool(
         id,
         "mcp__fixture-http__echo",
@@ -438,6 +611,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)("MCP tier gate (router-le
       );
       expect(httpCall.text).toBe("ok:x");
       expect(httpCall.isError).toBe(false);
+      expect(h.server.postCount()).toBe(postsBeforeCall + 1);
 
       await h.router.addServer(id, {
         imported: {
@@ -473,13 +647,13 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)("MCP tier gate (router-le
       const resA = await h.router.callTool(
         a,
         "mcp__fetch__fetch",
-        { url: `${h.server.url}/a` },
+        { url: `${h.server.fetchUrl}/a` },
         run(a),
       );
       const resB = await h.router.callTool(
         b,
         "mcp__fetch__fetch",
-        { url: `${h.server.url}/b` },
+        { url: `${h.server.fetchUrl}/b` },
         run(b),
       );
 
@@ -516,7 +690,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)("MCP tier gate (router-le
       const curated = await h.router.callTool(
         id,
         "mcp__fetch__fetch",
-        { url: `${h.server.url}/still-works` },
+        { url: `${h.server.fetchUrl}/still-works` },
         run(id),
       );
       expect(curated.isError).toBe(false);

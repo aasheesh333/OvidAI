@@ -14,19 +14,29 @@
 
 import { trimToolResult, type McpToolDef, type McpToolCallResult } from "../client.js";
 import type { McpCallContext, NativeMcpHandler } from "../transports/native.js";
-import { followGuardedRedirects } from "./fetch.js";
+import {
+  assertBoundedHeadersOrCancel,
+  egressResponseFromDecodedFetch,
+  readBoundedBody,
+  type EgressLimits,
+  type ProviderEgress,
+} from "../egress/responseLimits.js";
+import { createSecretRedactor } from "../egress/redactor.js";
+import {
+  authorizeProviderOperation,
+  snapshotProviderArgs,
+  validateProviderArgs,
+  type Effect,
+  type ProviderOperation,
+  type ToolContext,
+} from "../providers/types.js";
 
 export const GITHUB_TOOLS: readonly string[] = [
   "search_repositories",
   "get_file_contents",
-  "create_or_update_file",
-  "create_issue",
   "list_issues",
   "get_issue",
-  "add_issue_comment",
-  "create_pull_request",
   "list_pull_requests",
-  "fork_repository",
   "list_commits",
   "get_user",
 ];
@@ -38,7 +48,7 @@ const NO_TOKEN_MESSAGE =
 
 interface GhRequest {
   url: string;
-  method: string;
+  method: ProviderOperation["request"]["method"];
   headers: Record<string, string>;
   body?: string;
 }
@@ -237,9 +247,66 @@ function ghHeaders(token: string): Record<string, string> {
     Accept: "application/vnd.github+json",
     "User-Agent": "OvidAI/1.0",
     Authorization: `Bearer ${token}`,
-    "X-GitHub-Api-Version": "2022-11-28",
+    "X-GitHub-Api-Version": "2026-03-10",
   };
 }
+
+const READ_EFFECTS: Readonly<Record<string, Effect>> = {
+  search_repositories: "read",
+  get_file_contents: "read",
+  list_issues: "read",
+  get_issue: "read",
+  list_pull_requests: "read",
+  list_commits: "read",
+  get_user: "read",
+};
+
+function boundedSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  const properties = Object.fromEntries(Object.entries(schema.properties ?? {}).map(([name, value]) => {
+    const field = value as Record<string, unknown>;
+    if (field.type === "string") return [name, { ...field, minLength: name === "path" ? 0 : 1, maxLength: 8_192 }];
+    if (field.type === "integer") return [name, { ...field, minimum: 1, maximum: 100 }];
+    if (field.type === "array") return [name, { ...field, maxItems: 100, items: { type: "string", minLength: 1, maxLength: 256 } }];
+    return [name, field];
+  }));
+  return {
+    ...schema,
+    properties,
+    additionalProperties: false,
+    maxProperties: Object.keys(properties).length,
+  };
+}
+
+const READ_REQUEST_PATHS: Readonly<Record<string, string>> = {
+  search_repositories: "/search/repositories",
+  get_file_contents: "/repos/{owner}/{repo}/contents/{path}",
+  list_issues: "/repos/{owner}/{repo}/issues",
+  get_issue: "/repos/{owner}/{repo}/issues/{issue_number}",
+  list_pull_requests: "/repos/{owner}/{repo}/pulls",
+  list_commits: "/repos/{owner}/{repo}/commits",
+  get_user: "/user",
+};
+
+export const GITHUB_READ_OPERATIONS: readonly ProviderOperation[] = TOOLS.flatMap((tool) => {
+  const effect = READ_EFFECTS[tool.name];
+  const pathTemplate = READ_REQUEST_PATHS[tool.name];
+  if (effect === undefined || pathTemplate === undefined) return [];
+  return [{
+    name: tool.name,
+    description: tool.description ?? `Read ${tool.name} through GitHub REST.`,
+    inputSchema: boundedSchema(tool.inputSchema ?? {}),
+    effect,
+    approval: "mode",
+    requiredScopes: tool.name === "list_issues" || tool.name === "get_issue"
+      ? ["Issues: Read"]
+      : tool.name === "get_user" || tool.name === "search_repositories"
+        ? []
+        : ["Contents: Read"],
+    request: { originKey: "github", method: "GET", pathTemplate },
+    limits: { timeoutMs: 30_000, responseBytes: 65_536, frameBytes: 65_536, pageBytes: 65_536 },
+    outputPolicy: { kind: "redacted_text", maxBytes: 65_536 },
+  }];
+});
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
@@ -249,23 +316,105 @@ function num(v: unknown, fallback: number): number {
   return typeof v === "number" ? v : fallback;
 }
 
-export function createGitHubHandler(deps: { apiBase?: string } = {}): NativeMcpHandler {
+function safeRepositoryPath(value: string): boolean {
+  if (value.startsWith("/") || value.includes("\\") || /[\u0000-\u001f]/.test(value)) return false;
+  return value.split("/").every((segment) => {
+    if (segment === "." || segment === "..") return false;
+    try {
+      const decoded = decodeURIComponent(segment);
+      return decoded !== "." && decoded !== ".." && !decoded.includes("/") && !decoded.includes("\\");
+    } catch {
+      return true; // A literal percent is encoded as data before the request.
+    }
+  });
+}
+
+function encodeRepositoryPath(value: string): string {
+  return value.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+}
+
+function validOperationCoordinates(name: string, args: Record<string, unknown>): boolean {
+  for (const key of ["owner", "repo"] as const) {
+    const value = args[key];
+    if (value !== undefined && (typeof value !== "string" || !/^[A-Za-z0-9_.-]+$/.test(value))) return false;
+  }
+  if (name === "get_file_contents") {
+    const path = args.path;
+    if (typeof path !== "string" || !safeRepositoryPath(path)) return false;
+  }
+  if (name === "get_user" && args.username !== undefined) {
+    if (typeof args.username !== "string" || !/^[A-Za-z0-9-]*$/.test(args.username)) return false;
+  }
+  return true;
+}
+
+function nativeAuthorizationContext(ctx: McpCallContext): ToolContext {
+  const candidate = ctx as unknown as Partial<ToolContext>;
+  return {
+    ...candidate,
+    sessionId: candidate.sessionId ?? "",
+    runId: candidate.runId ?? "",
+    userId: candidate.userId ?? ctx.uid,
+    connectionId: candidate.connectionId ?? "",
+    providerId: "github",
+    mode: candidate.mode ?? "safe",
+    planMode: candidate.planMode ?? false,
+    unattended: candidate.unattended ?? true,
+    isSubagent: candidate.isSubagent ?? false,
+    depth: candidate.depth ?? 0,
+    callKey: candidate.callKey ?? "",
+    signal: candidate.signal ?? new AbortController().signal,
+  } as ToolContext;
+}
+
+export function createGitHubHandler(deps: { apiBase?: string; providerEgress?: ProviderEgress } = {}): NativeMcpHandler {
   const apiBase = (deps.apiBase ?? DEFAULT_API_BASE).replace(/\/+$/, "");
+  const redactor = createSecretRedactor();
 
   async function request(ctx: McpCallContext, req: GhRequest): Promise<{ ok: boolean; status: number; body: string }> {
-    // every hop of every request re-enters ctx.fetchImpl (SSRF-guarded)
-    const res = await followGuardedRedirects(ctx.fetchImpl, req.url, {
-      method: req.method,
-      headers: req.headers,
-      body: req.body,
-    });
-    const body = await res.text();
-    return { ok: res.status >= 200 && res.status < 300, status: res.status, body };
+    const limits: EgressLimits = {
+      connectMs: 30_000,
+      headersMs: 30_000,
+      idleMs: 30_000,
+      totalMs: 30_000,
+      maxRedirects: 0,
+      headerBytes: 8_192,
+      responseBytes: 65_536,
+      decompressedBytes: 262_144,
+    };
+    const token = req.headers.Authorization?.replace(/^Bearer /, "") ?? "";
+    const response = deps.providerEgress !== undefined
+      ? await deps.providerEgress.request({
+          originKey: "github",
+          url: new URL(req.url),
+          method: req.method,
+          headers: req.headers,
+          ...(req.body === undefined ? {} : { body: new TextEncoder().encode(req.body) }),
+          secretValues: [token],
+          privileged: true,
+          redirect: "deny",
+          limits,
+          signal: AbortSignal.timeout(limits.totalMs),
+        })
+      : await (async () => {
+          const legacy = await ctx.fetchImpl(req.url, {
+            method: req.method,
+            headers: req.headers,
+            body: req.body,
+            redirect: "manual",
+            signal: AbortSignal.timeout(limits.totalMs),
+          });
+          return egressResponseFromDecodedFetch(legacy, new URL(req.url));
+        })();
+    await assertBoundedHeadersOrCancel(response, limits);
+    const bytes = await readBoundedBody(response, limits);
+    const body = new TextDecoder().decode(bytes);
+    return { ok: response.status >= 200 && response.status < 300, status: response.status, body };
   }
 
   async function get(ctx: McpCallContext, url: string, token: string): Promise<McpToolCallResult> {
     const r = await request(ctx, { url, method: "GET", headers: ghHeaders(token) });
-    return r.ok ? toolResult(r.body) : toolResult(`GitHub API error (${r.status}): ${r.body}`, true);
+    return r.ok ? toolResult(redactor.text(r.body, [token])) : toolResult(`Provider request failed (HTTP ${r.status}).`, true);
   }
 
   async function send(
@@ -281,7 +430,7 @@ export function createGitHubHandler(deps: { apiBase?: string } = {}): NativeMcpH
       headers: ghHeaders(token),
       body: JSON.stringify(bodyMap),
     });
-    return r.ok ? toolResult(r.body) : toolResult(`GitHub API error (${r.status}): ${r.body}`, true);
+    return r.ok ? toolResult(redactor.text(r.body, [token])) : toolResult(`Provider request failed (HTTP ${r.status}).`, true);
   }
 
   return {
@@ -294,10 +443,22 @@ export function createGitHubHandler(deps: { apiBase?: string } = {}): NativeMcpH
     },
 
     async listTools(): Promise<McpToolDef[]> {
-      return TOOLS.map((t) => ({ ...t, inputSchema: { ...t.inputSchema } }));
+      return GITHUB_READ_OPERATIONS.map((operation) => ({ ...operation, inputSchema: { ...operation.inputSchema } }));
     },
 
     async callTool(name: string, args: Record<string, unknown>, ctx: McpCallContext): Promise<McpToolCallResult> {
+      const operation = GITHUB_READ_OPERATIONS.find((candidate) => candidate.name === name);
+      if (operation === undefined) return toolResult(`Unknown tool "${name}" for github MCP`, true);
+      try {
+        args = snapshotProviderArgs(args);
+      } catch {
+        return toolResult("Invalid operation arguments.", true);
+      }
+      if (!validateProviderArgs(operation.inputSchema, args).ok || !validOperationCoordinates(name, args)) {
+        return toolResult("Invalid operation arguments.", true);
+      }
+      const authorization = await authorizeProviderOperation(nativeAuthorizationContext(ctx), operation, args);
+      if (authorization.kind === "deny") return toolResult(`Operation denied (${authorization.code}).`, true);
       const authToken = (ctx.secrets.GITHUB_TOKEN ?? "").trim();
       if (authToken === "") {
         return toolResult(NO_TOKEN_MESSAGE, true);
@@ -320,24 +481,24 @@ export function createGitHubHandler(deps: { apiBase?: string } = {}): NativeMcpH
             if (owner === undefined || repo === undefined || path === undefined) {
               return toolResult("Missing required arguments: owner, repo, path", true);
             }
-            let url = `${apiBase}/repos/${owner}/${repo}/contents/${path}`;
+            let url = `${apiBase}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodeRepositoryPath(path)}`;
             if (ref !== undefined && ref !== "") {
               url += `?ref=${encodeURIComponent(ref)}`;
             }
             const r = await request(ctx, { url, method: "GET", headers: ghHeaders(authToken) });
-            if (!r.ok) return toolResult(`GitHub API error (${r.status}): ${r.body}`, true);
+            if (!r.ok) return toolResult(`Provider request failed (HTTP ${r.status}).`, true);
             // base64-encoded file contents are decoded for the model
             try {
               const json = JSON.parse(r.body) as Record<string, unknown>;
               if (json.encoding === "base64" && typeof json.content === "string") {
                 const rawBase64 = json.content.replaceAll("\n", "");
                 const decoded = Buffer.from(rawBase64, "base64").toString("utf8");
-                return toolResult(decoded);
+                return toolResult(redactor.text(decoded, [authToken]));
               }
             } catch {
               // fall through: return the raw body (Dart parity)
             }
-            return toolResult(r.body);
+            return toolResult(redactor.text(r.body, [authToken]));
           }
 
           case "create_or_update_file": {
@@ -483,9 +644,8 @@ export function createGitHubHandler(deps: { apiBase?: string } = {}): NativeMcpH
           default:
             return toolResult(`Unknown tool "${name}" for github MCP`, true);
         }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return toolResult(`GitHub request failed: ${message}`, true);
+      } catch {
+        return toolResult("GitHub request failed.", true);
       }
     },
   };

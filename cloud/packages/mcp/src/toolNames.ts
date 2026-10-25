@@ -1,21 +1,19 @@
+import { safeMcpServerName } from "@ovid/shared";
+
 /**
- * Tool naming — Dart parity with `McpConnectedTool` (`_safe`, `legacyToolName`,
- * `canonicalId`). The published name is the model-facing, stable identifier
- * (`mcp__<safe server>__<tool>`); the canonical id is the provider-independent
- * `mcp:<serverId>/<tool>`.
+ * Tool naming — canonical NFKC normalization followed by the existing Dart
+ * `_safe` ASCII projection. The published name is the model-facing, stable
+ * identifier (`mcp__<safe server>__<tool>`); the canonical id is the
+ * provider-independent `mcp:<serverId>/<tool>`.
  */
 
 /**
- * Dart `_safe`: lowercase; every run of characters outside `[a-z0-9_-]`
- * collapses to one `_`; leading/trailing `_` are trimmed. An all-unsafe name
- * yields "" (Dart does the same — callers publish `mcp____<tool>` rather than
- * inventing an id).
+ * Canonical policy: NFKC before case folding, then Dart `_safe` sanitization.
+ * Every run of characters outside `[a-z0-9_-]` collapses to one `_`;
+ * leading/trailing `_` are trimmed. An all-unsafe name yields "".
  */
 export function safeServerName(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, "_")
-    .replace(/^_+|_+$/g, "");
+  return safeMcpServerName(name);
 }
 
 /** The published (legacy) tool name: `mcp__<safe server>__<tool>`. */

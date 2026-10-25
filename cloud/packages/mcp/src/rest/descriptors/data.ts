@@ -34,15 +34,28 @@ import {
   createRestHandler,
   resolveTimeoutSeconds,
   s3Authorization,
-  s3PresignedGetUrl,
   sha256Hex,
   sigV4Encode,
   restToolDefs,
+  createSecretRedactor,
+  type RestHandlerOptions,
   type RestServiceDescriptor,
 } from "../engine.js";
+import {
+  assertBoundedHeadersOrCancel,
+  egressResponseFromDecodedFetch,
+  readBoundedBody,
+  type EgressLimits,
+  type ProviderEgress,
+} from "../../egress/responseLimits.js";
+import {
+  authorizeProviderOperation,
+  snapshotProviderArgs,
+  validateProviderArgs,
+  type ToolContext,
+} from "../../providers/types.js";
 import { trimToolResult, type McpToolCallResult } from "../../client.js";
 import type { McpCallContext, NativeMcpHandler } from "../../transports/native.js";
-import { followGuardedRedirects } from "../../native/fetch.js";
 
 // ---------------------------------------------------------------------------
 // Descriptors
@@ -51,13 +64,13 @@ import { followGuardedRedirects } from "../../native/fetch.js";
 export const NOTION_DESCRIPTOR: RestServiceDescriptor = {
   curatedId: "notion",
   displayName: "Notion Sync",
-  description: "Search, query and create Notion pages and databases.",
+  description: "Search Notion and query pages/data sources through the current read API.",
   baseUrl: "https://api.notion.com/v1",
   auth: "bearer",
   authPrefix: "Bearer ",
   credentialKey: "api_key",
   credentialLabel: "Notion API key",
-  staticHeaders: { "Notion-Version": "2022-06-28" },
+  staticHeaders: { "Notion-Version": "2026-03-11" },
   tools: [
     {
       name: "search",
@@ -73,43 +86,24 @@ export const NOTION_DESCRIPTOR: RestServiceDescriptor = {
       },
     },
     {
-      name: "query_database",
-      description: "Query a Notion database.",
+      name: "query_data_source",
+      description: "Query a Notion data source with bounded cursor pagination.",
       method: "POST",
-      path: "/databases/{db_id}/query",
-      required: ["db_id"],
-      jsonBodyArg: "filter_json",
-      inputSchema: {
-        type: "object",
-        properties: {
-          db_id: { type: "string" },
-          filter_json: { type: "string" },
-        },
-        required: ["db_id"],
-      },
-    },
-    {
-      name: "create_page",
-      description: "Create a new Notion page.",
-      method: "POST",
-      path: "/pages",
-      required: ["parent_id", "title"],
+      path: "/data_sources/{data_source_id}/query",
+      effect: "read",
+      required: ["data_source_id"],
       bodyTemplate: {
-        "parent.database_id": "arg:parent_id",
-        "properties.title.title.0.text.content": "arg:title",
-        "children.0.object": 'when:text:const:"block"',
-        "children.0.type": 'when:text:const:"paragraph"',
-        "children.0.paragraph.rich_text.0.type": 'when:text:const:"text"',
-        "children.0.paragraph.rich_text.0.text.content": "arg:text",
+        start_cursor: "arg:start_cursor",
+        page_size: "int:page_size:50",
       },
       inputSchema: {
         type: "object",
         properties: {
-          parent_id: { type: "string" },
-          title: { type: "string" },
-          text: { type: "string" },
+          data_source_id: { type: "string", minLength: 1, maxLength: 128 },
+          start_cursor: { type: "string", maxLength: 8_192 },
+          page_size: { type: "integer", minimum: 1, maximum: 100, default: 50 },
         },
-        required: ["parent_id", "title"],
+        required: ["data_source_id"],
       },
     },
     {
@@ -132,7 +126,7 @@ export const NOTION_DESCRIPTOR: RestServiceDescriptor = {
 export const GOOGLE_DRIVE_DESCRIPTOR: RestServiceDescriptor = {
   curatedId: "google-drive",
   displayName: "Google Drive MCP",
-  description: "Search, read and upload Google Drive files (text-oriented).",
+  description: "Search metadata and read Drive blobs or native-document exports with bounded responses.",
   baseUrl: "https://www.googleapis.com/drive/v3",
   auth: "bearer",
   authPrefix: "Bearer ",
@@ -141,62 +135,83 @@ export const GOOGLE_DRIVE_DESCRIPTOR: RestServiceDescriptor = {
   tools: [
     {
       name: "search",
-      description: "Search Google Drive files.",
+      description: "Search Google Drive files with an explicit bounded field projection.",
       method: "GET",
       path: "/files",
+      effect: "read",
       queryArgMap: { query: "q", limit: "pageSize:20" },
+      fixedQuery: {
+        fields: "nextPageToken,files(id,name,mimeType,parents,capabilities.canDownload)",
+        supportsAllDrives: "true",
+      },
       inputSchema: {
         type: "object",
         properties: {
-          query: { type: "string" },
-          limit: { type: "integer", default: 20 },
+          query: { type: "string", maxLength: 2_048 },
+          limit: { type: "integer", minimum: 1, maximum: 100, default: 20 },
         },
       },
     },
     {
       name: "get_file",
-      description: "Get Google Drive file metadata by id.",
+      description: "Get bounded Drive file metadata and download capability by id.",
       method: "GET",
       path: "/files/{id}",
+      effect: "read",
       required: ["id"],
-      fixedQuery: { fields: "*" },
+      fixedQuery: {
+        fields: "id,name,mimeType,capabilities.canDownload",
+        supportsAllDrives: "true",
+      },
       inputSchema: {
         type: "object",
-        properties: {
-          id: { type: "string" },
-        },
+        properties: { id: { type: "string", minLength: 1, maxLength: 256 } },
         required: ["id"],
       },
     },
     {
-      name: "download_text",
-      description: "Download text content of a Google Drive file (or export Google Docs to plain text).",
+      name: "download_file",
+      description: "Download blob content with alt=media; native Google documents use export_native instead.",
       method: "GET",
       path: "/files/{id}",
+      effect: "read",
       required: ["id"],
-      fixedQuery: { alt: "media" },
+      fixedQuery: { alt: "media", supportsAllDrives: "true" },
+      outputPolicy: { kind: "binary_metadata", maxBytes: 65_536 },
       inputSchema: {
         type: "object",
-        properties: {
-          id: { type: "string" },
-        },
+        properties: { id: { type: "string", minLength: 1, maxLength: 256 } },
         required: ["id"],
       },
     },
     {
-      name: "upload_text",
-      description: "Upload a text file to Google Drive (multipart upload).",
-      method: "POST",
-      path: "/files",
-      required: ["name", "text"],
+      name: "export_native",
+      description: "Export a native Google Workspace document through files.export using an allowed MIME type.",
+      method: "GET",
+      path: "/files/{id}/export",
+      effect: "read",
+      required: ["id", "mime_type"],
+      queryArgMap: { mime_type: "mimeType" },
+      fixedQuery: { supportsAllDrives: "true" },
+      outputPolicy: { kind: "binary_metadata", maxBytes: 65_536 },
       inputSchema: {
         type: "object",
         properties: {
-          name: { type: "string" },
-          text: { type: "string" },
-          folder_id: { type: "string" },
+          id: { type: "string", minLength: 1, maxLength: 256 },
+          mime_type: {
+            type: "string",
+            enum: [
+              "text/plain",
+              "text/csv",
+              "text/html",
+              "application/pdf",
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+              "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            ],
+          },
         },
-        required: ["name", "text"],
+        required: ["id", "mime_type"],
       },
     },
   ],
@@ -205,7 +220,7 @@ export const GOOGLE_DRIVE_DESCRIPTOR: RestServiceDescriptor = {
 export const AIRTABLE_DESCRIPTOR: RestServiceDescriptor = {
   curatedId: "airtable",
   displayName: "Airtable MCP",
-  description: "Airtable records over the REST API (list, create, update, delete).",
+  description: "Read Airtable records through scoped PAT/OAuth access.",
   baseUrl: "https://api.airtable.com/v0",
   auth: "bearer",
   authPrefix: "Bearer ",
@@ -227,162 +242,112 @@ export const AIRTABLE_DESCRIPTOR: RestServiceDescriptor = {
       },
       required: ["base_id", "table"],
     },
-    {
-      name: "create_record",
-      description: 'Create a record. fields_json is the fields object, e.g. {"Name": "Write report"}.',
-      method: "POST",
-      path: "/{base_id}/{table}",
-      inputSchema: {
-        type: "object",
-        properties: {
-          base_id: { type: "string" },
-          table: { type: "string" },
-          fields_json: { type: "object" },
-        },
-        required: ["base_id", "table", "fields_json"],
-      },
-      bodyTemplate: { fields: "json:fields_json" },
-      required: ["base_id", "table", "fields_json"],
-    },
-    {
-      name: "update_record",
-      description: "Update a record. fields_json is the fields object.",
-      method: "PATCH",
-      path: "/{base_id}/{table}/{record_id}",
-      inputSchema: {
-        type: "object",
-        properties: {
-          base_id: { type: "string" },
-          table: { type: "string" },
-          record_id: { type: "string" },
-          fields_json: { type: "object" },
-        },
-        required: ["base_id", "table", "record_id", "fields_json"],
-      },
-      bodyTemplate: { fields: "json:fields_json" },
-      required: ["base_id", "table", "record_id", "fields_json"],
-    },
-    {
-      name: "delete_record",
-      description: "Delete a record from a table.",
-      method: "DELETE",
-      path: "/{base_id}/{table}/{record_id}",
-      inputSchema: {
-        type: "object",
-        properties: {
-          base_id: { type: "string" },
-          table: { type: "string" },
-          record_id: { type: "string" },
-        },
-        required: ["base_id", "table", "record_id"],
-      },
-      required: ["base_id", "table", "record_id"],
-    },
   ],
 };
 
 export const SUPABASE_DESCRIPTOR: RestServiceDescriptor = {
   curatedId: "supabase",
   displayName: "Supabase MCP",
-  description: "Supabase tables over the PostgREST API (select, insert, update, delete).",
+  description: "Read allowlisted Supabase tables with a publishable key, user JWT, grants, and RLS.",
   baseUrl: "{base_url}",
   auth: "bearer",
   authPrefix: "Bearer ",
-  credentialKey: "service_key",
-  credentialLabel: "Supabase service role key",
-  staticHeaders: { apikey: "{secret}" },
+  credentialKey: "user_jwt",
+  credentialLabel: "Supabase Auth user JWT",
   extraConfig: [
+    { key: "publishable_key", label: "Supabase publishable key", secret: false },
     {
       key: "base_url",
       label: "Supabase project URL",
       secret: false,
-      hint: "The project REST URL, e.g. https://xyzcompany.supabase.co.",
+      hint: "The project origin, e.g. https://xyzcompany.supabase.co.",
     },
+    { key: "allowed_tables", label: "Allowed tables (comma-separated)", secret: false },
+    { key: "allowed_columns", label: "Allowed projection columns (comma-separated)", secret: false },
   ],
   tools: [
     {
       name: "select",
-      description:
-        'Select rows from a table. query is the PostgREST filter map passed through as URL params, e.g. {"select": "*", "status": "eq.done"}.',
+      description: "Select bounded columns and rows from an allowlisted table using the end user's RLS identity.",
       method: "GET",
       path: "/rest/v1/{table}",
-      queryArgs: ["query"],
+      effect: "read",
+      queryArgMap: { columns: "select:id", limit: "limit:20" },
+      outputPolicy: { kind: "redacted_json", maxBytes: 65_536 },
       inputSchema: {
         type: "object",
         properties: {
-          table: { type: "string" },
-          query: { type: "object" },
+          table: { type: "string", minLength: 1, maxLength: 63 },
+          columns: { type: "string", minLength: 1, maxLength: 512 },
+          limit: { type: "integer", minimum: 1, maximum: 100, default: 20 },
         },
         required: ["table"],
       },
       required: ["table"],
     },
-    {
-      name: "insert",
-      description: 'Insert a row. row_json is the row object, e.g. {"task": "write tests"}.',
-      method: "POST",
-      path: "/rest/v1/{table}",
-      jsonBodyArg: "row_json",
-      inputSchema: {
-        type: "object",
-        properties: {
-          table: { type: "string" },
-          row_json: { type: "object" },
-        },
-        required: ["table", "row_json"],
-      },
-      required: ["table", "row_json"],
-    },
-    {
-      name: "update",
-      description:
-        "Update rows matching the query filter map. patch_json is the patch object. A non-empty query filter is required — unfiltered writes are refused.",
-      method: "PATCH",
-      path: "/rest/v1/{table}",
-      jsonBodyArg: "patch_json",
-      queryArgs: ["query"],
-      requireQueryArgs: ["query"],
-      inputSchema: {
-        type: "object",
-        properties: {
-          table: { type: "string" },
-          query: { type: "object" },
-          patch_json: { type: "object" },
-        },
-        required: ["table", "query", "patch_json"],
-      },
-      required: ["table", "query", "patch_json"],
-    },
-    {
-      name: "delete",
-      description:
-        "Delete rows matching the query filter map. A non-empty query filter is required — unfiltered deletes are refused.",
-      method: "DELETE",
-      path: "/rest/v1/{table}",
-      queryArgs: ["query"],
-      requireQueryArgs: ["query"],
-      inputSchema: {
-        type: "object",
-        properties: {
-          table: { type: "string" },
-          query: { type: "object" },
-        },
-        required: ["table", "query"],
-      },
-      required: ["table", "query"],
-    },
   ],
 };
+
+function validSupabaseUserJwt(token: string): boolean {
+  const parts = token.split(".");
+  if (parts.length !== 3 || parts.some((part) => part === "")) return false;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as { role?: unknown };
+    return payload.role === "authenticated";
+  } catch {
+    return false;
+  }
+}
+
+/** Adds the publishable application key separately from the end-user Bearer identity. */
+export function createSupabaseHandler(
+  options: Omit<RestHandlerOptions, "resolveConnectionConfig"> = {},
+): NativeMcpHandler {
+  const definitions = createRestHandler(SUPABASE_DESCRIPTOR, options);
+  return {
+    initialize: (params) => definitions.initialize(params),
+    listTools: () => definitions.listTools(),
+    async callTool(name, args, ctx) {
+      const stored = ctx.secrets ?? {};
+      const publishable = (stored.publishable_key ?? "").trim();
+      const jwt = (stored.user_jwt ?? "").trim();
+      const table = typeof args.table === "string" ? args.table : "";
+      const allowedTables = (stored.allowed_tables ?? "").split(",").map((entry) => entry.trim()).filter((entry) => entry !== "");
+      const allowedColumns = new Set(
+        (stored.allowed_columns ?? "").split(",").map((entry) => entry.trim()).filter((entry) => entry !== ""),
+      );
+      let base: URL | undefined;
+      try { base = new URL((stored.base_url ?? "").trim()); } catch { base = undefined; }
+      const validBase = base !== undefined && base.protocol === "https:" && base.username === "" && base.password === "" &&
+        base.search === "" && base.hash === "" && /^[a-z0-9-]+\.supabase\.co$/.test(base.hostname) &&
+        (base.pathname === "/" || base.pathname === "");
+      const columns = typeof args.columns === "string" ? args.columns : "id";
+      const requestedColumns = columns.split(",").map((column) => column.trim());
+      const validColumns = requestedColumns.length > 0 && requestedColumns.every((column) =>
+        /^[A-Za-z_][A-Za-z0-9_]*$/.test(column) && allowedColumns.has(column)
+      );
+      if (!publishable.startsWith("sb_publishable_") || !validSupabaseUserJwt(jwt) || !validBase ||
+          !/^[A-Za-z_][A-Za-z0-9_]*$/.test(table) || !allowedTables.includes(table) || !validColumns) {
+        return toolResult("Invalid Supabase connection configuration or table policy.", true);
+      }
+      const descriptor: RestServiceDescriptor = {
+        ...SUPABASE_DESCRIPTOR,
+        staticHeaders: { apikey: publishable },
+      };
+      return createRestHandler(descriptor, options).callTool(name, args, ctx);
+    },
+  };
+}
 
 export const FIREBASE_DESCRIPTOR: RestServiceDescriptor = {
   curatedId: "firebase",
   displayName: "Firebase MCP",
   description: "Firestore documents and collections over the REST API (Firestore only).",
   baseUrl: "https://firestore.googleapis.com/v1",
-  auth: "queryKey",
-  authParam: "key",
-  credentialKey: "api_key",
-  credentialLabel: "Firebase API key",
+  auth: "bearer",
+  authPrefix: "Bearer ",
+  credentialKey: "access_token",
+  credentialLabel: "Firebase ID token or Google OAuth access token",
   extraConfig: [
     {
       key: "project_id",
@@ -420,158 +385,24 @@ export const FIREBASE_DESCRIPTOR: RestServiceDescriptor = {
       },
       required: ["collection"],
     },
-    {
-      name: "create_document",
-      description:
-        'Create a document in a collection. fields_json is the Firestore fields map, e.g. {"name": {"stringValue": "Ada"}} (Firestore only).',
-      method: "POST",
-      path: "/projects/{project_id}/databases/(default)/documents/{collection}",
-      inputSchema: {
-        type: "object",
-        properties: {
-          collection: { type: "string" },
-          fields_json: { type: "object" },
-        },
-        required: ["collection", "fields_json"],
-      },
-      bodyTemplate: { fields: "json:fields_json" },
-      required: ["collection", "fields_json"],
-    },
-    {
-      name: "patch_document",
-      description: "Update a Firestore document by path. fields_json is the Firestore fields map (Firestore only).",
-      method: "PATCH",
-      path: "/projects/{project_id}/databases/(default)/documents/{path}",
-      inputSchema: {
-        type: "object",
-        properties: {
-          path: { type: "string" },
-          fields_json: { type: "object" },
-        },
-        required: ["path", "fields_json"],
-      },
-      bodyTemplate: { fields: "json:fields_json" },
-      required: ["path", "fields_json"],
-    },
-    {
-      name: "delete_document",
-      description: "Delete a Firestore document by path (Firestore only).",
-      method: "DELETE",
-      path: "/projects/{project_id}/databases/(default)/documents/{path}",
-      inputSchema: {
-        type: "object",
-        properties: {
-          path: { type: "string" },
-        },
-        required: ["path"],
-      },
-      required: ["path"],
-    },
   ],
 };
 
 export const MONGODB_DESCRIPTOR: RestServiceDescriptor = {
   curatedId: "mongodb",
-  displayName: "MongoDB MCP",
-  description: "MongoDB documents over the Atlas Data API (the self-hosted wire protocol is unsupported).",
-  baseUrl: "{data_api_base}",
-  auth: "apiKeyHeader",
-  authHeader: "api-key",
-  credentialKey: "api_key",
-  credentialLabel: "MongoDB Data API key",
-  extraConfig: [
-    {
-      key: "data_api_base",
-      label: "MongoDB Data API base URL",
-      secret: false,
-      hint: "The Atlas Data API base, e.g. https://data.mongodb-api.com/app/…/endpoint/data/v1.",
-    },
-    {
-      key: "data_source",
-      label: "MongoDB data source",
-      secret: false,
-      hint: "The Atlas cluster name, e.g. Cluster0.",
-    },
-  ],
-  tools: [
-    {
-      name: "find",
-      description:
-        "Find documents (Atlas Data API only — the self-hosted wire protocol is unsupported). filter_json is optional; limit defaults to 20.",
-      method: "POST",
-      path: "/action/find",
-      inputSchema: {
-        type: "object",
-        properties: {
-          db: { type: "string" },
-          coll: { type: "string" },
-          filter_json: { type: "object" },
-          limit: { type: "number" },
-        },
-        required: ["db", "coll"],
-      },
-      bodyTemplate: {
-        dataSource: "config:data_source",
-        database: "arg:db",
-        collection: "arg:coll",
-        filter: "json:filter_json",
-        limit: "int:limit:20",
-      },
-      required: ["db", "coll"],
-    },
-    {
-      name: "find_one",
-      description:
-        "Find a single document (Atlas Data API only — the self-hosted wire protocol is unsupported).",
-      method: "POST",
-      path: "/action/findOne",
-      inputSchema: {
-        type: "object",
-        properties: {
-          db: { type: "string" },
-          coll: { type: "string" },
-          filter_json: { type: "object" },
-        },
-        required: ["db", "coll"],
-      },
-      bodyTemplate: {
-        dataSource: "config:data_source",
-        database: "arg:db",
-        collection: "arg:coll",
-        filter: "json:filter_json",
-      },
-      required: ["db", "coll"],
-    },
-    {
-      name: "insert_one",
-      description:
-        "Insert a document. doc_json is the document (Atlas Data API only — the self-hosted wire protocol is unsupported).",
-      method: "POST",
-      path: "/action/insertOne",
-      inputSchema: {
-        type: "object",
-        properties: {
-          db: { type: "string" },
-          coll: { type: "string" },
-          doc_json: { type: "object" },
-        },
-        required: ["db", "coll", "doc_json"],
-      },
-      bodyTemplate: {
-        dataSource: "config:data_source",
-        database: "arg:db",
-        collection: "arg:coll",
-        document: "json:doc_json",
-      },
-      required: ["db", "coll", "doc_json"],
-    },
-  ],
+  displayName: "MongoDB Atlas Data API (retired)",
+  description: "Deprecated: Atlas Data API and Custom HTTPS Endpoints were removed on 2025-09-30; no document calls are available.",
+  baseUrl: "https://www.mongodb.com",
+  auth: "none",
+  credentialKey: "",
+  credentialLabel: "Retired MongoDB Atlas Data API credential",
+  tools: [],
 };
 
 export const S3_DESCRIPTOR: RestServiceDescriptor = {
   curatedId: "s3",
   displayName: "S3 MCP",
-  description: "S3 objects over SigV4-signed virtual-hosted requests (list, get, put, delete, presign).",
+  description: "Read S3 objects through short-lived SigV4 credentials with bounded responses and no redirects.",
   baseUrl: "https://s3.{region}.amazonaws.com",
   auth: "none",
   credentialKey: "secret_access_key",
@@ -595,6 +426,7 @@ export const S3_DESCRIPTOR: RestServiceDescriptor = {
       secret: false,
       hint: "The bucket name (virtual-hosted style requests).",
     },
+    { key: "session_token", label: "AWS STS session token", secret: true },
   ],
   tools: [
     {
@@ -613,7 +445,7 @@ export const S3_DESCRIPTOR: RestServiceDescriptor = {
     {
       name: "get_object",
       description:
-        "Fetch an object key (SigV4-signed). UTF-8 text under 6000 bytes is returned inline, otherwise metadata plus a presign_get hint.",
+        "Fetch an object key (SigV4-signed). Small UTF-8 text is returned inline; other content is metadata only.",
       method: "GET",
       path: "/{key}",
       inputSchema: {
@@ -621,52 +453,6 @@ export const S3_DESCRIPTOR: RestServiceDescriptor = {
         properties: {
           key: { type: "string" },
           timeout_seconds: { type: "number" },
-        },
-        required: ["key"],
-      },
-      required: ["key"],
-    },
-    {
-      name: "put_object",
-      description: "Write text to an object key (SigV4-signed).",
-      method: "PUT",
-      path: "/{key}",
-      inputSchema: {
-        type: "object",
-        properties: {
-          key: { type: "string" },
-          text: { type: "string" },
-          timeout_seconds: { type: "number" },
-        },
-        required: ["key", "text"],
-      },
-      required: ["key", "text"],
-    },
-    {
-      name: "delete_object",
-      description: "Delete an object key (SigV4-signed).",
-      method: "DELETE",
-      path: "/{key}",
-      inputSchema: {
-        type: "object",
-        properties: {
-          key: { type: "string" },
-          timeout_seconds: { type: "number" },
-        },
-        required: ["key"],
-      },
-      required: ["key"],
-    },
-    {
-      name: "presign_get",
-      description: "Build a presigned GET URL for a key (pure SigV4 signing, no network). expires is seconds, default 3600 (max 604800).",
-      method: "GET",
-      path: "/{key}",
-      inputSchema: {
-        type: "object",
-        properties: {
-          key: { type: "string" },
-          expires: { type: "number" },
         },
         required: ["key"],
       },
@@ -704,18 +490,6 @@ function amzDateStr(date: Date): string {
   return `${dateStamp}T${two(date.getUTCHours())}${two(date.getUTCMinutes())}${two(date.getUTCSeconds())}Z`;
 }
 
-function asInt(raw: unknown, key: string, fallback: number): number {
-  if (raw === undefined || raw === null) return fallback;
-  if (typeof raw === "number") return Math.round(raw);
-  const text = String(raw).trim();
-  if (text === "") return fallback;
-  const parsed = Number(text);
-  if (Number.isNaN(parsed)) {
-    throw new Error(`Invalid ${key} "${String(raw)}": expected a number.`);
-  }
-  return Math.round(parsed);
-}
-
 interface S3SendResult {
   status: number;
   body: Buffer;
@@ -731,7 +505,7 @@ interface S3SendResult {
 async function s3Send(
   ctx: McpCallContext,
   opts: {
-    method: string;
+    method: "GET" | "PUT" | "DELETE";
     key: string;
     query?: Record<string, string>;
     bodyBytes?: Uint8Array;
@@ -741,6 +515,9 @@ async function s3Send(
     region: string;
     bucket: string;
     timeoutSeconds: number;
+    sessionToken?: string;
+    providerEgress?: ProviderEgress;
+    secretValues?: readonly string[];
   },
 ): Promise<S3SendResult> {
   const host = `${opts.bucket}.s3.${opts.region}.amazonaws.com`;
@@ -749,6 +526,12 @@ async function s3Send(
   const now = new Date();
   const amzDate = amzDateStr(now);
   const payloadHash = sha256Hex(opts.bodyBytes ?? Buffer.alloc(0));
+  const signedHeaders: Record<string, string> = {
+    host,
+    "x-amz-date": amzDate,
+    "x-amz-content-sha256": payloadHash,
+    ...(opts.sessionToken === undefined || opts.sessionToken === "" ? {} : { "x-amz-security-token": opts.sessionToken }),
+  };
   const authorization = s3Authorization({
     accessKeyId: opts.accessKeyId,
     secretAccessKey: opts.secretAccessKey,
@@ -756,7 +539,7 @@ async function s3Send(
     method: opts.method,
     canonicalUri: rawPath,
     queryParameters: opts.query ?? {},
-    headers: { host, "x-amz-date": amzDate },
+    headers: signedHeaders,
     payloadHash,
     amzDate: now,
   });
@@ -768,30 +551,54 @@ async function s3Send(
 
   const headers: Record<string, string> = {
     "x-amz-date": amzDate,
+    "x-amz-content-sha256": payloadHash,
     Authorization: authorization,
+    ...(opts.sessionToken === undefined || opts.sessionToken === "" ? {} : { "x-amz-security-token": opts.sessionToken }),
   };
   if (opts.contentType !== undefined) headers["content-type"] = opts.contentType;
 
-  let res: Response;
+  const totalMs = opts.timeoutSeconds * 1_000;
+  const limits: EgressLimits = {
+    connectMs: totalMs,
+    headersMs: totalMs,
+    idleMs: totalMs,
+    totalMs,
+    maxRedirects: 0,
+    headerBytes: 8_192,
+    responseBytes: 65_536,
+    decompressedBytes: 262_144,
+  };
   try {
-    res = await ctx.fetchImpl(urlStr, {
-      method: opts.method,
-      headers,
-      body:
-        opts.bodyBytes !== undefined && opts.bodyBytes.length > 0
-          ? (opts.bodyBytes as unknown as BodyInit)
-          : undefined,
-      redirect: "manual",
-      signal: AbortSignal.timeout(opts.timeoutSeconds * 1000),
-    });
-  } catch (err) {
-    if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
-      throw new Error(`Request to ${urlStr} timed out after ${opts.timeoutSeconds} seconds.`);
-    }
-    throw new Error(`HTTP request failed: ${messageOf(err)}`);
+    const url = new URL(urlStr);
+    const response = opts.providerEgress !== undefined
+      ? await opts.providerEgress.request({
+          originKey: "s3",
+          url,
+          method: opts.method,
+          headers,
+          ...(opts.bodyBytes === undefined ? {} : { body: opts.bodyBytes }),
+          secretValues: opts.secretValues ?? [opts.secretAccessKey],
+          privileged: true,
+          redirect: "deny",
+          limits,
+          signal: AbortSignal.timeout(totalMs),
+        })
+      : await (async () => {
+          const legacy = await ctx.fetchImpl(url.toString(), {
+            method: opts.method,
+            headers,
+            body: opts.bodyBytes as BodyInit | undefined,
+            redirect: "manual",
+            signal: AbortSignal.timeout(totalMs),
+          });
+          return egressResponseFromDecodedFetch(legacy, url);
+        })();
+    await assertBoundedHeadersOrCancel(response, limits);
+    const body = Buffer.from(await readBoundedBody(response, limits));
+    return { status: response.status, body, contentType: response.headers.get("content-type") ?? "unknown" };
+  } catch {
+    throw new Error("Provider request failed or exceeded its safety limits.");
   }
-  const body = Buffer.from(await res.arrayBuffer());
-  return { status: res.status, body, contentType: res.headers.get("content-type") ?? "unknown" };
 }
 
 function requireStringArg(args: Record<string, unknown>, key: string): string {
@@ -808,9 +615,41 @@ function requireStringArg(args: Record<string, unknown>, key: string): string {
  * timeout/verbatim/trim conventions. One process-wide instance is safe:
  * credentials come from ctx.secrets per call.
  */
+function nativeAuthorizationContext(ctx: McpCallContext, providerId: string): ToolContext {
+  const candidate = ctx as unknown as Partial<ToolContext>;
+  return {
+    ...candidate,
+    sessionId: candidate.sessionId ?? "",
+    runId: candidate.runId ?? "",
+    userId: candidate.userId ?? ctx.uid,
+    connectionId: candidate.connectionId ?? "",
+    providerId,
+    mode: candidate.mode ?? "safe",
+    planMode: candidate.planMode ?? false,
+    unattended: candidate.unattended ?? true,
+    isSubagent: candidate.isSubagent ?? false,
+    depth: candidate.depth ?? 0,
+    callKey: candidate.callKey ?? "",
+    signal: candidate.signal ?? new AbortController().signal,
+  } as ToolContext;
+}
+
 export function createS3Handler(
   descriptor: RestServiceDescriptor = S3_DESCRIPTOR,
+  options: RestHandlerOptions = {},
 ): NativeMcpHandler {
+  const published = restToolDefs(descriptor).map((operation) => ({
+    ...operation,
+    description: operation.description ?? `Read ${operation.name} through the official provider operation.`,
+    inputSchema: operation.inputSchema ?? {
+      type: "object",
+      properties: {},
+      required: [],
+      additionalProperties: false,
+      maxProperties: 0,
+    },
+  }));
+  const redactor = options.redactor ?? createSecretRedactor();
   return {
     async initialize(): Promise<Record<string, unknown>> {
       return {
@@ -829,17 +668,35 @@ export function createS3Handler(
       args: Record<string, unknown>,
       ctx: McpCallContext,
     ): Promise<McpToolCallResult> {
-      const def = descriptor.tools.find((t) => t.name === name);
-      if (def === undefined) {
-        return toolResult(`Unknown tool: ${name} for plugin "${descriptor.displayName}".`, true);
+      const operation = published.find((candidate) => candidate.name === name);
+      if (operation === undefined) {
+        return toolResult("Unknown provider operation.", true);
       }
+      try {
+        args = snapshotProviderArgs(args);
+      } catch {
+        return toolResult("Invalid operation arguments.", true);
+      }
+      if (!validateProviderArgs(operation.inputSchema, args).ok) {
+        return toolResult("Invalid operation arguments.", true);
+      }
+      const authorization = await authorizeProviderOperation(nativeAuthorizationContext(ctx, descriptor.curatedId), operation, args);
+      if (authorization.kind === "deny") return toolResult(`Operation denied (${authorization.code}).`, true);
       const stored = ctx.secrets ?? {};
+      const redactionValues = [
+        stored[descriptor.credentialKey],
+        stored.access_key_id,
+        stored.session_token,
+      ].filter((value): value is string => typeof value === "string" && value !== "");
+      const finish = (text: string, isError = false): McpToolCallResult =>
+        toolResult(redactor.text(text, redactionValues), isError);
       try {
         // Configure-first gates, Dart order: secret → key id → region → bucket.
         const gates: [string, string][] = [
           [descriptor.credentialKey, descriptor.credentialLabel],
           ["access_key_id", "AWS access key ID"],
           ["region", "AWS region"],
+          ["session_token", "AWS STS session token"],
           ["bucket", "S3 bucket"],
         ];
         for (const [key, label] of gates) {
@@ -851,27 +708,19 @@ export function createS3Handler(
         const accessKeyId = (stored.access_key_id ?? "").trim();
         const region = (stored.region ?? "").trim();
         const bucket = (stored.bucket ?? "").trim();
-
-        if (name === "presign_get") {
-          const key = requireStringArg(args, "key");
-          const expires = Math.min(604800, Math.max(1, asInt(args.expires, "expires", 3600)));
-          return toolResult(
-            s3PresignedGetUrl({
-              accessKeyId,
-              secretAccessKey,
-              region,
-              bucket,
-              key,
-              expiresSeconds: expires,
-              amzDate: new Date(),
-            }),
-          );
+        if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(bucket) || !/^[a-z0-9-]+$/.test(region)) {
+          return finish("Invalid S3 connection configuration.", true);
         }
+        const transport = {
+          sessionToken: (stored.session_token ?? "").trim(),
+          providerEgress: options.providerEgress,
+          secretValues: Object.values(stored).filter((value) => value !== ""),
+        };
 
         const timeoutSeconds = resolveTimeoutSeconds(args);
 
         if (name === "list_objects") {
-          const query: Record<string, string> = { "list-type": "2" };
+          const query: Record<string, string> = { "list-type": "2", "max-keys": "100" };
           const prefix = args.prefix === undefined || args.prefix === null ? "" : String(args.prefix);
           if (prefix !== "") query.prefix = prefix;
           const response = await s3Send(ctx, {
@@ -883,11 +732,12 @@ export function createS3Handler(
             region,
             bucket,
             timeoutSeconds,
+            ...transport,
           });
           if (response.status < 200 || response.status >= 300) {
-            return toolResult(`HTTP ${response.status}\n${response.body.toString("utf8")}`, true);
+            return finish(`Provider request failed (HTTP ${response.status}).`, true);
           }
-          return toolResult(response.body.toString("utf8"));
+          return finish(response.body.toString("utf8"));
         }
 
         if (name === "get_object") {
@@ -900,9 +750,10 @@ export function createS3Handler(
             region,
             bucket,
             timeoutSeconds,
+            ...transport,
           });
           if (response.status < 200 || response.status >= 300) {
-            return toolResult(`HTTP ${response.status}\n${response.body.toString("utf8")}`, true);
+            return finish(`Provider request failed (HTTP ${response.status}).`, true);
           }
           let text: string | null = null;
           try {
@@ -910,55 +761,16 @@ export function createS3Handler(
           } catch {
             text = null;
           }
-          if (text !== null && response.body.length <= 6000) return toolResult(text);
-          return toolResult(
+          if (text !== null && response.body.length <= 6000) return finish(text);
+          return finish(
             `S3 object "${bucket}/${key}": ${response.body.length} bytes, ` +
-              `content-type: ${response.contentType}. (Content is binary or exceeds 6000 ` +
-              `bytes and is not inlined — call presign_get for a download URL.)`,
+              `content-type: ${response.contentType}. Content is binary or exceeds 6000 bytes and is not inlined.`,
           );
-        }
-
-        if (name === "put_object") {
-          const key = requireStringArg(args, "key");
-          const text = requireStringArg(args, "text");
-          const bodyBytes = Buffer.from(text, "utf8");
-          const response = await s3Send(ctx, {
-            method: "PUT",
-            key,
-            bodyBytes,
-            contentType: "text/plain; charset=utf-8",
-            accessKeyId,
-            secretAccessKey,
-            region,
-            bucket,
-            timeoutSeconds,
-          });
-          if (response.status < 200 || response.status >= 300) {
-            return toolResult(`HTTP ${response.status}\n${response.body.toString("utf8")}`, true);
-          }
-          return toolResult(`Put ${bodyBytes.length} bytes to "${key}" in bucket "${bucket}".`);
-        }
-
-        if (name === "delete_object") {
-          const key = requireStringArg(args, "key");
-          const response = await s3Send(ctx, {
-            method: "DELETE",
-            key,
-            accessKeyId,
-            secretAccessKey,
-            region,
-            bucket,
-            timeoutSeconds,
-          });
-          if (response.status < 200 || response.status >= 300) {
-            return toolResult(`HTTP ${response.status}\n${response.body.toString("utf8")}`, true);
-          }
-          return toolResult(`Deleted "${key}" from bucket "${bucket}".`);
         }
 
         return toolResult(`Unknown tool: ${name} for plugin "${descriptor.displayName}".`, true);
       } catch (err) {
-        return toolResult(messageOf(err), true);
+        return finish(messageOf(err), true);
       }
     },
   };
@@ -969,93 +781,12 @@ export function createS3Handler(
 // multipart upload_text; everything else delegates to the engine handler)
 // ---------------------------------------------------------------------------
 
-const GDRIVE_UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
-const GDRIVE_BOUNDARY = "-------314159265358979323846";
+/** Reserved for a separately evidenced future write; no upload operation is published. */
+export const GOOGLE_DRIVE_UPLOAD_ORIGIN = "https://www.googleapis.com/upload/drive/v3";
 
 export function createGoogleDriveHandler(
   descriptor: RestServiceDescriptor = GOOGLE_DRIVE_DESCRIPTOR,
+  options: RestHandlerOptions = {},
 ): NativeMcpHandler {
-  const rest = createRestHandler(descriptor);
-
-  async function uploadText(
-    args: Record<string, unknown>,
-    ctx: McpCallContext,
-    token: string,
-  ): Promise<McpToolCallResult> {
-    const name = requireStringArg(args, "name");
-    const text = typeof args.text === "string" ? args.text : "";
-    const folderId = typeof args.folder_id === "string" ? args.folder_id.trim() : "";
-    let timeoutSeconds: number;
-    try {
-      timeoutSeconds = resolveTimeoutSeconds(args);
-    } catch (err) {
-      return toolResult(messageOf(err), true);
-    }
-
-    const metadata: Record<string, unknown> = {
-      name,
-      mimeType: "text/plain",
-      ...(folderId !== "" ? { parents: [folderId] } : {}),
-    };
-    const body =
-      `--${GDRIVE_BOUNDARY}\r\n` +
-      `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
-      `${JSON.stringify(metadata)}\r\n` +
-      `--${GDRIVE_BOUNDARY}\r\n` +
-      `Content-Type: text/plain\r\n\r\n` +
-      `${text}\r\n` +
-      `--${GDRIVE_BOUNDARY}--\r\n`;
-
-    let res: Response;
-    try {
-      res = await followGuardedRedirects(ctx.fetchImpl, GDRIVE_UPLOAD_URL, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "content-type": `multipart/related; boundary=${GDRIVE_BOUNDARY}`,
-        },
-        body,
-        signal: AbortSignal.timeout(timeoutSeconds * 1000),
-      });
-    } catch (err) {
-      if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
-        return toolResult(`Request to ${GDRIVE_UPLOAD_URL} timed out after ${timeoutSeconds} seconds.`, true);
-      }
-      return toolResult(`HTTP request failed: ${messageOf(err)}`, true);
-    }
-    const text2 = await res.text();
-    if (res.status >= 200 && res.status < 300) return toolResult(text2);
-    return toolResult(`HTTP ${res.status}\n${text2}`, true);
-  }
-
-  return {
-    async initialize(params) {
-      return rest.initialize(params);
-    },
-
-    async listTools() {
-      return rest.listTools();
-    },
-
-    async callTool(
-      name: string,
-      args: Record<string, unknown>,
-      ctx: McpCallContext,
-    ): Promise<McpToolCallResult> {
-      if (name !== "upload_text") return rest.callTool(name, args, ctx);
-      const stored = ctx.secrets ?? {};
-      const token = (stored[descriptor.credentialKey] ?? "").trim();
-      if (token === "") {
-        return toolResult(
-          configureFirstMessage(descriptor.displayName, descriptor.credentialLabel),
-          true,
-        );
-      }
-      try {
-        return await uploadText(args ?? {}, ctx, token);
-      } catch (err) {
-        return toolResult(messageOf(err), true);
-      }
-    },
-  };
+  return createRestHandler(descriptor, options);
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createGitHubHandler, GITHUB_TOOLS } from "./github.js";
 import type { McpCallContext } from "../transports/native.js";
+import type { ProviderEgress } from "../egress/responseLimits.js";
 
 // ---------------------------------------------------------------------------
 // Native GitHub MCP handler — a 1:1 port of the Dart NativeGitHubMcpHandler:
@@ -84,7 +85,7 @@ describe("createGitHubHandler", () => {
     const headers = calls[0].headers as Record<string, string>;
     expect(headers.Accept).toBe("application/vnd.github+json");
     expect(headers.Authorization).toBe("Bearer tok-123");
-    expect(headers["X-GitHub-Api-Version"]).toBe("2022-11-28");
+    expect(headers["X-GitHub-Api-Version"]).toBe("2026-03-10");
     expect(headers["User-Agent"]).toBe("OvidAI/1.0");
   });
 
@@ -95,37 +96,18 @@ describe("createGitHubHandler", () => {
     expect(calls[0].url).toBe(`${API_BASE}/search/repositories?q=q&per_page=30&page=1`);
   });
 
-  it("create_issue POSTs body {title, body}", async () => {
-    const { calls, fetchImpl } = makeFetch(() => ok('{"number":7}'));
+  it("legacy create_issue and create_or_update_file are absent and uncallable", async () => {
+    const { calls, fetchImpl } = makeFetch(() => ok("{}"));
     const handler = createGitHubHandler({ apiBase: API_BASE });
-
-    const res = await handler.callTool(
-      "create_issue",
-      { owner: "ovid", repo: "app", title: "Bug", body: "It broke" },
-      makeCtx({ secrets: { GITHUB_TOKEN: "tok" }, fetchImpl }),
-    );
-    expect(res.isError).toBe(false);
-    expect(calls[0].url).toBe(`${API_BASE}/repos/ovid/app/issues`);
-    expect(calls[0].method).toBe("POST");
-    expect(JSON.parse(String(calls[0].body))).toEqual({ title: "Bug", body: "It broke" });
-  });
-
-  it("create_or_update_file PUTs base64 content with message", async () => {
-    const { calls, fetchImpl } = makeFetch(() => ok('{"content":{}}'));
-    const handler = createGitHubHandler({ apiBase: API_BASE });
-
-    await handler.callTool(
-      "create_or_update_file",
-      { owner: "o", repo: "r", path: "docs/a.md", content: "hello", message: "add doc", branch: "main", sha: "abc" },
-      makeCtx({ secrets: { GITHUB_TOKEN: "tok" }, fetchImpl }),
-    );
-    expect(calls[0].url).toBe(`${API_BASE}/repos/o/r/contents/docs/a.md`);
-    expect(calls[0].method).toBe("PUT");
-    const body = JSON.parse(String(calls[0].body)) as Record<string, string>;
-    expect(body.message).toBe("add doc");
-    expect(body.content).toBe(Buffer.from("hello", "utf8").toString("base64"));
-    expect(body.branch).toBe("main");
-    expect(body.sha).toBe("abc");
+    for (const [name, args] of [
+      ["create_issue", { owner: "ovid", repo: "app", title: "Bug" }],
+      ["create_or_update_file", { owner: "o", repo: "r", path: "a", content: "x", message: "x" }],
+    ] as const) {
+      const result = await handler.callTool(name, args, makeCtx({ secrets: { GITHUB_TOKEN: "tok" }, fetchImpl }));
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("Unknown tool");
+    }
+    expect(calls).toHaveLength(0);
   });
 
   it("get_file_contents decodes base64 file content", async () => {
@@ -145,13 +127,30 @@ describe("createGitHubHandler", () => {
     expect(calls[0].url).toBe(`${API_BASE}/repos/o/r/contents/a.md?ref=${encodeURIComponent("dev")}`);
   });
 
-  it("non-2xx → isError with status and body", async () => {
-    const { fetchImpl } = makeFetch(() => new Response("nope", { status: 404 }));
+  it("get_file_contents returns status-only errors without raw body or echoed secrets", async () => {
+    const token = "github-secret-token";
+    const { fetchImpl } = makeFetch(() => new Response(
+      JSON.stringify({ message: "private upstream detail", echo: token, authorization: `Bearer ${token}` }),
+      { status: 404 },
+    ));
+    const result = await createGitHubHandler({ apiBase: API_BASE }).callTool(
+      "get_file_contents",
+      { owner: "o", repo: "r", path: "a.md" },
+      makeCtx({ secrets: { GITHUB_TOKEN: token }, fetchImpl }),
+    );
+    expect(result.isError).toBe(true);
+    expect(result.text).toBe("Provider request failed (HTTP 404).");
+    expect(result.text).not.toContain(token);
+    expect(result.text).not.toContain("private upstream detail");
+  });
+
+  it("non-2xx → bounded status-only error without upstream text", async () => {
+    const { fetchImpl } = makeFetch(() => new Response("secret upstream detail", { status: 404 }));
     const handler = createGitHubHandler({ apiBase: API_BASE });
     const res = await handler.callTool("get_user", {}, makeCtx({ secrets: { GITHUB_TOKEN: "tok" }, fetchImpl }));
     expect(res.isError).toBe(true);
-    expect(res.text).toContain("GitHub API error (404)");
-    expect(res.text).toContain("nope");
+    expect(res.text).toBe("Provider request failed (HTTP 404).");
+    expect(res.text).not.toContain("secret upstream detail");
   });
 
   it("fetch rejection → isError GitHub request failed (e.g. SSRF guard)", async () => {
@@ -161,29 +160,40 @@ describe("createGitHubHandler", () => {
     const handler = createGitHubHandler({ apiBase: API_BASE });
     const res = await handler.callTool("get_user", {}, makeCtx({ secrets: { GITHUB_TOKEN: "tok" }, fetchImpl }));
     expect(res.isError).toBe(true);
-    expect(res.text).toContain("GitHub request failed:");
+    expect(res.text).toContain("GitHub request failed");
   });
 
-  it("redirects followed manually — every hop goes back through ctx.fetchImpl (re-guarded)", async () => {
-    const { calls, fetchImpl } = makeFetch((url) =>
-      url.includes("/moved")
-        ? new Response(null, { status: 302, headers: { location: `${API_BASE}/repos/o/r2/issues` } })
-        : ok("[{\"number\":1}]"),
+  it("privileged redirects are denied without replaying authorization", async () => {
+    const { calls, fetchImpl } = makeFetch(() =>
+      new Response("do not expose", { status: 302, headers: { location: `${API_BASE}/repos/o/r2/issues` } }),
     );
     const handler = createGitHubHandler({ apiBase: API_BASE });
-
     const res = await handler.callTool(
       "list_issues",
       { owner: "o", repo: "moved" },
       makeCtx({ secrets: { GITHUB_TOKEN: "tok" }, fetchImpl }),
     );
-    expect(res.isError).toBe(false);
+    expect(res.isError).toBe(true);
+    expect(res.text).not.toContain("do not expose");
     expect(calls.map((c) => c.url)).toEqual([
       `${API_BASE}/repos/o/moved/issues?state=open&per_page=30&page=1`,
-      `${API_BASE}/repos/o/r2/issues`,
     ]);
-    // the hole T3-review I1 flagged: no hop may be followed by the HTTP stack
-    for (const c of calls) expect(c.redirect).toBe("manual");
+    expect(calls[0].redirect).toBe("manual");
+  });
+
+  it("rejects path escapes and malformed repository coordinates before egress", async () => {
+    const { calls, fetchImpl } = makeFetch(() => ok("{}"));
+    const handler = createGitHubHandler({ apiBase: API_BASE });
+    for (const args of [
+      { owner: "../user", repo: "repo", path: "a.txt" },
+      { owner: "o", repo: "r", path: "../user" },
+      { owner: "o", repo: "r", path: "%2e%2e/user" },
+      { owner: "o", repo: "r", path: "/absolute" },
+    ]) {
+      const result = await handler.callTool("get_file_contents", args, makeCtx({ secrets: { GITHUB_TOKEN: "t" }, fetchImpl }));
+      expect(result.isError).toBe(true);
+    }
+    expect(calls).toHaveLength(0);
   });
 
   it("unknown tool → isError \"Unknown tool \"x\" for github MCP\"", async () => {
@@ -207,33 +217,65 @@ describe("createGitHubHandler", () => {
     const handler = createGitHubHandler({ apiBase: API_BASE });
     const tools = await handler.listTools();
     expect(tools.map((t) => t.name)).toEqual([...GITHUB_TOOLS]);
-    // the brief's enumerated set (a 1:1 port of the Dart tool list)
-    for (const name of [
+    expect(GITHUB_TOOLS).toEqual([
       "search_repositories",
       "get_file_contents",
-      "create_issue",
       "list_issues",
       "get_issue",
-      "add_issue_comment",
-      "create_pull_request",
       "list_pull_requests",
-      "fork_repository",
       "list_commits",
       "get_user",
-    ]) {
-      expect(GITHUB_TOOLS).toContain(name);
-    }
+    ]);
     const search = tools.find((t) => t.name === "search_repositories");
     expect(search?.description).toBe("Search for GitHub repositories by query.");
     expect(search?.inputSchema).toEqual({
       type: "object",
       properties: {
-        query: { type: "string", description: "The search query." },
-        per_page: { type: "integer", description: "Results per page (default: 30)." },
-        page: { type: "integer", description: "Page number." },
+        query: { type: "string", minLength: 1, maxLength: 8_192, description: "The search query." },
+        per_page: { type: "integer", minimum: 1, maximum: 100, description: "Results per page (default: 30)." },
+        page: { type: "integer", minimum: 1, maximum: 100, description: "Page number." },
       },
       required: ["query"],
+      additionalProperties: false,
+      maxProperties: 3,
     });
+  });
+
+  it("uses the typed bounded ProviderEgress boundary and denies redirects", async () => {
+    const requests: Parameters<ProviderEgress["request"]>[0][] = [];
+    const providerEgress: ProviderEgress = {
+      async request(req) {
+        requests.push(req);
+        return {
+          status: 200,
+          headers: new Headers({ "content-type": "application/json" }),
+          body: new Response('{"id":"user-1"}').body!,
+          origin: new URL(API_BASE),
+          remoteAddress: "192.0.2.20",
+        };
+      },
+      async close() {},
+    };
+    const legacy = makeFetch(() => ok("{}"));
+    const result = await createGitHubHandler({ apiBase: API_BASE, providerEgress }).callTool(
+      "get_user",
+      {},
+      makeCtx({ secrets: { GITHUB_TOKEN: "github-token" }, fetchImpl: legacy.fetchImpl }),
+    );
+    expect(result.isError).toBe(false);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].originKey).toBe("github");
+    expect(requests[0].redirect).toBe("deny");
+    expect(requests[0].secretValues).toContain("github-token");
+    expect(legacy.calls).toHaveLength(0);
+  });
+
+  it("keeps unproven writes out of the read-first native definition", async () => {
+    const tools = await createGitHubHandler({ apiBase: API_BASE }).listTools();
+    expect(tools.map((tool) => tool.name)).not.toContain("create_issue");
+    expect(tools.map((tool) => tool.name)).not.toContain("create_or_update_file");
+    expect(tools.map((tool) => tool.name)).not.toContain("create_pull_request");
+    expect(tools.every((tool) => (tool as { effect?: string }).effect === "read")).toBe(true);
   });
 
   it("initialize reports serverInfo github", async () => {
