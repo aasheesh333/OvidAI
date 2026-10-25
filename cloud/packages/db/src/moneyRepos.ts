@@ -981,6 +981,22 @@ export const accountDeletions = {
   },
 };
 
+export interface CollabArtifactAccountIdentity {
+  ownerUserId: string;
+  actorUserId: string;
+  sessionId: string;
+}
+
+/** Exact account-deletion UID lock shared with withUidLock (seed 714031). */
+export async function lockCollabArtifactAccountAuthority(
+  db: Db,
+  input: CollabArtifactAccountIdentity,
+): Promise<void> {
+  for (const uid of [...new Set([input.ownerUserId, input.actorUserId])].sort()) {
+    await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${uid}, 714031))`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // withUidLock — per-uid advisory lock (server/account/postgres.py locked())
 // ---------------------------------------------------------------------------

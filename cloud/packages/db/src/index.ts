@@ -29,6 +29,7 @@ export * from "./studioRepos.js";
 export * from "./studioPreviewStore.js";
 export * from "./studioPreviewPostgres.js";
 export * from "./collabRepos.js";
+export * from "./collabArtifactRecovery.js";
 // Table objects share names with the repo namespaces above (sessions, messages,
 // runs), so the schema is exported under its own namespace instead of `export *`.
 export * as schema from "./schema.js";

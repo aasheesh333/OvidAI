@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@ovid/shared": "workspace:*",
+    "@ovid/storage": "workspace:*",
     "drizzle-orm": "^0.45.4",
     "postgres": "^3.4.9",
     "uuidv7": "^1.2.1"
