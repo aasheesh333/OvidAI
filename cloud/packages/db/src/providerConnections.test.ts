@@ -136,21 +136,126 @@ describe.skipIf(!TEST_DATABASE_URL)("provider connections against isolated real 
     const sourceUid = await seedUser(db, "pro");
     await createConnectionWithinCap(
       db,
-      createInput(sourceUid, "Source Name", { approvedSourceId: "source-a", approvedDigest: "digest-a" }),
+      createInput(sourceUid, "Source Name A", { approvedSourceId: "source-a", approvedDigest: "digest-a" }),
     );
     await expect(
       createConnectionWithinCap(
         db,
-        createInput(sourceUid, "source name", { approvedSourceId: "source-b", approvedDigest: "digest-b" }),
+        createInput(sourceUid, "Source Name B", { approvedSourceId: "source-b", approvedDigest: "digest-b" }),
       ),
     ).resolves.toMatchObject({ approvedSourceId: "source-b", approvedDigest: "digest-b" });
     await expect(
       createConnectionWithinCap(
         db,
-        createInput(sourceUid, "SOURCE NAME", { approvedSourceId: "source-a", approvedDigest: "digest-a" }),
+        createInput(sourceUid, "SOURCE NAME A", { approvedSourceId: "source-a", approvedDigest: "digest-a" }),
       ),
     ).rejects.toMatchObject({ code: "server_exists" });
   }, 30_000);
+
+  it("enforces sanitized custom-name uniqueness inside concurrent transactional admission", async () => {
+    const uid = await seedUser(db, "pro");
+    const attempts = await Promise.allSettled(
+      ["fetch", "Fetch!", "fetch!!", "FETCH", " fetch ", "Fetch"].map((name) =>
+        createConnectionWithinCap(db, createInput(uid, name)),
+      ),
+    );
+    expect(attempts.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(
+      attempts
+        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+        .every((result) => errorCode(result) === "server_exists"),
+    ).toBe(true);
+
+    await expect(
+      createConnectionWithinCap(db, createInput(uid, "fetch-client")),
+    ).resolves.toMatchObject({ name: "fetch-client" });
+    await expect(
+      createConnectionWithinCap(db, createInput(uid, "fetch client")),
+    ).resolves.toMatchObject({ name: "fetch client" });
+    await expect(
+      createConnectionWithinCap(db, createInput(uid, "Fetch Client!")),
+    ).rejects.toMatchObject({ code: "server_exists" });
+
+    const rows = await db.$client.unsafe(
+      "SELECT name FROM mcp_servers WHERE user_id = $1 AND curated_id IS NULL ORDER BY name",
+      [uid],
+    );
+    expect(rows).toHaveLength(3);
+    expect(rows.map((row) => row.name)).toEqual(expect.arrayContaining(["fetch client", "fetch-client"]));
+    expect(rows.filter((row) => !["fetch client", "fetch-client"].includes(row.name))).toHaveLength(1);
+  }, 15_000);
+
+  it("enforces one per-user namespace across approved-source identities without losing source identity", async () => {
+    const uid = await seedUser(db, "pro");
+    const attempts = await Promise.allSettled([
+      createConnectionWithinCap(db, createInput(uid, "Shared Namespace", {
+        approvedSourceId: "source-a",
+        approvedDigest: "digest-a",
+      })),
+      createConnectionWithinCap(db, createInput(uid, "shared namespace!", {
+        approvedSourceId: "source-b",
+        approvedDigest: "digest-b",
+      })),
+    ]);
+    expect(attempts.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(attempts.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const fulfilled = attempts.find((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof createConnectionWithinCap>>> =>
+      result.status === "fulfilled",
+    );
+    const sourceId = fulfilled!.value.approvedSourceId;
+    const digest = fulfilled!.value.approvedDigest;
+    await expect(
+      createConnectionWithinCap(db, createInput(uid, "SHARED NAMESPACE", {
+        approvedSourceId: sourceId,
+        approvedDigest: digest,
+      })),
+    ).rejects.toMatchObject({ code: "server_exists" });
+    await expect(
+      createConnectionWithinCap(db, createInput(uid, "Distinct Namespace", {
+        approvedSourceId: sourceId === "source-a" ? "source-b" : "source-a",
+        approvedDigest: sourceId === "source-a" ? "digest-b" : "digest-a",
+      })),
+    ).resolves.toMatchObject({ name: "Distinct Namespace" });
+    const rows = await db.$client.unsafe(
+      "SELECT approved_source_id, approved_digest FROM mcp_servers WHERE user_id = $1",
+      [uid],
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows).toContainEqual({ approved_source_id: sourceId, approved_digest: digest });
+
+    // Per-user global does not mean cross-user global.
+    const otherUid = await seedUser(db, "pro");
+    await expect(
+      createConnectionWithinCap(db, createInput(otherUid, "Shared Namespace", {
+        approvedSourceId: "source-b",
+        approvedDigest: "digest-b",
+      })),
+    ).resolves.toMatchObject({ userId: otherUid, name: "Shared Namespace" });
+  }, 15_000);
+
+  it("collides NFKC/case/punctuation variants transactionally without merging genuinely different names", async () => {
+    const uid = await seedUser(db, "pro");
+    const fullwidthDecomposed = "\uFF45\u0301\uFF43\uFF4C\uFF41\uFF49\uFF52";
+    const attempts = await Promise.allSettled(
+      ["éclair", "e\u0301clair", "ÉCLAIR!", fullwidthDecomposed].map((name) =>
+        createConnectionWithinCap(db, createInput(uid, name)),
+      ),
+    );
+    expect(attempts.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(
+      attempts
+        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+        .every((result) => errorCode(result) === "server_exists"),
+    ).toBe(true);
+
+    for (const distinct of ["eclair", "e-clair", "e clair"]) {
+      await expect(createConnectionWithinCap(db, createInput(uid, distinct)))
+        .resolves.toMatchObject({ name: distinct });
+    }
+    expect(normalizeConnectionName("  Ｆｅｔｃｈ  ")).toBe("fetch");
+    expect(normalizeConnectionName("e\u0301clair")).toBe(normalizeConnectionName("éclair"));
+    expect(normalizeConnectionName("eclair")).not.toBe(normalizeConnectionName("éclair"));
+  }, 15_000);
 
   it("re-reads the current plan after waiting for the per-user admission lock", async () => {
     const uid = await seedUser(db, "pro");
@@ -176,6 +281,143 @@ describe.skipIf(!TEST_DATABASE_URL)("provider connections against isolated real 
       releaseLock();
       await holder.catch(() => {});
     }
+  }, 15_000);
+
+  it("enforces global NFKC namespaces on rename while excluding only the same row", async () => {
+    const uid = await seedUser(db, "pro");
+    const alpha = await createConnectionWithinCap(db, createInput(uid, "Alpha", {
+      approvedSourceId: "source-a",
+      approvedDigest: "digest-a",
+    }));
+    const beta = await createConnectionWithinCap(db, createInput(uid, "Beta", {
+      approvedSourceId: "source-b",
+      approvedDigest: "digest-b",
+    }));
+    const expected = { configVersion: 1, disconnectGeneration: 0 };
+
+    await expect(transitionConnection(db, beta.connectionId, uid, { name: "Alpha!" }, expected))
+      .rejects.toMatchObject({ code: "server_exists" });
+    await expect(transitionConnection(db, beta.connectionId, uid, {
+      name: "fetch",
+      isNamespaceReserved: (name) => name === "fetch",
+    }, expected)).rejects.toMatchObject({ code: "server_exists" });
+    expect(await revalidateConnection(db, beta.connectionId, uid, expected)).toBe("denied");
+
+    const sameSourceTarget = await createConnectionWithinCap(db, createInput(uid, "Same Source Occupied", {
+      approvedSourceId: "source-shared",
+      approvedDigest: "digest-shared",
+    }));
+    const sameSourceCandidate = await createConnectionWithinCap(db, createInput(uid, "Same Source Candidate", {
+      approvedSourceId: "source-shared",
+      approvedDigest: "digest-shared",
+    }));
+    expect(sameSourceTarget.approvedSourceId).toBe(sameSourceCandidate.approvedSourceId);
+    await expect(transitionConnection(db, sameSourceCandidate.connectionId, uid, {
+      name: "same source occupied!",
+    }, expected)).rejects.toMatchObject({ code: "server_exists" });
+
+    expect(await transitionConnection(db, beta.connectionId, uid, { name: "Gamma" }, {
+      configVersion: 0,
+      disconnectGeneration: 0,
+    })).toBeNull();
+    expect(await transitionConnection(db, beta.connectionId, uid, { name: "Gamma" }, {
+      configVersion: 1,
+      disconnectGeneration: 1,
+    })).toBeNull();
+
+    const unicode = await createConnectionWithinCap(db, createInput(uid, "éclair"));
+    await expect(transitionConnection(db, beta.connectionId, uid, { name: "e\u0301clair!" }, expected))
+      .rejects.toMatchObject({ code: "server_exists" });
+    await expect(transitionConnection(db, beta.connectionId, uid, { name: "eclair" }, expected))
+      .resolves.toMatchObject({ name: "eclair", configVersion: 2, disconnectGeneration: 0 });
+
+    // A legitimate same-source rename is not an idempotency conflict.
+    await expect(transitionConnection(db, alpha.connectionId, uid, { name: "Alpha Renamed" }, expected))
+      .resolves.toMatchObject({
+        connectionId: alpha.connectionId,
+        name: "Alpha Renamed",
+        approvedSourceId: "source-a",
+        approvedDigest: "digest-a",
+        configVersion: 2,
+        disconnectGeneration: 0,
+      });
+    await expect(transitionConnection(db, alpha.connectionId, uid, { name: "Alpha!" }, {
+      configVersion: 2,
+      disconnectGeneration: 0,
+    })).resolves.toMatchObject({ name: "Alpha!", configVersion: 3 });
+
+    // The row itself is excluded from its collision set; every other row still applies.
+    await expect(transitionConnection(db, alpha.connectionId, uid, { name: "ALPHA!" }, {
+      configVersion: 3,
+      disconnectGeneration: 0,
+    }))
+      .resolves.toMatchObject({ name: "ALPHA!", configVersion: 4 });
+    await expect(transitionConnection(db, unicode.connectionId, uid, { name: "eclair" }, expected))
+      .rejects.toMatchObject({ code: "server_exists" });
+
+    // A first user's occupied target remains present throughout the other user's
+    // successful rename: namespace uniqueness is per-user, not cross-user.
+    const occupied = await createConnectionWithinCap(db, createInput(uid, "Cross User Rename", {
+      approvedSourceId: "source-a",
+      approvedDigest: "digest-a",
+    }));
+    const otherUid = await seedUser(db, "pro");
+    const other = await createConnectionWithinCap(db, createInput(otherUid, "Other", {
+      approvedSourceId: "source-a",
+      approvedDigest: "digest-a",
+    }));
+    await expect(transitionConnection(db, other.connectionId, otherUid, {
+      name: "cross user rename!",
+    }, expected)).resolves.toMatchObject({
+      userId: otherUid,
+      name: "cross user rename!",
+      configVersion: 2,
+      disconnectGeneration: 0,
+    });
+    const simultaneous = await db.$client.unsafe(
+      "SELECT user_id, name FROM mcp_servers WHERE id = ANY($1::uuid[])",
+      [[occupied.connectionId, other.connectionId]],
+    );
+    expect(simultaneous).toEqual(expect.arrayContaining([
+      { user_id: uid, name: "Cross User Rename" },
+      { user_id: otherUid, name: "cross user rename!" },
+    ]));
+  }, 15_000);
+
+  it("serializes concurrent renames into one sanitized namespace without weakening generation fences", async () => {
+    const uid = await seedUser(db, "pro");
+    const first = await createConnectionWithinCap(db, createInput(uid, "First", {
+      approvedSourceId: "source-a",
+      approvedDigest: "digest-a",
+    }));
+    const second = await createConnectionWithinCap(db, createInput(uid, "Second", {
+      approvedSourceId: "source-b",
+      approvedDigest: "digest-b",
+    }));
+    const expected = { configVersion: 1, disconnectGeneration: 0 };
+    const attempts = await Promise.allSettled([
+      transitionConnection(db, first.connectionId, uid, { name: "Shared Rename" }, expected),
+      transitionConnection(db, second.connectionId, uid, { name: "shared rename!" }, expected),
+    ]);
+    const fulfilled = attempts.filter((result) => result.status === "fulfilled");
+    const rejected = attempts.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(errorCode(rejected[0]!)).toBe("server_exists");
+
+    const winner = fulfilled[0]!.status === "fulfilled" ? fulfilled[0]!.value : null;
+    expect(winner).not.toBeNull();
+    expect(winner!.configVersion).toBe(2);
+    const loserId = winner!.connectionId === first.connectionId ? second.connectionId : first.connectionId;
+    expect(await revalidateConnection(db, loserId, uid, expected)).toBe("denied");
+    expect(await revalidateConnection(db, winner!.connectionId, uid, expected)).toBe("stale");
+    const rows = await db.$client.unsafe(
+      "SELECT id, name, config_version FROM mcp_servers WHERE user_id = $1 ORDER BY id",
+      [uid],
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows.filter((row) => row.name.toLowerCase().includes("shared rename"))).toHaveLength(1);
+    expect(rows.find((row) => row.id === loserId)?.config_version).toBe(1);
   }, 15_000);
 
   it("fences a stale generation and keeps IDs across rename", async () => {

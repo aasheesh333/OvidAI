@@ -21,7 +21,9 @@ import {
 import {
   CURATED_IDS,
   CURATED_MANIFEST,
+  KNOWN_PROVIDER_IDS,
   PRO_REQUIRED_MESSAGE,
+  RESERVED_PROVIDER_NAMESPACES,
   parseMcpConfig,
   safeServerName,
   type ImportedMcp,
@@ -83,6 +85,7 @@ const curatedBodySchema = z
 const patchBodySchema = z
   .object({
     enabled: z.boolean().optional(),
+    name: z.string().trim().min(1).max(200).optional(),
     // The whole object REPLACES the sealed blob (custom rows: {env?,
     // headers?}; curated rows: the flat credential map).
     secrets: z.record(z.string(), z.unknown()).optional(),
@@ -489,10 +492,22 @@ function connectionAdmissionFailure(reply: FastifyReply, error: unknown): Fastif
  * row) would shadow it, so creation is refused rather than silently
  * namespaced (Task 11 router parity).
  */
-function namespaceTaken(rows: McpServerRow[], name: string): boolean {
+function reservedNamespaceTaken(name: string): boolean {
   const safe = safeServerName(name);
-  if (CURATED_IDS.some((id) => safeServerName(id) === safe)) return true;
+  return safe === "" || RESERVED_PROVIDER_NAMESPACES.has(safe);
+}
+
+function namespaceTaken(rows: McpServerRow[], name: string): boolean {
+  if (reservedNamespaceTaken(name)) return true;
+  const safe = safeServerName(name);
   return rows.some((row) => row.curatedId === null && safeServerName(row.name) === safe);
+}
+
+function renameAdmission(name: string | undefined): Pick<
+  TransitionConnectionPatch,
+  "name" | "isNamespaceReserved"
+> {
+  return name === undefined ? {} : { name, isNamespaceReserved: reservedNamespaceTaken };
 }
 
 function validateTransport(body: z.infer<typeof customBodySchema>): string | null {
@@ -625,7 +640,16 @@ export function registerMcpServerRoutes(app: FastifyInstance, deps: GatewayDeps)
     }
     const { uid } = request.principal;
     const providerId = parsed.data.providerId;
-    const kind = CURATED_IDS.includes(providerId) ? "curated" : "custom";
+    const supported = CURATED_IDS.includes(providerId);
+    if (!supported && KNOWN_PROVIDER_IDS.includes(providerId)) {
+      return sendError(
+        reply,
+        409,
+        "provider_unsupported",
+        "This provider is known but is not supported for connection admission.",
+      );
+    }
+    const kind = supported ? "curated" : "custom";
     const transport = parsed.data.transport ?? (kind === "curated" ? "native" : "http");
     if (kind === "curated" && transport !== "native") {
       return badRequest(reply, "Curated providers use their catalog-owned transport.");
@@ -665,6 +689,7 @@ export function registerMcpServerRoutes(app: FastifyInstance, deps: GatewayDeps)
     const name = parsed.data.name ??
       CURATED_MANIFEST.find((entry) => entry.curatedId === providerId)?.displayName ??
       providerId;
+    if (kind === "custom" && reservedNamespaceTaken(name)) return serverExists(reply);
 
     try {
       const row = await createConnectionWithinCap(deps.db, {
@@ -836,7 +861,7 @@ export function registerMcpServerRoutes(app: FastifyInstance, deps: GatewayDeps)
     const patch: TransitionConnectionPatch = {
       enabled: parsed.data.enabled,
       agentEnabled: parsed.data.agentEnabled,
-      name: parsed.data.name,
+      ...renameAdmission(parsed.data.name),
     };
     if (parsed.data.secrets !== undefined) {
       patch.secrets = parsed.data.secrets;
@@ -1077,7 +1102,10 @@ export function registerMcpServerRoutes(app: FastifyInstance, deps: GatewayDeps)
       }
     }
 
-    const patch: TransitionConnectionPatch = { enabled: parsed.data.enabled };
+    const patch: TransitionConnectionPatch = {
+      enabled: parsed.data.enabled,
+      ...renameAdmission(parsed.data.name),
+    };
     if (candidateAuth !== null) patch.authState = candidateAuth;
     if (parsed.data.secrets !== undefined) {
       // REPLACE the sealed blob — never merge, never echo. Legacy writes use

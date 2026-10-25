@@ -1,7 +1,7 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance, InjectOptions } from "fastify";
 import { newId, users, type Db } from "@ovid/db";
-import { PRO_REQUIRED_MESSAGE, createEnvelopeCrypto, parseMcpConfig } from "@ovid/mcp";
+import { KNOWN_PROVIDER_IDS, PRO_REQUIRED_MESSAGE, createEnvelopeCrypto, parseMcpConfig } from "@ovid/mcp";
 import { mcpServerDtoSchema, type McpServerDto } from "@ovid/shared";
 import type { EncryptedEnvelope } from "@ovid/mcp";
 import { buildGateway } from "../app.js";
@@ -16,6 +16,63 @@ import {
   stubVerifier,
   stubSystemBus,
 } from "../test/stubs.js";
+
+// Explicit test-only supported manifest. These entries mirror the current
+// descriptor prerequisites without claiming that any production row is ready.
+vi.mock("@ovid/mcp", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@ovid/mcp")>();
+  const tool = (name: string) => ({ name, description: `${name} test operation` });
+  return {
+    ...actual,
+    CURATED_IDS: ["github", "jira", "s3", "supabase"],
+    CURATED_MANIFEST: [
+      {
+        curatedId: "github",
+        displayName: "GitHub",
+        description: "Supported test GitHub entry",
+        credentialFields: [{ key: "GITHUB_TOKEN", label: "GitHub token", secret: true }],
+        tools: [tool("list_issues")],
+      },
+      {
+        curatedId: "jira",
+        displayName: "Jira",
+        description: "Supported test Jira entry",
+        credentialFields: [
+          { key: "api_token", label: "Jira API token", secret: true },
+          { key: "host", label: "Jira host", secret: false },
+          { key: "email", label: "Jira email", secret: false },
+        ],
+        tools: [tool("search_issues")],
+      },
+      {
+        curatedId: "s3",
+        displayName: "S3",
+        description: "Supported test S3 entry",
+        credentialFields: [
+          { key: "secret_access_key", label: "AWS secret access key", secret: true },
+          { key: "access_key_id", label: "AWS access key ID", secret: false },
+          { key: "region", label: "AWS region", secret: false },
+          { key: "bucket", label: "S3 bucket", secret: false },
+          { key: "session_token", label: "AWS STS session token", secret: true },
+        ],
+        tools: [tool("list_objects")],
+      },
+      {
+        curatedId: "supabase",
+        displayName: "Supabase",
+        description: "Supported test Supabase entry",
+        credentialFields: [
+          { key: "user_jwt", label: "Supabase Auth user JWT", secret: true },
+          { key: "publishable_key", label: "Supabase publishable key", secret: false },
+          { key: "base_url", label: "Supabase project URL", secret: false },
+          { key: "allowed_tables", label: "Allowed tables (comma-separated)", secret: false },
+          { key: "allowed_columns", label: "Allowed projection columns (comma-separated)", secret: false },
+        ],
+        tools: [tool("select")],
+      },
+    ],
+  };
+});
 
 // MCP server CRUD routes (P5 Task 15). Real Postgres (Task 8 tables) + the
 // REAL envelope crypto with a fixed test key — the tests prove secrets are
@@ -90,6 +147,24 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp server routes (real postgres)"
     return app.inject({
       method: "POST",
       url: "/cloud/v1/mcp/connections",
+      headers: authHeaders(uid),
+      payload,
+    });
+  }
+
+  async function patchConnection(uid: string, id: string, payload: NonNullable<InjectOptions["payload"]>) {
+    return app.inject({
+      method: "PATCH",
+      url: `/cloud/v1/mcp/connections/${id}`,
+      headers: authHeaders(uid),
+      payload,
+    });
+  }
+
+  async function patchServer(uid: string, id: string, payload: NonNullable<InjectOptions["payload"]>) {
+    return app.inject({
+      method: "PATCH",
+      url: `/cloud/v1/mcp/servers/${id}`,
       headers: authHeaders(uid),
       payload,
     });
@@ -540,6 +615,145 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp server routes (real postgres)"
     expect(legacyDto).not.toHaveProperty("providerId");
   });
 
+  it("rejects every known unsupported provider ID instead of admitting it as custom", async () => {
+    const uid = testUid("known-unsupported-admission");
+    await seedPro(uid);
+    const testSupported = new Set(["github", "jira", "s3", "supabase"]);
+    for (const providerId of KNOWN_PROVIDER_IDS.filter((id) => !testSupported.has(id))) {
+      const res = await postConnection(uid, {
+        providerId,
+        transport: "stdio",
+        config: { command: "known-provider-must-not-become-custom" },
+      });
+      expect(res.statusCode, `${providerId}: ${res.body}`).toBe(409);
+      expect(res.json().error.code).toBe("provider_unsupported");
+    }
+    expect(await db.$client.unsafe("SELECT id FROM mcp_servers WHERE user_id = $1", [uid])).toHaveLength(0);
+  });
+
+  it("reserves sanitized known namespaces in legacy and new admission without blocking genuine customs", async () => {
+    const uid = testUid("known-namespace-admission");
+    await seedPro(uid);
+
+    const legacy = await postServer(uid, {
+      name: "VerCeL!",
+      transport: "http",
+      url: "https://connector.example.test/mcp",
+    });
+    expect(legacy.statusCode, legacy.body).toBe(409);
+    expect(legacy.json().error.code).toBe("server_exists");
+
+    const legacyCurated = await postServer(uid, { curatedId: "vercel" });
+    expect(legacyCurated.statusCode).toBe(400);
+
+    const unicodeLegacy = await postServer(uid, {
+      name: "verceℓ!",
+      transport: "http",
+      url: "https://unicode-legacy.example.test/mcp",
+    });
+    expect(unicodeLegacy.statusCode, unicodeLegacy.body).toBe(409);
+    expect(unicodeLegacy.json().error.code).toBe("server_exists");
+
+    const collision = await postConnection(uid, {
+      providerId: "local-fetch-adapter",
+      name: "Fetch!",
+      transport: "stdio",
+      config: { command: "local-fetch-adapter" },
+    });
+    expect(collision.statusCode, collision.body).toBe(409);
+    expect(collision.json().error.code).toBe("server_exists");
+
+    const unicodeCollision = await postConnection(uid, {
+      providerId: "local-unicode-fetch-adapter",
+      name: "fⓔtch!",
+      transport: "stdio",
+      config: { command: "local-unicode-fetch-adapter" },
+    });
+    expect(unicodeCollision.statusCode, unicodeCollision.body).toBe(409);
+    expect(unicodeCollision.json().error.code).toBe("server_exists");
+
+    const custom = await postConnection(uid, {
+      providerId: "fetch-client",
+      name: "Fetch Client",
+      transport: "stdio",
+      config: { command: "genuinely-custom-fetch-client" },
+    });
+    expect(custom.statusCode, custom.body).toBe(201);
+    expect(custom.json()).toMatchObject({ providerId: "fetch-client", name: "Fetch Client" });
+  });
+
+  it("agrees with tool projection on NFC/NFD collisions without merging distinct names", async () => {
+    const legacyUid = testUid("legacy-unicode-collision");
+    await seedPro(legacyUid);
+    const firstLegacy = await postServer(legacyUid, {
+      name: "éclair",
+      transport: "http",
+      url: "https://unicode-one.example.test/mcp",
+    });
+    expect(firstLegacy.statusCode, firstLegacy.body).toBe(201);
+    const decomposedLegacy = await postServer(legacyUid, {
+      name: "e\u0301clair!",
+      transport: "http",
+      url: "https://unicode-two.example.test/mcp",
+    });
+    expect(decomposedLegacy.statusCode, decomposedLegacy.body).toBe(409);
+    expect(decomposedLegacy.json().error.code).toBe("server_exists");
+    const distinctLegacy = await postServer(legacyUid, {
+      name: "eclair",
+      transport: "http",
+      url: "https://unicode-three.example.test/mcp",
+    });
+    expect(distinctLegacy.statusCode, distinctLegacy.body).toBe(201);
+
+    const connectionUid = testUid("connection-unicode-collision");
+    await seedPro(connectionUid);
+    const firstConnection = await postConnection(connectionUid, {
+      providerId: "custom-unicode-one",
+      name: "éclair",
+      transport: "stdio",
+      config: { command: "custom-unicode-one" },
+    });
+    expect(firstConnection.statusCode, firstConnection.body).toBe(201);
+    const decomposedConnection = await postConnection(connectionUid, {
+      providerId: "custom-unicode-two",
+      name: "e\u0301clair!",
+      transport: "stdio",
+      config: { command: "custom-unicode-two" },
+    });
+    expect(decomposedConnection.statusCode, decomposedConnection.body).toBe(409);
+    expect(decomposedConnection.json().error.code).toBe("server_exists");
+    const distinctConnection = await postConnection(connectionUid, {
+      providerId: "custom-unicode-three",
+      name: "eclair",
+      transport: "stdio",
+      config: { command: "custom-unicode-three" },
+    });
+    expect(distinctConnection.statusCode, distinctConnection.body).toBe(201);
+  });
+
+  it("serializes sanitized custom-name collisions in new transactional admission", async () => {
+    const uid = testUid("connection-namespace-race");
+    await seedPro(uid);
+    const responses = await Promise.all([
+      postConnection(uid, {
+        providerId: "custom-one",
+        name: "duplicate space",
+        transport: "stdio",
+        config: { command: "custom-one" },
+      }),
+      postConnection(uid, {
+        providerId: "custom-two",
+        name: "Duplicate Space!",
+        transport: "stdio",
+        config: { command: "custom-two" },
+      }),
+    ]);
+    expect(responses.filter((res) => res.statusCode === 201)).toHaveLength(1);
+    expect(responses.filter((res) => res.statusCode === 409)).toHaveLength(1);
+    expect(responses.find((res) => res.statusCode === 409)?.json().error.code).toBe("server_exists");
+    expect(await db.$client.unsafe("SELECT id FROM mcp_servers WHERE user_id = $1", [uid])).toHaveLength(1);
+  });
+
   it("strictly denies create/patch extras and unsupported, unauthenticated, or disabled activation", async () => {
     const uid = testUid("connection-activation");
     await seedPro(uid);
@@ -658,7 +872,7 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp server routes (real postgres)"
           name: "Supabase plaintext service key",
           config: {
             base_url: "https://project.supabase.co",
-            service_key: "supabase-service-key-plaintext-51c2",
+            user_jwt: "supabase-service-key-plaintext-51c2",
           },
         },
       },
@@ -684,7 +898,7 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp server routes (real postgres)"
           name: "Supabase nested service key",
           config: {
             base_url: "https://project.supabase.co",
-            nested: { serviceKey: "supabase-nested-service-key-plaintext-24d8" },
+            nested: { userJwt: "supabase-nested-service-key-plaintext-24d8" },
           },
         },
       },
@@ -724,23 +938,33 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp server routes (real postgres)"
 
     const uid = testUid("supabase-legitimate-config");
     await seedPro(uid);
-    const serviceKey = "supabase-sealed-service-key-93c5";
+    const userJwt = "supabase-sealed-service-key-93c5";
     const legitimate = await postConnection(uid, {
       providerId: "supabase",
       name: "Supabase sealed split config",
-      config: { base_url: "https://project.supabase.co" },
-      secrets: { service_key: serviceKey },
+      config: {
+        base_url: "https://project.supabase.co",
+        publishable_key: "sb_publishable_test_only",
+        allowed_tables: "documents",
+        allowed_columns: "id",
+      },
+      secrets: { user_jwt: userJwt },
     });
     expect(legitimate.statusCode, legitimate.body).toBe(201);
     expect(legitimate.json()).toMatchObject({ authState: "configured", hasSecrets: true });
     expect(legitimate.json()).not.toHaveProperty("config");
-    expect(legitimate.body).not.toContain(serviceKey);
+    expect(legitimate.body).not.toContain(userJwt);
     const rows = await db.$client.unsafe(
       "SELECT config, secrets_sealed FROM mcp_servers WHERE user_id = $1",
       [uid],
     );
-    expect(rows[0]?.config).toEqual({ base_url: "https://project.supabase.co" });
-    expect(JSON.stringify(rows)).not.toContain(serviceKey);
+    expect(rows[0]?.config).toEqual({
+      base_url: "https://project.supabase.co",
+      publishable_key: "sb_publishable_test_only",
+      allowed_tables: "documents",
+      allowed_columns: "id",
+    });
+    expect(JSON.stringify(rows)).not.toContain(userJwt);
   });
 
   it("requires Jira host/email plus api_token before configured or agent activation", async () => {
@@ -821,7 +1045,10 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp server routes (real postgres)"
         providerId: "s3",
         name: `S3 incomplete ${index}`,
         config,
-        secrets: { secret_access_key: "s3-secret-sealed-42d9" },
+        secrets: {
+          secret_access_key: "s3-secret-sealed-42d9",
+          session_token: "s3-session-token-test-only",
+        },
       });
       const activated = await app.inject({
         method: "PATCH",
@@ -847,7 +1074,10 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp server routes (real postgres)"
       providerId: "s3",
       name: "S3 complete prerequisites",
       config: completeConfig,
-      secrets: { secret_access_key: "s3-secret-sealed-42d9" },
+      secrets: {
+        secret_access_key: "s3-secret-sealed-42d9",
+        session_token: "s3-session-token-test-only",
+      },
     });
     expect(created.statusCode, created.body).toBe(201);
     expect(created.json()).toMatchObject({ authState: "configured", agentEnabled: false });
@@ -872,7 +1102,11 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp server routes (real postgres)"
     const active = await postConnection(activeUid, {
       providerId: "s3",
       name: "S3 active replacement fence",
-      secrets: { ...completeConfig, secret_access_key: "s3-original-complete-secret-52a8" },
+      secrets: {
+        ...completeConfig,
+        secret_access_key: "s3-original-complete-secret-52a8",
+        session_token: "s3-original-session-token-test-only",
+      },
     });
     expect(active.statusCode, active.body).toBe(201);
     const activeId = active.json().connectionId;
@@ -928,6 +1162,7 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp server routes (real postgres)"
       region: "us-east-1",
       bucket: "legacy-test-bucket",
       secret_access_key: "legacy-original-sealed-secret-38f2",
+      session_token: "legacy-original-session-token-test-only",
     };
     await db.$client.unsafe(
       `INSERT INTO mcp_servers
@@ -1080,6 +1315,189 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp server routes (real postgres)"
     expect(outcomes.map((outcome) => outcome.actual)).toEqual(outcomes.map((outcome) => outcome.expected));
     expect(outcomes.every((outcome) => outcome.providerId === "github")).toBe(true);
     expect(outcomes.every((outcome) => !outcome.body.includes(validSecret))).toBe(true);
+  });
+
+  it("rejects reserved and colliding custom renames on the new connection route", async () => {
+    const uid = testUid("connection-rename-admission");
+    await seedPro(uid);
+    const alpha = await postConnection(uid, {
+      providerId: "custom-alpha",
+      name: "Alpha",
+      transport: "stdio",
+      config: { command: "custom-alpha" },
+    });
+    const beta = await postConnection(uid, {
+      providerId: "custom-beta",
+      name: "Beta",
+      transport: "stdio",
+      config: { command: "custom-beta" },
+    });
+    const unicode = await postConnection(uid, {
+      providerId: "custom-unicode",
+      name: "éclair",
+      transport: "stdio",
+      config: { command: "custom-unicode" },
+    });
+    expect(unicode.statusCode).toBe(201);
+    const betaId = beta.json().connectionId as string;
+    await db.$client.unsafe(
+      "UPDATE mcp_servers SET approved_source_id = 'source-a', approved_digest = 'digest-a' WHERE id = $1",
+      [alpha.json().connectionId],
+    );
+    await db.$client.unsafe(
+      "UPDATE mcp_servers SET approved_source_id = 'source-b', approved_digest = 'digest-b' WHERE id = $1",
+      [betaId],
+    );
+
+    for (const name of ["Alpha!", "fetch", "verceℓ", "e\u0301clair!"]) {
+      const refused = await patchConnection(uid, betaId, { name });
+      expect(refused.statusCode, `${name}: ${refused.body}`).toBe(409);
+      expect(refused.json().error.code).toBe("server_exists");
+    }
+    const unchanged = await patchConnection(uid, betaId, {});
+    expect(unchanged.json()).toMatchObject({ name: "Beta", configVersion: 1, disconnectGeneration: 0 });
+
+    const sameSourceTarget = await postConnection(uid, {
+      providerId: "custom-same-source-target",
+      name: "Same Source Occupied",
+      transport: "stdio",
+      config: { command: "custom-same-source-target" },
+    });
+    const sameSourceCandidate = await postConnection(uid, {
+      providerId: "custom-same-source-candidate",
+      name: "Same Source Candidate",
+      transport: "stdio",
+      config: { command: "custom-same-source-candidate" },
+    });
+    expect(sameSourceTarget.statusCode, sameSourceTarget.body).toBe(201);
+    expect(sameSourceCandidate.statusCode, sameSourceCandidate.body).toBe(201);
+    for (const id of [sameSourceTarget.json().connectionId, sameSourceCandidate.json().connectionId]) {
+      await db.$client.unsafe(
+        "UPDATE mcp_servers SET approved_source_id = 'source-shared', approved_digest = 'digest-shared' WHERE id = $1",
+        [id],
+      );
+    }
+    const sameSourceCollision = await patchConnection(uid, sameSourceCandidate.json().connectionId, {
+      name: "same source occupied!",
+    });
+    expect(sameSourceCollision.statusCode, sameSourceCollision.body).toBe(409);
+    expect(sameSourceCollision.json().error.code).toBe("server_exists");
+
+    const renamed = await patchConnection(uid, betaId, { name: "eclair" });
+    expect(renamed.statusCode, renamed.body).toBe(200);
+    expect(renamed.json()).toMatchObject({ name: "eclair", configVersion: 2, disconnectGeneration: 0 });
+    const sameSourceValid = await patchConnection(uid, alpha.json().connectionId, { name: "Alpha Renamed" });
+    expect(sameSourceValid.statusCode, sameSourceValid.body).toBe(200);
+    expect(sameSourceValid.json()).toMatchObject({
+      name: "Alpha Renamed",
+      configVersion: 2,
+      disconnectGeneration: 0,
+    });
+    const selfRename = await patchConnection(uid, alpha.json().connectionId, { name: "ALPHA RENAMED!" });
+    expect(selfRename.statusCode, selfRename.body).toBe(200);
+    expect(selfRename.json()).toMatchObject({ name: "ALPHA RENAMED!", configVersion: 3 });
+  });
+
+  it("serializes concurrent custom renames on the new connection route", async () => {
+    const uid = testUid("connection-concurrent-rename");
+    await seedPro(uid);
+    const first = await postConnection(uid, {
+      providerId: "custom-first",
+      name: "First",
+      transport: "stdio",
+      config: { command: "custom-first" },
+    });
+    const second = await postConnection(uid, {
+      providerId: "custom-second",
+      name: "Second",
+      transport: "stdio",
+      config: { command: "custom-second" },
+    });
+    const ids = [first.json().connectionId as string, second.json().connectionId as string];
+    const responses = await Promise.all([
+      patchConnection(uid, ids[0]!, { name: "Shared Rename" }),
+      patchConnection(uid, ids[1]!, { name: "shared rename!" }),
+    ]);
+    expect(responses.filter((response) => response.statusCode === 200)).toHaveLength(1);
+    expect(responses.filter((response) => response.statusCode === 409)).toHaveLength(1);
+    const rows = await db.$client.unsafe(
+      "SELECT id, name, config_version FROM mcp_servers WHERE user_id = $1",
+      [uid],
+    );
+    expect(rows.filter((row) => row.name.toLowerCase().includes("shared rename"))).toHaveLength(1);
+    expect(rows.filter((row) => row.config_version === 1)).toHaveLength(1);
+    expect(rows.filter((row) => row.config_version === 2)).toHaveLength(1);
+  });
+
+  it("enforces the same rename admission on the legacy route without changing its DTO", async () => {
+    const uid = testUid("legacy-rename-admission");
+    await seedPro(uid);
+    const alpha = await postServer(uid, {
+      name: "Alpha",
+      transport: "http",
+      url: "https://legacy-alpha.example.test/mcp",
+    });
+    const beta = await postServer(uid, {
+      name: "Beta",
+      transport: "http",
+      url: "https://legacy-beta.example.test/mcp",
+    });
+    const unicode = await postServer(uid, {
+      name: "éclair",
+      transport: "http",
+      url: "https://legacy-unicode.example.test/mcp",
+    });
+    expect(unicode.statusCode).toBe(201);
+    const betaId = beta.json().id as string;
+    await db.$client.unsafe(
+      "UPDATE mcp_servers SET approved_source_id = 'source-a', approved_digest = 'digest-a' WHERE id = $1",
+      [alpha.json().id],
+    );
+    await db.$client.unsafe(
+      "UPDATE mcp_servers SET approved_source_id = 'source-b', approved_digest = 'digest-b' WHERE id = $1",
+      [betaId],
+    );
+
+    for (const name of ["Alpha!", "fetch", "verceℓ", "e\u0301clair!"]) {
+      const refused = await patchServer(uid, betaId, { name });
+      expect(refused.statusCode, `${name}: ${refused.body}`).toBe(409);
+      expect(refused.json().error.code).toBe("server_exists");
+    }
+    const sameSourceTarget = await postServer(uid, {
+      name: "Same Source Occupied",
+      transport: "http",
+      url: "https://legacy-same-source-target.example.test/mcp",
+    });
+    const sameSourceCandidate = await postServer(uid, {
+      name: "Same Source Candidate",
+      transport: "http",
+      url: "https://legacy-same-source-candidate.example.test/mcp",
+    });
+    expect(sameSourceTarget.statusCode, sameSourceTarget.body).toBe(201);
+    expect(sameSourceCandidate.statusCode, sameSourceCandidate.body).toBe(201);
+    for (const id of [sameSourceTarget.json().id, sameSourceCandidate.json().id]) {
+      await db.$client.unsafe(
+        "UPDATE mcp_servers SET approved_source_id = 'source-shared', approved_digest = 'digest-shared' WHERE id = $1",
+        [id],
+      );
+    }
+    const sameSourceCollision = await patchServer(uid, sameSourceCandidate.json().id, {
+      name: "same source occupied!",
+    });
+    expect(sameSourceCollision.statusCode, sameSourceCollision.body).toBe(409);
+    expect(sameSourceCollision.json().error.code).toBe("server_exists");
+    const renamed = await patchServer(uid, betaId, { name: "eclair" });
+    expect(renamed.statusCode, renamed.body).toBe(200);
+    expect(renamed.json()).toMatchObject({ id: betaId, name: "eclair", enabled: true });
+    expect(renamed.json()).not.toHaveProperty("agentEnabled");
+    expect(renamed.json()).not.toHaveProperty("authState");
+
+    const sameSourceValid = await patchServer(uid, alpha.json().id, { name: "Alpha Renamed" });
+    expect(sameSourceValid.statusCode, sameSourceValid.body).toBe(200);
+    expect(sameSourceValid.json()).toMatchObject({ name: "Alpha Renamed" });
+    const selfRename = await patchServer(uid, alpha.json().id, { name: "ALPHA RENAMED!" });
+    expect(selfRename.statusCode, selfRename.body).toBe(200);
+    expect(selfRename.json()).toMatchObject({ name: "ALPHA RENAMED!" });
   });
 
   it("PATCH fences renames/secrets and DELETE disconnects with generation invalidation", async () => {

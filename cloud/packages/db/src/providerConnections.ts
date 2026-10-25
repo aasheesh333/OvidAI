@@ -1,6 +1,8 @@
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, isNull, ne, sql } from "drizzle-orm";
 import {
+  normalizeMcpConnectionName,
   planFor,
+  safeMcpServerName,
   type McpTransport,
   type ProviderAuthState,
   type ProviderConnectionState,
@@ -61,6 +63,8 @@ export interface TransitionConnectionPatch {
   agentEnabled?: boolean;
   name?: string;
   normalizedConnectionName?: string;
+  /** Catalog reservation injected by admission callers; never a readiness probe. */
+  isNamespaceReserved?: (name: string) => boolean;
   secrets?: Record<string, unknown>;
   sealSecrets?: SealConnectionSecrets;
   authState?: ProviderAuthState;
@@ -100,9 +104,9 @@ const HEALTH_STATES: readonly ProviderHealthState[] = [
   "disabled",
 ];
 
-/** The 0031 expression indexes use lower(btrim(name)); do not add a second normalization. */
+/** NFKC + case folding, shared with the model-facing MCP namespace policy. */
 export function normalizeConnectionName(name: string): string {
-  return name.trim().toLowerCase();
+  return normalizeMcpConnectionName(name);
 }
 
 function authState(value: string): ProviderAuthState {
@@ -135,7 +139,7 @@ export function toMcpConnectionRow(row: McpServerRow): McpConnectionRow {
     ...(row.approvedDigest !== null ? { approvedDigest: row.approvedDigest } : {}),
     name: row.name,
     transport: row.transport as McpTransport,
-    normalizedConnectionName: row.normalizedConnectionName ?? normalizeConnectionName(row.name),
+    normalizedConnectionName: normalizeConnectionName(row.normalizedConnectionName ?? row.name),
     config: row.config,
     secretsSealed: row.secretsSealed,
     createdAt: row.createdAt,
@@ -167,21 +171,51 @@ function seal(
   return sealSecrets(JSON.stringify(secrets), `mcp_servers:${connectionId}`);
 }
 
+async function namespaceCollisionExists(
+  db: Db,
+  uid: string,
+  name: string,
+  excludeConnectionId?: string,
+): Promise<boolean> {
+  const namespace = safeMcpServerName(name);
+  if (namespace === "") return true;
+  // Model namespaces are per-user global across every approved-source identity.
+  const rows = await db
+    .select({ name: mcpServers.name })
+    .from(mcpServers)
+    .where(and(
+      eq(mcpServers.userId, uid),
+      isNull(mcpServers.curatedId),
+      ...(excludeConnectionId === undefined ? [] : [ne(mcpServers.id, excludeConnectionId)]),
+    ));
+  return rows.some((row) => safeMcpServerName(row.name) === namespace);
+}
+
+async function customNamespaceExists(db: Db, input: CreateConnectionInput): Promise<boolean> {
+  return input.kind === "custom" && namespaceCollisionExists(db, input.userId, input.name);
+}
+
 async function identityExists(db: Db, input: CreateConnectionInput): Promise<boolean> {
-  const identity = input.kind === "curated"
-    ? and(
-        eq(mcpServers.userId, input.userId),
-        eq(mcpServers.curatedId, input.providerId),
-        sql`COALESCE(${mcpServers.providerId}, ${mcpServers.curatedId}) = ${input.providerId}`,
-      )
-    : and(
-        eq(mcpServers.userId, input.userId),
-        isNull(mcpServers.curatedId),
-        sql`COALESCE(${mcpServers.normalizedConnectionName}, lower(btrim(${mcpServers.name}))) = ${input.normalizedConnectionName}`,
-        sql`COALESCE(${mcpServers.approvedSourceId}, ${mcpServers.approvedDigest}, '') = ${input.approvedSourceId ?? input.approvedDigest ?? ""}`,
-      );
-  const rows = await db.select({ id: mcpServers.id }).from(mcpServers).where(identity).limit(1);
-  return rows.length > 0;
+  if (input.kind === "curated") {
+    const rows = await db.select({ id: mcpServers.id }).from(mcpServers).where(and(
+      eq(mcpServers.userId, input.userId),
+      eq(mcpServers.curatedId, input.providerId),
+      sql`COALESCE(${mcpServers.providerId}, ${mcpServers.curatedId}) = ${input.providerId}`,
+    )).limit(1);
+    return rows.length > 0;
+  }
+  // Source identity still controls idempotency; canonical name comparison also
+  // understands legacy rows whose persisted normalization predates NFKC.
+  const rows = await db
+    .select({ name: mcpServers.name, normalized: mcpServers.normalizedConnectionName })
+    .from(mcpServers)
+    .where(and(
+      eq(mcpServers.userId, input.userId),
+      isNull(mcpServers.curatedId),
+      sql`COALESCE(${mcpServers.approvedSourceId}, ${mcpServers.approvedDigest}, '') = ${input.approvedSourceId ?? input.approvedDigest ?? ""}`,
+    ));
+  const expected = normalizeConnectionName(input.normalizedConnectionName);
+  return rows.some((row) => normalizeConnectionName(row.normalized ?? row.name) === expected);
 }
 
 /**
@@ -196,7 +230,13 @@ export async function createConnectionWithinCap(
     return await db.transaction(async (transaction) => {
       const tx = transaction as unknown as Db;
       await lockCustomConnectorCreates(tx, input.userId);
-      if (await identityExists(tx, input)) throw serverExists();
+      const canonicalInput = input.kind === "custom"
+        ? { ...input, normalizedConnectionName: normalizeConnectionName(input.name) }
+        : input;
+      // The route precheck is only UX: this sanitized namespace check runs
+      // after the per-user lock, in the same transaction as the insert.
+      if (await customNamespaceExists(tx, canonicalInput)) throw serverExists();
+      if (await identityExists(tx, canonicalInput)) throw serverExists();
 
       if (input.kind === "custom") {
         const tier = await users.getTier(tx, input.userId);
@@ -227,7 +267,7 @@ export async function createConnectionWithinCap(
           disconnectGeneration: 0,
           approvedSourceId: input.approvedSourceId ?? null,
           approvedDigest: input.approvedDigest ?? null,
-          normalizedConnectionName: input.normalizedConnectionName,
+          normalizedConnectionName: canonicalInput.normalizedConnectionName,
           config: input.config ?? null,
           secretsSealed,
           enabled: input.enabled ?? true,
@@ -298,8 +338,25 @@ export async function transitionConnection(
   if (patch.authState !== undefined) set.authState = patch.authState;
 
   try {
-    const rows = await db.update(mcpServers).set(set).where(expectedWhere).returning();
-    return rows[0] === undefined ? null : toMcpConnectionRow(rows[0]);
+    return await db.transaction(async (transaction) => {
+      const tx = transaction as unknown as Db;
+      if (patch.name !== undefined) {
+        await lockCustomConnectorCreates(tx, uid);
+        const current = await tx
+          .select({ curatedId: mcpServers.curatedId })
+          .from(mcpServers)
+          .where(and(eq(mcpServers.id, id), eq(mcpServers.userId, uid)))
+          .limit(1);
+        if (current[0]?.curatedId === null) {
+          if (patch.isNamespaceReserved?.(patch.name) === true) throw serverExists();
+          if (await namespaceCollisionExists(tx, uid, patch.name, id)) throw serverExists();
+        }
+      }
+      // The same conditional update fences every mutation, including a rename
+      // combined with secrets. A rejected rename writes nothing and bumps nothing.
+      const rows = await tx.update(mcpServers).set(set).where(expectedWhere).returning();
+      return rows[0] === undefined ? null : toMcpConnectionRow(rows[0]);
+    });
   } catch (error) {
     if (isUniqueViolation(error)) throw serverExists();
     throw error;
