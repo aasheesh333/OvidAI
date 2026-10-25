@@ -2,7 +2,7 @@ import { and, asc, eq, gt, inArray, isNotNull, sql } from "drizzle-orm";
 import type { StructuredSubagentReport } from "@ovid/shared";
 import type { Db } from "./client.js";
 import { readDurableSubagentReportSnapshotWithin } from "./subagentReportSnapshots.js";
-import { newId } from "./repos.js";
+import { lockCompactionSession, newId } from "./repos.js";
 import {
   messages,
   runs,
@@ -742,6 +742,32 @@ export async function settleAttemptAndMaybeWake(
   input: { attemptId: string; outcome: TerminalOutcome },
 ): Promise<{ rootTaskRunId: string; shouldWake: boolean }> {
   return db.transaction(async (tx) => {
+    // Canonical lock order shared with compaction and resume controls:
+    // parent session -> child session -> logical worker -> attempt. The first
+    // unlocked read only identifies that lineage; it is revalidated below.
+    const [lineage] = await tx
+      .select({
+        id: subagentAttempts.id,
+        logicalWorkerId: subagentAttempts.logicalWorkerId,
+        sessionId: subagentAttempts.sessionId,
+        childSessionId: subagentAttempts.childSessionId,
+        rootTaskRunId: subagentAttempts.rootTaskRunId,
+      })
+      .from(subagentAttempts)
+      .where(eq(subagentAttempts.id, input.attemptId))
+      .limit(1);
+    if (lineage === undefined) throw new Error("Unknown subagent attempt");
+    await lockCompactionSession(tx, lineage.sessionId, { mode: "shared" });
+    if (lineage.childSessionId !== lineage.sessionId) {
+      await lockCompactionSession(tx, lineage.childSessionId, { mode: "shared" });
+    }
+    const [worker] = await tx
+      .select({ id: subagentLogicalWorkers.id })
+      .from(subagentLogicalWorkers)
+      .where(eq(subagentLogicalWorkers.id, lineage.logicalWorkerId))
+      .for("update")
+      .limit(1);
+    if (worker === undefined) throw new Error("Subagent attempt has no logical worker");
     const [attempt] = await tx
       .select()
       .from(subagentAttempts)
@@ -749,6 +775,12 @@ export async function settleAttemptAndMaybeWake(
       .for("update")
       .limit(1);
     if (attempt === undefined) throw new Error("Unknown subagent attempt");
+    if (attempt.logicalWorkerId !== lineage.logicalWorkerId ||
+        attempt.sessionId !== lineage.sessionId ||
+        attempt.childSessionId !== lineage.childSessionId ||
+        attempt.rootTaskRunId !== lineage.rootTaskRunId) {
+      throw new Error("Subagent attempt lineage changed during settlement");
+    }
     if (attempt.status !== "running") {
       return { rootTaskRunId: attempt.rootTaskRunId, shouldWake: false };
     }

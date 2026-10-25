@@ -426,6 +426,99 @@ export const sessions = {
 // messages
 // ---------------------------------------------------------------------------
 
+/**
+ * Edit/regenerate would invalidate lossless-compaction replay or exact recall.
+ * The transaction performs no destructive write when this is thrown.
+ */
+export class CompactedHistoryTruncationError extends Error {
+  readonly name = "CompactedHistoryTruncationError";
+  readonly code = "compacted_history_truncation";
+
+  constructor(readonly sessionId: string, readonly fromId: string) {
+    super("Truncation is fenced while the session has compaction replay state or the deleted span is referenced by exact recall.");
+  }
+}
+
+export class StaleCompactionInputError extends Error {
+  readonly name = "StaleCompactionInputError";
+  readonly code = "stale_compaction_input";
+
+  constructor(readonly sessionId: string, readonly messageId: string) {
+    super("Compaction input no longer matches its canonical message; rebuild it before folding or replaying.");
+  }
+}
+
+type RepoTx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+export interface CompactionCanonicalInputMessage {
+  readonly id?: string;
+  readonly role: string;
+  readonly content: string;
+}
+
+/**
+ * Session-scoped serialization shared by truncation and 0039 writers.
+ * truncateFrom takes it before any anchor read. After canonical actor
+ * validation, foldCheckpoint/appendExactItem take it before any canonical or
+ * history resolution, cursor insertion, replay lookup or outcome construction.
+ *
+ * - truncateFrom uses `exclusive`, serializing same-session truncations.
+ * - foldCheckpoint and appendExactItem use `shared`, allowing independent
+ *   actors while excluding truncation for the duration of the transaction.
+ * - Worker parent-owned event/approval writers lock parent then child in
+ *   that order; parent truncation takes the same parent gate and sees
+ *   child-scoped references before deleting the event.
+ *
+ * Fold supplies its COMPLETE input, not merely the folded prefix. Every input
+ * message with a canonical ID is locked FOR SHARE and compared by session,
+ * role and content before any cursor/replay/outcome work. Thus a tail deleted
+ * before the first fold produces stale_compaction_input and rolls back,
+ * instead of creating or replaying an outcome containing missing history.
+ * Noncanonical/sealed messages have no message-row check here; their exact
+ * object validation remains owned by the compaction repository.
+ *
+ * These are row locks only: no table lock is acquired and unrelated sessions
+ * retain normal reads/writes. A missing session is left to the caller's actor
+ * or anchor validation, preserving their established error behavior.
+ */
+export async function lockCompactionSession(
+  tx: RepoTx,
+  sessionId: string,
+  options: {
+    mode: "shared" | "exclusive";
+    messages?: readonly CompactionCanonicalInputMessage[];
+  },
+): Promise<void> {
+  const sessionRows = options.mode === "shared"
+    ? await tx.select({ id: sessionsTable.id }).from(sessionsTable)
+      .where(eq(sessionsTable.id, sessionId)).for("share").limit(1)
+    : await tx.select({ id: sessionsTable.id }).from(sessionsTable)
+      .where(eq(sessionsTable.id, sessionId)).for("update").limit(1);
+  if (sessionRows[0] === undefined || options.messages === undefined) return;
+
+  const expected = options.messages.filter(
+    (message): message is CompactionCanonicalInputMessage & { readonly id: string } =>
+      typeof message.id === "string" && message.id.length > 0,
+  );
+  if (expected.length === 0) return;
+  const ids = [...new Set(expected.map((message) => message.id))];
+  const canonical = await tx.select({
+    id: messagesTable.id,
+    role: messagesTable.role,
+    content: messagesTable.content,
+  }).from(messagesTable)
+    .where(and(eq(messagesTable.sessionId, sessionId), inArray(messagesTable.id, ids)))
+    .orderBy(asc(messagesTable.id))
+    .for("share");
+  const byId = new Map(canonical.map((row) => [row.id, row]));
+  for (const message of expected) {
+    const row = byId.get(message.id);
+    if (row === undefined || row.role !== message.role || row.content !== message.content) {
+      throw new StaleCompactionInputError(sessionId, message.id);
+    }
+  }
+}
+
 export const messages = {
   async append(
     db: Db,
@@ -611,6 +704,10 @@ export const messages = {
     opts: { eventsFrom?: Date; keepAnchor?: boolean } = {},
   ): Promise<number> {
     return db.transaction(async (tx) => {
+      // Acquire the same target-session gate used by 0039 writers before any
+      // anchor/cursor reads. Same-session truncations therefore serialize on
+      // one row; no compatible table lock is upgraded behind another reader.
+      await lockCompactionSession(tx, sessionId, { mode: "exclusive" });
       const anchorRows = await tx
         .select()
         .from(messagesTable)
@@ -618,6 +715,76 @@ export const messages = {
         .limit(1);
       const anchor = anchorRows[0];
       if (anchor === undefined) return 0;
+
+      const stateRows = await tx
+        .select()
+        .from(sessionAgentStateTable)
+        .where(eq(sessionAgentStateTable.sessionId, sessionId))
+        .limit(1);
+      const stateRow = stateRows[0];
+      const json = stateRow?.state as { compaction?: { cutoffMessageId?: string | null } | null } | undefined;
+      const cutoff = json?.compaction?.cutoffMessageId ?? null;
+      const removed = cutoff !== null && (opts.keepAnchor === true ? cutoff > fromId : cutoff >= fromId);
+      const resetLegacyCompaction = json?.compaction != null && (cutoff === null || removed);
+      const messageCut = opts.keepAnchor === true ? sql`m.id > ${fromId}` : sql`m.id >= ${fromId}`;
+      const eventsFrom = opts.eventsFrom ?? anchor.createdAt;
+      const legacyStateRef = `postgres:session_agent_state/${sessionId}#compaction`;
+      const fencedRows = await tx.execute(sql`
+        SELECT (
+          -- Persisted runtime replay is session-wide: truncateFrom has no actor
+          -- argument and its message/event cut can cross every actor's input.
+          EXISTS (
+            SELECT 1 FROM compaction_cursors c
+             WHERE c.session_id = ${sessionId}
+          )
+          OR EXISTS (
+            SELECT 1 FROM compaction_checkpoints c
+             WHERE c.session_id = ${sessionId} AND c.actor_kind IS NOT NULL
+          )
+          -- Migration-backfilled and manually appended exact history can exist
+          -- without a runtime cursor. Fence only the destructive span there.
+          OR EXISTS (
+            SELECT 1
+              FROM messages m
+             WHERE m.session_id = ${sessionId}
+               AND ${messageCut}
+               AND (
+                 EXISTS (
+                   SELECT 1 FROM compaction_history_items h
+                    WHERE h.session_id = m.session_id
+                      AND h.object_ref = 'postgres:messages/' || m.id
+                 )
+                 OR EXISTS (
+                   SELECT 1 FROM compaction_checkpoints c
+                    WHERE c.session_id = m.session_id AND c.cutoff_message_id = m.id
+                 )
+               )
+          )
+          OR EXISTS (
+            SELECT 1
+              FROM session_event_mirror e
+             WHERE e.session_id = ${sessionId}
+               AND e.ts >= ${eventsFrom}
+               AND EXISTS (
+                 SELECT 1 FROM compaction_history_items h
+                  -- Child-scoped worker history may reference this parent
+                  -- event; match the owner reference, not h.session_id.
+                  WHERE h.object_ref = 'postgres:session_event_mirror/' || e.session_id || '/' || e.seq
+               )
+          )
+          OR (
+            ${resetLegacyCompaction}
+            AND EXISTS (
+              SELECT 1 FROM compaction_history_items h
+               WHERE h.session_id = ${sessionId} AND h.object_ref = ${legacyStateRef}
+            )
+          )
+        ) AS blocked
+      `) as unknown as Array<{ blocked: boolean }>;
+      if (fencedRows[0]?.blocked === true) {
+        throw new CompactedHistoryTruncationError(sessionId, fromId);
+      }
+
       // keepAnchor: everything AFTER the anchor goes, the anchor stays (a
       // prompt re-run keeps its own row).
       const deleted = await tx
@@ -634,25 +801,14 @@ export const messages = {
         .where(
           and(
             eq(sessionEventMirror.sessionId, sessionId),
-            gte(sessionEventMirror.ts, opts.eventsFrom ?? anchor.createdAt),
+            gte(sessionEventMirror.ts, eventsFrom),
           ),
         );
-      const stateRows = await tx
-        .select()
-        .from(sessionAgentStateTable)
-        .where(eq(sessionAgentStateTable.sessionId, sessionId))
-        .limit(1);
-      const stateRow = stateRows[0];
-      if (stateRow !== undefined) {
-        const json = stateRow.state as { compaction?: { cutoffMessageId?: string | null } | null };
-        const cutoff = json.compaction?.cutoffMessageId ?? null;
-        const removed = cutoff !== null && (opts.keepAnchor === true ? cutoff > fromId : cutoff >= fromId);
-        if (json.compaction != null && (cutoff === null || removed)) {
-          await tx
-            .update(sessionAgentStateTable)
-            .set({ state: { ...stateRow.state, compaction: null } })
-            .where(eq(sessionAgentStateTable.sessionId, sessionId));
-        }
+      if (stateRow !== undefined && resetLegacyCompaction) {
+        await tx
+          .update(sessionAgentStateTable)
+          .set({ state: { ...stateRow.state, compaction: null } })
+          .where(eq(sessionAgentStateTable.sessionId, sessionId));
       }
       return deleted.length;
     });

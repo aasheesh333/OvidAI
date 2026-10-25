@@ -24,6 +24,8 @@ export function createPostgresDeletionStore(db: Db): DeletionStore {
     locked<T>(uid: string, fn: (session: DeletionSession) => Promise<T>): Promise<T> {
       return withUidLock(db, uid, async (locked) => {
         const session: DeletionSession = {
+          // Collaborators must transact on this handle, never reacquire the pool.
+          db: locked,
           async get(id: string): Promise<DeletionRow | null> {
             const row = await accountDeletions.get(locked, id);
             if (row === null) return null;

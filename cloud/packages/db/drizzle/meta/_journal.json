@@ -253,6 +253,20 @@
       "when": 1793900000000,
       "tag": "0038_usage_billing_windows",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1794000000000,
+      "tag": "0039_lossless_compaction",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1794100000000,
+      "tag": "0040_collaboration",
+      "breakpoints": true
     }
   ]
 }

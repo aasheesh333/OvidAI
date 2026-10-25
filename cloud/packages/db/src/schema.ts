@@ -1,5 +1,6 @@
 import {
   bigint,
+  bigserial,
   boolean,
   char,
   check,
@@ -1111,6 +1112,7 @@ export const runUsage = pgTable(
     providerModel: text("provider_model"),
     costUsd: numeric("cost_usd", { precision: 38, scale: 10 }),
     costSource: text("cost_source").$type<"litellm" | "provider">(),
+    billingClass: text("billing_class").notNull().default("ovid_allowance").$type<"ovid_allowance" | "byok">(),
     createdAt: timestamptz("created_at").notNull().defaultNow(),
   },
   (t) => [
@@ -1239,6 +1241,7 @@ export const subagentDispatches = pgTable(
     byokKeyId: text("byok_key_id"),
     byokModel: text("byok_model"),
     actorUserId: text("actor_user_id").notNull().references(() => users.uid),
+    temperature: doublePrecision("temperature"),
     state: text("state")
       .notNull()
       .$type<"awaiting_next_user_task" | "admitted" | "cancelled">(),
@@ -1690,6 +1693,7 @@ export const usageRunAdmissions = pgTable(
     source: text("source").notNull(),
     runId: char("run_id", { length: 36 }).notNull(),
     idempotencyKey: text("idempotency_key").notNull(),
+    billingClass: text("billing_class").notNull().default("ovid_allowance").$type<"ovid_allowance" | "byok">(),
     createdAt: timestamptz("created_at").notNull().defaultNow(),
   },
   (t) => [
@@ -1728,6 +1732,7 @@ export const usageQuotaReservations = pgTable(
     actualCacheWriteTokens: bigint("actual_cache_write_tokens", { mode: "number" }),
     costUsd: numeric("cost_usd", { precision: 38, scale: 10 }),
     costSource: text("cost_source").$type<"litellm" | "provider">(),
+    billingClass: text("billing_class").notNull().default("ovid_allowance").$type<"ovid_allowance" | "byok">(),
     dayWindowStart: timestamptz("day_window_start").notNull(),
     monthWindowStart: timestamptz("month_window_start").notNull(),
     runUsageId: char("run_usage_id", { length: 36 }),
@@ -1824,3 +1829,327 @@ export type UsageQuotaReservationRow = typeof usageQuotaReservations.$inferSelec
 export type UploadWindowCounterRow = typeof uploadWindowCounters.$inferSelect;
 export type StorageUsageCounterRow = typeof storageUsageCounters.$inferSelect;
 export type StorageReservationRow = typeof storageReservations.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// 0039 lossless compaction: append-only exact-history references, immutable
+// checkpoints, and independently locked main/worker cursors. Existing canonical
+// rows remain authoritative. NULL means that legacy lineage or usage was not
+// evidenced; it never means zero measured tokens.
+// ---------------------------------------------------------------------------
+
+export type CompactionHistoryItemKind =
+  | "message"
+  | "tool_call"
+  | "approval"
+  | "artifact"
+  | "file"
+  | "logical_worker"
+  | "attempt"
+  | "checkpoint"
+  | "compaction"
+  | "event"
+  | "control";
+
+export const compactionHistoryItems = pgTable(
+  "compaction_history_items",
+  {
+    position: bigserial("position", { mode: "number" }).primaryKey(),
+    sessionId: char("session_id", { length: 36 })
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    rootTaskRunId: char("root_task_run_id", { length: 36 }).references(() => runs.id),
+    logicalWorkerId: char("logical_worker_id", { length: 36 })
+      .references(() => subagentLogicalWorkers.id),
+    attemptId: char("attempt_id", { length: 36 }).references(() => subagentAttempts.id),
+    kind: text("kind").notNull().$type<CompactionHistoryItemKind>(),
+    stableId: text("stable_id").notNull(),
+    eventCursor: text("event_cursor").notNull(),
+    // Legacy-compatible payload column only. The 0039 repository never writes
+    // new inline plaintext: exact content lives in canonical/sealed objects and
+    // every new row uses objectRef. Raw legacy reads are fenced explicitly.
+    inlinePayload: jsonb("inline_payload"),
+    objectRef: text("object_ref"),
+    byteLength: bigint("byte_length", { mode: "number" }).notNull(),
+    occurredAt: timestamptz("occurred_at"),
+    recordedAt: timestamptz("recorded_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("compaction_history_identity_uq")
+      .on(t.sessionId, t.kind, t.stableId, t.eventCursor),
+    index("compaction_history_scope_position_idx")
+      .on(t.sessionId, t.rootTaskRunId, t.logicalWorkerId, t.attemptId, t.position),
+    index("compaction_history_reference_idx")
+      .on(t.sessionId, t.kind, t.stableId, t.position),
+    index("compaction_history_event_cursor_idx")
+      .on(t.sessionId, t.eventCursor, t.position),
+    check("compaction_history_kind_check", sql`${t.kind} IN ('message','tool_call','approval','artifact','file','logical_worker','attempt','checkpoint','compaction','event','control')`),
+    check("compaction_history_payload_check", sql`(${t.inlinePayload} IS NOT NULL AND ${t.objectRef} IS NULL) OR (${t.inlinePayload} IS NULL AND ${t.objectRef} IS NOT NULL)`),
+    check("compaction_history_bytes_check", sql`${t.byteLength} >= 0`),
+    check("compaction_history_lineage_check", sql`${t.attemptId} IS NULL OR ${t.logicalWorkerId} IS NOT NULL`),
+  ],
+);
+
+export const compactionCheckpoints = pgTable(
+  "compaction_checkpoints",
+  {
+    checkpointId: char("checkpoint_id", { length: 36 }).primaryKey(),
+    compactionId: char("compaction_id", { length: 36 }).notNull(),
+    sessionId: char("session_id", { length: 36 })
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    rootTaskRunId: char("root_task_run_id", { length: 36 }).references(() => runs.id),
+    logicalWorkerId: char("logical_worker_id", { length: 36 })
+      .references(() => subagentLogicalWorkers.id),
+    attemptId: char("attempt_id", { length: 36 }).references(() => subagentAttempts.id),
+    actorId: text("actor_id"),
+    actorKind: text("actor_kind").$type<"main" | "worker">(),
+    previousCheckpointId: char("previous_checkpoint_id", { length: 36 }),
+    requestDigest: char("request_digest", { length: 64 }),
+    model: text("model"),
+    contextLimit: bigint("context_limit", { mode: "number" }),
+    outputReserveTokens: bigint("output_reserve_tokens", { mode: "number" }),
+    providerReserveTokens: bigint("provider_reserve_tokens", { mode: "number" }),
+    beforeTokens: bigint("before_tokens", { mode: "number" }),
+    afterTokens: bigint("after_tokens", { mode: "number" }),
+    usageSource: text("usage_source").$type<"measured" | "deterministic_fallback">(),
+    cutoffCursor: text("cutoff_cursor"),
+    cutoffMessageId: char("cutoff_message_id", { length: 36 }),
+    ledgerVersion: integer("ledger_version"),
+    ledger: jsonb("ledger").$type<Record<string, unknown>>(),
+    summary: text("summary"),
+    activeState: jsonb("active_state").notNull().$type<Record<string, unknown>>(),
+    continuation: text("continuation").$type<"continuing_existing_task">(),
+    createdAt: timestamptz("created_at"),
+    recordedAt: timestamptz("recorded_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("compaction_checkpoints_compaction_uq").on(t.compactionId),
+    uniqueIndex("compaction_checkpoints_request_uq")
+      .on(t.sessionId, t.rootTaskRunId, t.actorKind, t.actorId, t.requestDigest),
+    index("compaction_checkpoints_scope_idx")
+      .on(t.sessionId, t.rootTaskRunId, t.actorKind, t.actorId, t.createdAt, t.checkpointId),
+    check("compaction_checkpoints_actor_kind_check", sql`${t.actorKind} IS NULL OR ${t.actorKind} IN ('main','worker')`),
+    check("compaction_checkpoints_usage_source_check", sql`${t.usageSource} IS NULL OR ${t.usageSource} IN ('measured','deterministic_fallback')`),
+    check("compaction_checkpoints_tokens_check", sql`(${t.contextLimit} IS NULL OR ${t.contextLimit} > 0) AND (${t.outputReserveTokens} IS NULL OR ${t.outputReserveTokens} >= 0) AND (${t.providerReserveTokens} IS NULL OR ${t.providerReserveTokens} >= 0) AND (${t.beforeTokens} IS NULL OR ${t.beforeTokens} >= 0) AND (${t.afterTokens} IS NULL OR ${t.afterTokens} >= 0)`),
+    check("compaction_checkpoints_ledger_check", sql`${t.ledgerVersion} IS NULL OR ${t.ledgerVersion} > 0`),
+    check("compaction_checkpoints_digest_check", sql`${t.requestDigest} IS NULL OR ${t.requestDigest} ~ '^[0-9a-f]{64}$'`),
+    check("compaction_checkpoints_continuation_check", sql`${t.continuation} IS NULL OR ${t.continuation} = 'continuing_existing_task'`),
+    check("compaction_checkpoints_shape_check", sql`
+      (${t.actorKind} IS NULL AND ${t.actorId} IS NULL AND ${t.rootTaskRunId} IS NULL AND ${t.logicalWorkerId} IS NULL AND ${t.attemptId} IS NULL AND ${t.requestDigest} IS NULL AND ${t.model} IS NULL AND ${t.contextLimit} IS NULL AND ${t.outputReserveTokens} IS NULL AND ${t.providerReserveTokens} IS NULL AND ${t.beforeTokens} IS NULL AND ${t.afterTokens} IS NULL AND ${t.usageSource} IS NULL AND ${t.ledgerVersion} IS NULL AND ${t.ledger} IS NULL AND ${t.summary} IS NULL AND ${t.continuation} IS NULL AND ${t.createdAt} IS NULL)
+      OR
+      (${t.rootTaskRunId} IS NOT NULL AND ${t.actorId} IS NOT NULL AND ${t.requestDigest} IS NOT NULL AND ${t.model} IS NOT NULL AND ${t.contextLimit} IS NOT NULL AND ${t.outputReserveTokens} IS NOT NULL AND ${t.providerReserveTokens} IS NOT NULL AND ${t.beforeTokens} IS NOT NULL AND ${t.afterTokens} IS NOT NULL AND ${t.usageSource} IS NOT NULL AND ${t.ledgerVersion} IS NOT NULL AND ${t.ledger} IS NOT NULL AND ${t.summary} IS NOT NULL AND ${t.continuation} IS NOT NULL AND ${t.createdAt} IS NOT NULL AND
+        ((${t.actorKind} = 'main' AND ${t.actorId} = 'main' AND ${t.logicalWorkerId} IS NULL AND ${t.attemptId} IS NULL) OR
+         (${t.actorKind} = 'worker' AND ${t.logicalWorkerId} IS NOT NULL AND ${t.attemptId} IS NOT NULL AND ${t.actorId} = ${t.logicalWorkerId}::text)))`),
+  ],
+);
+
+export const compactionCursors = pgTable(
+  "compaction_cursors",
+  {
+    sessionId: char("session_id", { length: 36 })
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    rootTaskRunId: char("root_task_run_id", { length: 36 })
+      .notNull()
+      .references(() => runs.id),
+    actorKind: text("actor_kind").notNull().$type<"main" | "worker">(),
+    actorId: text("actor_id").notNull(),
+    logicalWorkerId: char("logical_worker_id", { length: 36 })
+      .references(() => subagentLogicalWorkers.id),
+    attemptId: char("attempt_id", { length: 36 }).references(() => subagentAttempts.id),
+    checkpointId: char("checkpoint_id", { length: 36 })
+      .references(() => compactionCheckpoints.checkpointId),
+    compactionId: char("compaction_id", { length: 36 }),
+    cutoffCursor: text("cutoff_cursor"),
+    cutoffMessageId: char("cutoff_message_id", { length: 36 }),
+    ledgerVersion: integer("ledger_version").notNull().default(0),
+    pendingRecallCursor: text("pending_recall_cursor"),
+    continuation: text("continuation")
+      .notNull()
+      .default("continuing_existing_task")
+      .$type<"continuing_existing_task">(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.sessionId, t.rootTaskRunId, t.actorKind, t.actorId] }),
+    index("compaction_cursors_worker_idx")
+      .on(t.sessionId, t.logicalWorkerId, t.rootTaskRunId),
+    index("compaction_cursors_checkpoint_idx").on(t.checkpointId),
+    check("compaction_cursors_actor_check", sql`(${t.actorKind} = 'main' AND ${t.actorId} = 'main' AND ${t.logicalWorkerId} IS NULL AND ${t.attemptId} IS NULL) OR (${t.actorKind} = 'worker' AND ${t.logicalWorkerId} IS NOT NULL AND ${t.attemptId} IS NOT NULL AND ${t.actorId} = ${t.logicalWorkerId}::text)`),
+    check("compaction_cursors_ledger_check", sql`${t.ledgerVersion} >= 0`),
+    check("compaction_cursors_continuation_check", sql`${t.continuation} = 'continuing_existing_task'`),
+  ],
+);
+
+export type CompactionHistoryItemRow = typeof compactionHistoryItems.$inferSelect;
+export type CompactionCheckpointRow = typeof compactionCheckpoints.$inferSelect;
+export type CompactionCursorRow = typeof compactionCursors.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// 0040 collaboration metadata. Bearer material is SHA-256 hashed at rest; the
+// canonical sessions/messages/runs/session_event_mirror tables remain the only
+// transcript/history. Generations are durable fencing inputs for Task 4's run
+// admission/writer, never client-supplied authority.
+// ---------------------------------------------------------------------------
+
+export const collabRooms = pgTable(
+  "collab_rooms",
+  {
+    id: char("id", { length: 36 }).primaryKey(),
+    tokenHash: char("token_hash", { length: 64 }).notNull(),
+    sessionId: char("session_id", { length: 36 })
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    ownerUserId: text("owner_user_id")
+      .notNull()
+      .references(() => users.uid, { onDelete: "cascade" }),
+    requestId: text("request_id").notNull(),
+    lifecycle: text("lifecycle").notNull().default("active").$type<"active" | "closing" | "closed">(),
+    generation: bigint("generation", { mode: "number" }).notNull().default(1),
+    closeRequestId: text("close_request_id"),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("collab_rooms_token_hash_uq").on(t.tokenHash),
+    uniqueIndex("collab_rooms_session_uq").on(t.sessionId),
+    uniqueIndex("collab_rooms_owner_request_uq").on(t.ownerUserId, t.requestId),
+    index("collab_rooms_owner_lifecycle_idx").on(t.ownerUserId, t.lifecycle),
+    check("collab_rooms_token_hash_check", sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
+    check("collab_rooms_lifecycle_check", sql`${t.lifecycle} IN ('active','closing','closed')`),
+    check("collab_rooms_generation_check", sql`${t.generation} >= 1`),
+  ],
+);
+
+export const collabMembers = pgTable(
+  "collab_members",
+  {
+    roomId: char("room_id", { length: 36 })
+      .notNull()
+      .references(() => collabRooms.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.uid, { onDelete: "cascade" }),
+    participantId: text("participant_id").notNull(),
+    role: text("role").notNull().$type<"owner" | "participant">(),
+    status: text("status").notNull().default("active").$type<"active" | "left" | "revoked">(),
+    displayName: text("display_name"),
+    generation: bigint("generation", { mode: "number" }).notNull().default(1),
+    joinRequestId: text("join_request_id"),
+    joinInviteHash: char("join_invite_hash", { length: 64 }),
+    joinedAt: timestamptz("joined_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+    revokedAt: timestamptz("revoked_at"),
+  },
+  (t) => [
+    primaryKey({ columns: [t.roomId, t.userId] }),
+    uniqueIndex("collab_members_room_participant_uq").on(t.roomId, t.participantId),
+    uniqueIndex("collab_members_room_active_owner_uq").on(t.roomId).where(sql`${t.role} = 'owner' AND ${t.status} = 'active'`),
+    index("collab_members_room_status_idx").on(t.roomId, t.status, t.joinedAt, t.participantId),
+    index("collab_members_user_status_idx").on(t.userId, t.status),
+    check("collab_members_role_check", sql`${t.role} IN ('owner','participant')`),
+    check("collab_members_status_check", sql`${t.status} IN ('active','left','revoked')`),
+    check("collab_members_generation_check", sql`${t.generation} >= 1`),
+    check("collab_members_join_invite_hash_check", sql`${t.joinInviteHash} IS NULL OR ${t.joinInviteHash} ~ '^[0-9a-f]{64}$'`),
+  ],
+);
+
+export const collabInvites = pgTable(
+  "collab_invites",
+  {
+    id: text("id").primaryKey(),
+    roomId: char("room_id", { length: 36 })
+      .notNull()
+      .references(() => collabRooms.id, { onDelete: "cascade" }),
+    codeHash: char("code_hash", { length: 64 }).notNull(),
+    issuedByUserId: text("issued_by_user_id")
+      .notNull()
+      .references(() => users.uid, { onDelete: "cascade" }),
+    idempotencyKey: text("idempotency_key").notNull(),
+    issuedGeneration: bigint("issued_generation", { mode: "number" }).notNull().default(1),
+    maxUses: integer("max_uses").notNull(),
+    uses: integer("uses").notNull().default(0),
+    expiresAt: timestamptz("expires_at").notNull(),
+    revokedAt: timestamptz("revoked_at"),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("collab_invites_code_hash_uq").on(t.codeHash),
+    uniqueIndex("collab_invites_room_request_uq").on(t.roomId, t.issuedByUserId, t.idempotencyKey),
+    index("collab_invites_room_active_idx").on(t.roomId, t.revokedAt, t.expiresAt),
+    index("collab_invites_issuer_idx").on(t.issuedByUserId, t.revokedAt),
+    check("collab_invites_code_hash_check", sql`${t.codeHash} ~ '^[0-9a-f]{64}$'`),
+    check("collab_invites_uses_check", sql`${t.maxUses} BETWEEN 1 AND 50 AND ${t.uses} >= 0 AND ${t.uses} <= ${t.maxUses}`),
+    check("collab_invites_generation_check", sql`${t.issuedGeneration} >= 1`),
+  ],
+);
+
+export const collabTurns = pgTable(
+  "collab_turns",
+  {
+    id: char("id", { length: 36 }).primaryKey(),
+    roomId: char("room_id", { length: 36 })
+      .notNull()
+      .references(() => collabRooms.id, { onDelete: "cascade" }),
+    participantId: text("participant_id").notNull(),
+    actorUserId: text("actor_user_id")
+      .notNull()
+      .references(() => users.uid, { onDelete: "cascade" }),
+    runId: char("run_id", { length: 36 })
+      .notNull()
+      .references(() => runs.id, { onDelete: "cascade" }),
+    userMessageId: char("user_message_id", { length: 36 })
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    idempotencyKey: text("idempotency_key").notNull(),
+    model: text("model"),
+    status: text("status").notNull().default("queued").$type<"queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted">(),
+    cancelRequestedAt: timestamptz("cancel_requested_at"),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("collab_turns_room_idempotency_uq").on(t.roomId, t.idempotencyKey),
+    uniqueIndex("collab_turns_run_uq").on(t.runId),
+    index("collab_turns_actor_status_idx").on(t.actorUserId, t.status),
+    index("collab_turns_room_participant_idx").on(t.roomId, t.participantId),
+    check("collab_turns_status_check", sql`${t.status} IN ('queued','running','completed','failed','cancelled','interrupted')`),
+  ],
+);
+
+export const collabSenderLeases = pgTable(
+  "collab_sender_leases",
+  {
+    id: char("id", { length: 36 }).primaryKey(),
+    roomId: char("room_id", { length: 36 })
+      .notNull()
+      .references(() => collabRooms.id, { onDelete: "cascade" }),
+    holderParticipantId: text("holder_participant_id").notNull(),
+    holderUserId: text("holder_user_id")
+      .notNull()
+      .references(() => users.uid, { onDelete: "cascade" }),
+    runId: char("run_id", { length: 36 })
+      .notNull()
+      .references(() => runs.id, { onDelete: "cascade" }),
+    generation: bigint("generation", { mode: "number" }).notNull().default(1),
+    roomGeneration: bigint("room_generation", { mode: "number" }).notNull().default(1),
+    membershipGeneration: bigint("membership_generation", { mode: "number" }).notNull().default(1),
+    startedAt: timestamptz("started_at").notNull().defaultNow(),
+    heartbeatAt: timestamptz("heartbeat_at").notNull().defaultNow(),
+    releasedAt: timestamptz("released_at"),
+    cancelRequestedAt: timestamptz("cancel_requested_at"),
+  },
+  (t) => [
+    uniqueIndex("collab_sender_leases_run_uq").on(t.runId),
+    uniqueIndex("collab_sender_leases_room_active_uq").on(t.roomId).where(sql`${t.releasedAt} IS NULL`),
+    index("collab_sender_leases_heartbeat_idx").on(t.heartbeatAt).where(sql`${t.releasedAt} IS NULL`),
+    index("collab_sender_leases_holder_idx").on(t.holderUserId, t.releasedAt),
+    check("collab_sender_leases_generations_check", sql`${t.generation} >= 1 AND ${t.roomGeneration} >= 1 AND ${t.membershipGeneration} >= 1`),
+  ],
+);
+
+export type CollabRoomRow = typeof collabRooms.$inferSelect;
+export type CollabMemberRow = typeof collabMembers.$inferSelect;
+export type CollabInviteRow = typeof collabInvites.$inferSelect;
+export type CollabTurnRow = typeof collabTurns.$inferSelect;
+export type CollabSenderLeaseRow = typeof collabSenderLeases.$inferSelect;
