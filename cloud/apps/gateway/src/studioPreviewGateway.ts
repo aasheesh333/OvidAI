@@ -440,7 +440,7 @@ async function readCookieGrant(
 }
 
 function rawContentPath(request: FastifyRequest, previewId: string): string | null {
-  const rawUrl = request.raw.url;
+  const rawUrl = request.raw.url ?? request.url;
   if (!rawUrl.startsWith("/preview/")) return null;
   const idEnd = rawUrl.indexOf("/", "/preview/".length);
   if (idEnd < 0) return null;
