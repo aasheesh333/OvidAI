@@ -27,7 +27,7 @@ import {
   type ClientNetwork,
 } from "./clientIp.js";
 import type { IpObservationStore } from "./ipObservations.js";
-import { dataControlRepo, type Db } from "@ovid/db";
+import { billingUsers, dataControlRepo, type Db } from "@ovid/db";
 import type { KeyAdmin } from "@ovid/account";
 import {
   type SuspensionMailer,
@@ -89,8 +89,12 @@ export interface IpAnomalyGuardOptions {
 export interface IpAnomalySuspensionOptions {
   db: Db;
   /** Mint Redis: the live account-standing projection read before key use. */
-  redis: { set(key: string, value: string): unknown };
-  keyAdmin: Pick<KeyAdmin, "listKeys" | "keyBlock">;
+  redis: {
+    get(key: string): unknown;
+    set(key: string, value: string): unknown;
+    eval(script: string, numKeys: number, ...keysAndArgs: string[]): unknown;
+  };
+  keyAdmin: Pick<KeyAdmin, "listKeys" | "keyBlock" | "withAccount">;
   mailer: SuspensionMailer;
   now?: () => Date;
 }
@@ -109,17 +113,98 @@ export function createIpAnomalySuspension(
     async suspend({ uid, blockId }) {
       // The destination is read below from the server's own users row after
       // the security block, never accepted from the caller or request token.
-      await opts.db.$client`
-        INSERT INTO users (uid, banned_at, banned_reason)
-        VALUES (${uid}, ${now().toISOString()}, 'auto')
-        ON CONFLICT (uid) DO UPDATE
-          SET banned_at = EXCLUDED.banned_at, banned_reason = 'auto'`;
-      await opts.redis.set(`user:${uid}:banned`, "auto");
+      const suspendKeys = async (generation: number | null, lockedDb: Db): Promise<void> => {
+        if (generation === null) {
+          // Legacy unit doubles only. createHttpKeyAdmin always supplies the
+          // shared account port, so production never takes this unfenced branch.
+          await opts.db.$client`
+            INSERT INTO users (uid, banned_at, banned_reason)
+            VALUES (${uid}, ${now().toISOString()}, 'auto')
+            ON CONFLICT (uid) DO UPDATE
+              SET banned_at = EXCLUDED.banned_at, banned_reason = 'auto'`;
+          await opts.redis.set(`user:${uid}:banned`, "auto");
+        } else {
+          const bannedAtIso = now().toISOString();
+          // Commit the recovery intent before any external effect. A failure
+          // after this point leaves a pending projection for the next retry;
+          // there is no enclosing transaction to roll back durable recovery.
+          await billingUsers.beginAnomalyStandingProjection(
+            lockedDb,
+            uid,
+            generation,
+            bannedAtIso,
+          );
+          // Reserve that SAME monotonic value in Redis before either
+          // generation-checked standing write. An older value is advanced; a
+          // newer value or unavailable reservation fails closed, before key
+          // enumeration or mail can report applied suspension.
+          const reserved = await opts.redis.eval(
+            `local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+             if tonumber(ARGV[1]) < current then return 0 end
+             redis.call('SET', KEYS[1], ARGV[1])
+             return 1`,
+            1,
+            `user:${uid}:billing_refresh_generation`,
+            String(generation),
+          );
+          if (Number(reserved) !== 1) throw new Error("billing generation reservation failed");
+          if (!(await billingUsers.setBannedForRefresh(
+            lockedDb,
+            uid,
+            true,
+            "auto",
+            bannedAtIso,
+            generation,
+          ))) {
+            throw new Error("stale billing generation");
+          }
+          const projected = await opts.redis.eval(
+            `if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+             redis.call('SET', KEYS[2], 'auto')
+             return 1`,
+            2,
+            `user:${uid}:billing_refresh_generation`,
+            `user:${uid}:banned`,
+            String(generation),
+          );
+          if (Number(projected) !== 1) throw new Error("stale billing generation");
 
-      const keyIds = [...new Set(await opts.keyAdmin.listKeys(uid))];
-      for (const keyId of keyIds) {
-        const status = await opts.keyAdmin.keyBlock(keyId);
-        if (status < 200 || status >= 300) throw new Error("key block failed");
+          // The short standing transaction has committed, but completion is
+          // allowed only after BOTH stores read back the same standing. Any
+          // later failure retains the pending marker and cannot send mail or
+          // report applied. A retry re-drives this projection before key work.
+          const [standing] = await lockedDb.$client`
+            SELECT banned_at IS NOT NULL AS banned, banned_reason
+            FROM users WHERE uid = ${uid}`;
+          const [redisGeneration, redisBan] = await Promise.all([
+            opts.redis.get(`user:${uid}:billing_refresh_generation`),
+            opts.redis.get(`user:${uid}:banned`),
+          ]);
+          if (standing?.banned !== true || standing?.banned_reason !== "auto" ||
+              redisGeneration !== String(generation) || redisBan !== "auto") {
+            throw new Error("anomaly standing projection is unresolved");
+          }
+          if (!(await billingUsers.completeAnomalyStandingProjection(
+            lockedDb,
+            uid,
+            generation,
+          ))) {
+            throw new Error("anomaly standing projection completion failed");
+          }
+        }
+
+        const keyIds = [...new Set(await opts.keyAdmin.listKeys(uid))];
+        for (const keyId of keyIds) {
+          const status = await opts.keyAdmin.keyBlock(keyId, uid);
+          if (status < 200 || status >= 300) throw new Error("key block failed");
+        }
+      };
+      if (opts.keyAdmin.withAccount !== undefined) {
+        await opts.keyAdmin.withAccount(uid, (generation, lockedDb) =>
+          suspendKeys(generation, lockedDb)
+        );
+      } else {
+        await suspendKeys(null, opts.db);
       }
 
       const registeredEmail = await dataControlRepo.registeredEmail(opts.db, uid);

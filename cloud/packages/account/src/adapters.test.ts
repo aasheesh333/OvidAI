@@ -11,6 +11,8 @@ import {
   sessions,
   sharesRepo,
   users,
+  type BillingRemoteAuthority,
+  type BillingRemoteOperation,
   type Db,
 } from "@ovid/db";
 import type { App } from "firebase-admin/app";
@@ -263,35 +265,43 @@ describe("createFirebaseAdmin", () => {
 });
 
 describe("createHttpKeyAdmin", () => {
-  it("calls LiteLLM /key/block and /key/delete with the master key and a timeout", async () => {
-    const calls: Array<{ url: string; body: unknown; auth: string | null }> = [];
-    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
-      calls.push({
-        url: String(input),
-        body: JSON.parse(String(init?.body)),
-        auth: new Headers(init?.headers).get("authorization"),
-      });
-      return new Response("{}", { status: 200 });
-    }) as typeof fetch;
-    const admin = createHttpKeyAdmin("https://litellm.invalid/", "sk-master", fetchImpl);
-    expect(await admin.keyBlock("tok-a")).toBe(200);
-    expect(await admin.keyDelete(["tok-a", "tok-b"])).toBe(200);
-    expect(calls).toEqual([
-      { url: "https://litellm.invalid/key/block", body: { key: "tok-a" }, auth: "Bearer sk-master" },
-      {
-        url: "https://litellm.invalid/key/delete",
-        body: { keys: ["tok-a", "tok-b"] },
-        auth: "Bearer sk-master",
+  it("routes block/delete through the shared authority instead of raw best-effort POSTs", async () => {
+    const operations: BillingRemoteOperation[] = [];
+    const authority = {
+      execute: async (operation: BillingRemoteOperation) => {
+        operations.push(operation);
+        return { status: "completed", recovered: false };
       },
+      withAccount: async (_uid: string, operation: (generation: number) => Promise<unknown>) =>
+        operation(7),
+    } as unknown as BillingRemoteAuthority;
+    const fetchImpl = (async () => {
+      throw new Error("raw mutation transport must not be called");
+    }) as typeof fetch;
+    const admin = createHttpKeyAdmin(
+      "https://litellm.invalid/",
+      "sk-master",
+      fetchImpl,
+      { authority },
+    );
+    expect(await admin.keyBlock("tok-a", "u1")).toBe(200);
+    expect(await admin.keyDelete(["tok-a", "tok-b"], "u1")).toBe(200);
+    expect(operations.map(({ uid, generation, kind, target, effect, blocked }) => ({
+      uid, generation, kind, target, effect, blocked,
+    }))).toEqual([
+      { uid: "u1", generation: 7, kind: "key", target: "tok-a", effect: "block", blocked: true },
+      { uid: "u1", generation: 7, kind: "key", target: "tok-a", effect: "delete", blocked: undefined },
+      { uid: "u1", generation: 7, kind: "key", target: "tok-b", effect: "delete", blocked: undefined },
     ]);
   });
 
-  it("returns status 0 on a network failure (caller decides)", async () => {
+  it("fails closed without a durable authority or uid, never returning status 0 as success", async () => {
     const admin = createHttpKeyAdmin("https://litellm.invalid", "sk", (async () => {
-      throw new Error("down");
+      throw new Error("raw mutation transport must not be called");
     }) as typeof fetch);
-    expect(await admin.keyBlock("tok")).toBe(0);
-    expect(await admin.keyDelete(["tok"])).toBe(0);
+    await expect(admin.keyBlock("tok", "u1")).rejects.toThrow(/unresolved/i);
+    await expect(admin.keyDelete(["tok"], "u1")).rejects.toThrow(/unresolved/i);
+    await expect(admin.keyBlock("tok")).rejects.toThrow(/unresolved/i);
   });
 
   it("enumerates owned keys from GET /key/list?user_id= (H4)", async () => {

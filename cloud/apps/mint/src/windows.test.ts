@@ -169,9 +169,9 @@ describe.skipIf(!RUN)("window machinery (windows.ts)", () => {
   it("effectiveTier resolves stored aliases and falls back to free", async () => {
     const uid = testUid("win-tier");
     await redis.set(`user:${uid}:tier`, "7x");
-    expect(await effectiveTier(deps, uid)).toBe("pro");
+    expect(await effectiveTier(deps, uid)).toBe("plus");
     await redis.set(`user:${uid}:tier`, "3x");
-    expect(await effectiveTier(deps, uid)).toBe("starter");
+    expect(await effectiveTier(deps, uid)).toBe("go");
     await redis.set(`user:${uid}:tier`, "bogus");
     expect(await effectiveTier(deps, uid)).toBe("free");
     await redis.del(`user:${uid}:tier`);
@@ -222,8 +222,8 @@ describe.skipIf(!RUN)("window machinery (windows.ts)", () => {
   it("tierBudget / userBudgetTarget: free uses the monthly cap and 30d", async () => {
     const uid = testUid("win-budget");
     await redis.set(`user:${uid}:tier`, "7x");
-    expect(await tierBudget(deps, uid, "7x")).toEqual({ budget: 3.45, duration: "24h" });
-    expect(await userBudgetTarget(deps, uid, "7x")).toEqual({ budget: 3.45, duration: "24h" });
+    expect(await tierBudget(deps, uid, "7x")).toEqual({ budget: 0.75, duration: "24h" });
+    expect(await userBudgetTarget(deps, uid, "7x")).toEqual({ budget: 0.75, duration: "24h" });
     expect(await userBudgetTarget(deps, uid, "free")).toEqual({ budget: 10, duration: "30d" });
 
     await redis.set(`user:${uid}:monthlyCapUsd`, "4.5");
@@ -237,7 +237,7 @@ describe.skipIf(!RUN)("window machinery (windows.ts)", () => {
         ...original,
         plans: original.plans.map((p) => (p.id === "pro" ? { ...p, slow_mode: true } : p)),
       });
-      expect((await tierBudget(deps, testUid("win-slow"), "pro")).budget).toBe(10.35);
+      expect((await tierBudget(deps, testUid("win-slow"), "pro")).budget).toBe(9);
     } finally {
       await storeSettings({ db, redis }, original);
     }
@@ -256,19 +256,19 @@ describe.skipIf(!RUN)("window machinery (windows.ts)", () => {
     let updates = fake.posts("/key/update");
     expect(updates).toHaveLength(2);
     for (const u of updates) {
-      expect(u.max_budget).toBe(3.45);
+      expect(u.max_budget).toBe(0.75);
       expect(u.rpm_limit).toBe(240);
       expect(u.tpm_limit).toBe(4_000_000);
       expect(u.max_parallel_requests).toBe(16);
       expect("budget_duration" in u).toBe(false);
     }
-    expect(fake.posts("/user/update")).toEqual([{ user_id: uid, max_budget: 3.45 }]);
+    expect(fake.posts("/user/update")).toEqual([{ user_id: uid, max_budget: 0.75 }]);
 
     // second call: still no budget_duration (the clock is untouched)
     await reapplyUser(deps, uid);
     updates = fake.posts("/key/update").slice(2);
     for (const u of updates) expect("budget_duration" in u).toBe(false);
-    expect(fake.posts("/user/update").slice(1)).toEqual([{ user_id: uid, max_budget: 3.45 }]);
+    expect(fake.posts("/user/update").slice(1)).toEqual([{ user_id: uid, max_budget: 0.75 }]);
 
     // duration changed → it is sent
     for (const key of fake.keys.values()) key.budget_duration = "1h";
@@ -278,13 +278,17 @@ describe.skipIf(!RUN)("window machinery (windows.ts)", () => {
     expect(fake.posts("/user/update").slice(2)[0].budget_duration).toBe("24h");
 
     // forceDuration (a window reset) always restarts the clock
-    await reapplyUser(deps, uid, { forceDuration: true });
+    await reapplyUser(deps, uid, { forceDuration: true, operationId: "windows-test-force" });
     for (const u of fake.posts("/key/update").slice(6)) expect(u.budget_duration).toBe("24h");
 
-    await reapplyUser(deps, uid, { userForceDuration: true, userExtra: { spend: 0 } });
+    await reapplyUser(deps, uid, {
+      userForceDuration: true,
+      userExtra: { spend: 0 },
+      operationId: "windows-test-user-force",
+    });
     expect(fake.posts("/user/update").at(-1)).toMatchObject({
       user_id: uid,
-      max_budget: 3.45,
+      max_budget: 0.75,
       budget_duration: "24h",
       spend: 0,
     });
@@ -303,6 +307,18 @@ describe.skipIf(!RUN)("window machinery (windows.ts)", () => {
     expect("budget_duration" in fake.posts("/user/update").at(-1)!).toBe(false);
   });
 
+  it("reapplyUser counts LiteLLM /user/update HTTP >=300 as a projection error", async () => {
+    const uid = testUid("win-user-update-500");
+    const result = await reapplyUser({
+      ...deps,
+      litellm: {
+        ...deps.litellm,
+        userUpdate: async () => 503,
+      },
+    }, uid);
+    expect(result.errors).toBe(1);
+  });
+
   it("resetWindowUser restarts the window, zeroes key spend, keeps the free monthly clock", async () => {
     const uid = testUid("win-reset");
     const k = poolKeys(uid);
@@ -317,7 +333,7 @@ describe.skipIf(!RUN)("window machinery (windows.ts)", () => {
     fake.addKey("tok-reset", { spend: 0.5 });
     fake.users.set(uid, { spend: 5, budget_duration: "30d" });
 
-    expect(await resetWindowUser(deps, uid)).toEqual({ keys: 1, errors: 0 });
+    expect(await resetWindowUser(deps, uid, { operationId: "windows-test-reset" })).toEqual({ keys: 1, errors: 0 });
 
     const start = Number(await redis.get(k.start));
     expect(Math.abs(start - Date.now() / 1000)).toBeLessThan(5);
@@ -340,7 +356,7 @@ describe.skipIf(!RUN)("window machinery (windows.ts)", () => {
     fake.addKey("tok-reset-month");
     fake.users.set(uid, { spend: 5, budget_duration: "30d" });
 
-    await resetWindowUser(deps, uid, { resetMonthFree: true });
+    await resetWindowUser(deps, uid, { resetMonthFree: true, operationId: "windows-test-reset-month" });
 
     expect(fake.posts("/user/update").at(-1)).toMatchObject({
       user_id: uid,
@@ -357,17 +373,17 @@ describe.skipIf(!RUN)("window machinery (windows.ts)", () => {
     fake.addKey("tok-reset-paid");
     fake.users.set(uid, { spend: 0, budget_duration: "24h" });
 
-    await resetWindowUser(deps, uid);
+    await resetWindowUser(deps, uid, { operationId: "windows-test-reset" });
 
     expect(fake.posts("/key/update").at(-1)).toMatchObject({
       key: "tok-reset-paid",
-      max_budget: 3.45,
+      max_budget: 0.75,
       spend: 0,
       budget_duration: "24h",
     });
     expect(fake.posts("/user/update").at(-1)).toMatchObject({
       user_id: uid,
-      max_budget: 3.45,
+      max_budget: 0.75,
       budget_duration: "24h",
       spend: 0,
     });

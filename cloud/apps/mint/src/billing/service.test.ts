@@ -142,7 +142,7 @@ describe.skipIf(!RUN)("BillingService (service.ts)", () => {
   function build(overrides: { api?: PlayDeveloperApi | null } = {}): BillingService {
     return createBillingService({
       db,
-      redis: {} as Redis,
+      redis: { set: async () => "OK" } as unknown as Redis,
       env: testEnv(),
       verifyIdentity,
       projection: { publishUserTier: async () => {} },
@@ -209,17 +209,17 @@ describe.skipIf(!RUN)("BillingService (service.ts)", () => {
     expect(payload).toMatchObject({
       ok: true,
       status: "active",
-      tier: "3x",
+      tier: "go",
       product_id: "ovid_plus_monthly",
       expires_at: iso(NOW + 30 * 86400),
       auto_renewing: true,
       acknowledge: true,
     });
-    expect(sink).toEqual([{ uid, tier: "3x", expiresAt: NOW + 30 * 86400 }]);
+    expect(sink).toEqual([{ uid, tier: "go", expiresAt: NOW + 30 * 86400 }]);
     expect(await store.get("tok-1")).toMatchObject({
       uid,
       status: "active",
-      tier: "3x",
+      tier: "go",
       accountHash: accountHash(uid),
     });
   });
@@ -230,8 +230,8 @@ describe.skipIf(!RUN)("BillingService (service.ts)", () => {
     const second = await verify();
     expect(second).toEqual(first);
     expect(sink).toEqual([
-      { uid, tier: "3x", expiresAt: NOW + 30 * 86400 },
-      { uid, tier: "3x", expiresAt: NOW + 30 * 86400 },
+      { uid, tier: "go", expiresAt: NOW + 30 * 86400 },
+      { uid, tier: "go", expiresAt: NOW + 30 * 86400 },
     ]);
   });
 
@@ -266,7 +266,7 @@ describe.skipIf(!RUN)("BillingService (service.ts)", () => {
     play.ackFail = new Error("play down");
     const { status, payload } = await verify();
     expect(status).toBe(200);
-    expect(payload).toMatchObject({ ok: true, tier: "3x", acknowledge: true });
+    expect(payload).toMatchObject({ ok: true, tier: "go", acknowledge: true });
   });
 
   it("unverified or foreign purchases never set a paid tier", async () => {
@@ -342,7 +342,7 @@ describe.skipIf(!RUN)("BillingService (service.ts)", () => {
   it("requireAccountId=false accepts a token without the obfuscated id", async () => {
     const permissive = createBillingService({
       db,
-      redis: {} as Redis,
+      redis: { set: async () => "OK" } as unknown as Redis,
       env: testEnv(),
       verifyIdentity,
       projection: { publishUserTier: async () => {} },
@@ -375,7 +375,7 @@ describe.skipIf(!RUN)("BillingService (service.ts)", () => {
         subscriptionNotification: { notificationType: 2, purchaseToken: "tok-1" },
       }),
     );
-    expect(sink.at(-1)).toEqual({ uid, tier: "3x", expiresAt: NOW + 60 * 86400 });
+    expect(sink.at(-1)).toEqual({ uid, tier: "go", expiresAt: NOW + 60 * 86400 });
     // User cancels: keeps access, auto-renew off.
     play.tokens.set(
       "tok-1",
@@ -386,7 +386,7 @@ describe.skipIf(!RUN)("BillingService (service.ts)", () => {
         subscriptionNotification: { notificationType: 3, purchaseToken: "tok-1" },
       }),
     );
-    expect(sink.at(-1)).toEqual({ uid, tier: "3x", expiresAt: NOW + 60 * 86400 });
+    expect(sink.at(-1)).toEqual({ uid, tier: "go", expiresAt: NOW + 60 * 86400 });
     expect((await service.usageFields(uid)).plan_auto_renews).toBe(false);
     // Expiry: tier removed.
     now = NOW + 61 * 86400;
@@ -444,7 +444,7 @@ describe.skipIf(!RUN)("BillingService (service.ts)", () => {
       subscription({ uid: other, product: "ovid_max_monthly", linked: "tok-old" }),
     );
     const upgraded = await verify("tok-new", "ovid_max_monthly", other);
-    expect(upgraded.payload.tier).toBe("15x");
+    expect(upgraded.payload.tier).toBe("pro");
     expect((await store.get("tok-old"))!.status).toBe("replaced");
 
     sink.length = 0;
@@ -456,7 +456,7 @@ describe.skipIf(!RUN)("BillingService (service.ts)", () => {
     expect((await store.get("tok-old"))!.status).toBe("replaced");
     expect(sink).toEqual(
       expect.arrayContaining([
-        { uid: other, tier: "15x", expiresAt: NOW + 30 * 86400 },
+        { uid: other, tier: "pro", expiresAt: NOW + 30 * 86400 },
         { uid, tier: "free", expiresAt: null },
       ]),
     );
@@ -471,7 +471,7 @@ describe.skipIf(!RUN)("BillingService (service.ts)", () => {
     );
     expect((await store.get("tok-9"))!.uid).toBeNull();
     expect(sink).toEqual([]);
-    expect((await verify("tok-9")).payload.tier).toBe("3x");
+    expect((await verify("tok-9")).payload.tier).toBe("go");
     expect((await store.get("tok-9"))!.uid).toBe(uid);
   });
 
@@ -509,6 +509,61 @@ describe.skipIf(!RUN)("BillingService (service.ts)", () => {
     await service.notify(note);
     expect([...sink]).toEqual([...first, ...first]);
     expect(await store.get("tok-1")).toEqual(row1);
+  });
+
+  // ---- canonical entitlement authority -----------------------------------
+
+  it("BillingService.entitlement exposes the verified canonical value", async () => {
+    play.tokens.set("tok-1", subscription({ uid }));
+    await verify();
+    expect(await service.entitlement(uid)).toEqual({
+      tier: "go",
+      productId: "ovid_plus_monthly",
+      period: "monthly",
+      expiresAt: NOW + 30 * 86400,
+      autoRenewing: true,
+      purchaseState: "active",
+    });
+  });
+
+  it("RevenueCat remains authoritative when Play verification is unconfigured", async () => {
+    const closed = build({ api: null });
+    const applied = await closed.revenueCat({
+      id: "rc-service-event",
+      type: "INITIAL_PURCHASE",
+      occurredAt: now,
+      appUserId: uid,
+      transactionId: "rc-service-transaction",
+      productId: "ovid_pro_yearly",
+      expiresAt: now + 365 * 86400,
+      autoRenewing: true,
+      cancelReason: null,
+      environment: "PRODUCTION",
+    });
+    expect(applied.status).toBe("applied");
+    expect(await closed.entitlement(uid)).toEqual(applied.entitlement);
+    expect(applied.entitlement).toMatchObject({
+      tier: "plus",
+      productId: "ovid_pro_yearly",
+      period: "yearly",
+      purchaseState: "active",
+    });
+    expect(sink.at(-1)).toEqual({ uid, tier: "plus", expiresAt: now + 365 * 86400 });
+  });
+
+  it("unconfigured read-only offerings are unavailable and expose no purchase control", async () => {
+    const closed = build({ api: null });
+    expect(closed.offerings()).toEqual({ available: false, products: [] });
+    expect(closed.offerings()).not.toHaveProperty("purchaseEnabled");
+    expect(closed.offerings()).not.toHaveProperty("checkoutUrl");
+    expect(await closed.entitlement(uid)).toEqual({
+      tier: "free",
+      productId: null,
+      period: null,
+      expiresAt: null,
+      autoRenewing: false,
+      purchaseState: "unknown",
+    });
   });
 
   // ---- /usage fields ------------------------------------------------------

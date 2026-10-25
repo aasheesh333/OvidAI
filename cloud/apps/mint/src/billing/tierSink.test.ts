@@ -82,16 +82,16 @@ describe.skipIf(!RUN)("tierSink (tierSink.ts)", () => {
 
     // Postgres durable copy.
     const row = await billingUsers.getTier(db, uid);
-    expect(row.tier).toBe("3x");
+    expect(row.tier).toBe("go");
     expect(row.tierExpiresAt?.getTime()).toBe(expiry * 1000);
 
     // Projection ran AFTER the Postgres write (it observed the new tier).
     expect(observed).toEqual([
-      { uid, tier: "3x", expiresAt: expiry, dbTier: "3x" },
+      { uid, tier: "go", expiresAt: expiry, dbTier: "go" },
     ]);
 
     // Redis tier key + the self-expiry window (Review Focus #3).
-    expect(await redis.get(`user:${uid}:tier`)).toBe("3x");
+    expect(await redis.get(`user:${uid}:tier`)).toBe("go");
     expect(await redis.get(`user:${uid}:tier_expires_at`)).toBe(String(expiry));
     const ttlMs = await redis.pttl(`user:${uid}:tier`);
     const upperMs = (expiry + TIER_SKEW_SECONDS) * 1000 - before;
@@ -127,10 +127,21 @@ describe.skipIf(!RUN)("tierSink (tierSink.ts)", () => {
     expect((await billingUsers.getTier(db, uid)).tier).toBe("free");
   });
 
+  it("a returned LiteLLM reapply error fails the sink instead of reporting success", async () => {
+    const uid = testUid("tier-reapply-error");
+    sink = createTierSink({
+      db,
+      redis,
+      projection: realProjection,
+      reapplyUser: async () => ({ keys: 0, errors: 1 }),
+    });
+    await expect(sink(uid, "free", null)).rejects.toThrow(/projection/i);
+  });
+
   it("a paid tier with no expiry gets a plain SET (no TTL), expiry key cleared", async () => {
     const uid = testUid("tier-noexp");
     await sink(uid, "15x", null);
-    expect(await redis.get(`user:${uid}:tier`)).toBe("15x");
+    expect(await redis.get(`user:${uid}:tier`)).toBe("pro");
     expect(await redis.pttl(`user:${uid}:tier`)).toBe(-1);
     expect(await redis.get(`user:${uid}:tier_expires_at`)).toBeNull();
     expect((await billingUsers.getTier(db, uid)).tierExpiresAt).toBeNull();

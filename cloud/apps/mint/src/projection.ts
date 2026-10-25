@@ -3,6 +3,11 @@ import type { Redis } from "ioredis";
 import { pyNumStr } from "@ovid/money";
 import { DB2, OVID_UIDS_SET, SCALARS, parseSettings, serializeSettings, validatePlan, type PlanData, type Settings } from "./planMath.js";
 import { getSettings, publishSettingsToRedis } from "./settings.js";
+import {
+  BILLING_REFRESH_GENERATION_KEY,
+  currentBillingProjectionGeneration,
+  StaleBillingAccountWriteError,
+} from "./windows.js";
 
 /**
  * The Redis db2 request-time projection. Postgres is the durable authority
@@ -91,16 +96,48 @@ export function createProjection(deps: { db: Db; redis: Redis }): Projection {
     };
   }
 
-  async function applyKeys(writes: KeyWrite[]): Promise<void> {
-    for (const w of writes) {
-      if (w.value === null) {
-        await redis.del(w.key);
-      } else if (w.exatEpoch !== undefined) {
-        await redis.set(w.key, w.value, "EXAT", w.exatEpoch);
-      } else {
-        await redis.set(w.key, w.value);
+  async function applyKeys(uid: string, writes: KeyWrite[]): Promise<void> {
+    const generation = currentBillingProjectionGeneration();
+    if (generation === undefined) {
+      for (const w of writes) {
+        if (w.value === null) {
+          await redis.del(w.key);
+        } else if (w.exatEpoch !== undefined) {
+          await redis.set(w.key, w.value, "EXAT", w.exatEpoch);
+        } else {
+          await redis.set(w.key, w.value);
+        }
       }
+      return;
     }
+
+    const script = ["if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end"];
+    const args = [String(generation)];
+    writes.forEach((write, index) => {
+      const keyIndex = index + 2;
+      if (write.value === null) {
+        script.push(`redis.call('DEL', KEYS[${keyIndex}])`);
+        return;
+      }
+      args.push(write.value);
+      const valueIndex = args.length;
+      if (write.exatEpoch !== undefined) {
+        args.push(String(write.exatEpoch));
+        script.push(
+          `redis.call('SET', KEYS[${keyIndex}], ARGV[${valueIndex}], 'EXAT', ARGV[${args.length}])`,
+        );
+      } else {
+        script.push(`redis.call('SET', KEYS[${keyIndex}], ARGV[${valueIndex}])`);
+      }
+    });
+    const result = await redis.eval(
+      script.join("\n") + "\nreturn 1",
+      writes.length + 1,
+      BILLING_REFRESH_GENERATION_KEY(uid),
+      ...writes.map((write) => write.key),
+      ...args,
+    );
+    if (Number(result) !== 1) throw new StaleBillingAccountWriteError();
   }
 
   /**
@@ -179,26 +216,25 @@ export function createProjection(deps: { db: Db; redis: Redis }): Projection {
     tier: string | null,
     expiresAtEpoch: number | null,
   ): Promise<void> {
-    await applyKeys(tierKeys(uid, tier, expiresAtEpoch));
+    await applyKeys(uid, tierKeys(uid, tier, expiresAtEpoch));
   }
 
   async function publishUserState(
     uid: string,
     opts: { clearBan?: boolean } = {},
   ): Promise<void> {
-    const [row, override, currentBanned] = await Promise.all([
+    const [row, override, currentBanned, previousEmail] = await Promise.all([
       readUserRow(uid),
       plansRepo.getOverride(db, uid),
       redis.get(`user:${uid}:banned`),
+      redis.get(`user:${uid}:email`),
     ]);
-    await applyKeys(desiredUserStateKeys(uid, row, override, currentBanned, opts.clearBan ?? false));
-    // email cleared in Postgres → also drop the reverse key it used to point at
-    if (row?.email == null) {
-      const prev = await redis.get(`user:${uid}:email`);
-      if (prev !== null && prev !== "") {
-        await redis.del(`email:${prev}`);
-      }
+    const writes = desiredUserStateKeys(uid, row, override, currentBanned, opts.clearBan ?? false);
+    // Include reverse-email cleanup in the same generation-checked Lua write.
+    if (row?.email == null && previousEmail !== null && previousEmail !== "") {
+      writes.push({ key: `email:${previousEmail}`, value: null });
     }
+    await applyKeys(uid, writes);
   }
 
   async function resyncAtBoot(): Promise<ReconcileReport> {
@@ -247,7 +283,7 @@ export function createProjection(deps: { db: Db; redis: Redis }): Projection {
           report.conflictsResolvedFromPostgres++;
         }
       }
-      await applyKeys(writes);
+      await applyKeys(uid, writes);
     }
     return report;
   }

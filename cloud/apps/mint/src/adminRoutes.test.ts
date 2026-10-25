@@ -3,15 +3,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { plansRepo, users as usersRepo, type Db } from "@ovid/db";
+import { PLANS, type PlanTier } from "@ovid/shared";
 import type { Redis } from "ioredis";
 import type { FastifyInstance, LightMyRequestResponse } from "fastify";
 import type { MintDeps } from "./app.js";
 import { buildMintApps, HttpContractError } from "./app.js";
-import { requireAdmin } from "./adminRoutes.js";
+import { requireAdmin, resyncCanonicalPlans } from "./adminRoutes.js";
 import { AUDIT_LIST } from "./adminAudit.js";
 import { isBanned, recordStrike } from "./antiAbuse.js";
 import { loadMintEnv, type MintEnv } from "./env.js";
-import { findPlan } from "./planMath.js";
+import { findPlan, parseSettings } from "./planMath.js";
 import { createLiteLlmAdmin } from "./litellmAdmin.js";
 import { getSettings, publishSettingsToRedis, storeSettings } from "./settings.js";
 import {
@@ -48,6 +49,7 @@ const AUTH_MATRIX: Array<[string, string, unknown]> = [
   ["POST", "/admin/settings", { free_daily_usd: 9 }],
   ["GET", "/admin/plans", null],
   ["POST", "/admin/plans", { id: "x", kind: "split" }],
+  ["POST", "/admin/plans/resync", null],
   ["POST", "/admin/plans/pro/disable", null],
   ["GET", "/admin/models", null],
   ["POST", "/admin/set-base-budget", { daily_usd: 9 }],
@@ -202,10 +204,11 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
     const uids = [testUid("ra"), testUid("rb"), testUid("rc")];
     for (const u of uids) await prime(u);
 
-    const res = await admin("POST", "/admin/reset-window", { all: true });
+    const res = await admin("POST", "/admin/reset-window", { all: true, operation_id: "admin-test-reset-all" });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({
       ok: true,
+      accepted: false,
       reset: 6,
       detail: { mode: "sync", users: 3, keys: 6, errors: 0 },
     });
@@ -232,10 +235,11 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
 
     deps.env.reapplySyncMax = 1;
     try {
-      const res = await admin("POST", "/admin/reset-window", { all: true });
-      expect(res.statusCode).toBe(200);
+      const res = await admin("POST", "/admin/reset-window", { all: true, operation_id: "admin-test-reset-all" });
+      expect(res.statusCode).toBe(202);
       expect(res.json()).toEqual({
-        ok: true,
+        ok: false,
+        accepted: true,
         reset: 0,
         detail: { mode: "background", users: total },
       });
@@ -512,6 +516,170 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
     expect(freeOff.json()).toEqual({ detail: "the 'free' plan must stay enabled" });
   });
 
+  it("canonical resync is idempotent and makes Postgres, Redis and LiteLLM match PLANS", async () => {
+    const original = await getSettings({ db });
+    const uid = testUid("canonical-resync");
+    const keys = await userWithKeys(uid, "plus");
+    fake.users.get(uid)!.budget_duration = "24h";
+    const stale = {
+      ...original,
+      plans: original.plans.map((plan) =>
+        plan.id in PLANS
+          ? {
+              ...plan,
+              name: "stale",
+              price_usd: 1234,
+              mult: 999,
+              enabled: plan.id === "go" ? false : plan.enabled,
+              window_hours: 720,
+            }
+          : plan,
+      ),
+    };
+    try {
+      await storeSettings({ db, redis }, stale);
+      const res = await admin("POST", "/admin/plans/resync");
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({
+        ok: true,
+        status: "ok",
+        changed: true,
+        projection: { redis: "ok", litellm: "ok", errors: 0 },
+      });
+
+      const durable = await getSettings({ db });
+      for (const plan of durable.plans.filter((row) => row.id in PLANS)) {
+        const canonical = PLANS[plan.id as PlanTier];
+        const before = stale.plans.find((row) => row.id === plan.id)!;
+        expect(plan).toMatchObject({
+          name: canonical.name,
+          price_usd: canonical.priceUsd,
+          mult: canonical.autoMultiplier,
+          enabled: before.enabled,
+          window_hours: before.window_hours,
+        });
+      }
+      const projected = parseSettings(
+        await redis.hgetall("config:limits"),
+        await redis.get("config:base_daily_usd"),
+      );
+      expect(projected.plans).toEqual(durable.plans);
+
+      const expected = Math.round(original.free_daily_usd * PLANS.plus.autoMultiplier * 30 * 1e6) / 1e6;
+      for (const key of Object.values(keys)) {
+        expect(fake.posts("/key/update").filter((body) => body.key === key).at(-1)).toMatchObject({
+          max_budget: expected,
+          budget_duration: "30d",
+        });
+      }
+      expect(fake.posts("/user/update").filter((body) => body.user_id === uid).at(-1)).toMatchObject({
+        max_budget: expected,
+        budget_duration: "30d",
+      });
+
+      const again = await admin("POST", "/admin/plans/resync");
+      expect(again.statusCode).toBe(200);
+      expect(again.json()).toMatchObject({ ok: true, status: "ok", changed: false });
+      expect(await getSettings({ db })).toEqual(durable);
+    } finally {
+      await storeSettings({ db, redis }, original);
+    }
+  });
+
+  it("canonical resync reports a committed Redis projection failure as degraded", async () => {
+    const original = await getSettings({ db });
+    const stale = {
+      ...original,
+      plans: original.plans.map((plan) => ({ ...plan, name: "stale-before-resync" })),
+    };
+    await storeSettings({ db, redis }, stale);
+    const brokenRedis = new Proxy(redis, {
+      get(target, property, receiver) {
+        if (property === "hset") {
+          return async () => {
+            throw new Error("isolated redis projection failure");
+          };
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as Redis;
+    try {
+      const result = await resyncCanonicalPlans({ ...deps, redis: brokenRedis });
+      expect(result).toMatchObject({
+        ok: false,
+        status: "degraded",
+        projection: { redis: "failed" },
+      });
+      // Postgres committed; the failure is not misreported as a rejected write.
+      for (const plan of (await getSettings({ db })).plans.filter((row) => row.id in PLANS)) {
+        expect(plan.name).toBe(PLANS[plan.id as PlanTier].name);
+      }
+    } finally {
+      await storeSettings({ db, redis }, original);
+    }
+  });
+
+  it("canonical resync degrades when LiteLLM /user/update returns HTTP >=300", async () => {
+    const uid = testUid("canonical-user-update-500");
+    await userWithKeys(uid, "plus");
+    const result = await resyncCanonicalPlans({
+      ...deps,
+      litellm: {
+        ...deps.litellm,
+        userUpdate: async () => 503,
+      },
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      status: "degraded",
+      projection: { redis: "ok", litellm: "degraded" },
+    });
+    expect(result.projection.errors).toBeGreaterThan(0);
+  });
+
+  it("canonical resync appends before/after/IP audit without changing prices", async () => {
+    const original = await getSettings({ db });
+    const named = {
+      ...original,
+      plans: original.plans.map((plan) => ({ ...plan, name: `stale-${plan.id}` })),
+    };
+    await storeSettings({ db, redis }, named);
+    const baselineRows = await db.$client`SELECT action FROM mint_audit WHERE action = 'plan-resync'`;
+    const baselineEntries = (await auditEntries()).filter((item) => item.action === "plan-resync").length;
+    try {
+      const res = await admin("POST", "/admin/plans/resync", undefined, {
+        "x-forwarded-for": "203.0.113.44",
+      });
+      expect(res.statusCode).toBe(200);
+      const entries = await auditEntries();
+      const entry = entries.find((item) => item.action === "plan-resync");
+      expect(entry).toMatchObject({
+        action: "plan-resync",
+        target: "canonical-plans",
+        ip: "203.0.113.44",
+      });
+      const beforePlans = (entry!.before as { plans: Array<{ id: string; name: string; price_usd: number }> }).plans;
+      const afterPlans = (entry!.after as { plans: Array<{ id: string; name: string; price_usd: number }> }).plans;
+      expect(beforePlans.map((plan) => plan.name)).toEqual(named.plans.map((plan) => plan.name));
+      expect(afterPlans.map((plan) => plan.name)).toEqual(
+        named.plans.map((plan) => plan.id in PLANS ? PLANS[plan.id as PlanTier].name : plan.name),
+      );
+      expect(afterPlans.map((plan) => plan.price_usd)).toEqual(original.plans.map((plan) => plan.price_usd));
+
+      await admin("POST", "/admin/plans/resync");
+      const rows = await db.$client`
+        SELECT action, ip FROM mint_audit WHERE action = 'plan-resync' ORDER BY at`;
+      expect(rows).toHaveLength(baselineRows.length + 2);
+      expect(rows.filter((row) => row.ip === "203.0.113.44")).toEqual([
+        { action: "plan-resync", ip: "203.0.113.44" },
+      ]);
+      expect((await auditEntries()).filter((item) => item.action === "plan-resync")).toHaveLength(baselineEntries + 2);
+    } finally {
+      await storeSettings({ db, redis }, original);
+    }
+  });
+
   // -------------------------------------------------------------- user/update
 
   it("user/update tier + custom free limit: Postgres + db2 + reapply, then clear", async () => {
@@ -530,8 +698,8 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
       reapplied: { keys: number; errors: number };
     };
     expect(body.ok).toBe(true);
-    expect(body.user.tier).toBe("3x");
-    expect(body.user.plan).toBe("starter");
+    expect(body.user.tier).toBe("go");
+    expect(body.user.plan).toBe("go");
     expect(body.user.daily_usd_override).toBe("2.0");
     expect(body.reapplied).toEqual({ keys: 2, errors: 0 });
 
@@ -539,14 +707,14 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
     const rows = (await db.$client`SELECT tier FROM users WHERE uid = ${uid}`) as {
       tier: string;
     }[];
-    expect(rows[0]!.tier).toBe("starter");
+    expect(rows[0]!.tier).toBe("go");
     expect((await plansRepo.getOverride(db, uid))?.dailyUsd).toBe("2.0");
     // db2 projection
-    expect(await redis.get(`user:${uid}:tier`)).toBe("3x");
+    expect(await redis.get(`user:${uid}:tier`)).toBe("go");
     expect(await redis.get(`user:${uid}:dailyUsd`)).toBe("2.0");
-    // re-applied: 2 × mult 3 per 24h window
+    // re-applied: 2 × canonical Go mult 1.5 per 24h window
     for (const t of Object.values(toks)) {
-      expect(fake.keys.get(t)!.max_budget).toBeCloseTo(6, 10);
+      expect(fake.keys.get(t)!.max_budget).toBeCloseTo(3, 10);
     }
 
     // the /admin/set-tier alias + clear_daily_usd
@@ -554,15 +722,15 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
     expect(alias.statusCode).toBe(200);
     expect((alias.json() as { user: { daily_usd_override: string | null } }).user.daily_usd_override).toBeNull();
     expect(await redis.get(`user:${uid}:dailyUsd`)).toBeNull();
-    expect(fake.keys.get(toks.web)!.max_budget).toBeCloseTo(0.45, 10);
+    expect(fake.keys.get(toks.web)!.max_budget).toBeCloseTo(0.225, 10);
     expect(await plansRepo.getOverride(db, uid)).toBeNull();
 
     // audited with before/after — two set-user calls happened (set, then clear)
     const setUser = (await auditEntries()).filter((e) => e.action === "set-user");
     expect(setUser).toHaveLength(2);
     expect((setUser[1]!.before as Record<string, unknown>).plan).toBe("free");
-    expect((setUser[1]!.after as Record<string, unknown>).plan).toBe("starter");
-    expect((setUser[1]!.after as Record<string, unknown>).tier).toBe("3x");
+    expect((setUser[1]!.after as Record<string, unknown>).plan).toBe("go");
+    expect((setUser[1]!.after as Record<string, unknown>).tier).toBe("go");
     expect((setUser[1]!.after as Record<string, unknown>).daily_usd_override).toBe("2.0");
     expect((setUser[0]!.after as Record<string, unknown>).daily_usd_override).toBeNull();
   });
@@ -585,7 +753,7 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
 
     const clear = await admin("POST", "/admin/user/update", { uid, clear_pools: true });
     expect(clear.statusCode).toBe(200);
-    expect(fake.keys.get(toks.android)!.max_budget).toBeCloseTo(0.15 * 23, 10);
+    expect(fake.keys.get(toks.android)!.max_budget).toBeCloseTo(0.15 * 20, 10);
     expect((await plansRepo.getOverride(db, uid))?.pools ?? null).toBeNull();
   });
 
@@ -629,10 +797,11 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
     };
     expect(await redis.get(`usagecache:${uid}`)).not.toBeNull();
 
-    const res = await admin("POST", "/admin/reset-window", { uid });
+    const res = await admin("POST", "/admin/reset-window", { uid, operation_id: "admin-test-reset-user" });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({
       ok: true,
+      accepted: false,
       reset: 2,
       detail: { mode: "sync", users: 1, keys: 2, errors: 0 },
     });
@@ -668,12 +837,12 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
     const uid = testUid("rwf");
     await prime(uid, "free");
 
-    await admin("POST", "/admin/reset-window", { uid });
+    await admin("POST", "/admin/reset-window", { uid, operation_id: "admin-test-reset-user" });
     expect(fake.users.get(uid)!.spend).toBe(4);
     // the free user's budget clock (30d) was NOT restarted
     expect(fake.posts("/user/update").every((u) => !("budget_duration" in u))).toBe(true);
 
-    await admin("POST", "/admin/reset-window", { uid, reset_month_free: true });
+    await admin("POST", "/admin/reset-window", { uid, reset_month_free: true, operation_id: "admin-test-reset" });
     expect(fake.users.get(uid)!.spend).toBe(0);
     const withDuration = fake.posts("/user/update").filter((u) => "budget_duration" in u);
     expect(withDuration).toHaveLength(1);
@@ -682,7 +851,7 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
   it("reset-usage (legacy) also zeroes the monthly backstop", async () => {
     const uid = testUid("rul");
     await prime(uid, "free");
-    const res = await admin("POST", "/admin/reset-usage", { uid });
+    const res = await admin("POST", "/admin/reset-usage", { uid, operation_id: "admin-test-reset-usage" });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ ok: true, reset: 2 });
     expect(fake.users.get(uid)!.spend).toBe(0);
@@ -752,12 +921,12 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
     expect(res.statusCode).toBe(200);
     const u = res.json() as Record<string, unknown>;
     expect(u.uid).toBe(uid);
-    expect((u.plan as { id: string }).id).toBe("pro");
-    expect(u.tier).toBe("7x");
+    expect((u.plan as { id: string }).id).toBe("plus");
+    expect(u.tier).toBe("plus");
     expect(u.email).toBe("u@example.com");
     const all = (u.pool_state_usd as { all: { spent: number; remaining: number } }).all;
     expect(all.spent).toBeCloseTo(0.3, 10);
-    expect(all.remaining).toBeCloseTo(0.15 * 23 - 0.3, 10);
+    expect(all.remaining).toBeCloseTo(0.15 * 5 - 0.3, 10);
     expect(
       ((u.today as { by_model: Record<string, { via_auto: number }> }).by_model[
         "deepseek-v4.1-flash"
@@ -801,7 +970,7 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
     await admin("POST", "/admin/settings", { free_daily_usd: 3 });
     await admin("POST", "/admin/set-tier", { uid, tier: "7x" });
     await admin("POST", "/admin/ban", { uid });
-    await admin("POST", "/admin/reset-window", { uid });
+    await admin("POST", "/admin/reset-window", { uid, operation_id: "admin-test-reset-user" });
 
     const entries = await auditEntries();
     expect(entries.slice(0, 4).map((e) => e.action)).toEqual([
@@ -815,8 +984,8 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
     expect((s.after as Record<string, unknown>).free_daily_usd).toBe(3);
     const t = entries.find((e) => e.action === "set-user")!;
     expect((t.before as Record<string, unknown>).plan).toBe("free");
-    expect((t.after as Record<string, unknown>).plan).toBe("pro");
-    expect((t.after as Record<string, unknown>).tier).toBe("7x");
+    expect((t.after as Record<string, unknown>).plan).toBe("plus");
+    expect((t.after as Record<string, unknown>).tier).toBe("plus");
 
     const lines = readFileSync(join(stateDir, "admin-audit.jsonl"), "utf8")
       .split("\n")
@@ -868,8 +1037,8 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
     expect(exp.exported_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
     expect(exp.settings.plans[0]!.id).toBe("free");
     expect(exp.users[uid]).toMatchObject({
-      tier: "3x",
-      plan: "starter",
+      tier: "go",
+      plan: "go",
       email: "export@example.com",
       pools_override: { mult: 4 },
     });
@@ -962,11 +1131,12 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
     const one = await admin("POST", "/admin/reset-window", {
       uid,
       reset_month_free: "false",
+      operation_id: "admin-test-reset-false",
     });
     expect(one.statusCode).toBe(200);
     expect(fake.users.get(uid)!.spend).toBe(4); // monthly backstop untouched
 
-    const all = await admin("POST", "/admin/reset-window", { all: true });
+    const all = await admin("POST", "/admin/reset-window", { all: true, operation_id: "admin-test-reset-all" });
     expect(all.statusCode).toBe(200);
     expect((all.json() as { detail: { mode: string } }).detail.mode).toBe("sync");
   });
@@ -1102,7 +1272,7 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
     // ALL-users reset does not touch a chat-only user's counters.
     await redis.set(`pool:${mintUid}:spend`, "9");
     await redis.set(`pool:${chatUid}:spend`, "9");
-    const res = await admin("POST", "/admin/reset-window", { all: true });
+    const res = await admin("POST", "/admin/reset-window", { all: true, operation_id: "admin-test-reset-all" });
     expect(res.statusCode).toBe(200);
     expect(await redis.get(`pool:${mintUid}:spend`)).toBeNull();
     expect(await redis.get(`pool:${chatUid}:spend`)).toBe("9");

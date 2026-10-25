@@ -1,6 +1,12 @@
 import type { FastifyInstance } from "fastify";
 import { plansRepo } from "@ovid/db";
-import { PLANS, planFor, type PlanTier } from "@ovid/shared";
+import {
+  PLAN_TIERS,
+  PLANS,
+  planFor,
+  signInternalRequest,
+  type PlanTier,
+} from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
 
 /**
@@ -56,6 +62,110 @@ export function registerPlanRoutes(app: FastifyInstance, deps: GatewayDeps): voi
           };
         }),
     };
+  });
+}
+
+export const BILLING_ENTITLEMENT_PATH = "/internal/billing/entitlement";
+
+export interface BillingEntitlement {
+  tier: PlanTier;
+  productId: string | null;
+  period: "monthly" | "yearly" | null;
+  expiresAt: number | null;
+  autoRenewing: boolean;
+  purchaseState: "active" | "cancelled" | "expired" | "refunded" | "pending" | "unknown";
+}
+
+export interface BillingEntitlementClient {
+  /** Null means unavailable/malformed; it never means Free. */
+  entitlement(uid: string): Promise<BillingEntitlement | null>;
+}
+
+export interface BillingEntitlementClientOptions {
+  baseUrl: string;
+  secret: string;
+  fetchImpl?: typeof fetch;
+  clock?: () => number;
+  timeoutMs?: number;
+}
+
+const PURCHASE_STATES: ReadonlySet<string> = new Set([
+  "active",
+  "cancelled",
+  "expired",
+  "refunded",
+  "pending",
+  "unknown",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseEntitlement(body: unknown): BillingEntitlement | null {
+  if (!isRecord(body) || !isRecord(body.entitlement)) return null;
+  const value = body.entitlement;
+  if (
+    typeof value.tier !== "string" || !(PLAN_TIERS as readonly string[]).includes(value.tier) ||
+    !(typeof value.productId === "string" || value.productId === null) ||
+    !(value.period === "monthly" || value.period === "yearly" || value.period === null) ||
+    !(typeof value.expiresAt === "number" && Number.isFinite(value.expiresAt) || value.expiresAt === null) ||
+    typeof value.autoRenewing !== "boolean" ||
+    typeof value.purchaseState !== "string" || !PURCHASE_STATES.has(value.purchaseState)
+  ) {
+    return null;
+  }
+  return {
+    tier: value.tier as PlanTier,
+    productId: value.productId,
+    period: value.period,
+    expiresAt: value.expiresAt,
+    autoRenewing: value.autoRenewing,
+    purchaseState: value.purchaseState as BillingEntitlement["purchaseState"],
+  };
+}
+
+/** HMAC-signed, read-only mint client. No purchase, cache or checkout methods exist. */
+export function createBillingEntitlementClient(
+  options: BillingEntitlementClientOptions,
+): BillingEntitlementClient {
+  const base = options.baseUrl.trim().replace(/\/+$/, "");
+  const secret = options.secret.trim();
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const clock = options.clock ?? (() => Math.floor(Date.now() / 1000));
+  if (base === "" || secret === "") return { entitlement: async () => null };
+  return {
+    async entitlement(uid) {
+      const timestamp = Math.trunc(clock());
+      const path = BILLING_ENTITLEMENT_PATH;
+      try {
+        const timeout = options.timeoutMs ?? 5000;
+        const res = await fetchImpl(`${base}${path}?uid=${encodeURIComponent(uid)}`, {
+          method: "GET",
+          headers: {
+            "cache-control": "no-store",
+            "X-Ovid-Timestamp": Buffer.from(String(timestamp), "utf8").toString("base64"),
+            "X-Ovid-Signature": signInternalRequest(secret, "GET", path, uid, timestamp),
+          },
+          ...(Number.isFinite(timeout) && timeout > 0
+            ? { signal: AbortSignal.timeout(timeout) }
+            : {}),
+        });
+        if (!res.ok) return null;
+        return parseEntitlement(await res.json());
+      } catch {
+        return null;
+      }
+    },
+  };
+}
+
+export function billingEntitlementClientFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): BillingEntitlementClient {
+  return createBillingEntitlementClient({
+    baseUrl: env.OVID_INTERNAL_MINT_URL ?? "",
+    secret: env.OVID_INTERNAL_API_SECRET ?? "",
   });
 }
 

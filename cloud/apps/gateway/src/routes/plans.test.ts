@@ -1,4 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { verifyInternalRequest } from "@ovid/shared";
+import {
+  BILLING_ENTITLEMENT_PATH,
+  createBillingEntitlementClient,
+  type BillingEntitlement,
+} from "./plans.js";
 import type { Db } from "@ovid/db";
 import { buildGateway } from "../app.js";
 import {
@@ -139,5 +145,68 @@ describe("GET /cloud/v1/plans", () => {
       planRow({ id: "starter", name: "Starter", priceUsd: "5", mult: "1.5", aliases: ["3x"], position: 1 }),
     ]);
     expect(body.plans[1]).toMatchObject({ id: "starter", tier: "go", storageGb: 5, projectFiles: 100 });
+  });
+});
+
+describe("read-only mint billing entitlement client", () => {
+  const entitlement: BillingEntitlement = {
+    tier: "plus",
+    productId: "ovid_pro_yearly",
+    period: "yearly",
+    expiresAt: 1_900_000_000,
+    autoRenewing: false,
+    purchaseState: "cancelled",
+  };
+
+  it("signs a GET for the verified uid and returns mint's value verbatim", async () => {
+    const now = 1_800_000_000;
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ entitlement }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    const client = createBillingEntitlementClient({
+      baseUrl: "http://mint:8092/",
+      secret: "test-internal-secret-0123456789abcdef",
+      fetchImpl: fetchImpl as typeof fetch,
+      clock: () => now,
+    });
+    expect(await client.entitlement("u1")).toEqual(entitlement);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    const [url, init] = fetchImpl.mock.calls[0]! as unknown as [string, RequestInit];
+    expect(url).toBe(`http://mint:8092${BILLING_ENTITLEMENT_PATH}?uid=u1`);
+    expect(init.method).toBe("GET");
+    expect(init.body).toBeUndefined();
+    const headers = init.headers as Record<string, string>;
+    expect(verifyInternalRequest(
+      "test-internal-secret-0123456789abcdef",
+      "GET",
+      BILLING_ENTITLEMENT_PATH,
+      "u1",
+      headers["X-Ovid-Timestamp"]!,
+      headers["X-Ovid-Signature"]!,
+      now,
+    )).toBe(true);
+  });
+
+  it("is unavailable without configuration and never makes a store or network call", async () => {
+    const fetchImpl = vi.fn();
+    const client = createBillingEntitlementClient({
+      baseUrl: "",
+      secret: "",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    expect(await client.entitlement("u1")).toBeNull();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("does not infer a tier from malformed or non-authoritative response text", async () => {
+    const client = createBillingEntitlementClient({
+      baseUrl: "http://mint:8092",
+      secret: "test-internal-secret-0123456789abcdef",
+      fetchImpl: async () => new Response(JSON.stringify({
+        entitlement: { ...entitlement, tier: "whale", price: 999 },
+      }), { status: 200 }),
+    });
+    expect(await client.entitlement("u1")).toBeNull();
   });
 });

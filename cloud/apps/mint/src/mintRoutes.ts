@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { accountDeletions } from "@ovid/db";
+import { accountDeletions, billingUsers } from "@ovid/db";
 import {
   clientIp,
   enforceIpSignupQuota,
@@ -15,7 +15,15 @@ import { findPlan, storedTier } from "./planMath.js";
 import { createProjection } from "./projection.js";
 import { getSettings } from "./settings.js";
 import { rememberEmail } from "./verifier.js";
-import { effectiveTier, freeCapRemaining, planFor, reapplyUser } from "./windows.js";
+import {
+  effectiveTier,
+  freeCapRemaining,
+  planFor,
+  reapplyUser,
+  withBillingAccountWrite,
+  currentBillingProjectionGeneration,
+  StaleBillingAccountWriteError,
+} from "./windows.js";
 
 /**
  * Public mint endpoints — the FastAPI surface the installed APK depends on:
@@ -188,20 +196,29 @@ export function registerMintRoutes(publicApp: FastifyInstance, deps: MintDeps): 
     }
     const tier = storedTier(plan);
 
-    // Durable authority first (Ruling Q4): Postgres stores the canonical plan
-    // id; Redis carries the billing alias (legacy 3x/7x/15x) the app expects.
-    await deps.db.$client`
-      INSERT INTO users (uid, tier) VALUES (${uid}, ${plan.id})
-      ON CONFLICT (uid) DO UPDATE SET tier = EXCLUDED.tier`;
-    const projection = createProjection({ db: deps.db, redis: deps.redis });
-    await projection.publishUserTier(uid, tier, null);
+    return withBillingAccountWrite(deps, uid, async () => {
+      const generation = currentBillingProjectionGeneration();
+      if (generation === undefined) throw new StaleBillingAccountWriteError();
+      // Durable authority first (Ruling Q4): the actual SQL write is generation
+      // checked; Redis carries the billing alias the installed app expects.
+      if (!(await billingUsers.setTierForRefresh(deps.db, uid, plan.id, null, generation))) {
+        throw new StaleBillingAccountWriteError();
+      }
+      const projection = createProjection({ db: deps.db, redis: deps.redis });
+      await projection.publishUserTier(uid, tier, null);
 
-    try {
-      await reapplyUser(deps, uid);
-    } catch (err) {
-      console.log(`upgrade reapply error: ${errorName(err)}`);
-    }
-    return reply.send({ ok: true, tier });
+      let reapplied;
+      try {
+        reapplied = await reapplyUser(deps, uid);
+      } catch (error) {
+        console.log(`upgrade reapply unresolved: ${errorName(error)}`);
+        throw new HttpContractError(503, "tier saved but the LiteLLM projection is unresolved");
+      }
+      if (reapplied.errors > 0) {
+        throw new HttpContractError(503, "tier saved but the LiteLLM projection is unresolved");
+      }
+      return reply.send({ ok: true, tier });
+    });
   });
 
   /**

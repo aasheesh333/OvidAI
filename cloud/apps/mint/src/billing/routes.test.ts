@@ -2,7 +2,8 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { type Db } from "@ovid/db";
 import type { Redis } from "ioredis";
-import { HttpContractError, type MintDeps, type MintIdentityVerifier } from "../app.js";
+import { buildMintApps, HttpContractError, type MintDeps, type MintIdentityVerifier } from "../app.js";
+import { signInternalRequest } from "@ovid/shared";
 import { loadMintEnv, type MintEnv } from "../env.js";
 import { createLiteLlmAdmin } from "../litellmAdmin.js";
 import { registerUsageRoutes } from "../usage.js";
@@ -43,6 +44,26 @@ function stubBilling(overrides: Partial<BillingService> = {}): BillingService {
     configured: true,
     verify: async () => ({ status: 200, payload: { ok: true, status: "active" } }),
     notify: async () => {},
+    revenueCat: async () => ({
+      status: "applied",
+      entitlement: {
+        tier: "free",
+        productId: null,
+        period: null,
+        expiresAt: null,
+        autoRenewing: false,
+        purchaseState: "unknown",
+      },
+    }),
+    entitlement: async () => ({
+      tier: "free",
+      productId: null,
+      period: null,
+      expiresAt: null,
+      autoRenewing: false,
+      purchaseState: "unknown",
+    }),
+    offerings: () => ({ available: false, products: [] }),
     usageFields: async () => ({}),
     products: {},
     ...overrides,
@@ -258,6 +279,100 @@ describe("billing routes (routes.ts)", () => {
     expect(res4.statusCode).toBe(503);
     expect(res4.body).toBe("");
   });
+
+  it("revenuecat: wrong secret is rejected and a verified event is processed", async () => {
+    const revenueCat = vi.fn(async () => ({
+      status: "applied" as const,
+      entitlement: {
+        tier: "plus" as const,
+        productId: "ovid_pro_yearly",
+        period: "yearly" as const,
+        expiresAt: 1_900_000_000,
+        autoRenewing: true,
+        purchaseState: "active" as const,
+      },
+    }));
+    const server = app(stubBilling({ revenueCat }), routeDeps(), {
+      deletionFence: async () => {},
+      revenueCatSecret: "rc-route-secret",
+    });
+    const payload = {
+      event: {
+        id: "route-event",
+        type: "INITIAL_PURCHASE",
+        event_timestamp_ms: 1_800_000_000_000,
+        app_user_id: "u1",
+        original_transaction_id: "route-transaction",
+        product_id: "ovid_pro_yearly",
+        expiration_at_ms: 1_900_000_000_000,
+        auto_renew_status: true,
+      },
+    };
+    const denied = await server.inject({
+      method: "POST",
+      url: "/billing/revenuecat",
+      headers: { authorization: "Bearer wrong" },
+      payload,
+    });
+    expect(denied.statusCode).toBe(401);
+    expect(revenueCat).not.toHaveBeenCalled();
+
+    const accepted = await server.inject({
+      method: "POST",
+      url: "/billing/revenuecat",
+      headers: { authorization: "Bearer rc-route-secret" },
+      payload,
+    });
+    expect(accepted.statusCode).toBe(200);
+    expect(accepted.json()).toMatchObject({ ok: true, status: "applied" });
+    expect(revenueCat).toHaveBeenCalledOnce();
+    expect(accepted.headers["cache-control"]).toBe("no-store");
+  });
+
+  it("offerings: unconfigured is unavailable and web checkout stays absent", async () => {
+    const server = app(stubBilling());
+    const offerings = await server.inject({ method: "GET", url: "/billing/offerings" });
+    expect(offerings.statusCode).toBe(503);
+    expect(offerings.json()).toEqual({ ok: false, error: { code: "billing_unavailable" } });
+    expect(offerings.body).not.toContain("purchaseEnabled\":true");
+
+    const checkout = await server.inject({ method: "POST", url: "/billing/checkout", payload: {} });
+    expect(checkout.statusCode).toBe(404);
+  });
+
+  it("internal entitlement: signed admin-listener read only, public route absent", async () => {
+    const entitlement = {
+      tier: "plus" as const,
+      productId: "ovid_pro_yearly",
+      period: "yearly" as const,
+      expiresAt: 1_900_000_000,
+      autoRenewing: false,
+      purchaseState: "cancelled" as const,
+    };
+    const deps = routeDeps();
+    const now = 1_800_000_000;
+    deps.clock = () => new Date(now * 1000);
+    deps.billing = stubBilling({ entitlement: async () => entitlement });
+    const apps = buildMintApps(deps);
+    const path = "/internal/billing/entitlement";
+    const headers = {
+      "x-ovid-timestamp": Buffer.from(String(now)).toString("base64"),
+      "x-ovid-signature": signInternalRequest("sk-internal-test", "GET", path, "u1", now),
+    };
+    const res = await apps.adminApp.inject({
+      method: "GET",
+      url: `${path}?uid=u1`,
+      headers,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ entitlement });
+    expect(res.headers["cache-control"]).toBe("no-store");
+
+    const publicRes = await apps.publicApp.inject({ method: "GET", url: `${path}?uid=u1`, headers });
+    expect(publicRes.statusCode).toBe(404);
+    await apps.publicApp.close();
+    await apps.adminApp.close();
+  });
 });
 
 describe("pubsubPushVerifier (pushAuth.ts)", () => {
@@ -403,7 +518,7 @@ describe.skipIf(!RUN)("POST /usage billing merge (usage.ts)", () => {
     expect(body).toHaveProperty("remaining_fraction");
     expect(body.billing_enabled).toBe(false);
     const plans = body.plans as { tier: string; features: string[] }[];
-    expect(plans.map((p) => p.tier)).toEqual(["free", "3x", "7x", "15x"]);
+    expect(plans.map((p) => p.tier)).toEqual(["free", "go", "plus", "pro"]);
     expect(plans[0]!.features.length).toBeGreaterThan(0);
     expect(body).not.toHaveProperty("plan_expires_at");
   });
@@ -604,14 +719,14 @@ describe.skipIf(!RUN)("/billing/verify — installed-client contract (real verif
       expect(body).toMatchObject({
         ok: true,
         status: "active",
-        tier: "7x",
+        tier: "plus",
         product_id: "ovid_pro_monthly",
         auto_renewing: true,
         acknowledge: true,
       });
       expect(typeof body.expires_at).toBe("string");
       expect(Number.isNaN(Date.parse(body.expires_at as string))).toBe(false);
-      expect(sink.at(-1)).toEqual({ uid, tier: "7x" });
+      expect(sink.at(-1)).toEqual({ uid, tier: "plus" });
       expect(acks).toEqual(["tok-client"]);
       // Resume/restore re-delivers the same token: same verdict, no error.
       const again = await clientPost(app, uid, "tok-client");

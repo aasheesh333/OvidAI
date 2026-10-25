@@ -7,12 +7,25 @@ import {
   type PurchaseRow,
 } from "@ovid/db";
 import type { Redis } from "ioredis";
+import { planFor } from "@ovid/shared";
 import type { MintEnv } from "../env.js";
 import { BillingError, evaluate } from "./domain.js";
 import type { PlayDeveloperApi } from "./play.js";
 import { createPlayApi } from "./play.js";
-import { accountHash, loadProducts } from "./products.js";
+import {
+  accountHash,
+  BILLING_PRODUCTS,
+  selectBillingProduct,
+  type BillingPeriod,
+} from "./products.js";
 import { createTierSink, type PublishTier, type TierSink } from "./tierSink.js";
+import {
+  createEntitlementService,
+  type BillingEntitlement,
+  type EntitlementApplyResult,
+  type EntitlementStore,
+  type RevenueCatEvent,
+} from "./entitlements.js";
 
 /**
  * Play Billing service — port of server/billing/api.py BillingService.
@@ -64,12 +77,21 @@ export interface BillingVerifyResult {
   payload: Record<string, unknown>;
 }
 
+export interface BillingOffering {
+  productId: string;
+  tier: string;
+  period: BillingPeriod;
+}
+
 export interface BillingService {
   readonly configured: boolean;
-  /** Play product id -> tier (3x/7x/15x); planCards maps plans to products. */
+  /** Play product id -> canonical or legacy tier; planCards maps plans to products. */
   readonly products: Record<string, string>;
   verify(uid: string, body: unknown): Promise<BillingVerifyResult>;
   notify(envelope: unknown): Promise<void>;
+  revenueCat(event: RevenueCatEvent): Promise<EntitlementApplyResult>;
+  entitlement(uid: string): Promise<BillingEntitlement>;
+  offerings(): { available: boolean; products: BillingOffering[] };
   usageFields(uid: string | null): Promise<Record<string, unknown>>;
 }
 
@@ -85,6 +107,8 @@ export interface BillingServiceDeps {
   /** Full tier sink override (tests). Defaults to createTierSink(...). */
   setTier?: TierSink;
   store?: PurchaseLedger;
+  /** Defaults to billingUsers' durable purchase/event repository. */
+  entitlementStore?: EntitlementStore;
   /** Play API; `null` = billing disabled, `undefined` = build from env. */
   api?: PlayDeveloperApi | null;
   clock?: () => number;
@@ -117,7 +141,18 @@ function resolveProducts(env: MintEnv, override?: Record<string, string>): Recor
   if (env.play.products !== null) {
     return { ...env.play.products };
   }
-  return loadProducts({});
+  return Object.fromEntries(
+    Object.entries(BILLING_PRODUCTS).map(([productId, product]) => [productId, product.tier]),
+  );
+}
+
+function evaluateCanonical(
+  resource: unknown,
+  products: Record<string, string>,
+  now: number,
+): ReturnType<typeof evaluate> {
+  const entitlement = evaluate(resource, products, now);
+  return { ...entitlement, tier: planFor(entitlement.tier).id };
 }
 
 function buildApi(env: MintEnv, api: PlayDeveloperApi | null | undefined): PlayDeveloperApi | null {
@@ -146,16 +181,31 @@ export function createBillingService(deps: BillingServiceDeps): BillingService {
       reapplyUser: deps.reapplyUser ?? (async () => undefined),
     });
   const configured = api !== null && store !== null;
+  const entitlements = createEntitlementService({
+    db: deps.db,
+    redis: deps.redis,
+    clock,
+    setTier,
+    ...(deps.entitlementStore !== undefined ? { store: deps.entitlementStore } : {}),
+  });
 
-  /** Recompute the user's best active purchase and push it to mint. */
-  async function apply(uid: string | null): Promise<{ tier: string; best: PurchaseRow | null }> {
+  /** Recompute the canonical entitlement and use its one projection writer. */
+  async function apply(uid: string | null): Promise<{ tier: string; current: BillingEntitlement }> {
     if (uid === null || uid === "") {
-      return { tier: "free", best: null };
+      return {
+        tier: "free",
+        current: {
+          tier: "free",
+          productId: null,
+          period: null,
+          expiresAt: null,
+          autoRenewing: false,
+          purchaseState: "unknown",
+        },
+      };
     }
-    const best = await store.effective(uid, Math.trunc(clock()));
-    const tier = best?.tier ?? "free";
-    await setTier(uid, tier, best?.expiresAt ?? null);
-    return { tier, best };
+    const current = await entitlements.refresh(uid);
+    return { tier: current.tier, current };
   }
 
   async function verify(uid: string, body: unknown): Promise<BillingVerifyResult> {
@@ -193,7 +243,7 @@ export function createBillingService(deps: BillingServiceDeps): BillingService {
 
     const resource = await api!.getSubscription(token);
     const now = Math.trunc(clock());
-    const entitlement = evaluate(resource, products, now);
+    const entitlement = evaluateCanonical(resource, products, now);
     if (entitlement.account_hash === null) {
       if (requireAccountId) {
         throw new BillingError(403, "account_mismatch");
@@ -203,7 +253,7 @@ export function createBillingService(deps: BillingServiceDeps): BillingService {
     }
 
     const row = await store.record(token, entitlement, now, uid);
-    const { tier, best } = await apply(uid);
+    const { tier, current } = await apply(uid);
     const active = row.status === "active";
     if (active && !entitlement.acknowledged && api!.acknowledgeSubscription !== undefined) {
       // SH-002: acknowledge server-side too, so a client that dies between
@@ -223,8 +273,8 @@ export function createBillingService(deps: BillingServiceDeps): BillingService {
       status: row.status,
       tier,
       product_id: row.productId,
-      expires_at: iso(best?.expiresAt ?? null),
-      auto_renewing: Boolean(best?.autoRenewing),
+      expires_at: iso(current.expiresAt),
+      auto_renewing: current.autoRenewing,
       // The client acknowledges (completePurchase) only when this is true.
       acknowledge: active,
     };
@@ -280,7 +330,7 @@ export function createBillingService(deps: BillingServiceDeps): BillingService {
     const resource = await api!.getSubscription(token);
     let entitlement;
     try {
-      entitlement = evaluate(resource, products, now);
+      entitlement = evaluateCanonical(resource, products, now);
     } catch (err) {
       if (err instanceof BillingError) {
         // Unknown product etc. — redelivery cannot fix it.
@@ -309,15 +359,26 @@ export function createBillingService(deps: BillingServiceDeps): BillingService {
     const fields: Record<string, unknown> = {
       billing_enabled: configured,
     };
-    if (configured && uid !== null && uid !== "") {
-      const best = await store.effective(uid, Math.trunc(clock()));
-      if (best !== null) {
-        fields.plan_expires_at = iso(best.expiresAt);
-        fields.plan_auto_renews = best.autoRenewing;
-        fields.plan_product_id = best.productId;
+    if (uid !== null && uid !== "") {
+      const current = await entitlements.entitlement(uid);
+      if (current.productId !== null) {
+        fields.plan_expires_at = iso(current.expiresAt);
+        fields.plan_auto_renews = current.autoRenewing;
+        fields.plan_product_id = current.productId;
+        fields.plan_period = current.period;
+        fields.plan_purchase_state = current.purchaseState;
       }
     }
     return fields;
+  }
+
+  function offerings(): { available: boolean; products: BillingOffering[] } {
+    if (!configured) return { available: false, products: [] };
+    const available = Object.keys(products).flatMap((productId) => {
+      const product = selectBillingProduct(productId, [productId]);
+      return product === null ? [] : [{ productId, ...product }];
+    });
+    return { available: available.length > 0, products: available };
   }
 
   return {
@@ -327,6 +388,9 @@ export function createBillingService(deps: BillingServiceDeps): BillingService {
     products,
     verify,
     notify,
+    revenueCat: (event) => entitlements.apply(event),
+    entitlement: (uid) => entitlements.entitlement(uid),
+    offerings,
     usageFields,
   };
 }

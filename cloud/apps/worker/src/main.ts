@@ -1,7 +1,7 @@
 import { pathToFileURL } from "node:url";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { Redis } from "ioredis";
-import { createDb, dbPoolOptionsFromEnv, byokKeysRepo, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, imagesRepo, mcpOauthFlows, mcpServers as mcpServersRepo, messages as messagesRepo, runs as runsRepo, sharesRepo, users, workspaceObjects as workspaceObjectsRepo } from "@ovid/db";
+import { assertSessionFileCapacity, createDb, createStorageQuotaRepos, dbPoolOptionsFromEnv, byokKeysRepo, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, imagesRepo, mcpOauthFlows, mcpServers as mcpServersRepo, messages as messagesRepo, runs as runsRepo, sharesRepo, users, workspaceObjects as workspaceObjectsRepo } from "@ovid/db";
 import {
   createCloudCleanup,
   createFirebaseAdmin,
@@ -34,6 +34,7 @@ import {
   createR2PrefixDeleterFromEnv,
   createSandboxManagerEviction,
   createStorage,
+  createHttpArtifactGrantFactory,
   diskAlertFractionFromEnv,
   hibernateWorkspace,
   hydrateWorkspace,
@@ -60,7 +61,6 @@ import {
   selectQuotaBackend,
 } from "@ovid/sandbox";
 import {
-  createGuardedEgressFetch,
   createSsrfGuard,
   type EgressFetch,
   type GitHubApiPort,
@@ -77,6 +77,7 @@ import { createServerKeyResolver } from "./keyResolver.js";
 import { buildFileService } from "./fileService.js";
 import { createStudioGitService, parseStudioGitAllowedHosts } from "./studioGitRoutes.js";
 import { createMcpRuntime } from "./mcpRuntime.js";
+import { createFetchEgressPolicy } from "./fetchEgressPolicy.js";
 import { createNotifier, createFcmPushSender } from "./notify.js";
 import { createWebPushSender } from "./webPush.js";
 import { createPluginInstallProcessor } from "./pluginInstallProcessor.js";
@@ -111,6 +112,8 @@ export interface WorkerEnv {
    * /internal/mint-key for unattended runs whose key is missing from db2.
    */
   internalMintUrl: string;
+  /** Gateway-internal grant service base URL; null => CDN publication unavailable. */
+  gatewayInternalUrl: string | null;
   /** P9 Task 9: shared HMAC secret (OVID_INTERNAL_API_SECRET, >= 32 bytes). */
   internalApiSecret: string;
   litellmBaseUrl: string;
@@ -297,6 +300,14 @@ export function loadWorkerEnv(raw: NodeJS.ProcessEnv): WorkerEnv {
   if (Buffer.byteLength(internalApiSecret, "utf8") < 32) {
     throw new Error("OVID_INTERNAL_API_SECRET must be at least 32 bytes");
   }
+  const gatewayInternalUrl = raw.OVID_GATEWAY_INTERNAL_URL?.trim() || null;
+  if (gatewayInternalUrl !== null) {
+    const parsed = new URL(gatewayInternalUrl);
+    if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+        parsed.username !== "" || parsed.password !== "" || parsed.search !== "" || parsed.hash !== "") {
+      throw new Error("OVID_GATEWAY_INTERNAL_URL must be an absolute http(s) base URL without credentials/query/fragment");
+    }
+  }
 
   return {
     nodeEnv: raw.NODE_ENV?.trim() || "development",
@@ -304,6 +315,7 @@ export function loadWorkerEnv(raw: NodeJS.ProcessEnv): WorkerEnv {
     redisQUrl: required("REDIS_Q_URL"),
     redisMintUrl: required("REDIS_MINT_URL"),
     internalMintUrl,
+    gatewayInternalUrl,
     internalApiSecret,
     litellmBaseUrl: required("OVID_LITELLM_BASE"),
     defaultModel: required("OVID_DEFAULT_MODEL"),
@@ -489,6 +501,16 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     }),
   });
 
+  // Shared actual-byte reservations and signed gateway grants for every
+  // ordinary generated-artifact publisher. A missing gateway base URL is a
+  // typed cdn_grant_not_configured failure only when CDN minting is attempted.
+  const cdn = loadCdnConfig(env);
+  const artifactQuota = createStorageQuotaRepos(db);
+  const artifactGrantFactory = createHttpArtifactGrantFactory({
+    baseUrl: cfg.gatewayInternalUrl,
+    secret: cdn?.grantInternalSecret ?? cfg.internalApiSecret,
+  });
+
   // ---- W8: cloud image generation/editing tools --------------------------
   // Host-side tools call mint's signed internal image routes. The worker
   // never hands a provider key or the model pool to the sandbox. The
@@ -533,6 +555,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
               storage,
               workspaceObjects: workspaceObjectsRepo,
               eventMirror: eventMirrorRepo,
+              quota: artifactQuota,
+              grantFactory: artifactGrantFactory,
+              assertProjectFileCapacity: assertSessionFileCapacity,
+              ...(cdn !== null ? { cdn } : {}),
             },
             {
               userId: input.userId,
@@ -610,7 +636,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   // transports and the GitHub REST port alike. No raw-fetch default remains
   // in the worker's production path. Hoisted above the MCP runtime so the
   // curated fetch/REST/GitHub handlers share the SAME guarded egress.
-  const egress = createGuardedEgressFetch(createSsrfGuard());
+  const egress = createFetchEgressPolicy(createSsrfGuard());
 
   // ---- P5 Task 16: the MCP runtime (router + catalog + installer). --------
   // The sandbox seam is the ONLY P2 → @ovid/mcp adaptation point; passing the
@@ -730,6 +756,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       eventMirror: eventMirrorRepo,
       workspaceDir: (userId: string, sessionId: string) =>
         manager.workspaceDir(userId, sessionId),
+      quota: artifactQuota,
+      grantFactory: artifactGrantFactory,
+      assertProjectFileCapacity: assertSessionFileCapacity,
+      ...(cdn !== null ? { cdn } : {}),
     }),
   });
 
@@ -833,10 +863,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     console.error("[worker] hydrate worker error", err);
   });
 
-  // W12: optional signed-CDN capabilities for generated artifacts. Absent
-  // OVID_CDN_* keeps the presign path exactly as before; a partial config
-  // fails loudly here (same contract as the gateway).
-  const cdn = loadCdnConfig(env);
+  // W12 CDN/grant dependencies were composed above and are shared by every
+  // ordinary artifact publisher; absent CDN retains the short-presign path.
 
   // Internal HTTP: container network only (never a host-published port).
   const fileService = buildFileService({
@@ -848,6 +876,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     activity,
     internalToken: cfg.internalToken,
     studioGit,
+    connectionHealthInvocations: mcpRuntime?.connectionHealthInvocations,
     inlineMaxBytes: cfg.inlineMaxBytes,
     port: cfg.workerFilePort,
     host: "0.0.0.0",
@@ -855,6 +884,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     runs: runsRepo,
     eventMirror: eventMirrorRepo,
     workspaceObjects: workspaceObjectsRepo,
+    quota: artifactQuota,
+    grantFactory: artifactGrantFactory,
+    assertProjectFileCapacity: assertSessionFileCapacity,
     ...(cdn !== null ? { cdn } : {}),
   });
   await fileService.listen({ port: cfg.workerFilePort, host: "0.0.0.0" });
@@ -940,7 +972,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
      * is the same text. The loop only rewrites a TRAILING USER row, so a system
      * row is left exactly as written and the model reads it as context.
      */
-    wakeParent: async ({ sessionId, userId, text }) => {
+    wakeParent: async ({ sessionId, userId, text, actorUserId, source, provenance, modelContext }) => {
       const row = await messagesRepo.append(db, {
         sessionId,
         role: "system",
@@ -952,7 +984,16 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       });
       await queues.agentRuns.add(
         AGENT_RUN_JOB_NAME,
-        { runId: run.id, sessionId, userId, prompt: text },
+        {
+          runId: run.id,
+          sessionId,
+          userId,
+          prompt: text,
+          actorUserId: actorUserId ?? userId,
+          source: source ?? "parent_wake",
+          provenance: provenance ?? "server",
+          ...(modelContext !== undefined ? { modelContext } : {}),
+        },
         { jobId: run.id },
       );
     },
@@ -1143,6 +1184,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       .filter((value) => value !== ""),
   );
   let accountSweeper: { stop(): Promise<void> } | null = null;
+  let accountKeyAdmin: ReturnType<typeof createHttpKeyAdmin> | null = null;
   if (accountAppIds.size > 0) {
     // P9 final review H2: the real R2 ListObjectsV2 + DeleteObjects deleter.
     // Without R2 configured the no-op seam remains, but it is called out
@@ -1157,6 +1199,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     const firebaseApp = getApps()[0] ?? initializeApp();
     const admin = createFirebaseAdmin(firebaseApp, accountAppIds);
     const deletionStore = createPostgresDeletionStore(db);
+    accountKeyAdmin = createHttpKeyAdmin(
+      cfg.litellmBaseUrl,
+      env.OVID_LITELLM_MASTER_KEY?.trim() ?? "",
+    );
     const lifecycle = createLifecycle({
       store: deletionStore,
       admin,
@@ -1164,10 +1210,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
         db,
         redisDb2: redisMint,
         redisQueue: redisQ,
-        litellm: createHttpKeyAdmin(
-          cfg.litellmBaseUrl,
-          env.OVID_LITELLM_MASTER_KEY?.trim() ?? "",
-        ),
+        litellm: accountKeyAdmin,
         r2: r2Deleter ?? createNoopR2Deleter(),
         images: {
           deleteAccount: async (uid) => {
@@ -1203,7 +1246,13 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       // P9 Task 15: stop the account sweeper before any connection closes —
       // stop() awaits the in-flight finalize pass (durable checkpoints mean a
       // forced kill is also safe).
-      await accountSweeper?.stop();
+      try {
+        await accountSweeper?.stop();
+      } finally {
+        // stop() drains every user of this adapter. close() releases only its
+        // lazy pool and still runs if that drain reports a failure.
+        await accountKeyAdmin?.close?.();
+      }
       // P4 Task 10: stop the scheduler loop and drain the mirror consumer
       // BEFORE the agent-runs worker drains (a mirror job only enqueues).
       schedulerLoop.stop();

@@ -4,6 +4,7 @@ import { isBanned } from "../antiAbuse.js";
 import { requireNoDeletionFence } from "../mintRoutes.js";
 import { BillingError } from "./domain.js";
 import { pubsubPushVerifier } from "./pushAuth.js";
+import { createRevenueCatWebhook } from "./revenuecatWebhook.js";
 import type { BillingService } from "./service.js";
 
 /**
@@ -53,6 +54,8 @@ export interface BillingRouteOptions {
    * tests inject a deterministic seam.
    */
   deletionFence?(uid: string): Promise<void>;
+  /** Test seam; production reads REVENUECAT_WEBHOOK_SECRET without persisting it. */
+  revenueCatSecret?: string | null;
 }
 
 export function registerBillingRoutes(
@@ -136,6 +139,31 @@ export function registerBillingRoutes(
         request.log.error({ err }, "billing.verify failed");
         return sendUnavailable(reply);
       }
+    });
+
+    scope.get("/billing/offerings", async (_request, reply) => {
+      const result = billing.offerings();
+      if (!result.available) return sendUnavailable(reply);
+      return reply
+        .header("Cache-Control", "no-store")
+        .send({ ok: true, ...result });
+    });
+
+    const revenueCat = createRevenueCatWebhook({
+      secret: opts.revenueCatSecret !== undefined
+        ? opts.revenueCatSecret
+        : process.env.REVENUECAT_WEBHOOK_SECRET,
+      process: (event) => billing.revenueCat(event),
+    });
+    scope.post("/billing/revenuecat", async (request, reply) => {
+      const result = await revenueCat(
+        headerValue(request.headers.authorization),
+        request.body === MALFORMED_BODY ? null : request.body,
+      );
+      return reply
+        .code(result.status)
+        .header("Cache-Control", "no-store")
+        .send(result.payload);
     });
 
     const verifyPush = pubsubPushVerifier(deps.env);

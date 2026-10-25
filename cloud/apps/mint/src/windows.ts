@@ -1,3 +1,13 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import {
+  billingUsers,
+  type BillingRemoteEffect,
+  type BillingRemoteExecuteOptions,
+  type BillingRemoteExecution,
+  type BillingRemoteOperation,
+  type BillingRemoteOperationKind,
+  type Db,
+} from "@ovid/db";
 import type { MintDeps } from "./app.js";
 import {
   DB2,
@@ -11,6 +21,10 @@ import {
   type Settings,
 } from "./planMath.js";
 import { getOverride, getSettings, userFreeDaily } from "./settings.js";
+import {
+  executeMintRemoteOperation,
+  mintRemoteOperation,
+} from "./billing/remoteProtocol.js";
 
 /**
  * Window + budget machinery — port of mint.py's window_bounds /
@@ -33,6 +47,108 @@ import { getOverride, getSettings, userFreeDaily } from "./settings.js";
 export interface ReapplyResult {
   keys: number;
   errors: number;
+}
+
+/** Per-call billing generation, propagated through the existing one-argument production wrapper. */
+const billingProjectionGeneration = new AsyncLocalStorage<number>();
+const billingRecoveryId = new AsyncLocalStorage<string>();
+const billingRemoteWriteLock = new AsyncLocalStorage<string>();
+export const BILLING_REFRESH_GENERATION_KEY = (uid: string): string =>
+  `user:${uid}:billing_refresh_generation`;
+
+/** A compatibility writer was superseded before its callback performed any mutation. */
+export class StaleBillingAccountWriteError extends Error {
+  constructor() {
+    super("stale billing projection generation");
+    this.name = "StaleBillingAccountWriteError";
+  }
+}
+
+export function withBillingProjectionGeneration<T>(
+  generation: number,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return billingProjectionGeneration.run(generation, operation);
+}
+
+/** Generation bound to the current account lock; unversioned boot resyncs have none. */
+export function currentBillingProjectionGeneration(): number | undefined {
+  return billingProjectionGeneration.getStore();
+}
+
+/** Share one cross-process account lock with billing and compatibility writers. */
+export async function withBillingAccountLock<T>(
+  db: Db,
+  uid: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  if (billingRemoteWriteLock.getStore() === uid) return operation();
+  return billingUsers.withBillingRemoteWriteLock(db, uid, () =>
+    billingRemoteWriteLock.run(uid, operation),
+  );
+}
+
+/** Compatibility writers join the same durable latest-generation protocol. */
+export async function withBillingAccountWrite<T>(
+  deps: Pick<MintDeps, "db" | "redis">,
+  uid: string,
+  operation: () => Promise<T>,
+  opts: { recoveryId?: string } = {},
+): Promise<T> {
+  if (billingRemoteWriteLock.getStore() === uid) return operation();
+  return withBillingAccountLock(deps.db, uid, async () => {
+    // Generation allocation is inside the SAME cross-process scope lock as the
+    // side effects. A newer refund therefore cannot supersede halfway through
+    // this callback and expose a stale intermediate durable/Redis write.
+    const { generation } = await billingUsers.beginRefresh(deps.db, uid, opts.recoveryId);
+    const key = BILLING_REFRESH_GENERATION_KEY(uid);
+    const reserved = await deps.redis.eval(
+      `local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+       if tonumber(ARGV[1]) < current then return 0 end
+       redis.call('SET', KEYS[1], ARGV[1])
+       return 1`,
+      1,
+      key,
+      String(generation),
+    );
+    if (Number(reserved) !== 1) throw new StaleBillingAccountWriteError();
+    if (!(await billingUsers.isLatestRefresh(deps.db, uid, generation))) {
+      throw new StaleBillingAccountWriteError();
+    }
+    return withBillingProjectionGeneration(generation, () =>
+      opts.recoveryId === undefined
+        ? operation()
+        : billingRecoveryId.run(opts.recoveryId, operation),
+    );
+  });
+}
+
+async function withAccountWriter<T>(
+  deps: MintDeps,
+  uid: string,
+  operation: () => Promise<T>,
+  opts: { retrySuperseded?: boolean; recoveryId?: string } = {},
+): Promise<T> {
+  if (billingRemoteWriteLock.getStore() === uid) return operation();
+  if (billingProjectionGeneration.getStore() !== undefined) {
+    return withBillingAccountLock(deps.db, uid, operation);
+  }
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      return await withBillingAccountWrite(deps, uid, operation, { recoveryId: opts.recoveryId });
+    } catch (error) {
+      if (opts.retrySuperseded !== true || !(error instanceof StaleBillingAccountWriteError)) {
+        throw error;
+      }
+    }
+  }
+  throw new StaleBillingAccountWriteError();
+}
+
+async function billingProjectionCurrent(deps: MintDeps, uid: string): Promise<boolean> {
+  const expected = billingProjectionGeneration.getStore();
+  if (expected === undefined) return true;
+  return (await deps.redis.get(BILLING_REFRESH_GENERATION_KEY(uid))) === String(expected);
 }
 
 function clockNow(deps: MintDeps): Date {
@@ -131,14 +247,15 @@ export async function poolRateLimits(
 
 /** Push the current rate limits to every key (mint.py push_rate_limits). */
 export async function poolPushRateLimits(deps: MintDeps, uid: string): Promise<void> {
-  const limits = await poolRateLimits(deps, uid);
-  for (const keyId of Object.values(await poolUserKeyIds(deps, uid))) {
-    try {
-      await deps.litellm.keyUpdate({ key: keyId, ...limits });
-    } catch (err) {
-      console.log(`[mint] rate-limit update error: ${errorName(err)}`);
+  return withAccountWriter(deps, uid, async () => {
+    const limits = await poolRateLimits(deps, uid);
+    for (const keyId of Object.values(await poolUserKeyIds(deps, uid))) {
+      await performRemoteOperation(
+        deps,
+        remoteOperation(uid, "key", keyId, { key: keyId, ...limits }),
+      );
     }
-  }
+  }, { retrySuperseded: true });
 }
 
 /**
@@ -151,15 +268,37 @@ export async function poolSyncSlowMode(
   slow: boolean,
   until: Date,
 ): Promise<boolean> {
-  const was = await poolInSlowMode(deps, uid);
-  if (slow) {
-    await deps.redis.hset(DB2.SLOW_HASH, uid, (until.getTime() / 1000).toFixed(3));
-  } else {
-    await deps.redis.hdel(DB2.SLOW_HASH, uid);
-  }
-  if (was === slow) return false;
-  await poolPushRateLimits(deps, uid);
-  return true;
+  return withAccountWriter(deps, uid, async () => {
+    const generation = currentBillingProjectionGeneration();
+    if (generation === undefined) throw new StaleBillingAccountWriteError();
+    const was = await poolInSlowMode(deps, uid);
+    if (was === slow) return false;
+    const result = slow
+      ? await deps.redis.eval(
+          `if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+           redis.call('HSET', KEYS[2], ARGV[2], ARGV[3])
+           return 1`,
+          2,
+          BILLING_REFRESH_GENERATION_KEY(uid),
+          DB2.SLOW_HASH,
+          String(generation),
+          uid,
+          (until.getTime() / 1000).toFixed(3),
+        )
+      : await deps.redis.eval(
+          `if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+           redis.call('HDEL', KEYS[2], ARGV[2])
+           return 1`,
+          2,
+          BILLING_REFRESH_GENERATION_KEY(uid),
+          DB2.SLOW_HASH,
+          String(generation),
+          uid,
+        );
+    if (Number(result) !== 1) throw new StaleBillingAccountWriteError();
+    await poolPushRateLimits(deps, uid);
+    return true;
+  }, { retrySuperseded: true });
 }
 
 /**
@@ -296,8 +435,57 @@ export async function userBudgetTarget(
   return tierBudgetWith(deps, uid, tier, s);
 }
 
+function remoteOperation(
+  uid: string,
+  kind: BillingRemoteOperationKind,
+  target: string,
+  body: Record<string, unknown>,
+  opts: {
+    effect?: BillingRemoteEffect;
+    idempotencyKey?: string;
+    restartBudgetClock?: boolean;
+  } = {},
+): BillingRemoteOperation {
+  const generation = billingProjectionGeneration.getStore();
+  if (generation === undefined) throw new Error("billing remote operation requires generation");
+  const restart = opts.restartBudgetClock === true;
+  const recoveryId = opts.idempotencyKey ?? (restart ? billingRecoveryId.getStore() : undefined);
+  if (restart && recoveryId === undefined) {
+    throw new Error("budget clock restart requires a stable logical recovery id");
+  }
+  return mintRemoteOperation(uid, generation, kind, target, body, {
+    ...opts,
+    ...(recoveryId === undefined ? {} : { idempotencyKey: recoveryId }),
+  });
+}
+
+/** Shared lifecycle entry point used by key mint/rotation, bans, and team writes. */
+export async function executeBillingRemoteOperation(
+  deps: MintDeps,
+  uid: string,
+  kind: BillingRemoteOperationKind,
+  target: string,
+  body: Record<string, unknown>,
+  opts: {
+    effect?: BillingRemoteEffect;
+    idempotencyKey?: string;
+    restartBudgetClock?: boolean;
+  } = {},
+  execution: BillingRemoteExecuteOptions = {},
+): Promise<BillingRemoteExecution> {
+  return executeMintRemoteOperation(deps, remoteOperation(uid, kind, target, body, opts), execution);
+}
+
+/** One account serialized, write-ahead, latest-generation fenced remote mutation. */
+async function performRemoteOperation(
+  deps: MintDeps,
+  operation: BillingRemoteOperation,
+): Promise<void> {
+  await executeMintRemoteOperation(deps, operation);
+}
+
 /** mint.py ensure_user_budget — the duration is sent only when it changes. */
-export async function ensureUserBudget(
+async function ensureUserBudgetLocked(
   deps: MintDeps,
   uid: string,
   tier: string,
@@ -324,20 +512,33 @@ export async function ensureUserBudget(
   if (forceDuration || (current !== duration && current !== "unknown")) {
     body.budget_duration = duration;
   }
-  const status = await deps.litellm.userUpdate(body);
-  if (status === 0) {
-    // The wrapper swallows network errors; reapplyUser must count this like
-    // Python's raised httpx exception.
-    throw new Error("user/update network error");
+  if (!(await billingProjectionCurrent(deps, uid))) {
+    throw new Error("stale billing projection generation");
   }
-  if (status >= 300) {
-    console.log(`[mint] user/update ${status} for ${uid.slice(0, 6)}`);
+  await performRemoteOperation(deps, remoteOperation(uid, "user", uid, body, {
+    restartBudgetClock: forceDuration,
+  }));
+  if (!(await billingProjectionCurrent(deps, uid))) {
+    throw new Error("stale billing projection generation");
   }
+}
+
+export async function ensureUserBudget(
+  deps: MintDeps,
+  uid: string,
+  tier: string,
+  forceDuration: boolean,
+  extra: Record<string, unknown> | null,
+): Promise<void> {
+  return withAccountWriter(deps, uid, () =>
+    ensureUserBudgetLocked(deps, uid, tier, forceDuration, extra),
+  );
 }
 
 /** mint.py apply_key_budget: budget + rate limits; duration only on change. */
 async function applyKeyBudget(
   deps: MintDeps,
+  uid: string,
   keyId: string,
   budget: number,
   duration: string,
@@ -349,13 +550,37 @@ async function applyKeyBudget(
   if (forceDuration || (info !== null && info.budget_duration !== duration)) {
     body.budget_duration = duration;
   }
-  const status = await deps.litellm.keyUpdateStatus(body);
-  if (status === 0) throw new Error("key/update network error");
-  if (status >= 300) {
-    console.log(`[mint] key/update ${status}`);
-    return false;
+  if (!(await billingProjectionCurrent(deps, uid))) {
+    throw new Error("stale billing projection generation");
+  }
+  await performRemoteOperation(deps, remoteOperation(uid, "key", keyId, body, {
+    restartBudgetClock: forceDuration,
+  }));
+  if (!(await billingProjectionCurrent(deps, uid))) {
+    throw new Error("stale billing projection generation");
   }
   return true;
+}
+
+/** Compatibility entry point for an existing key's complete mutation body. */
+export async function updateKeyProjection(
+  deps: MintDeps,
+  uid: string,
+  keyId: string,
+  body: Record<string, unknown>,
+): Promise<void> {
+  return withAccountWriter(deps, uid, async () => {
+    if (!(await billingProjectionCurrent(deps, uid))) {
+      throw new Error("stale billing projection generation");
+    }
+    await performRemoteOperation(
+      deps,
+      remoteOperation(uid, "key", keyId, { ...body, key: keyId }),
+    );
+    if (!(await billingProjectionCurrent(deps, uid))) {
+      throw new Error("stale billing projection generation");
+    }
+  });
 }
 
 /**
@@ -363,7 +588,7 @@ async function applyKeyBudget(
  * (android + web) and the LiteLLM user budget. `extra` merges into each key
  * body, `userExtra` into the user body.
  */
-export async function reapplyUser(
+async function reapplyUserUnlocked(
   deps: MintDeps,
   uid: string,
   opts: {
@@ -371,6 +596,7 @@ export async function reapplyUser(
     forceDuration?: boolean;
     userExtra?: Record<string, unknown> | null;
     userForceDuration?: boolean;
+    operationId?: string;
   } = {},
 ): Promise<ReapplyResult> {
   const forceDuration = opts.forceDuration ?? false;
@@ -385,7 +611,7 @@ export async function reapplyUser(
   for (const keyId of Object.values(await poolUserKeyIds(deps, uid))) {
     try {
       const info = forceDuration ? null : await deps.litellm.keyInfo(keyId);
-      if (await applyKeyBudget(deps, keyId, budget, duration, info, bodyExtra, forceDuration)) {
+      if (await applyKeyBudget(deps, uid, keyId, budget, duration, info, bodyExtra, forceDuration)) {
         keys += 1;
       } else {
         errors += 1;
@@ -393,6 +619,7 @@ export async function reapplyUser(
     } catch (err) {
       errors += 1;
       console.log(`[mint] reapply key error: ${errorName(err)}`);
+      return { keys, errors };
     }
   }
   try {
@@ -405,16 +632,49 @@ export async function reapplyUser(
 }
 
 /**
+ * Billing and compatibility callers serialize the entire remote sequence per
+ * account. Without this lock, an older paid request can finish after a newer
+ * Free request even though generation pre/post checks fire. Every caller
+ * allocates its durable generation only after entering the same scope lock.
+ */
+export async function reapplyUser(
+  deps: MintDeps,
+  uid: string,
+  opts: {
+    extra?: Record<string, unknown>;
+    forceDuration?: boolean;
+    userExtra?: Record<string, unknown> | null;
+    userForceDuration?: boolean;
+    /** Required for any explicit budget-clock restart; stable across retry. */
+    operationId?: string;
+  } = {},
+): Promise<ReapplyResult> {
+  const force = opts.forceDuration === true || opts.userForceDuration === true;
+  if (force && (opts.operationId === undefined || opts.operationId.trim() === "")) {
+    throw new Error("explicit budget clock restart requires a stable operationId");
+  }
+  return withAccountWriter(
+    deps,
+    uid,
+    () => reapplyUserUnlocked(deps, uid, opts),
+    {
+      retrySuperseded: true,
+      ...(force ? { recoveryId: `budget-restart:${uid}:${opts.operationId}` } : {}),
+    },
+  );
+}
+
+/**
  * mint.py reset_window_user: restart the window NOW — clear the pool
  * counters, slow mode and usage cache, zero spend on every key, and
  * re-apply the budgets. The free plan's LiteLLM user budget is the monthly
  * backstop with its own 30-day clock, so it restarts only when
  * resetMonthFree is set; other plans' user budget is the window budget.
  */
-export async function resetWindowUser(
+async function resetWindowUserLocked(
   deps: MintDeps,
   uid: string,
-  opts: { resetMonthFree?: boolean } = {},
+  opts: { resetMonthFree?: boolean; operationId: string },
 ): Promise<ReapplyResult> {
   const now = clockNow(deps);
   const s = await getSettings({ db: deps.db });
@@ -424,15 +684,30 @@ export async function resetWindowUser(
   const pools = userPools(s, plan, freeDaily, override);
   const k = poolKeys(uid);
 
-  await deps.redis.del(k.spend, k.auto, `usagecache:${uid}`);
-  await deps.redis.set(
+  const generation = currentBillingProjectionGeneration();
+  if (generation === undefined) throw new StaleBillingAccountWriteError();
+  const projected = await deps.redis.eval(
+    `if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+     redis.call('DEL', KEYS[2], KEYS[3], KEYS[4], KEYS[8])
+     redis.call('SET', KEYS[5], ARGV[3], 'EX', ARGV[4])
+     redis.call('HDEL', KEYS[6], ARGV[2])
+     redis.call('SREM', KEYS[7], ARGV[2])
+     return 1`,
+    8,
+    BILLING_REFRESH_GENERATION_KEY(uid),
+    k.spend,
+    k.auto,
+    `usagecache:${uid}`,
     k.start,
+    DB2.SLOW_HASH,
+    DB2.SLOW_PENDING,
+    monthKey(uid, now),
+    String(generation),
+    uid,
     (now.getTime() / 1000).toFixed(3),
-    "EX",
-    Math.trunc(pools.window_hours * 3600),
+    String(Math.trunc(pools.window_hours * 3600)),
   );
-  await deps.redis.hdel(DB2.SLOW_HASH, uid);
-  await deps.redis.srem(DB2.SLOW_PENDING, uid);
+  if (Number(projected) !== 1) throw new StaleBillingAccountWriteError();
 
   const isFree = plan.id === "free";
   const restartUser = !isFree || (opts.resetMonthFree ?? false);
@@ -441,9 +716,24 @@ export async function resetWindowUser(
     forceDuration: true,
     userExtra: restartUser ? { spend: 0 } : null,
     userForceDuration: restartUser,
+    operationId: opts.operationId,
   });
-  await deps.redis.del(monthKey(uid, now)); // legacy key, harmless
   return res;
+}
+
+export async function resetWindowUser(
+  deps: MintDeps,
+  uid: string,
+  opts: { resetMonthFree?: boolean; operationId: string },
+): Promise<ReapplyResult> {
+  const operationId = opts.operationId.trim();
+  if (operationId === "") throw new Error("window reset requires a stable operationId");
+  return withAccountWriter(
+    deps,
+    uid,
+    () => resetWindowUserLocked(deps, uid, opts),
+    { retrySuperseded: true, recoveryId: `window-reset:${uid}:${operationId}` },
+  );
 }
 
 /** Drop the 15 s /usage caches for the given users. */

@@ -396,7 +396,7 @@ describe.skipIf(!RUN)("POST /usage (usage.ts)", () => {
     await redis.set(`usagecache:${uid}`, JSON.stringify({ cached: true }));
     expect((await getUsage(uid)).cached).toBe(true);
 
-    await resetWindowUser(deps, uid);
+    await resetWindowUser(deps, uid, { operationId: "usage-test-reset" });
     expect((await getUsage(uid)).cached).toBeUndefined();
   });
 

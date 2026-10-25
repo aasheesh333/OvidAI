@@ -35,7 +35,13 @@ import { createMintModelCatalog, createMintRedisKeyProvider } from "./keys.js";
 import { createInternalMintProvisioner } from "./internalMint.js";
 import { createTicketStore } from "./tickets.js";
 import { createWorkerClient } from "./workerClient.js";
+import { createConnectionHealthClient } from "./connectionHealthClient.js";
 import { createStudioGitHttpTransport } from "./studioGitHttp.js";
+import { CollabMembership, type AccountAdmission as CollabAccountAdmission } from "./collab/membership.js";
+import { CollabLifecycle } from "./collab/lifecycle.js";
+import { CollabProjection } from "./collab/projection.js";
+import { createCollabObjectStore, createCollabReservationPort } from "./collab/objects.js";
+import { withCollabDeletionFence } from "./routes/account.js";
 import { createRedisPtyBridge } from "./wsPty.js";
 import { createRedisApprovalPublisher, createWsSocketRegistry } from "./ws.js";
 import { createSystemHub } from "./systemChannel.js";
@@ -74,6 +80,16 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
   // Pool size: OVID_DB_POOL_MAX / OVID_DB_IDLE_TIMEOUT_S (capacity wave);
   // unset keeps the postgres.js default (10).
   const db = createDb(cfg.databaseUrl, dbPoolOptionsFromEnv(env));
+  const collabEnabled = env.OVID_COLLAB_ENABLED === "true";
+  const collabAuthoritySecret = env.OVID_COLLAB_AUTHORITY_SECRET?.trim() ?? "";
+  if (collabEnabled && Buffer.byteLength(collabAuthoritySecret) < 32) {
+    throw new Error("OVID_COLLAB_AUTHORITY_SECRET must be at least 32 bytes when OVID_COLLAB_ENABLED=true");
+  }
+  // Disabled rooms still need deletion fencing if the flag was previously on.
+  // No route is mounted unless enabled and the token-issuing secret is configured.
+  const collabDeletionMembership = new CollabMembership(db, { authoritySecret: collabAuthoritySecret });
+  const collabLifecycle = new CollabLifecycle(collabDeletionMembership);
+  let collabMembership = new CollabMembership(db, { authoritySecret: collabAuthoritySecret });
   // createQueues takes a connection OPTIONS OBJECT — a bare URL string would
   // be spread into garbage options by withBlockingSafeRetries. P5 Task 15:
   // opt into the plugin-installs queue (the gateway enqueues install/
@@ -122,9 +138,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       .filter((value) => value !== ""),
   );
   let account: AccountRouteDeps | undefined;
-  let accountAdmission:
-    | (<T>(principal: { uid: string; authTime: number; signInProvider?: string }, fn: (uid: string) => Promise<T>) => Promise<T>)
-    | undefined;
+  let accountAdmission: CollabAccountAdmission | undefined;
   if (firebaseApp !== null && accountAppIds.size > 0) {
     if (r2Deleter === null) {
       console.warn(
@@ -141,30 +155,33 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       { appCheckMode: cfg.appCheckMode },
     );
     const deletionStore = createPostgresDeletionStore(db);
+    const cloudCleanup = createCloudCleanup({
+      db,
+      redisDb2: redisMint,
+      redisQueue: redisQ,
+      litellm: keyAdmin,
+      r2: r2Deleter ?? createNoopR2Deleter(),
+      images: {
+        deleteAccount: async (uid) => {
+          await db.transaction(async (tx) => {
+            await imagesRepo.insertDeleted(tx, uid, Math.floor(Date.now() / 1000));
+            await imagesRepo.clearAccount(tx, uid);
+          });
+        },
+      },
+      shares: { deleteAccount: (uid) => sharesRepo.deleteAccount(db, uid) },
+      byok: { deleteAccount: (uid) => byokKeysRepo.deleteAccount(db, uid) },
+    });
     const lifecycle = createLifecycle({
       store: deletionStore,
       admin,
-      data: createCloudCleanup({
-        db,
-        redisDb2: redisMint,
-        redisQueue: redisQ,
-        litellm: keyAdmin,
-        r2: r2Deleter ?? createNoopR2Deleter(),
-        images: {
-          deleteAccount: async (uid) => {
-            await db.transaction(async (tx) => {
-              await imagesRepo.insertDeleted(tx, uid, Math.floor(Date.now() / 1000));
-              await imagesRepo.clearAccount(tx, uid);
-            });
-          },
-        },
-        shares: { deleteAccount: (uid) => sharesRepo.deleteAccount(db, uid) },
-        byok: { deleteAccount: (uid) => byokKeysRepo.deleteAccount(db, uid) },
-      }),
+      data: withCollabDeletionFence(cloudCleanup, (uid, connection) =>
+        collabLifecycle.onDeletionPending(uid, connection)),
     });
     account = {
       lifecycle,
       verify: (token, attestation, opts) => admin.verify(token, attestation, opts),
+      collabLifecycle,
     };
     // Task 16's shares/reports admission seam: hold the UID lock and reject
     // every non-active/non-cancelled state. `access` only accepts ordinary
@@ -179,8 +196,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
           // inventing one, and `password` is not an ordinary identity.
           firebase: { sign_in_provider: principal.signInProvider },
         },
-        fn,
+        (uid, session) => fn(uid, session),
       );
+    collabMembership = new CollabMembership(db, {
+      authoritySecret: collabAuthoritySecret,
+      admission: accountAdmission,
+    });
     if ((env.OVID_LITELLM_MASTER_KEY?.trim() ?? "") === "") {
       console.warn(
         "[gateway] account cleanup has no OVID_LITELLM_MASTER_KEY — key block/delete will fail and retry",
@@ -279,6 +300,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
     baseUrl: cfg.workerInternalUrl,
     token: cfg.internalToken,
   });
+  const connectionHealthInvocations = crypto === undefined
+    ? undefined
+    : createConnectionHealthClient({
+        baseUrl: cfg.workerInternalUrl,
+        token: cfg.internalToken,
+      });
   const studioGit = createStudioGitHttpTransport({
     baseUrl: cfg.workerInternalUrl,
     token: cfg.internalToken,
@@ -341,6 +368,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
         console.warn("[gateway] rate limit store degraded; request refused");
       },
       worker,
+      connectionHealthInvocations,
       studioGit,
       inlineMaxBytes: cfg.fileInlineMaxBytes,
       putMaxBytes: cfg.putMaxBytes,
@@ -361,6 +389,15 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
         : {}),
       reports: accountAdmission !== undefined ? { admission: accountAdmission } : {},
       ...(account !== undefined ? { account } : {}),
+      ...(collabEnabled ? {
+        collab: {
+          membership: collabMembership,
+          projection: new CollabProjection(db),
+          objects: createCollabObjectStore(db),
+          reservations: createCollabReservationPort(db),
+          orphanSweepMs: 30_000,
+        },
+      } : {}),
       // P10 Task 2: the shutdown drain reaches every live WS socket through
       // this registry (installShutdownHandlers below passes closeWs).
       wsRegistry,
@@ -370,13 +407,19 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
 
   // Owned connections close with the app (deploy scripts call app.close()).
   app.addHook("onClose", async () => {
-    await queues.agentRuns.close();
-    await queues.pluginInstalls?.close();
-    await systemHub.close();
-    redisQ.disconnect();
-    if (redisC !== redisQ) redisC.disconnect();
-    redisMint.disconnect();
-    await db.$client.end({ timeout: 5 });
+    try {
+      await queues.agentRuns.close();
+      await queues.pluginInstalls?.close();
+      await systemHub.close();
+      redisQ.disconnect();
+      if (redisC !== redisQ) redisC.disconnect();
+      redisMint.disconnect();
+    } finally {
+      // Fastify has drained requests; close only the adapter-owned lazy pool,
+      // even if an earlier owned resource reported a shutdown failure.
+      await keyAdmin.close?.();
+      await db.$client.end({ timeout: 5 });
+    }
   });
 
   await app.listen({ host: cfg.host, port: cfg.port });

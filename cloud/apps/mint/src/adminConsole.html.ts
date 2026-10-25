@@ -244,16 +244,26 @@ function saveUser(){
  userCall(b)
 }
 function clearUser(flag){if(current)userCall({uid:current.uid,[flag]:true})}
+const resetOperations={user:null,all:null};
+function resetOperationId(slot,body){
+ const signature=JSON.stringify(body),previous=resetOperations[slot];
+ if(!previous||previous.signature!==signature)resetOperations[slot]={signature,id:'reset-'+crypto.randomUUID()};
+ return resetOperations[slot].id;
+}
+function resetOperationDone(slot,result){if(result&&result.ok)resetOperations[slot]=null}
 async function resetUser(){if(!current||!confirm('Restart the window now for '+current.uid+'?'))return;
- try{show('userActOut',await api('POST','/admin/reset-window',{uid:current.uid,reset_month_free:$('u_month').checked}));await lookup();loadAudit()}catch(e){show('userActOut',String(e),true)}}
+ const body={uid:current.uid,reset_month_free:$('u_month').checked};
+ try{body.operation_id=resetOperationId('user',body);const result=await api('POST','/admin/reset-window',body);resetOperationDone('user',result);show('userActOut',result);await lookup();loadAudit()}catch(e){show('userActOut',String(e),true)}}
 async function banUser(on){if(!current)return;
  try{show('userActOut',await api('POST',on?'/admin/ban':'/admin/unban',{uid:current.uid}));await lookup();loadAudit()}catch(e){show('userActOut',String(e),true)}}
 async function resetAll(){if(!confirm('Restart the window now for ALL users?'))return;
- try{show('resetStatus',await api('POST','/admin/reset-window',{all:true,reset_month_free:$('all_month').checked}));loadAudit();pollReset()}catch(e){show('resetStatus',String(e),true)}}
+ const body={all:true,reset_month_free:$('all_month').checked};
+ try{body.operation_id=resetOperationId('all',body);const result=await api('POST','/admin/reset-window',body);resetOperationDone('all',result);show('resetStatus',result);loadAudit();pollReset()}catch(e){show('resetStatus',String(e),true)}}
 async function pollReset(){
  try{const s=await api('GET','/admin/reset-status');if(s.state==='never')return;
   show('resetStatus','Last global reset: '+s.state+' · '+s.done+'/'+s.total+' users'+(s.errors?' · '+s.errors+' errors':'')+' · '+(s.at||''));
-  if(s.state==='running')setTimeout(pollReset,2000)}catch(e){}
+  if(s.state==='done'&&!s.errors)resetOperations.all=null;
+   if(s.state==='running')setTimeout(pollReset,2000)}catch(e){}
 }
 async function ipBan(on){const ip=$('banIp').value.trim();if(!ip)return;
  try{show('miscOut',await api('POST',on?'/admin/ban':'/admin/unban',{ip}));loadAudit()}catch(e){show('miscOut',String(e),true)}}

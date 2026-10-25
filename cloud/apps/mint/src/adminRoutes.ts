@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { plansRepo } from "@ovid/db";
+import { billingRemote, billingUsers, plansRepo } from "@ovid/db";
 import { pyNumStr } from "@ovid/money";
 import { audit, AUDIT_LIST } from "./adminAudit.js";
 import { ADMIN_CONSOLE_HTML } from "./adminConsole.html.js";
@@ -9,12 +9,15 @@ import type { MintDeps } from "./app.js";
 import { HttpContractError } from "./app.js";
 import { catalogFor, groupKind, publicFor } from "./catalog.js";
 import type { MintEnv } from "./env.js";
+import { requireInternalSignature } from "./internalAuth.js";
 import { createProjection } from "./projection.js";
 import {
   SCALARS,
   findPlan,
+  reconcileCanonicalPlans,
   storedTier,
   validateMembers,
+  validatePlan,
   validateSettings,
   type PlanData,
   type PoolsOverride,
@@ -35,6 +38,9 @@ import {
   poolUserKeyIds,
   reapplyUser,
   resetWindowUser,
+  withBillingAccountWrite,
+  currentBillingProjectionGeneration,
+  StaleBillingAccountWriteError,
   type ReapplyResult,
 } from "./windows.js";
 
@@ -357,6 +363,73 @@ export async function reapplyAll(
   return { mode: "sync", ...(await run()) };
 }
 
+export interface CanonicalResyncResult {
+  ok: boolean;
+  status: "ok" | "degraded";
+  changed: boolean;
+  plans: PlanData[];
+  projection: {
+    redis: "ok" | "failed";
+    litellm: "ok" | "degraded";
+    errors: number;
+  };
+}
+
+/**
+ * Migration 0025 owns legacy-id movement. This idempotent operator resync only
+ * canonicalizes existing rows, then proves the derived Redis/LiteLLM views.
+ * A projection failure is explicitly degraded: durable Postgres is never
+ * misreported as a rejected write or a fully successful projection.
+ */
+export async function resyncCanonicalPlans(
+  deps: MintDeps,
+  opts: { ip?: string } = {},
+): Promise<CanonicalResyncResult> {
+  const before = await getSettings({ db: deps.db });
+  const desired = reconcileCanonicalPlans(before.plans).map((plan) => validatePlan(plan));
+  const changed = JSON.stringify(desired) !== JSON.stringify(before.plans);
+  let redisStatus: "ok" | "failed" = "ok";
+  try {
+    if (changed) {
+      await storeSettings({ db: deps.db, redis: deps.redis }, { ...before, plans: desired });
+    } else {
+      await createProjection({ db: deps.db, redis: deps.redis }).publishSettings();
+    }
+  } catch (error) {
+    if (changed && !(error instanceof ProjectionPublishError)) throw error;
+    redisStatus = "failed";
+  }
+
+  let litellmStatus: "ok" | "degraded" = "ok";
+  let errors = 0;
+  try {
+    // An explicit uid list is always synchronous, so the result really proves
+    // every LiteLLM projection instead of merely scheduling background work.
+    const result = await reapplyAll(deps, await plansRepo.mintUids(deps.db));
+    if (result.mode === "sync") errors = result.errors;
+    if (errors > 0) litellmStatus = "degraded";
+  } catch {
+    litellmStatus = "degraded";
+    errors = Math.max(1, errors);
+  }
+  const current = await getSettings({ db: deps.db });
+  const ok = redisStatus === "ok" && litellmStatus === "ok";
+  const result: CanonicalResyncResult = {
+    ok,
+    status: ok ? "ok" : "degraded",
+    changed,
+    plans: current.plans,
+    projection: { redis: redisStatus, litellm: litellmStatus, errors },
+  };
+  await audit(deps, "plan-resync", {
+    target: "canonical-plans",
+    before,
+    after: { ...current, projection: result.projection },
+    ip: opts.ip,
+  });
+  return result;
+}
+
 // ── settings application (mint.py _apply_settings + _check_members_exist) ──
 
 /** auto_oss_members must be real LiteLLM model names (/model/info). */
@@ -385,6 +458,7 @@ async function checkMembersExist(
 
 interface ApplySettingsResult {
   ok: boolean;
+  accepted: boolean;
   settings: Settings;
   reapplied: ReapplyAllResult | { mode: "skipped" };
 }
@@ -455,8 +529,23 @@ async function applySettings(
     throw new HttpContractError(500, "could not save settings");
   }
   const result = reapply ? await reapplyAll(deps) : { mode: "skipped" as const };
+  if (result.mode === "sync" && result.errors > 0) {
+    await audit(deps, action, {
+      target,
+      before,
+      after: { ...after, projection_error: "LiteLLM projection unresolved" },
+      ip: requestIp(request),
+    });
+    throw new HttpContractError(503, "settings saved but the LiteLLM projection is unresolved");
+  }
   await audit(deps, action, { target, before, after, ip: requestIp(request) });
-  return { ok: true, settings: await getSettings({ db: deps.db }), reapplied: result };
+  const accepted = result.mode === "background";
+  return {
+    ok: !accepted,
+    accepted,
+    settings: await getSettings({ db: deps.db }),
+    reapplied: result,
+  };
 }
 
 // ── routes ───────────────────────────────────────────────────────────────────
@@ -495,6 +584,74 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
     }
   }
 
+  // Signed, read-only gateway projection. It is registered only on this admin
+  // listener and never on publicApp; the HMAC binds method, path, uid and time.
+  adminApp.get("/internal/billing/entitlement", async (request, reply) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const uid = typeof query.uid === "string" ? query.uid.trim() : "";
+    if (uid === "" || uid.length > 200) {
+      throw new HttpContractError(400, "uid is required");
+    }
+    const now = Math.floor((deps.clock?.() ?? new Date()).getTime() / 1000);
+    requireInternalSignature(deps, request, "/internal/billing/entitlement", uid, now);
+    if (deps.billing === undefined) {
+      throw new HttpContractError(503, "billing_unavailable");
+    }
+    const entitlement = await deps.billing.entitlement(uid);
+    return reply.send({ entitlement });
+  });
+
+  // ---- unresolved remote mutation recovery (owner only) ----
+
+  adminApp.get("/admin/billing/remote-operations", async (request) => {
+    auth(request);
+    const query = request.query as Record<string, unknown> | undefined;
+    const uid = typeof query?.uid === "string" && query.uid.trim() !== ""
+      ? query.uid.trim()
+      : undefined;
+    const operations = await billingRemote.listUnresolved(deps.db, uid);
+    return {
+      operations: operations.map((operation) => ({
+        id: operation.id,
+        uid: operation.uid,
+        generation: operation.generation,
+        kind: operation.kind,
+        effect: operation.effect ?? "update",
+        target: operation.target,
+        created_target: operation.createdTarget ?? null,
+        phase: operation.phase ?? "prepared",
+        attempts: operation.attempts ?? 0,
+        updated_at: operation.updatedAt,
+      })),
+    };
+  });
+
+  adminApp.post("/admin/billing/remote-operations/drain", async (request, reply) => {
+    auth(request);
+    const body = requireBodyObject(request);
+    const uid = optStr(body.uid)?.trim() ?? "";
+    const operationId = optStr(body.operation_id)?.trim() ?? "";
+    if (uid === "" || operationId === "") throw new HttpContractError(400, "uid and operation_id required");
+    if (body.confirmation !== "remote-request-drained") {
+      throw new HttpContractError(400, "external remote-request-drained confirmation required");
+    }
+    await withBillingAccountWrite(deps, uid, async () => {
+      const generation = currentBillingProjectionGeneration();
+      if (generation === undefined) throw new StaleBillingAccountWriteError();
+      if (!(await billingRemote.markDrained(deps.db, uid, operationId, generation))) {
+        throw new HttpContractError(409, "remote operation is not pending uncertain work");
+      }
+    });
+    await audit(deps, "billing-remote-drain", {
+      target: { uid, operation_id: operationId },
+      after: { retry_required: true },
+      ip: requestIp(request),
+    });
+    // Retirement is not remote applied-state proof. The latest caller must
+    // retry; only that latest desired operation may be sent after this point.
+    return reply.code(202).send({ drained: true, retry_required: true });
+  });
+
   // ---- settings ----
 
   adminApp.get("/admin/settings", async (request) => {
@@ -523,7 +680,7 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
     const changes = { ...body };
     delete changes.reapply;
     const result = await applySettings(deps, request, changes, reapply, "settings");
-    return reply.send(result);
+    return reply.code(result.accepted ? 202 : 200).send(result);
   });
 
   // ---- plans as data ----
@@ -532,6 +689,12 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
     auth(request);
     const settings = await getSettings({ db: deps.db });
     return { plans: settings.plans };
+  });
+
+  adminApp.post("/admin/plans/resync", async (request, reply) => {
+    auth(request);
+    const result = await resyncCanonicalPlans(deps, { ip: requestIp(request) });
+    return reply.code(result.ok ? 200 : 503).send(result);
   });
 
   /** Add a plan or edit one by id: name, price, enabled, aliases, window, mult, slow, auto-oss. */
@@ -556,7 +719,7 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
       found ? "plan-edit" : "plan-add",
       pid,
     );
-    return reply.send(result);
+    return reply.code(result.accepted ? 202 : 200).send(result);
   });
 
   /** enable/disable = start/stop selling (existing users keep the plan). */
@@ -581,7 +744,7 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
       `plan-${action}`,
       pid,
     );
-    return reply.send(result);
+    return reply.code(result.accepted ? 202 : 200).send(result);
   });
 
   // ---- models ----
@@ -652,74 +815,106 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
       poolsOverride = validatePoolOverride(body.pools as Record<string, unknown>);
     }
 
-    const before = await userState(deps, uid);
-    const projection = createProjection({ db: deps.db, redis: deps.redis });
+    return withBillingAccountWrite(deps, uid, async () => {
+      const generation = currentBillingProjectionGeneration();
+      if (generation === undefined) throw new StaleBillingAccountWriteError();
+      const before = await userState(deps, uid);
+      const projection = createProjection({ db: deps.db, redis: deps.redis });
 
-    // Postgres first (authority), then the db2 projection
-    if (plan !== null) {
-      // M4: an admin tier grant is not a purchase — a stale purchased expiry
-      // would silently re-expire the admin's grant on the next resync.
-      await deps.db.$client`
-        INSERT INTO users (uid, tier, tier_expires_at, mint_provisioned)
-        VALUES (${uid}, ${plan.id}, NULL, true)
-        ON CONFLICT (uid) DO UPDATE
-          SET tier = EXCLUDED.tier, tier_expires_at = NULL, mint_provisioned = true`;
-    }
-    const overrideWrite: { dailyUsd?: string | null; monthlyCapUsd?: string | null; pools?: PoolsOverride | null } = {};
-    if (boolField(body, "clear_daily_usd", false)) {
-      overrideWrite.dailyUsd = null;
-    } else if (dailyUsd !== null) {
-      overrideWrite.dailyUsd = pyNumStr(dailyUsd);
-    }
-    if (boolField(body, "clear_monthly_cap_usd", false)) {
-      overrideWrite.monthlyCapUsd = null;
-    } else if (monthlyCapUsd !== null) {
-      overrideWrite.monthlyCapUsd = pyNumStr(monthlyCapUsd);
-    }
-    if (boolField(body, "clear_pools", false)) {
-      overrideWrite.pools = null;
-    } else if (poolsOverride !== null && Object.keys(poolsOverride).length > 0) {
-      overrideWrite.pools = poolsOverride;
-    }
-    if (Object.keys(overrideWrite).length > 0) {
-      // M2: user_plan_overrides has an FK to users. An override-only update
-      // for an unknown uid is a 404 (Python accepted it, but silently
-      // dropping a typo'd entitlement is worse than an explicit miss).
-      if (plan === null && (await userRow(deps, uid)) === null) {
-        throw new HttpContractError(404, "user not found");
-      }
-      await plansRepo.saveOverride(deps.db, uid, overrideWrite);
-      await plansRepo.markProvisioned(deps.db, uid);
-    }
-    try {
+      // Postgres first (authority), then the db2 projection
       if (plan !== null) {
-        await projection.publishUserTier(uid, storedTier(plan), null);
+        // M4: an admin tier grant is not a purchase — a stale purchased expiry
+        // would silently re-expire the admin's grant on the next resync.
+        if (!(await billingUsers.setTierForRefresh(deps.db, uid, plan.id, null, generation))) {
+          throw new StaleBillingAccountWriteError();
+        }
       }
-      await projection.publishUserState(uid);
-    } catch (err) {
-      // I3: the Postgres write already committed. Log the real cause, audit
-      // the durable change and answer a sanitized 500 — never the driver text.
-      console.log(
-        `[mint] user update projection failed after postgres commit: ${errorName(err)}`,
-      );
-      const durable = await userState(deps, uid);
-      await audit(deps, "set-user", {
-        target: uid,
-        before,
-        after: { ...durable, projection_error: "redis projection failed" },
-        ip: requestIp(request),
-      });
-      throw new HttpContractError(
-        500,
-        "user saved but the redis projection failed; retry or resync",
-      );
-    }
+      const overrideWrite: { dailyUsd?: string | null; monthlyCapUsd?: string | null; pools?: PoolsOverride | null } = {};
+      if (boolField(body, "clear_daily_usd", false)) {
+        overrideWrite.dailyUsd = null;
+      } else if (dailyUsd !== null) {
+        overrideWrite.dailyUsd = pyNumStr(dailyUsd);
+      }
+      if (boolField(body, "clear_monthly_cap_usd", false)) {
+        overrideWrite.monthlyCapUsd = null;
+      } else if (monthlyCapUsd !== null) {
+        overrideWrite.monthlyCapUsd = pyNumStr(monthlyCapUsd);
+      }
+      if (boolField(body, "clear_pools", false)) {
+        overrideWrite.pools = null;
+      } else if (poolsOverride !== null && Object.keys(poolsOverride).length > 0) {
+        overrideWrite.pools = poolsOverride;
+      }
+      if (Object.keys(overrideWrite).length > 0) {
+        // M2: user_plan_overrides has an FK to users. An override-only update
+        // for an unknown uid is a 404 (Python accepted it, but silently
+        // dropping a typo'd entitlement is worse than an explicit miss).
+        if (plan === null && (await userRow(deps, uid)) === null) {
+          throw new HttpContractError(404, "user not found");
+        }
+        if (!(await billingUsers.saveOverrideForRefresh(deps.db, uid, overrideWrite, generation)) ||
+            !(await billingUsers.markProvisionedForRefresh(deps.db, uid, generation))) {
+          throw new StaleBillingAccountWriteError();
+        }
+      }
+      try {
+        if (plan !== null) {
+          await projection.publishUserTier(uid, storedTier(plan), null);
+        }
+        await projection.publishUserState(uid);
+      } catch (err) {
+        // I3: the Postgres write already committed. Log the real cause, audit
+        // the durable change and answer a sanitized 500 — never the driver text.
+        console.log(
+          `[mint] user update projection failed after postgres commit: ${errorName(err)}`,
+        );
+        const durable = await userState(deps, uid);
+        await audit(deps, "set-user", {
+          target: uid,
+          before,
+          after: { ...durable, projection_error: "redis projection failed" },
+          ip: requestIp(request),
+        });
+        throw new HttpContractError(
+          500,
+          "user saved but the redis projection failed; retry or resync",
+        );
+      }
 
-    const res = await reapplyUser(deps, uid);
-    await dropUsageCache(deps, [uid]);
-    const after = await userState(deps, uid);
-    await audit(deps, "set-user", { target: uid, before, after, ip: requestIp(request) });
-    return reply.send({ ok: true, user: after, reapplied: res });
+      let res: ReapplyResult;
+      try {
+        res = await reapplyUser(deps, uid);
+      } catch (error) {
+        const after = await userState(deps, uid);
+        await audit(deps, "set-user", {
+          target: uid,
+          before,
+          after: { ...after, projection_error: "LiteLLM projection unresolved" },
+          ip: requestIp(request),
+        });
+        console.log(`[mint] user update remote projection unresolved: ${errorName(error)}`);
+        throw new HttpContractError(
+          503,
+          "user saved but the LiteLLM projection is unresolved; retry or resync",
+        );
+      }
+      const after = await userState(deps, uid);
+      if (res.errors > 0) {
+        await audit(deps, "set-user", {
+          target: uid,
+          before,
+          after: { ...after, projection_error: "LiteLLM projection unresolved" },
+          ip: requestIp(request),
+        });
+        throw new HttpContractError(
+          503,
+          "user saved but the LiteLLM projection is unresolved; retry or resync",
+        );
+      }
+      await dropUsageCache(deps, [uid]);
+      await audit(deps, "set-user", { target: uid, before, after, ip: requestIp(request) });
+      return reply.send({ ok: true, user: after, reapplied: res });
+    });
   }
 
   adminApp.post("/admin/user/update", adminUserUpdate);
@@ -732,8 +927,12 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
     body: Record<string, unknown>,
     action: string,
     resetMonthFreeDefault: boolean,
-  ): Promise<{ ok: boolean; reset: number; detail: unknown }> {
+  ): Promise<{ ok: boolean; accepted: boolean; reset: number; detail: unknown }> {
     const resetMonthFree = boolField(body, "reset_month_free", resetMonthFreeDefault);
+    const operationId = optStr(body.operation_id)?.trim() ?? "";
+    if (!/^[A-Za-z0-9._:-]{8,128}$/.test(operationId)) {
+      throw new HttpContractError(400, "operation_id is required for recoverable window reset");
+    }
 
     // I1: ALL-users is an EXPLICIT request only. A missing/whitespace uid is
     // a client error, never an implicit global reset. `{all:true}` is the
@@ -764,7 +963,7 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
     let detail: { mode: string; users: number; keys?: number; errors?: number };
     let target: string;
     if (uid !== null) {
-      const res = await resetWindowUser(deps, uid, { resetMonthFree });
+      const res = await resetWindowUser(deps, uid, { resetMonthFree, operationId });
       detail = { mode: "sync", users: 1, keys: res.keys, errors: res.errors };
       target = uid;
     } else {
@@ -772,7 +971,7 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
       const uids = await plansRepo.mintUids(deps.db);
       const run = (): Promise<RunTotal> =>
         runOverUsers(deps, RESET_STATUS_KEY, uids, (u) =>
-          resetWindowUser(deps, u, { resetMonthFree }),
+          resetWindowUser(deps, u, { resetMonthFree, operationId }),
         );
       if (uids.length <= deps.env.reapplySyncMax) {
         detail = { mode: "sync", ...(await run()) };
@@ -791,22 +990,24 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
       after: { reset_month_free: resetMonthFree },
       ip: requestIp(request),
     });
-    return { ok: true, reset: detail.keys ?? 0, detail };
+    if (detail.mode === "sync" && (detail.errors ?? 0) > 0) {
+      throw new HttpContractError(503, "window reset saved but the LiteLLM projection is unresolved");
+    }
+    const accepted = detail.mode === "background";
+    return { ok: !accepted, accepted, reset: detail.keys ?? 0, detail };
   }
 
   adminApp.post("/admin/reset-window", async (request, reply) => {
     auth(request);
-    return reply.send(
-      await doReset(request, requireBodyObject(request), "reset-window", false),
-    );
+    const result = await doReset(request, requireBodyObject(request), "reset-window", false);
+    return reply.code(result.accepted ? 202 : 200).send(result);
   });
 
   /** Legacy name: a window reset that also zeroes the monthly backstop. */
   adminApp.post("/admin/reset-usage", async (request, reply) => {
     auth(request);
-    return reply.send(
-      await doReset(request, requireBodyObject(request), "reset-usage", true),
-    );
+    const result = await doReset(request, requireBodyObject(request), "reset-usage", true);
+    return reply.code(result.accepted ? 202 : 200).send(result);
   });
 
   adminApp.get("/admin/reset-status", async (request) => {
@@ -822,17 +1023,21 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
    * all-users operations. A ban of an unknown uid does insert one (the
    * durable authority needs a row to carry banned_at).
    */
-  async function setBanned(uid: string, banned: boolean, reason: string): Promise<void> {
-    const nowIso = isoUtc(clockNow(deps));
-    if (banned) {
-      await deps.db.$client`
-        INSERT INTO users (uid, banned_at, banned_reason)
-        VALUES (${uid}, ${nowIso}, ${reason})
-        ON CONFLICT (uid) DO UPDATE
-          SET banned_at = EXCLUDED.banned_at, banned_reason = EXCLUDED.banned_reason`;
-    } else {
-      await deps.db.$client`
-        UPDATE users SET banned_at = NULL, banned_reason = NULL WHERE uid = ${uid}`;
+  async function setBanned(
+    uid: string,
+    banned: boolean,
+    reason: string,
+    generation: number,
+  ): Promise<void> {
+    if (!(await billingUsers.setBannedForRefresh(
+      deps.db,
+      uid,
+      banned,
+      reason,
+      isoUtc(clockNow(deps)),
+      generation,
+    ))) {
+      throw new StaleBillingAccountWriteError();
     }
   }
 
@@ -861,20 +1066,32 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
     let before: AdminUserState | null = null;
     let after: AdminUserState | null = null;
     let projectionError: unknown | null = null;
+    let remoteError: unknown | null = null;
     if (rawUid !== null && rawUid.trim() !== "") {
       const uid = rawUid.trim();
-      before = await userState(deps, uid);
-      await setBanned(uid, true, "admin");
-      projectionError = await projectBan(uid, false);
-      // The live side effect still runs even if the Redis projection failed:
-      // an inert ban is worse than a degraded one.
-      await setKeyBlocked(deps, uid, true);
-      after = await userState(deps, uid);
+      await withBillingAccountWrite(deps, uid, async () => {
+        const generation = currentBillingProjectionGeneration();
+        if (generation === undefined) throw new StaleBillingAccountWriteError();
+        before = await userState(deps, uid);
+        await setBanned(uid, true, "admin", generation);
+        projectionError = await projectBan(uid, false);
+        // The live side effect still runs after a Redis failure, but its own
+        // unresolved result is never converted into an ok response.
+        try {
+          await setKeyBlocked(deps, uid, true);
+        } catch (error) {
+          remoteError = error;
+        }
+        after = await userState(deps, uid);
+      });
     }
     if (ip !== null && ip.trim() !== "") {
       await deps.redis.setex(`ban:ip:${ip.trim()}`, BAN_IP_TTL_S, "admin");
     }
     await audit(deps, "ban", { target: { uid: rawUid, ip }, before, after, ip: requestIp(request) });
+    if (remoteError !== null) {
+      throw new HttpContractError(503, "ban saved but the key projection is unresolved; retry or resync");
+    }
     if (projectionError !== null) {
       throw new HttpContractError(
         500,
@@ -892,20 +1109,32 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
     let before: AdminUserState | null = null;
     let after: AdminUserState | null = null;
     let projectionError: unknown | null = null;
+    let remoteError: unknown | null = null;
     if (rawUid !== null && rawUid.trim() !== "") {
       const uid = rawUid.trim();
-      before = await userState(deps, uid);
-      await setBanned(uid, false, "");
-      // clearBan: an explicit admin unban overrides the projection's
-      // Redis-only-ban preservation (I2).
-      projectionError = await projectBan(uid, true);
-      await setKeyBlocked(deps, uid, false);
-      after = await userState(deps, uid);
+      await withBillingAccountWrite(deps, uid, async () => {
+        const generation = currentBillingProjectionGeneration();
+        if (generation === undefined) throw new StaleBillingAccountWriteError();
+        before = await userState(deps, uid);
+        await setBanned(uid, false, "", generation);
+        // clearBan: an explicit admin unban overrides the projection's
+        // Redis-only-ban preservation (I2).
+        projectionError = await projectBan(uid, true);
+        try {
+          await setKeyBlocked(deps, uid, false);
+        } catch (error) {
+          remoteError = error;
+        }
+        after = await userState(deps, uid);
+      });
     }
     if (ip !== null && ip.trim() !== "") {
       await deps.redis.del(`ban:ip:${ip.trim()}`);
     }
     await audit(deps, "unban", { target: { uid: rawUid, ip }, before, after, ip: requestIp(request) });
+    if (remoteError !== null) {
+      throw new HttpContractError(503, "unban saved but the key projection is unresolved; retry or resync");
+    }
     if (projectionError !== null) {
       throw new HttpContractError(
         500,
@@ -1047,8 +1276,9 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
       "set-base-budget",
     );
     const r = result.reapplied as { keys?: number; users?: number };
-    return reply.send({
-      ok: true,
+    return reply.code(result.accepted ? 202 : 200).send({
+      ok: result.ok,
+      accepted: result.accepted,
       base_daily_usd: dailyUsd,
       reapplied: r.keys ?? r.users ?? 0,
       detail: r,

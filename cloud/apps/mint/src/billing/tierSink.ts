@@ -1,19 +1,18 @@
 import { billingUsers, type Db } from "@ovid/db";
 import type { Redis } from "ioredis";
 import { planFor } from "@ovid/shared";
+import {
+  BILLING_REFRESH_GENERATION_KEY,
+  withBillingAccountLock,
+  withBillingAccountWrite,
+  withBillingProjectionGeneration,
+} from "../windows.js";
 
 /**
- * Tier sink — the README's `set_user_tier` path.
- *
- * Postgres users.tier (+ tier_expires_at) is written FIRST (durable authority,
- * Ruling Q4), then the Redis projection (SET … EXAT expiry+600 / DEL both keys
- * on free), then `reapplyUser` so the LiteLLM key budgets follow the tier —
- * exactly the machinery /upgrade uses.
- *
- * The Redis key expiring on its own means a missed RTDN can never leave a
- * paid tier on forever.
+ * Tier sink — Postgres users.tier, the request-time Redis tier, then LiteLLM.
+ * Billing refreshes additionally carry a generation so a superseded writer
+ * cannot expose stale paid state even before a later repair runs.
  */
-
 export const TIER_SKEW_SECONDS = 600;
 
 export interface PublishTier {
@@ -26,7 +25,6 @@ export interface PublishTier {
 
 export interface TierSinkDeps {
   db: Db;
-  /** Kept in the contract so the sink owns the full projection dependency set. */
   redis: Redis;
   projection: PublishTier;
   reapplyUser(uid: string): Promise<unknown>;
@@ -36,28 +34,129 @@ export type TierSink = (
   uid: string,
   tier: string,
   expiresAt: number | null,
+  generation?: number,
 ) => Promise<void>;
 
-/**
- * Normalize to a plan id: an unknown tier is Free by absence, and a legacy
- * spelling (`3x` / `7x` / `15x`) is written back as the id it means, so the
- * stored string is always one the gateway resolves.
- */
+export class StaleTierProjectionError extends Error {
+  constructor() {
+    super("stale billing projection generation");
+    this.name = "StaleTierProjectionError";
+  }
+}
+
+export class TierProjectionError extends Error {
+  constructor(message = "billing projection failed") {
+    super(message);
+    this.name = "TierProjectionError";
+  }
+}
+
+/** Atomically reserve the newest Redis generation; older writers lose immediately. */
+export async function reserveBillingProjectionGeneration(
+  redis: Redis,
+  uid: string,
+  generation: number,
+): Promise<boolean> {
+  const key = BILLING_REFRESH_GENERATION_KEY(uid);
+  if (typeof redis.eval === "function") {
+    const result = await redis.eval(
+      `local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+       if tonumber(ARGV[1]) < current then return 0 end
+       redis.call('SET', KEYS[1], ARGV[1])
+       return 1`,
+      1,
+      key,
+      String(generation),
+    );
+    return Number(result) === 1;
+  }
+  // Lightweight test doubles do not implement Lua; production always takes the atomic path above.
+  const current = Number((await redis.get?.(key)) ?? 0);
+  if (generation < current) return false;
+  await redis.set(key, String(generation));
+  return true;
+}
+
 function normalizeTier(tier: string): string {
   return planFor(tier).id;
 }
 
+async function publishVersionedTier(
+  redis: Redis,
+  uid: string,
+  tier: string,
+  expiresAt: number | null,
+  generation: number,
+): Promise<boolean> {
+  const exat = expiresAt === null ? "" : String(Math.floor(expiresAt) + TIER_SKEW_SECONDS);
+  const result = await redis.eval(
+    `if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+     if ARGV[2] == 'free' then
+       redis.call('DEL', KEYS[2], KEYS[3])
+       return 1
+     end
+     if ARGV[3] ~= '' then
+       redis.call('SET', KEYS[2], ARGV[2], 'EXAT', ARGV[3])
+       redis.call('SET', KEYS[3], ARGV[4], 'EXAT', ARGV[3])
+     else
+       redis.call('SET', KEYS[2], ARGV[2])
+       redis.call('DEL', KEYS[3])
+     end
+     return 1`,
+    3,
+    BILLING_REFRESH_GENERATION_KEY(uid),
+    `user:${uid}:tier`,
+    `user:${uid}:tier_expires_at`,
+    String(generation),
+    tier,
+    exat,
+    expiresAt === null ? "" : String(Math.floor(expiresAt)),
+  );
+  return Number(result) === 1;
+}
+
+function assertReapplied(result: unknown): void {
+  if (typeof result === "object" && result !== null && "errors" in result) {
+    const errors = (result as { errors?: unknown }).errors;
+    if (typeof errors === "number" && errors > 0) {
+      throw new TierProjectionError("LiteLLM projection failed");
+    }
+  }
+}
+
 export function createTierSink(deps: TierSinkDeps): TierSink {
-  void deps.redis; // projection owns Redis; kept for dependency symmetry
-  return async (uid, tier, expiresAt) => {
+  return async (uid, tier, expiresAt, generation) => {
     const normalized = normalizeTier(tier);
     const durableExpiry = normalized === "free" ? null : (expiresAt ?? null);
 
-    // 1. Durable copy first — a Redis failure must never lose the tier.
-    await billingUsers.setTier(deps.db, uid, normalized, durableExpiry);
-    // 2. Request-time projection (self-expiring keys).
-    await deps.projection.publishUserTier(uid, normalized, durableExpiry);
-    // 3. LiteLLM budgets follow the tier (same path as /upgrade).
-    await deps.reapplyUser(uid);
+    if (generation === undefined) {
+      await withBillingAccountWrite(deps, uid, async () => {
+        await billingUsers.setTier(deps.db, uid, normalized, durableExpiry);
+        await deps.projection.publishUserTier(uid, normalized, durableExpiry);
+        assertReapplied(await deps.reapplyUser(uid));
+      });
+      return;
+    }
+
+    await withBillingProjectionGeneration(generation, () =>
+      withBillingAccountLock(deps.db, uid, async () => {
+        if (!(await reserveBillingProjectionGeneration(deps.redis, uid, generation))) {
+          throw new StaleTierProjectionError();
+        }
+        if (!(await billingUsers.setTierForRefresh(
+          deps.db,
+          uid,
+          normalized,
+          durableExpiry,
+          generation,
+        ))) {
+          throw new StaleTierProjectionError();
+        }
+        if (!(await publishVersionedTier(deps.redis, uid, normalized, durableExpiry, generation))) {
+          throw new StaleTierProjectionError();
+        }
+        assertReapplied(await deps.reapplyUser(uid));
+      }),
+    );
   };
 }

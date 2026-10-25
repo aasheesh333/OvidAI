@@ -7,7 +7,14 @@
 import { getAppCheck, type AppCheck } from "firebase-admin/app-check";
 import { getAuth, type Auth, type DecodedIdToken } from "firebase-admin/auth";
 import type { App } from "firebase-admin/app";
-import type { Db } from "@ovid/db";
+import {
+  BillingRemoteUnresolvedError,
+  createBillingRemoteAuthority,
+  createDb,
+  createLiteLlmBillingTransport,
+  type BillingRemoteAuthority,
+  type Db,
+} from "@ovid/db";
 import type { Redis } from "ioredis";
 import {
   AccountError,
@@ -172,10 +179,17 @@ export function createFirebaseAdmin(
 // ---------------------------------------------------------------------------
 
 export interface KeyAdmin {
-  /** POST /key/block {key} — returns the HTTP status (0 = network failure). */
-  keyBlock(key: string): Promise<number>;
-  /** POST /key/delete {keys} — returns the HTTP status (0 = network failure). */
-  keyDelete(keys: string[]): Promise<number>;
+  /** Verified shared-protocol block; unresolved work throws, never returns 0/fake success. */
+  keyBlock(key: string, uid?: string): Promise<number>;
+  /** Per-target verified shared-protocol delete; unresolved work throws. */
+  keyDelete(keys: string[], uid?: string): Promise<number>;
+  /** Hold one account lock/generation across a lifecycle sequence when composed. */
+  withAccount?<T>(
+    uid: string,
+    operation: (generation: number, lockedDb: Db) => Promise<T>,
+  ): Promise<T>;
+  /** Close only a DB handle owned by this adapter (used by composition/tests). */
+  close?(): Promise<void>;
   /**
    * GET /key/list?user_id= — every LiteLLM key owned by the uid (P9 final
    * review H4). Redis `user:{uid}:*keyid` is only a cache: a key whose
@@ -203,26 +217,81 @@ export function createHttpKeyAdmin(
   baseUrl: string,
   masterKey: string,
   fetchImpl: typeof fetch = fetch,
+  protocol: {
+    db?: Db;
+    databaseUrl?: string;
+    authority?: BillingRemoteAuthority;
+  } = {},
 ): KeyAdmin {
-  const post = async (path: string, body: Record<string, unknown>): Promise<number> => {
-    try {
-      const res = await fetchImpl(new URL(path, baseUrl), {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${masterKey}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(KEY_ADMIN_TIMEOUT_MS),
-      });
-      return res.status;
-    } catch {
-      return 0;
+  let db = protocol.db;
+  let ownsDb = false;
+  let authority: BillingRemoteAuthority | null | undefined = protocol.authority;
+  const requireAuthority = (): BillingRemoteAuthority => {
+    if (authority !== undefined && authority !== null) return authority;
+    const databaseUrl = protocol.databaseUrl ?? process.env.DATABASE_URL?.trim() ?? "";
+    if (databaseUrl === "") {
+      authority = null;
+      throw new BillingRemoteUnresolvedError();
     }
+    // Production compositions predate the protocol port and do not inject db.
+    // A single process-lifetime connection preserves those entry points while
+    // routing every mutation through the same PostgreSQL authority as mint.
+    if (db === undefined) {
+      db = createDb(databaseUrl, { max: 1 });
+      ownsDb = true;
+    }
+    authority = createBillingRemoteAuthority({
+      db,
+      transport: createLiteLlmBillingTransport({
+        baseUrl,
+        masterKey,
+        fetchImpl,
+        timeoutMs: KEY_ADMIN_TIMEOUT_MS,
+      }),
+      onUnresolved: (pending) => {
+        console.log(`[account] unresolved ${pending.kind}/${pending.effect ?? "update"} ${pending.phase ?? "prepared"}`);
+      },
+    });
+    return authority;
   };
+
+  async function mutate(
+    uid: string | undefined,
+    targets: string[],
+    effect: "block" | "delete",
+  ): Promise<number> {
+    if (uid === undefined || uid === "") throw new BillingRemoteUnresolvedError();
+    const remote = requireAuthority();
+    await remote.withAccount(uid, async (generation) => {
+      for (const target of [...new Set(targets)]) {
+        if (target === "") throw new BillingRemoteUnresolvedError();
+        await remote.execute({
+          uid,
+          generation,
+          kind: "key",
+          target,
+          effect,
+          ...(effect === "block" ? { blocked: true } : {}),
+        });
+      }
+    });
+    return 200;
+  }
+
   return {
-    keyBlock: (key) => post("/key/block", { key }),
-    keyDelete: (keys) => post("/key/delete", { keys }),
+    keyBlock: (key, uid) => mutate(uid, [key], "block"),
+    keyDelete: (keys, uid) => mutate(uid, keys, "delete"),
+    withAccount: <T>(
+      uid: string,
+      operation: (generation: number, lockedDb: Db) => Promise<T>,
+    ): Promise<T> => requireAuthority().withAccount(uid, operation),
+    async close(): Promise<void> {
+      if (!ownsDb) return;
+      if (db !== undefined) await db.$client.end({ timeout: 5 });
+      db = undefined;
+      ownsDb = false;
+      authority = undefined;
+    },
     async listKeys(userId: string): Promise<string[]> {
       // P9 final re-review NEW-1: the deployed LiteLLM defaults to
       // page=1&size=10, so a single request silently hides every key after
@@ -373,6 +442,15 @@ export function createCloudCleanup(deps: CloudCleanupDeps): CloudCleanup {
   const { db, redisDb2, litellm, r2 } = deps;
   const redisQueue = deps.redisQueue ?? redisDb2;
 
+  async function withKeyAuthority<T>(uid: string, operation: () => Promise<T>): Promise<T> {
+    if (litellm.withAccount !== undefined) {
+      return litellm.withAccount(uid, () => operation());
+    }
+    // Lightweight legacy test doubles have no lock port. Production
+    // createHttpKeyAdmin always supplies it and therefore never takes this branch.
+    return operation();
+  }
+
   async function tableExists(name: string): Promise<boolean> {
     const [row] = await db.$client`SELECT to_regclass(${name}) AS t`;
     return row?.t !== null && row?.t !== undefined;
@@ -440,12 +518,14 @@ export function createCloudCleanup(deps: CloudCleanupDeps): CloudCleanup {
       // Delete via LiteLLM as well to evict its key caches. A non-2xx (or a
       // network failure) is NOT evidence of cleanup — never proceed to auth.
       name: "gateway",
-      run: async (_uid, ctx) => {
+      run: async (uid, ctx) => {
         const tokens = (ctx.tokens as string[] | undefined) ?? [];
         if (tokens.length === 0) return;
-        if (!ok(await litellm.keyDelete(tokens))) {
-          throw new Error("key delete failed");
-        }
+        await withKeyAuthority(uid, async () => {
+          if (!ok(await litellm.keyDelete(tokens, uid))) {
+            throw new Error("key delete failed");
+          }
+        });
       },
     },
     {
@@ -605,14 +685,15 @@ export function createCloudCleanup(deps: CloudCleanupDeps): CloudCleanup {
 
     async revokeKeys(uid, ctx) {
       const tokens = (ctx.tokens as string[] | undefined) ?? [];
-      for (const token of tokens) {
-        // Block rather than delete key rows first: token-linked spend/log
-        // scopes still need those rows. Repeating a block after a crash is
-        // harmless.
-        if (!ok(await litellm.keyBlock(token))) {
-          throw new Error("key block failed");
+      await withKeyAuthority(uid, async () => {
+        for (const token of tokens) {
+          // Block rather than delete key rows first: token-linked spend/log
+          // scopes still need those rows. Verified completion is durable.
+          if (!ok(await litellm.keyBlock(token, uid))) {
+            throw new Error("key block failed");
+          }
         }
-      }
+      });
     },
 
     deletionSteps() {

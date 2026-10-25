@@ -10,6 +10,7 @@ import {
   pickAutoMember,
   poolKeys,
   poolState,
+  reconcileCanonicalPlans,
   seedPlans,
   serializeSettings,
   storedTier,
@@ -91,6 +92,54 @@ describe("seedPlans", () => {
   it("paidWindowHours only moves the paid plans (free stays 24h)", () => {
     const windows = Object.fromEntries(seedPlans(720).map((p) => [p.id, p.window_hours]));
     expect(windows).toEqual({ free: 24, go: 720, plus: 720, pro: 720 });
+  });
+});
+
+describe("reconcileCanonicalPlans", () => {
+  it("rewrites canonical fields from PLANS while preserving enabled and window state", () => {
+    const live = seedPlans(720).map((plan) => ({
+      ...plan,
+      name: "stale",
+      price_usd: 1234,
+      mult: 999,
+      aliases: ["stale-alias"],
+      enabled: plan.id === "plus" ? false : plan.enabled,
+    }));
+    live[0]!.window_hours = 48;
+
+    const reconciled = reconcileCanonicalPlans(live);
+    expect(reconciled).toHaveLength(live.length);
+    for (const plan of reconciled) {
+      const canonical = PLANS[plan.id as PlanTier];
+      const previous = live.find((row) => row.id === plan.id)!;
+      expect(plan).toMatchObject({
+        name: canonical.name,
+        price_usd: canonical.priceUsd,
+        mult: canonical.autoMultiplier,
+        enabled: previous.enabled,
+        window_hours: previous.window_hours,
+      });
+    }
+    expect(reconciled.find((plan) => plan.id === "go")!.aliases).toEqual(["starter", "3x"]);
+    expect(reconciled.find((plan) => plan.id === "plus")!.aliases).toEqual(["7x"]);
+    expect(reconciled.find((plan) => plan.id === "pro")!.aliases).toEqual(["max", "15x"]);
+    expect(reconcileCanonicalPlans(reconciled)).toEqual(reconciled);
+  });
+
+  it("does not insert missing plans or rewrite an owner-created plan", () => {
+    const custom: PlanData = {
+      id: "team",
+      name: "Team",
+      price_usd: 120,
+      enabled: true,
+      aliases: [],
+      window_hours: 72,
+      mult: 40,
+      slow_mode: false,
+      auto_oss: false,
+    };
+    const free = seedPlans()[0]!;
+    expect(reconcileCanonicalPlans([free, custom])).toEqual([free, custom]);
   });
 });
 

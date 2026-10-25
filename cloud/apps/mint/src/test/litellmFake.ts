@@ -20,8 +20,12 @@ export interface FakeKey {
   spend: number;
   max_budget: number | null;
   budget_duration: string | null;
+  rpm_limit: number | null;
+  tpm_limit: number | null;
+  max_parallel_requests: number | null;
   blocked: boolean;
   budget_reset_at: string | null;
+  [field: string]: unknown;
 }
 
 export interface FakeUser {
@@ -58,6 +62,14 @@ export interface FakeCall {
   params: Record<string, string>;
 }
 
+export interface FakeRequestContext {
+  request: IncomingMessage;
+  response: ServerResponse;
+  path: string;
+  body: Record<string, unknown>;
+  params: Record<string, string>;
+}
+
 export class FakeLiteLlm {
   readonly keys = new Map<string, FakeKey>();
   readonly users = new Map<string, FakeUser>();
@@ -67,6 +79,10 @@ export class FakeLiteLlm {
 
   /** When true /user/info answers 500 (the outage path). */
   failUserInfo = false;
+  failKeyInfo = false;
+  /** Test-only socket/acceptance seams. Return true when the response is handled. */
+  beforeHandle?: (context: FakeRequestContext) => boolean | Promise<boolean>;
+  beforeResponse?: (context: FakeRequestContext) => boolean | Promise<boolean>;
 
   baseUrl = "";
   private server: Server | undefined;
@@ -87,7 +103,9 @@ export class FakeLiteLlm {
         } catch {
           // keep {}
         }
-        this.handle(req, res, body);
+        void this.handle(req, res, body).catch(() => {
+          res.destroy();
+        });
       });
     });
     await new Promise<void>((resolve) => this.server!.listen(0, "127.0.0.1", resolve));
@@ -114,13 +132,21 @@ export class FakeLiteLlm {
     this.logs.length = 0;
     this.calls.length = 0;
     this.counter = 0;
+    this.failUserInfo = false;
+    this.failKeyInfo = false;
+    this.beforeHandle = undefined;
+    this.beforeResponse = undefined;
   }
 
-  addKey(token: string, opts: Partial<FakeKey> = {}): string {    this.keys.set(token, {
+  addKey(token: string, opts: Partial<FakeKey> = {}): string {
+    this.keys.set(token, {
       token,
       spend: 0,
       max_budget: null,
       budget_duration: "24h",
+      rpm_limit: null,
+      tpm_limit: null,
+      max_parallel_requests: null,
       blocked: false,
       budget_reset_at: new Date(Date.now() + 10 * 3600_000).toISOString(),
       ...opts,
@@ -184,11 +210,11 @@ export class FakeLiteLlm {
       .map((c) => c.body);
   }
 
-  private handle(
+  private async handle(
     req: IncomingMessage,
     res: ServerResponse,
     body: Record<string, unknown>,
-  ): void {
+  ): Promise<void> {
     if (req.headers.authorization !== `Bearer ${MASTER_KEY}`) {
       json(res, 401, { error: "auth" });
       return;
@@ -198,8 +224,35 @@ export class FakeLiteLlm {
     const params: Record<string, string> = {};
     for (const [k, v] of url.searchParams) params[k] = v;
     this.calls.push({ method: req.method ?? "", path, body, params });
+    const context = { request: req, response: res, path, body, params };
+    if ((await this.beforeHandle?.(context)) === true) return;
 
+    if (path === "/key/list") {
+      const page = Math.max(1, Number(params.page ?? "1") || 1);
+      const size = Math.max(1, Number(params.size ?? "100") || 100);
+      const owned = [...this.keys.values()].filter((info) =>
+        params.user_id === undefined || info.user_id === params.user_id
+      );
+      const keys = owned.slice((page - 1) * size, page * size);
+      json(res, 200, {
+        keys,
+        total_count: owned.length,
+        total_pages: Math.ceil(owned.length / size),
+      });
+      return;
+    }
+    if (path === "/key/delete") {
+      const targets = Array.isArray(body.keys) ? body.keys : [];
+      for (const target of targets) this.keys.delete(String(target));
+      if ((await this.beforeResponse?.(context)) === true) return;
+      json(res, 200, {});
+      return;
+    }
     if (path === "/key/info") {
+      if (this.failKeyInfo) {
+        json(res, 500, { error: "boom" });
+        return;
+      }
       const info = this.keys.get(params.key ?? "");
       if (info === undefined) {
         json(res, 404, { error: "nf" });
@@ -214,17 +267,20 @@ export class FakeLiteLlm {
         json(res, 404, {});
         return;
       }
-      for (const field of ["max_budget", "budget_duration", "spend"] as const) {
-        if (field in body) {
-          (info as unknown as Record<string, unknown>)[field] = body[field];
-        }
+      for (const [field, value] of Object.entries(body)) {
+        if (field !== "key") info[field] = value;
       }
+      if ("budget_duration" in body) {
+        info.budget_reset_at = resetAt(body.budget_duration);
+      }
+      if ((await this.beforeResponse?.(context)) === true) return;
       json(res, 200, info);
       return;
     }
     if (path === "/key/block" || path === "/key/unblock") {
       const info = this.keys.get(String(body.key ?? ""));
       if (info !== undefined) info.blocked = path === "/key/block";
+      if ((await this.beforeResponse?.(context)) === true) return;
       json(res, 200, {});
       return;
     }
@@ -235,6 +291,10 @@ export class FakeLiteLlm {
         max_budget: (body.max_budget as number | null | undefined) ?? null,
         budget_duration: (body.budget_duration as string | null | undefined) ?? null,
       });
+      const info = this.keys.get(token)!;
+      for (const [field, value] of Object.entries(body)) info[field] = value;
+      if ("budget_duration" in body) info.budget_reset_at = resetAt(body.budget_duration);
+      if ((await this.beforeResponse?.(context)) === true) return;
       json(res, 200, { key: `sk-live-${this.counter}`, token });
       return;
     }
@@ -259,7 +319,11 @@ export class FakeLiteLlm {
           (user as unknown as Record<string, unknown>)[field] = body[field];
         }
       }
+      if ("budget_duration" in body) {
+        user.budget_reset_at = resetAt(body.budget_duration);
+      }
       this.users.set(uid, user);
+      if ((await this.beforeResponse?.(context)) === true) return;
       json(res, 200, user);
       return;
     }
@@ -285,6 +349,13 @@ export class FakeLiteLlm {
 function json(res: ServerResponse, status: number, payload: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(payload));
+}
+
+function resetAt(duration: unknown): string | null {
+  const match = /^(\d+)([smhd])$/.exec(String(duration ?? ""));
+  if (match === null) return null;
+  const unit = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[match[2] as "s" | "m" | "h" | "d"];
+  return new Date(Date.now() + Number(match[1]) * unit).toISOString();
 }
 
 /** conftest.py standard_models: six auto members + big-pro + image + mystery. */

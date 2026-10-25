@@ -3,6 +3,7 @@ import { accountDeletions, artifactVault, runUsage, users } from "@ovid/db";
 import { countedTokens, planFor, storageBytes } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
 import { badRequest, queryValue } from "./http.js";
+import { billingEntitlementClientFromEnv } from "./plans.js";
 
 /**
  * Account health — one honest aggregate for the Account Health screen.
@@ -98,18 +99,19 @@ export function registerAccountHealthRoutes(app: FastifyInstance, deps: GatewayD
     // tier, expiry and ban flag live. It never changes tier or ban state.
     const user = await users.ensure(deps.db, uid, email);
 
-    const [storage, today, month, deletion] = await Promise.all([
+    const [storage, today, month, deletion, entitlement] = await Promise.all([
       artifactVault.usage(deps.db, uid),
       runUsage.totals(deps.db, { userId: uid, since: todaySince, until: now }),
       runUsage.totals(deps.db, { userId: uid, since: monthSince, until: now }),
       accountDeletions.get(deps.db, uid),
+      billingEntitlementClientFromEnv().entitlement(uid),
     ]);
 
     // `planFor` is the server's own resolution (unknown → Free, legacy
     // spellings → the tier they mean), so these limits are the ones actually
     // enforced — not a second table that could drift from it.
-    const plan = planFor(user.tier);
-    const quotaBytes = storageBytes(user.tier);
+    const plan = planFor(entitlement?.tier ?? user.tier);
+    const quotaBytes = storageBytes(entitlement?.tier ?? user.tier);
 
     // Token caps: the plan's ceiling against the tokens recorded in the same
     // window. `countedTokens` is input + output only — cache is reported
@@ -120,14 +122,16 @@ export function registerAccountHealthRoutes(app: FastifyInstance, deps: GatewayD
 
     reply.header("Cache-Control", "no-store");
     return {
+      /** Null means mint was unavailable; it is never translated into Free. */
+      entitlement,
       plan: {
-        /** The stored tier, verbatim (a legacy `7x` stays `7x`). */
-        tier: user.tier,
+        /** Canonical mint value when available; otherwise the durable stored spelling. */
+        tier: entitlement?.tier ?? user.tier,
         /** The plan that tier resolves to — the one whose limits apply. */
         id: plan.id,
         name: plan.name,
         /** Paid-tier expiry; null when the plan does not expire. */
-        expiresAt: iso(user.tierExpiresAt),
+        expiresAt: entitlement ? epochIso(entitlement.expiresAt) : iso(user.tierExpiresAt),
         limits: {
           storageBytes: quotaBytes,
           customConnectors: plan.customConnectors,

@@ -250,6 +250,24 @@ export function seedPlans(paidWindowHours: number = 24): PlanData[] {
 }
 
 /**
+ * Idempotent companion to migration 0025: rewrite only canonical rows that
+ * already exist. The migration owns legacy-id renames; this pass must not
+ * insert missing rows or overwrite operational enabled/window state.
+ */
+export function reconcileCanonicalPlans(live: PlanData[]): PlanData[] {
+  const canonical = new Map(seedPlans().map((plan) => [plan.id, plan]));
+  return live.map((plan) => {
+    const desired = canonical.get(plan.id);
+    if (desired === undefined) return plan;
+    return {
+      ...desired,
+      enabled: plan.enabled,
+      window_hours: plan.window_hours,
+    };
+  });
+}
+
+/**
  * Settings from the raw `config:limits` hash + `config:base_daily_usd`;
  * unset values fall back to the seeds. Unknown stored fields are ignored.
  * Invalid stored plans → seedPlans; invalid stored members → [] (plain auto).

@@ -1,6 +1,14 @@
+import { billingUsers } from "@ovid/db";
 import type { MintDeps } from "./app.js";
 import { HttpContractError } from "./app.js";
-import { isoUtc, poolUserKeyIds } from "./windows.js";
+import {
+  currentBillingProjectionGeneration,
+  executeBillingRemoteOperation,
+  isoUtc,
+  poolUserKeyIds,
+  StaleBillingAccountWriteError,
+  withBillingAccountWrite,
+} from "./windows.js";
 
 /**
  * Port of mint.py's anti-abuse block (mint.py:790-864) — client IP
@@ -64,17 +72,18 @@ export async function setKeyBlocked(
   uid: string,
   blocked: boolean,
 ): Promise<void> {
-  for (const keyId of Object.values(await poolUserKeyIds(deps, uid))) {
-    try {
-      if (blocked) {
-        await deps.litellm.keyBlock(keyId);
-      } else {
-        await deps.litellm.keyUnblock(keyId);
-      }
-    } catch (err) {
-      console.log(`[mint] key block error: ${errorName(err)}`);
+  return withBillingAccountWrite(deps, uid, async () => {
+    for (const keyId of Object.values(await poolUserKeyIds(deps, uid))) {
+      await executeBillingRemoteOperation(
+        deps,
+        uid,
+        "key",
+        keyId,
+        { key: keyId },
+        { effect: blocked ? "block" : "unblock" },
+      );
     }
-  }
+  });
 }
 
 /**
@@ -90,22 +99,33 @@ export async function recordStrike(deps: MintDeps, uid: string, ip: string): Pro
     await deps.redis.expire(strikeKey, windowS);
   }
   if (n >= deps.env.abuse.abuseStrikeLimit) {
-    await deps.redis.set(`user:${uid}:banned`, "auto");
-    // DURABLE AUTHORITY (I2): Postgres must carry the ban too, otherwise the
-    // next publishUserState (any admin update/export/audit) reads "not
-    // banned" and deletes the Redis flag, silently unbanning the account.
-    // A DB outage never prevents the Redis ban + key block below.
-    try {
-      await deps.db.$client`
-        INSERT INTO users (uid, banned_at, banned_reason)
-        VALUES (${uid}, ${isoUtc(clockNow(deps))}, 'auto')
-        ON CONFLICT (uid) DO UPDATE
-          SET banned_at = EXCLUDED.banned_at, banned_reason = 'auto'`;
-    } catch (err) {
-      console.log(`[mint] auto-ban persist error: ${errorName(err)}`);
-    }
-    // THE FIX: a banned account must stop spending through its cached keys.
-    await setKeyBlocked(deps, uid, true);
+    await withBillingAccountWrite(deps, uid, async () => {
+      const generation = currentBillingProjectionGeneration();
+      if (generation === undefined) throw new StaleBillingAccountWriteError();
+      // Durable authority, request-time standing, and every key mutation share
+      // one generation/lock. Failures remain visible; none is best-effort.
+      if (!(await billingUsers.setBannedForRefresh(
+        deps.db,
+        uid,
+        true,
+        "auto",
+        isoUtc(clockNow(deps)),
+        generation,
+      ))) {
+        throw new StaleBillingAccountWriteError();
+      }
+      const projected = await deps.redis.eval(
+        `if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+         redis.call('SET', KEYS[2], 'auto')
+         return 1`,
+        2,
+        `user:${uid}:billing_refresh_generation`,
+        `user:${uid}:banned`,
+        String(generation),
+      );
+      if (Number(projected) !== 1) throw new StaleBillingAccountWriteError();
+      await setKeyBlocked(deps, uid, true);
+    });
     await deps.alerter(
       "auto_ban",
       `uid ${uid.slice(0, 6)}… auto-banned after ${n} abuse strikes`,
@@ -200,8 +220,4 @@ export async function checkNewKeyBreaker(deps: MintDeps): Promise<void> {
       "sign-ups are temporarily paused — please try again shortly",
     );
   }
-}
-
-function errorName(err: unknown): string {
-  return err instanceof Error ? err.name : String(err);
 }

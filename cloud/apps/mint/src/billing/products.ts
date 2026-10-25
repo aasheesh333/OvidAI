@@ -1,4 +1,31 @@
 import { createHash } from "node:crypto";
+import type { PlanTier } from "@ovid/shared";
+
+export type BillingPeriod = "monthly" | "yearly";
+export interface BillingProduct {
+  tier: Exclude<PlanTier, "free">;
+  period: BillingPeriod;
+}
+
+/** The only store products mint accepts. Prices remain in the live plan rows. */
+export const BILLING_PRODUCTS = {
+  ovid_plus_monthly: { tier: "go", period: "monthly" },
+  ovid_plus_yearly: { tier: "go", period: "yearly" },
+  ovid_pro_monthly: { tier: "plus", period: "monthly" },
+  ovid_pro_yearly: { tier: "plus", period: "yearly" },
+  ovid_max_monthly: { tier: "pro", period: "monthly" },
+  ovid_max_yearly: { tier: "pro", period: "yearly" },
+} as const satisfies Record<string, BillingProduct>;
+
+/** Exact-period selection: an unavailable yearly package never falls back to monthly. */
+export function selectBillingProduct(
+  productId: string,
+  availableProductIds: Iterable<string>,
+): BillingProduct | null {
+  if (!Object.prototype.hasOwnProperty.call(BILLING_PRODUCTS, productId)) return null;
+  if (!new Set(availableProductIds).has(productId)) return null;
+  return BILLING_PRODUCTS[productId as keyof typeof BILLING_PRODUCTS];
+}
 
 /**
  * Port of server/billing/products.py — the Play product catalogue.
