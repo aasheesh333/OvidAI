@@ -60,8 +60,10 @@ describe("0038 usage billing windows migration metadata", () => {
     expect(snapshot.prevId).toBe(previous.id);
     const columnCount = Object.values(snapshot.tables as Record<string, { columns: Record<string, unknown> }>)
       .reduce((sum, table) => sum + Object.keys(table.columns).length, 0);
+    // 624 = the 620-column lineage baseline plus 0034 subagent_dispatches.temperature
+    // and 0038 billing_class on run_usage, usage_run_admissions, usage_quota_reservations.
     expect({ tables: Object.keys(snapshot.tables).length, columns: columnCount })
-      .toEqual({ tables: 63, columns: 620 });
+      .toEqual({ tables: 63, columns: 624 });
     expect(Object.keys(snapshot.tables).sort())
       .toEqual(expect.arrayContaining(Object.keys(previous.tables).sort()));
     for (const [table, definition] of Object.entries(previous.tables)) {
@@ -72,7 +74,7 @@ describe("0038 usage billing windows migration metadata", () => {
     const expectedRunUsage = structuredClone(previous.tables["public.run_usage"]);
     for (const column of [
       "quota_reservation_id", "quota_call_id", "attempt_id", "requested_model",
-      "provider_model", "cost_usd", "cost_source",
+      "provider_model", "cost_usd", "cost_source", "billing_class",
     ]) {
       delete actualRunUsage.columns[column];
     }
@@ -138,9 +140,11 @@ describe("0038 usage billing windows migration metadata", () => {
       "provider_model",
       "cost_usd",
       "cost_source",
+      "billing_class",
     ]) {
-      expect(runUsage?.columns[column], `run_usage ${column}`).toMatchObject({ notNull: false });
+      expect(runUsage?.columns[column], `run_usage ${column}`).toMatchObject({ notNull: column === "billing_class" });
     }
+    expect(runUsage?.columns.billing_class.default).toBe("'ovid_allowance'");
     expect(runUsage?.columns.cost_usd.type).toMatch(/^numeric\(38,\s*10\)$/);
 
     const legacyImages = snapshot.tables["public.image_jobs"];

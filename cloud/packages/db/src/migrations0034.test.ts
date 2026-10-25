@@ -61,8 +61,9 @@ describe("0034 subagent lifecycle migration metadata", () => {
     expect(snapshot.prevId).toBe(previous.id);
     const columnCount = Object.values(snapshot.tables as Record<string, { columns: Record<string, unknown> }>)
       .reduce((sum, table) => sum + Object.keys(table.columns).length, 0);
+    // 538 = the 537-column lineage baseline plus 0034 subagent_dispatches.temperature.
     expect({ tables: Object.keys(snapshot.tables).length, columns: columnCount })
-      .toEqual({ tables: 56, columns: 537 });
+      .toEqual({ tables: 56, columns: 538 });
     expect(Object.keys(snapshot.tables).sort())
       .toEqual(expect.arrayContaining(Object.keys(previous.tables).sort()));
     for (const [table, definition] of Object.entries(previous.tables)) {

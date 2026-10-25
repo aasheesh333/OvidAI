@@ -49,8 +49,10 @@ describe("0035 attachment declaration presence migration metadata", () => {
     expect(snapshot.prevId).toBe(previous.id);
     const columnCount = Object.values(snapshot.tables as Record<string, { columns: Record<string, unknown> }>)
       .reduce((sum, table) => sum + Object.keys(table.columns).length, 0);
+    // 539 = 0034's 538 columns (including subagent_dispatches.temperature)
+    // plus 0035 attachments.content_type_declared.
     expect({ tables: Object.keys(snapshot.tables).length, columns: columnCount })
-      .toEqual({ tables: 56, columns: 538 });
+      .toEqual({ tables: 56, columns: 539 });
     expect(Object.keys(snapshot.tables).sort())
       .toEqual(expect.arrayContaining(Object.keys(previous.tables).sort()));
     for (const [table, definition] of Object.entries(previous.tables)) {
