@@ -4,7 +4,9 @@ import {
   admitDispatches,
   markRootFinalized,
   settleAttemptAndMaybeWake,
+  snapshotRootFinalization,
 } from "../src/subagentAdmission.js";
+import { fingerprintRootFinalizationReports } from "../src/subagentReportSnapshots.js";
 
 export interface SessionCleanupFixture {
   userId: string;
@@ -79,10 +81,14 @@ export async function seedSessionCleanupFixture(
   const logicalWorkerId = admission.logicalWorkerId!;
   const childSessionId = admission.childSessionId!;
   await settleAttemptAndMaybeWake(db, { attemptId, outcome: "completed" });
+  const snapshot = await snapshotRootFinalization(db, { rootTaskRunId: run.id });
+  if (snapshot === null) throw new Error("0034 fixture root snapshot is missing");
   if ((await markRootFinalized(db, {
     rootTaskRunId: run.id,
-    executionEpoch: 1,
-    activeAttemptIds: [],
+    executionEpoch: snapshot.executionEpoch,
+    activeAttemptIds: snapshot.activeAttemptIds,
+    expectedReportAttemptIds: snapshot.reports.map((report) => report.attemptId),
+    expectedReportFingerprint: fingerprintRootFinalizationReports(snapshot.reports),
   })) !== "committed") {
     throw new Error("0034 fixture root was not finalized");
   }

@@ -1,11 +1,51 @@
+import { createHash } from "node:crypto";
 import { inArray } from "drizzle-orm";
 
 import type { Db } from "./client.js";
 import { subagentAttempts } from "./schema.js";
+import { subagentReportContentFingerprint } from "./subagentReportFingerprints.js";
 import type { SubagentReportRecord } from "./subagentAdmission.js";
+
+export { subagentReportContentFingerprint } from "./subagentReportFingerprints.js";
 
 export type DurableSubagentReportTransaction =
   Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+export type SubagentReportFingerprintRecord = Omit<
+  DurableSubagentReportRecord,
+  "task" | "at"
+>;
+
+/** Canonical per-report content; this exact value is also the outbox input. */
+export function fingerprintSubagentReport(
+  report: SubagentReportFingerprintRecord,
+): string {
+  return subagentReportContentFingerprint({
+    attemptId: report.attemptId,
+    terminal: {
+      logicalWorkerId: report.logicalWorkerId,
+      childSessionId: report.childSessionId,
+      childRunId: report.childRunId,
+      agentType: report.agentType,
+      status: report.status,
+      rootTaskRunId: report.rootTaskRunId,
+      executionEpoch: report.executionEpoch,
+    },
+    summary: report.summary,
+    structuredReport: report.structuredReport ?? null,
+  });
+}
+
+/** Separate aggregate semantics over ordered canonical per-report hashes. */
+export function fingerprintRootFinalizationReports(
+  reports: readonly SubagentReportFingerprintRecord[],
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify([...reports]
+      .sort((a, b) => a.attemptId < b.attemptId ? -1 : a.attemptId > b.attemptId ? 1 : 0)
+      .map(fingerprintSubagentReport)))
+    .digest("hex");
+}
 
 export interface DurableSubagentReportRecord extends SubagentReportRecord {
   rootTaskRunId: string;

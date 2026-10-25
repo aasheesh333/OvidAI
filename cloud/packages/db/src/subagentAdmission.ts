@@ -674,9 +674,42 @@ export async function updateDeferred(
   });
 }
 
+async function currentRootReportFingerprint(
+  tx: Tx,
+  rootTaskRunId: string,
+): Promise<{ attemptIds: string[]; fingerprint: string }> {
+  const reports = await tx
+    .select({
+      attemptId: subagentReports.attemptId,
+      logicalWorkerId: subagentReports.logicalWorkerId,
+      childSessionId: subagentReports.childSessionId,
+      childRunId: subagentReports.childRunId,
+      agentType: subagentReports.agentType,
+      status: subagentReports.status,
+      summary: subagentReports.summary,
+      structuredReport: subagentReports.structuredReport,
+      rootTaskRunId: subagentAttempts.rootTaskRunId,
+      executionEpoch: subagentAttempts.executionEpoch,
+    })
+    .from(subagentReports)
+    .innerJoin(subagentAttempts, eq(subagentReports.attemptId, subagentAttempts.id))
+    .where(eq(subagentAttempts.rootTaskRunId, rootTaskRunId))
+    .orderBy(asc(subagentReports.attemptId));
+  return {
+    attemptIds: reports.map((report) => report.attemptId)
+      .sort((a, b) => a < b ? -1 : a > b ? 1 : 0),
+    fingerprint: fingerprintRootFinalizationReports(reports),
+  };
+}
+
 export async function beforeRootFinalResponse(
   db: Db,
-  input: { rootTaskRunId: string; executionEpoch: number },
+  input: {
+    rootTaskRunId: string;
+    executionEpoch: number;
+    expectedReportAttemptIds?: readonly string[];
+    expectedReportFingerprint?: string;
+  },
 ): Promise<"allow" | "wait"> {
   return db.transaction(async (tx) => {
     const [root] = await tx
@@ -702,7 +735,22 @@ export async function beforeRootFinalResponse(
       input.rootTaskRunId,
       input.executionEpoch,
     );
-    return active === 0 ? "allow" : "wait";
+    if (active !== 0) return "wait";
+    if (input.expectedReportAttemptIds !== undefined ||
+        input.expectedReportFingerprint !== undefined) {
+      const current = await currentRootReportFingerprint(
+        tx,
+        input.rootTaskRunId,
+      );
+      const expectedIds = [...(input.expectedReportAttemptIds ?? [])].sort();
+      if (input.expectedReportFingerprint === undefined ||
+          current.fingerprint !== input.expectedReportFingerprint ||
+          current.attemptIds.length !== expectedIds.length ||
+          current.attemptIds.some((id, index) => id !== expectedIds[index])) {
+        return "wait";
+      }
+    }
+    return "allow";
   });
 }
 
@@ -988,8 +1036,10 @@ export async function markRootFinalized(
     rootTaskRunId: string;
     executionEpoch: number;
     activeAttemptIds: readonly string[];
-    /** Optional for legacy callers; the root-finalization adapter always supplies it. */
+    /** Required for production final synthesis; omitted legacy fences are rejected. */
     expectedReportAttemptIds?: readonly string[];
+    /** Canonical aggregate of every report's versioned content fingerprint. */
+    expectedReportFingerprint?: string;
   },
 ): Promise<"committed" | "fenced"> {
   return db.transaction(async (tx) => {
@@ -1022,13 +1072,11 @@ export async function markRootFinalized(
       // Reports are append-only and unique per attempt. Comparing this set
       // under the root lock closes admit -> settle -> empty-running-set ABA
       // without requiring executionEpoch to change on every admission.
-      const reportRows = await tx
-        .select({ attemptId: subagentReports.attemptId })
-        .from(subagentReports)
-        .innerJoin(subagentAttempts, eq(subagentReports.attemptId, subagentAttempts.id))
-        .where(eq(subagentAttempts.rootTaskRunId, input.rootTaskRunId))
-        .orderBy(asc(subagentReports.attemptId));
-      const currentReportIds = reportRows.map((report) => report.attemptId);
+      const current = await currentRootReportFingerprint(
+        tx,
+        input.rootTaskRunId,
+      );
+      const currentReportIds = current.attemptIds;
       const expectedReportIds = [...input.expectedReportAttemptIds].sort();
       if (
         currentReportIds.length !== expectedReportIds.length ||
@@ -1036,6 +1084,13 @@ export async function markRootFinalized(
       ) {
         return "fenced";
       }
+      if (input.expectedReportFingerprint === undefined ||
+          current.fingerprint !== input.expectedReportFingerprint) {
+        return "fenced";
+      }
+    } else {
+      // ID-only legacy callers cannot authorize a root-final response.
+      return "fenced";
     }
     const [existing] = await tx
       .select()

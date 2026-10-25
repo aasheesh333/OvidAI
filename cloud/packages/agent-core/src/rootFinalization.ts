@@ -9,7 +9,7 @@ export interface RootFinalizationSnapshot {
   activeAttemptIds: readonly string[];
   finalized: boolean;
   /** Every retained report for this root, including earlier fenced epochs; also the ABA fence input. */
-  reports: readonly SubagentReportRecord[];
+  reports: readonly DurableSubagentReportRecord[];
 }
 
 /**
@@ -87,24 +87,34 @@ export function createRootFinalizationGate(
     },
 
     async finalize(rootTaskRunId) {
-      const snapshot = await store.snapshotRoot(rootTaskRunId);
+      let snapshot: RootFinalizationSnapshot | null = null;
+      // A fenced snapshot is never synthesis input. Retry only from a fresh
+      // root/report read; production callers still require durable delivery.
+      for (let attempt = 0; attempt < 16; attempt += 1) {
+        snapshot = await store.snapshotRoot(rootTaskRunId);
+        if (snapshot === null) return { status: "not_found", rootTaskRunId };
+        if (snapshot.finalized) return { status: "fenced", snapshot };
+        if (snapshot.activeAttemptIds.length > 0) return { status: "wait", snapshot };
+
+        const allowed = await store.beforeRootFinalResponse({
+          rootTaskRunId,
+          executionEpoch: snapshot.executionEpoch,
+          expectedReportAttemptIds: snapshot.reports.map((report) => report.attemptId),
+          expectedReportFingerprint: fingerprintRootFinalizationReports(snapshot.reports),
+        });
+        if (allowed === "wait") return { status: "wait", snapshot };
+
+        const committed = await store.markRootFinalized({
+          rootTaskRunId,
+          executionEpoch: snapshot.executionEpoch,
+          activeAttemptIds: snapshot.activeAttemptIds,
+          expectedReportAttemptIds: snapshot.reports.map((report) => report.attemptId),
+          expectedReportFingerprint: fingerprintRootFinalizationReports(snapshot.reports),
+        });
+        if (committed === "committed") return { status: "committed", snapshot };
+      }
       if (snapshot === null) return { status: "not_found", rootTaskRunId };
-      if (snapshot.finalized) return { status: "fenced", snapshot };
-      if (snapshot.activeAttemptIds.length > 0) return { status: "wait", snapshot };
-
-      const allowed = await store.beforeRootFinalResponse({
-        rootTaskRunId,
-        executionEpoch: snapshot.executionEpoch,
-      });
-      if (allowed === "wait") return { status: "wait", snapshot };
-
-      const committed = await store.markRootFinalized({
-        rootTaskRunId,
-        executionEpoch: snapshot.executionEpoch,
-        activeAttemptIds: snapshot.activeAttemptIds,
-        expectedReportAttemptIds: snapshot.reports.map((report) => report.attemptId),
-      });
-      return { status: committed === "committed" ? "committed" : "fenced", snapshot };
+      return { status: "fenced", snapshot };
     },
   };
 }

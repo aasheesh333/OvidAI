@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { StructuredSubagentReport } from "@ovid/shared";
 import { describe, expect, it } from "vitest";
 
@@ -6,6 +7,11 @@ import {
   subagentReportContentFingerprint,
   type SubagentReportFingerprintInput,
 } from "./subagentReportFingerprints.js";
+import {
+  fingerprintRootFinalizationReports,
+  fingerprintSubagentReport,
+  type DurableSubagentReportRecord,
+} from "./subagentReportSnapshots.js";
 
 function structured(): StructuredSubagentReport {
   return {
@@ -100,6 +106,48 @@ describe("subagent report content fingerprints (UNEXECUTED under pause)", () => 
       .toContain('"files_modified":[],"artifacts_created":[]');
     expect(subagentReportContentFingerprint(unknown))
       .not.toBe(subagentReportContentFingerprint(empty));
+  });
+
+  it("uses the reviewed bare-hex aggregate over code-unit-ordered full per-report values", () => {
+    const base = input();
+    const reports: DurableSubagentReportRecord[] = [
+      {
+        logicalWorkerId: base.terminal.logicalWorkerId,
+        attemptId: "attempt-2",
+        childSessionId: base.terminal.childSessionId,
+        childRunId: base.terminal.childRunId,
+        agentType: base.terminal.agentType,
+        status: "failed",
+        summary: base.summary,
+        task: "full task",
+        at: 1,
+        rootTaskRunId: base.terminal.rootTaskRunId,
+        executionEpoch: 1,
+        structuredReport: structured(),
+      },
+      {
+        logicalWorkerId: base.terminal.logicalWorkerId,
+        attemptId: "attempt-1",
+        childSessionId: base.terminal.childSessionId,
+        childRunId: base.terminal.childRunId,
+        agentType: base.terminal.agentType,
+        status: "failed",
+        summary: base.summary,
+        task: "full task",
+        at: 2,
+        rootTaskRunId: base.terminal.rootTaskRunId,
+        executionEpoch: 2,
+        structuredReport: null,
+      },
+    ];
+    const ordered = [...reports].sort((a, b) =>
+      a.attemptId < b.attemptId ? -1 : a.attemptId > b.attemptId ? 1 : 0
+    );
+    const expected = createHash("sha256")
+      .update(JSON.stringify(ordered.map(fingerprintSubagentReport)), "utf8")
+      .digest("hex");
+    expect(fingerprintRootFinalizationReports(reports)).toBe(expected);
+    expect(fingerprintSubagentReport(reports[0]!)).toMatch(/^sha256:/);
   });
 
   it("rejects non-six-key or canonically inconsistent structured values", () => {

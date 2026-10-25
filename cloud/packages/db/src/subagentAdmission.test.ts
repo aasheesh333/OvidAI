@@ -3,6 +3,7 @@ import type postgres from "postgres";
 import { createDb, migrate, type Db } from "./client.js";
 import { createMigrationScratch, type MigrationScratch } from "./migrationTestKit.js";
 import { messages, newId, runs, sessions, users } from "./repos.js";
+import { fingerprintRootFinalizationReports } from "./subagentReportSnapshots.js";
 import {
   admitDispatches,
   beforeRootFinalResponse,
@@ -684,4 +685,275 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("durable subagent admission", () 
     expect((await scratch.client`SELECT count(*)::int AS count FROM subagent_attempts WHERE logical_worker_id = ${attempt.logical_worker_id}`)[0])
       .toEqual({ count: 1 });
   }, 180_000);
-});
+
+  it.each([
+    { field: "summary" as const },
+    { field: "structuredReport" as const },
+  ])("fences $field enrichment at both root CAS boundaries and retries fresh content", async ({ field }) => {
+    const fixture = await createFixture(`root_report_${field}_fence`);
+    cleanups.push(fixture.close);
+    const { db, scratch, sessionId, userId } = fixture;
+    const root = await createUserRoot(db, sessionId, "root report fingerprint root");
+    const [admitted] = await admitDispatches(db, requestsFor({
+      sessionId, userId, rootTaskRunId: root.rootTaskRunId,
+      batchId: newId(), count: 1, provenance: "server",
+    }));
+    expect(admitted).toMatchObject({ admission: "admitted" });
+    await runs.finish(db, admitted!.childRunId!, "completed");
+    await settleAttemptAndMaybeWake(db, {
+      attemptId: admitted!.attemptId!, outcome: "completed",
+    });
+    const stale = await snapshotRootFinalization(db, { rootTaskRunId: root.rootTaskRunId });
+    const expectedIds = stale!.reports.map((report) => report.attemptId);
+    const staleFingerprint = fingerprintRootFinalizationReports(stale!.reports);
+    if (field === "summary") {
+      await scratch.client`
+        UPDATE subagent_reports SET summary = 'enriched summary'
+         WHERE attempt_id = ${admitted!.attemptId!}`;
+    } else {
+      await scratch.client`
+        UPDATE subagent_reports SET structured_report = ${JSON.stringify({
+          subagent_id: admitted!.childSessionId,
+          status: "completed",
+          files_modified: ["src/enriched.ts"],
+          artifacts_created: [],
+          key_findings: "enriched structured finding",
+          error_if_any: null,
+        })}::jsonb
+         WHERE attempt_id = ${admitted!.attemptId!}`;
+    }
+    // Attempt ID/terminal identity did not change; both pre-response and final
+    // CAS must nevertheless reject the stale report content snapshot.
+    expect(await beforeRootFinalResponse(db, {
+      rootTaskRunId: root.rootTaskRunId,
+      executionEpoch: 1,
+      expectedReportAttemptIds: expectedIds,
+      expectedReportFingerprint: staleFingerprint,
+    })).toBe("wait");
+    expect(await markRootFinalized(db, {
+      rootTaskRunId: root.rootTaskRunId,
+      executionEpoch: 1,
+      activeAttemptIds: [],
+      expectedReportAttemptIds: expectedIds,
+      expectedReportFingerprint: staleFingerprint,
+    })).toBe("fenced");
+
+    const fresh = await snapshotRootFinalization(db, { rootTaskRunId: root.rootTaskRunId });
+    expect(fresh!.reports).toHaveLength(1);
+    expect(field === "summary"
+      ? fresh!.reports[0]!.summary
+      : fresh!.reports[0]!.structuredReport?.key_findings)
+      .toBe(field === "summary" ? "enriched summary" : "enriched structured finding");
+    const freshFingerprint = fingerprintRootFinalizationReports(fresh!.reports);
+    expect(freshFingerprint).not.toBe(staleFingerprint);
+    expect(await beforeRootFinalResponse(db, {
+      rootTaskRunId: root.rootTaskRunId,
+      executionEpoch: 1,
+      expectedReportAttemptIds: expectedIds,
+      expectedReportFingerprint: freshFingerprint,
+    })).toBe("allow");
+    expect(await markRootFinalized(db, {
+      rootTaskRunId: root.rootTaskRunId,
+      executionEpoch: 1,
+      activeAttemptIds: [],
+      expectedReportAttemptIds: expectedIds,
+      expectedReportFingerprint: freshFingerprint,
+    })).toBe("committed");
+  }, 180_000);
+
+  it.each([
+    { mutationEpoch: 1 },
+    { mutationEpoch: 2 },
+  ])("uses every retained report across real epochs and fences mutation in epoch $mutationEpoch", async ({ mutationEpoch }) => {
+    const fixture = await createFixture(`multi_epoch_report_fingerprint_${mutationEpoch}`);
+    cleanups.push(fixture.close);
+    const { db, scratch, sessionId, userId } = fixture;
+    const root = await createUserRoot(db, sessionId, "real multi-epoch root");
+    const [first] = await admitDispatches(db, requestsFor({
+      sessionId, userId, rootTaskRunId: root.rootTaskRunId,
+      batchId: newId(), count: 1, provenance: "server",
+    }));
+    expect(first).toMatchObject({ admission: "admitted" });
+    await runs.finish(db, first!.childRunId!, "failed", "epoch one continuable failure");
+    await settleAttemptAndMaybeWake(db, {
+      attemptId: first!.attemptId!, outcome: "failed",
+    });
+    const controls = new SubagentControls({
+      db,
+      activate: async () => {},
+      cancel: async () => {},
+      cleanup: {
+        recordOutcome() {},
+        async releaseAttempt(attemptId) {
+          await settleAttemptAndMaybeWake(db, { attemptId, outcome: "failed" });
+          return { released: true };
+        },
+      },
+    });
+    const parent: ToolContext = {
+      sessionId,
+      runId: root.rootTaskRunId,
+      userId,
+      mode: "auto",
+      planMode: false,
+      isSubagent: false,
+      depth: 0,
+      unattended: false,
+      callKey: `${root.rootTaskRunId}:multi-epoch`,
+      signal: new AbortController().signal,
+    };
+    const continued = await controls.control(parent, {
+      logicalWorkerId: first!.logicalWorkerId!,
+      action: "continue",
+      instruction: "start epoch two after the first root report is quiescent",
+      expectedAttemptId: first!.attemptId!,
+    });
+    expect(continued.status).toBe("running");
+    expect(continued.attemptId).not.toBe(first!.attemptId);
+    expect((await scratch.client`
+      SELECT a.status AS attempt_status, r.status AS run_status, r.last_error
+        FROM subagent_attempts a JOIN runs r ON r.id = a.child_run_id
+       WHERE a.id = ${first!.attemptId!}`)[0]).toMatchObject({
+      attempt_status: "failed",
+      run_status: "failed",
+      last_error: "epoch one continuable failure",
+    });
+    const secondAttemptId = continued.attemptId!;
+    const second = await scratch.client`
+      SELECT a.execution_epoch, a.child_run_id, a.logical_worker_id,
+             c.metadata->>'currentTurnRunId' AS current_turn_run_id
+        FROM subagent_attempts a
+        JOIN subagent_control_audit c ON c.source_attempt_id = a.id
+       WHERE a.id = ${secondAttemptId}`;
+    expect(second[0]).toMatchObject({
+      execution_epoch: 2,
+      logical_worker_id: first!.logicalWorkerId,
+    });
+    expect(second[0]!.current_turn_run_id).not.toBe(first!.childRunId);
+    await runs.finish(db, String(second[0]!.current_turn_run_id), "failed", "epoch two failure");
+    await settleAttemptAndMaybeWake(db, {
+      attemptId: secondAttemptId, outcome: "failed",
+    });
+
+    const snapshot = await snapshotRootFinalization(db, { rootTaskRunId: root.rootTaskRunId });
+    expect(snapshot!.executionEpoch).toBe(2);
+    expect(snapshot!.reports.map((report) => report.executionEpoch)).toEqual([1, 2]);
+    expect(snapshot!.activeAttemptIds).toEqual([]);
+    const ids = snapshot!.reports.map((report) => report.attemptId).sort();
+    expect(ids).toEqual([first!.attemptId, secondAttemptId].sort());
+    const fingerprint = fingerprintRootFinalizationReports(snapshot!.reports);
+    const fence = {
+      rootTaskRunId: root.rootTaskRunId,
+      executionEpoch: 2,
+      activeAttemptIds: [],
+      expectedReportAttemptIds: ids,
+      expectedReportFingerprint: fingerprint,
+    };
+    expect(await beforeRootFinalResponse(db, fence)).toBe("allow");
+    expect(await markRootFinalized(db, {
+      rootTaskRunId: root.rootTaskRunId,
+      executionEpoch: 2,
+      activeAttemptIds: [],
+      expectedReportAttemptIds: ids,
+    })).toBe("fenced");
+
+    const attemptId = mutationEpoch === 1 ? first!.attemptId! : secondAttemptId;
+    await scratch.client`
+      UPDATE subagent_reports SET summary = summary || '-mutated'
+       WHERE attempt_id = ${attemptId}`;
+    expect(await beforeRootFinalResponse(db, fence)).toBe("wait");
+    expect(await markRootFinalized(db, fence)).toBe("fenced");
+    const fresh = await snapshotRootFinalization(db, {
+      rootTaskRunId: root.rootTaskRunId,
+    });
+    expect(fresh!.reports.map((report) => report.executionEpoch)).toEqual([1, 2]);
+    const freshFence = {
+      ...fence,
+      expectedReportFingerprint: fingerprintRootFinalizationReports(fresh!.reports),
+    };
+    expect(await beforeRootFinalResponse(db, freshFence)).toBe("allow");
+    // The only successful finalization commit occurs once, after stale fencing
+    // and fresh-CAS checks, so this assertion remains reachable.
+    expect(await markRootFinalized(db, freshFence)).toBe("committed");
+  }, 180_000);
+
+  it("preserves input positions when separate batches repeat an index", async () => {
+    const fixture = await createFixture("admission_order");
+    cleanups.push(fixture.close);
+    const { db, scratch, sessionId, userId } = fixture;
+    const root = await createUserRoot(db, sessionId, "Two batches");
+    const first = requestsFor({
+      sessionId, userId, rootTaskRunId: root.rootTaskRunId, batchId: newId(),
+      count: 1, provenance: "web", promptPrefix: "first",
+    })[0]!;
+    const second = requestsFor({
+      sessionId, userId, rootTaskRunId: root.rootTaskRunId, batchId: newId(),
+      count: 1, provenance: "android", promptPrefix: "second",
+    })[0]!;
+    expect(first.index).toBe(second.index);
+    const outcomes = await admitDispatches(db, [first, second]);
+    expect(outcomes.map((outcome) => outcome.index)).toEqual([0, 0]);
+    expect(outcomes.map((outcome) => outcome.admission)).toEqual(["admitted", "admitted"]);
+    expect(outcomes[0]?.attemptId).not.toBe(outcomes[1]?.attemptId);
+    expect(outcomes[0]?.childRunId).not.toBe(outcomes[1]?.childRunId);
+    const stored = await scratch.client`
+      SELECT d.id, a.id AS attempt_id FROM subagent_dispatches d
+      JOIN subagent_logical_workers w ON w.request_id = d.id
+      JOIN subagent_attempts a ON a.logical_worker_id = w.id
+      WHERE d.id IN (${first.requestId}, ${second.requestId}) ORDER BY d.created_at, d.id`;
+    expect(stored).toHaveLength(2);
+    expect(outcomes.map((outcome) => outcome.attemptId).sort()).toEqual(
+      stored.map((row) => row.attempt_id).sort(),
+    );
+  }, 180_000);
+
+  it("allows a zero-admitted root to finalize without a worker wake and enforces one active attempt per worker in SQL", async () => {
+    const fixture = await createFixture("admission_zero");
+    cleanups.push(fixture.close);
+    const { db, scratch, sessionId, userId } = fixture;
+    const firstRoot = await createUserRoot(db, sessionId, "Fill capacity");
+    const admitted = await admitDispatches(db, requestsFor({
+      sessionId, userId, rootTaskRunId: firstRoot.rootTaskRunId, batchId: newId(),
+      count: 50, provenance: "web",
+    }));
+    const zeroRoot = await createUserRoot(db, sessionId, "No slots root");
+    const zeroBatchId = newId();
+    const zero = await admitDispatches(db, requestsFor({
+      sessionId, userId, rootTaskRunId: zeroRoot.rootTaskRunId, batchId: zeroBatchId,
+      count: 2, provenance: "android", promptPrefix: "zero",
+    }));
+    expect(zero.map((outcome) => outcome.admission)).toEqual([
+      "awaiting_next_user_task", "awaiting_next_user_task",
+    ]);
+    expect(zero.every((outcome) => outcome.childRunId === undefined)).toBe(true);
+    expect((await scratch.client`SELECT request_count, admitted_count, deferred_count FROM subagent_batches WHERE id = ${zeroBatchId}`)[0])
+      .toEqual({ request_count: 2, admitted_count: 0, deferred_count: 2 });
+    expect(await beforeRootFinalResponse(db, {
+      rootTaskRunId: zeroRoot.rootTaskRunId, executionEpoch: 1,
+    })).toBe("allow");
+    expect(await markRootFinalized(db, {
+      rootTaskRunId: zeroRoot.rootTaskRunId,
+      executionEpoch: 1,
+      activeAttemptIds: [],
+      expectedReportAttemptIds: [],
+      expectedReportFingerprint: fingerprintRootFinalizationReports([]),
+    })).toBe("committed");
+    expect((await scratch.client`SELECT wake_requested_at, finalized_at FROM subagent_root_finalizations WHERE root_task_run_id = ${zeroRoot.rootTaskRunId}`)[0]?.wake_requested_at)
+      .toBeNull();
+
+    const source = admitted[0]!;
+    const child = await sessions.create(db, userId, "duplicate-attempt-child");
+    const prompt = await messages.append(db, { sessionId: child.id, role: "user", content: "duplicate" });
+    const duplicateRun = await runs.create(db, { sessionId: child.id, promptMessageId: prompt.id });
+    const attempt = (await scratch.client`
+      SELECT logical_worker_id, root_task_run_id, admitted_at FROM subagent_attempts WHERE id = ${source.attemptId!}`)[0]!;
+    await expect(scratch.client`
+      INSERT INTO subagent_attempts
+        (id, logical_worker_id, session_id, root_task_run_id, execution_epoch, attempt_number,
+         child_session_id, child_run_id, prompt_message_id, status, admitted_at, started_at)
+      VALUES (${newId()}, ${attempt.logical_worker_id}, ${sessionId}, ${attempt.root_task_run_id}, 1, 2,
+        ${child.id}, ${duplicateRun.id}, ${prompt.id}, 'running', ${attempt.admitted_at}, now())`)
+      .rejects.toMatchObject({ code: "23505" });
+    expect((await scratch.client`SELECT count(*)::int AS count FROM subagent_attempts WHERE logical_worker_id = ${attempt.logical_worker_id}`)[0])
+      .toEqual({ count: 1 });
+  }, 180_000);
