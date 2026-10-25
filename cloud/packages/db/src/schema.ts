@@ -16,6 +16,7 @@ import {
   text,
   timestamp,
   uniqueIndex,
+  uuid,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import type {
@@ -28,6 +29,11 @@ import type {
   UiManifest,
   WorkspaceState,
 } from "@ovid/shared";
+import type {
+  StudioPreviewKind,
+  StudioPreviewScript,
+  StudioPreviewStatus,
+} from "./studioPreviewStore.js";
 
 // All timestamptz columns use precision 3 (milliseconds): JS Dates are ms-precision,
 // so stored values round-trip losslessly — which the keyset cursor in sessions.list
@@ -2153,3 +2159,61 @@ export type CollabMemberRow = typeof collabMembers.$inferSelect;
 export type CollabInviteRow = typeof collabInvites.$inferSelect;
 export type CollabTurnRow = typeof collabTurns.$inferSelect;
 export type CollabSenderLeaseRow = typeof collabSenderLeases.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// 0041 Studio preview process registration. Launch identity/definition are
+// immutable through studioPreviewPostgres; no argv, URL, grant, cookie, ticket,
+// credential or other secret material is stored here. Both parent FKs are
+// deliberately NO ACTION: session/account deletion must first stop previews and
+// then explicitly remove terminal evidence, never cascade away live recovery.
+// ---------------------------------------------------------------------------
+
+export const studioPreviews = pgTable(
+  "studio_previews",
+  {
+    id: uuid("id").primaryKey(),
+    // Match the canonical sessions.id char(36) parent exactly; a native UUID
+    // here could not form a PostgreSQL FK to that legacy-compatible column.
+    sessionId: char("session_id", { length: 36 })
+      .notNull()
+      .references(() => sessions.id, { onDelete: "no action" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.uid, { onDelete: "no action" }),
+    generation: bigint("generation", { mode: "number" }).notNull().default(1),
+    kind: text("kind").notNull().$type<StudioPreviewKind>(),
+    workspacePath: text("workspace_path").notNull(),
+    projectDir: text("project_dir"),
+    startScript: text("start_script").$type<StudioPreviewScript>(),
+    processId: integer("process_id"),
+    processGroupId: text("process_group_id"),
+    workerEpoch: text("worker_epoch"),
+    bindHost: text("bind_host"),
+    port: integer("port"),
+    status: text("status").notNull().$type<StudioPreviewStatus>(),
+    createdAt: timestamptz("created_at").notNull(),
+    lastAccessAt: timestamptz("last_access_at"),
+    expiresAt: timestamptz("expires_at").notNull(),
+    endedAt: timestamptz("ended_at"),
+    exitCode: integer("exit_code"),
+    failureCode: text("failure_code"),
+    logBytes: bigint("log_bytes", { mode: "number" }),
+  },
+  (t) => [
+    uniqueIndex("studio_previews_id_generation_uq").on(t.id, t.generation),
+    index("studio_previews_user_status_idx").on(t.userId, t.status, t.kind),
+    index("studio_previews_session_status_idx").on(t.sessionId, t.status),
+    index("studio_previews_expiry_sweep_idx")
+      .on(t.expiresAt, t.id)
+      .where(sql`${t.status} IN ('starting','running','stopping')`),
+    check("studio_previews_kind_check", sql`${t.kind} IN ('static','dev_server')`),
+    check("studio_previews_script_check", sql`${t.startScript} IS NULL OR ${t.startScript} IN ('dev','start','preview')`),
+    check("studio_previews_status_check", sql`${t.status} IN ('starting','running','stopping','stopped','failed','expired')`),
+    check("studio_previews_generation_check", sql`${t.generation} >= 1`),
+    check("studio_previews_port_check", sql`${t.port} IS NULL OR ${t.port} BETWEEN 20000 AND 29999`),
+    check("studio_previews_log_bytes_check", sql`${t.logBytes} IS NULL OR ${t.logBytes} >= 0`),
+    check("studio_previews_launch_definition_check", sql`(${t.kind} = 'dev_server' AND ${t.projectDir} IS NOT NULL AND ${t.startScript} IS NOT NULL) OR (${t.kind} = 'static' AND ${t.projectDir} IS NULL AND ${t.startScript} IS NULL)`),
+  ],
+);
+
+export type StudioPreviewRow = typeof studioPreviews.$inferSelect;
