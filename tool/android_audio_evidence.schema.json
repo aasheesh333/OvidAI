@@ -1,0 +1,636 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ovidsi.com/schemas/android-audio-acceptance-v1.json",
+  "title": "Ovid Android on-device audio acceptance (sanitized evidence)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "qualification", "evidence_origin", "state", "passed",
+    "device", "opt_in", "voice_flags", "privacy", "errors", "blockers",
+    "artifacts", "limitations"
+  ],
+  "properties": {
+    "schema": {"const": "ovid.android.audio.acceptance/v1"},
+    "qualification": {
+      "const": "actual signed-release audio-capable emulator evidence only; no physical-device or physical-speaker qualification"
+    },
+    "evidence_origin": {
+      "enum": ["none", "real_adb_ui_and_host_audio"]
+    },
+    "state": {"enum": ["blocked", "failed", "passed"]},
+    "passed": {"type": "boolean"},
+    "execution": {"$ref": "#/$defs/execution"},
+    "artifact": {"$ref": "#/$defs/artifact"},
+    "device": {"$ref": "#/$defs/device"},
+    "opt_in": {"$ref": "#/$defs/optIn"},
+    "voice_flags": {"$ref": "#/$defs/voiceFlags"},
+    "privacy": {"$ref": "#/$defs/privacy"},
+    "stimuli": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {"$ref": "#/$defs/stimulus"}
+    },
+    "stt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cases"],
+      "properties": {
+        "cases": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "items": {"$ref": "#/$defs/sttCase"}
+        }
+      }
+    },
+    "tts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cases"],
+      "properties": {
+        "cases": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "items": {"$ref": "#/$defs/ttsCase"}
+        }
+      }
+    },
+    "lifecycle": {"$ref": "#/$defs/lifecycle"},
+    "network": {"$ref": "#/$defs/network"},
+    "storage": {"$ref": "#/$defs/storage"},
+    "errors": {"$ref": "#/$defs/codes"},
+    "blockers": {"$ref": "#/$defs/codes"},
+    "artifacts": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "artifact-inspection.sanitized.json",
+          "logcat.redacted.txt",
+          "ui-latest.redacted.xml"
+        ]
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "maxItems": 2,
+      "items": {
+        "enum": [
+          "host output-monitor evidence is not a physical-speaker claim",
+          "server storage scope is the authenticated audit account and acceptance window"
+        ]
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "state": {"const": "passed"},
+          "passed": {"const": true}
+        },
+        "required": ["state", "passed"]
+      },
+      "then": {
+        "required": [
+          "execution", "artifact", "stimuli", "stt", "tts", "lifecycle",
+          "network", "storage"
+        ],
+        "properties": {
+          "evidence_origin": {"const": "real_adb_ui_and_host_audio"},
+          "errors": {"maxItems": 0},
+          "blockers": {"maxItems": 0},
+          "artifacts": {"minItems": 3, "maxItems": 3},
+          "opt_in": {
+            "properties": {
+              "audio_emulator": {"const": true},
+              "authorized_account": {"const": true},
+              "synthetic_stimuli": {"const": true},
+              "authorized_server_audit": {"const": true},
+              "exclusive_emulator_output": {"const": true}
+            }
+          },
+          "execution": {"required": ["finished_ms"]},
+          "artifact": {
+            "required": ["installed_sha256"],
+            "properties": {
+              "passed": {"const": true},
+              "zip_alignment_passed": {"const": true}
+            }
+          },
+          "device": {
+            "required": [
+              "emulator", "explicit_serial", "serial_sha256", "api", "abis",
+              "real_ui_sign_in", "audio_preflight"
+            ],
+            "properties": {
+              "emulator": {"const": true},
+              "explicit_serial": {"const": true},
+              "api": {"minimum": 33},
+              "real_ui_sign_in": {"const": true}
+            }
+          },
+          "network": {
+            "properties": {
+              "audit_authenticated": {"const": true},
+              "audit_fresh": {"const": true},
+              "recognized_transcript_post_observed": {"const": true}
+            }
+          },
+          "storage": {
+            "properties": {
+              "server_audio_objects": {"const": 0},
+              "server_audio_records": {"const": 0},
+              "server_audio_bytes": {"const": 0},
+              "scan_complete": {"const": true}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"passed": {"const": true}},
+        "required": ["passed"]
+      },
+      "then": {"properties": {"state": {"const": "passed"}}},
+      "else": {"properties": {"passed": {"const": false}}}
+    },
+    {
+      "if": {
+        "properties": {"state": {"const": "passed"}},
+        "required": ["state"]
+      },
+      "then": {"properties": {"passed": {"const": true}}}
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "safeCode": {
+      "type": "string",
+      "pattern": "^[a-z0-9_.-]{1,96}$"
+    },
+    "codes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/safeCode"}
+    },
+    "languageId": {
+      "enum": ["en", "hi", "hinglish", "pa", "ta"]
+    },
+    "locale": {
+      "enum": ["en-IN", "hi-IN", "pa-IN", "ta-IN"]
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_nonce_sha256", "started_ms"],
+      "properties": {
+        "run_nonce_sha256": {"$ref": "#/$defs/sha256"},
+        "started_ms": {"type": "integer", "minimum": 0},
+        "finished_ms": {"type": "integer", "minimum": 0}
+      }
+    },
+    "optIn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "audio_emulator", "authorized_account", "synthetic_stimuli",
+        "authorized_server_audit", "exclusive_emulator_output"
+      ],
+      "properties": {
+        "audio_emulator": {"type": "boolean"},
+        "authorized_account": {"type": "boolean"},
+        "synthetic_stimuli": {"type": "boolean"},
+        "authorized_server_audit": {"type": "boolean"},
+        "exclusive_emulator_output": {"type": "boolean"}
+      }
+    },
+    "voiceFlags": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["changed_by_harness", "bypassed_by_harness"],
+      "properties": {
+        "changed_by_harness": {"const": false},
+        "bypassed_by_harness": {"const": false}
+      }
+    },
+    "privacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "screenshots", "raw_audio_retention", "raw_transcript_retention",
+        "account_retention", "raw_server_payload_retention"
+      ],
+      "properties": {
+        "screenshots": {"const": "not_collected"},
+        "raw_audio_retention": {"const": "none_memory_only"},
+        "raw_transcript_retention": {"const": "none"},
+        "account_retention": {"const": "none"},
+        "raw_server_payload_retention": {"const": "none"}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact", "sha256", "size", "source_revision", "build_command",
+        "manifest", "signers_sha256", "abis",
+        "zip_alignment_passed", "passed"
+      ],
+      "properties": {
+        "artifact": {"const": "supplied APK"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "installed_sha256": {"$ref": "#/$defs/sha256"},
+        "size": {"type": "integer", "minimum": 1},
+        "source_revision": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{40,64}$"
+        },
+        "build_command": {"type": "string", "maxLength": 512},
+        "manifest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["package", "min_sdk", "target_sdk", "debuggable"],
+          "properties": {
+            "package": {"const": "com.dhanuk.ovidai"},
+            "min_sdk": {"type": "integer"},
+            "target_sdk": {"type": "integer"},
+            "debuggable": {"const": false}
+          }
+        },
+        "signers_sha256": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {"$ref": "#/$defs/sha256"}
+        },
+        "abis": {
+          "type": "array",
+          "items": {"enum": ["x86_64", "arm64-v8a", "armeabi-v7a"]}
+        },
+        "zip_alignment_passed": {"type": "boolean"},
+        "passed": {"type": "boolean"}
+      }
+    },
+    "audioMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "duration_ms", "samples", "peak", "rms", "dc_offset",
+        "max_window_rms", "active_windows_50ms", "clipped_samples",
+        "distinct_samples", "sha256"
+      ],
+      "properties": {
+        "duration_ms": {"type": "number", "minimum": 0},
+        "samples": {"type": "integer", "minimum": 1},
+        "peak": {"type": "integer", "minimum": 0, "maximum": 32768},
+        "rms": {"type": "number", "minimum": 0},
+        "dc_offset": {"type": "number", "minimum": 0},
+        "max_window_rms": {"type": "number", "minimum": 0},
+        "active_windows_50ms": {"type": "integer", "minimum": 0},
+        "clipped_samples": {"type": "integer", "minimum": 0},
+        "distinct_samples": {"type": "integer", "minimum": 0},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "audioPreflight": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "microphone_baseline", "output_baseline", "music_stream_unmuted",
+        "music_stream_volume"
+      ],
+      "properties": {
+        "microphone_baseline": {"$ref": "#/$defs/audioMetrics"},
+        "output_baseline": {"$ref": "#/$defs/audioMetrics"},
+        "music_stream_unmuted": {"type": "boolean"},
+        "music_stream_volume": {"type": "integer", "minimum": 0}
+      }
+    },
+    "device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["avd"],
+      "properties": {
+        "avd": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        },
+        "state": {"const": "prepared"},
+        "emulator": {"type": "boolean"},
+        "explicit_serial": {"type": "boolean"},
+        "serial_sha256": {"$ref": "#/$defs/sha256"},
+        "api": {"type": "integer"},
+        "abis": {
+          "type": "array",
+          "items": {"enum": ["x86_64", "arm64-v8a", "armeabi-v7a"]}
+        },
+        "real_ui_sign_in": {"type": "boolean"},
+        "audio_preflight": {"$ref": "#/$defs/audioPreflight"}
+      }
+    },
+    "stimulus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "locale", "audio_sha256", "expected_transcript_sha256",
+        "duration_ms", "attestation"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/languageId"},
+        "locale": {"$ref": "#/$defs/locale"},
+        "audio_sha256": {"$ref": "#/$defs/sha256"},
+        "expected_transcript_sha256": {"$ref": "#/$defs/sha256"},
+        "duration_ms": {"type": "number", "minimum": 2000, "maximum": 12000},
+        "attestation": {"const": "synthetic_non_personal_operator_supplied"}
+      }
+    },
+    "offlineObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["airplane_mode", "connected_networks", "connectivity_sha256"],
+      "properties": {
+        "airplane_mode": {"const": true},
+        "connected_networks": {"const": 0},
+        "connectivity_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "trackObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "known", "active_tracks", "source", "channel",
+        "observed_monotonic_ns", "dump_sha256"
+      ],
+      "properties": {
+        "known": {"const": true},
+        "active_tracks": {"type": "integer", "minimum": 0},
+        "source": {"const": "android.media.audio_flinger"},
+        "channel": {"const": "ovid.stt.record"},
+        "observed_monotonic_ns": {"type": "integer", "minimum": 0},
+        "dump_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "exclusiveCapture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "coverage_type", "source", "capture_route_sha256", "session_exclusive",
+        "whole_interval", "native_callback_sequence_complete",
+        "utterance_start_callback_observed", "utterance_completion_callback_observed",
+        "utterance_id_sha256", "native_utterance_id_sha256",
+        "callback_sequence_sha256", "event_count", "native_callback_count",
+        "manual_snapshot_count", "unattributed_transitions",
+        "unmatched_output_events", "matched_track_gaps", "duplicate_configurations",
+        "required_start_device_ms", "required_end_device_ms",
+        "first_observed_device_ms", "last_observed_device_ms",
+        "max_observed_gap_ms", "capture_uncertainty_us", "sample_rate",
+        "channels", "sample_format", "sample_count"
+      ],
+      "properties": {
+        "coverage_type": {
+          "enum": ["whole_interval_exclusive_capture", "background_segment_exclusive_capture"]
+        },
+        "source": {"const": "authorized_exclusive_capture_connector"},
+        "capture_route_sha256": {"$ref": "#/$defs/sha256"},
+        "session_exclusive": {"const": true},
+        "whole_interval": {"const": true},
+        "native_callback_sequence_complete": {"const": true},
+        "utterance_start_callback_observed": {"const": true},
+        "utterance_completion_callback_observed": {"const": true},
+        "utterance_id_sha256": {"$ref": "#/$defs/sha256"},
+        "native_utterance_id_sha256": {"$ref": "#/$defs/sha256"},
+        "callback_sequence_sha256": {"$ref": "#/$defs/sha256"},
+        "event_count": {"const": 2},
+        "native_callback_count": {"const": 2},
+        "manual_snapshot_count": {"const": 0},
+        "unattributed_transitions": {"const": 0},
+        "unmatched_output_events": {"const": 0},
+        "matched_track_gaps": {"const": 0},
+        "duplicate_configurations": {"const": 0},
+        "required_start_device_ms": {"type": "integer"},
+        "required_end_device_ms": {"type": "integer"},
+        "first_observed_device_ms": {"type": "integer"},
+        "last_observed_device_ms": {"type": "integer"},
+        "max_observed_gap_ms": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "capture_uncertainty_us": {"type": "integer", "minimum": 1, "maximum": 2000000},
+        "sample_rate": {"const": 16000},
+        "channels": {"const": 1},
+        "sample_format": {"const": "s16le"},
+        "sample_count": {"type": "integer", "minimum": 1}
+      }
+    },
+    "captureWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source", "channel", "timing_source", "first_pcm_frame_host_us",
+        "first_pcm_frame_monotonic_ns", "first_pcm_frame_device_ms",
+        "first_pcm_frame_uncertainty_us", "source_latency_us",
+        "max_source_latency_us", "capture_timing_uncertainty_us",
+        "capture_sample_count", "sample_rate", "channels", "sample_format",
+        "frame_count", "last_pcm_frame_host_us", "last_pcm_frame_monotonic_ns",
+        "cumulative_discontinuity_us", "end_to_end_discontinuity_us",
+        "last_emitted_frame_timestamp_validated",
+        "clock_anchor_count", "clock_max_offset_step_ms", "clock_max_anchor_gap_ms",
+        "clock_monotonic_bracketed", "host_device_offset_ms",
+        "device_clock_uncertainty_ms", "clock_uncertainty_us", "interval_guard_ms",
+        "utterance_started_monotonic_ns", "utterance_completed_monotonic_ns",
+        "pcm_start_ms", "pcm_end_ms"
+      ],
+      "properties": {
+        "source": {"const": "ovid.native.utterance_bounds"},
+        "channel": {"const": "ovid.tts.utterance"},
+        "timing_source": {"const": "pulse_simple_latency_backdated_frames"},
+        "first_pcm_frame_host_us": {"type": "integer", "minimum": 1},
+        "first_pcm_frame_monotonic_ns": {"type": "integer", "minimum": 1},
+        "first_pcm_frame_device_ms": {"type": "number"},
+        "first_pcm_frame_uncertainty_us": {"type": "integer", "minimum": 1, "maximum": 2000000},
+        "source_latency_us": {"type": "integer", "minimum": 0},
+        "max_source_latency_us": {"type": "integer", "minimum": 0},
+        "capture_timing_uncertainty_us": {"type": "integer", "minimum": 1, "maximum": 2000000},
+        "capture_sample_count": {"type": "integer", "minimum": 1},
+        "sample_rate": {"const": 16000},
+        "channels": {"const": 1},
+        "sample_format": {"const": "s16le"},
+        "frame_count": {"type": "integer", "minimum": 1},
+        "last_pcm_frame_host_us": {"type": "integer", "minimum": 1},
+        "last_pcm_frame_monotonic_ns": {"type": "integer", "minimum": 1},
+        "cumulative_discontinuity_us": {"type": "integer", "minimum": 0, "maximum": 2000},
+        "end_to_end_discontinuity_us": {"type": "number", "minimum": 0, "maximum": 2000},
+        "last_emitted_frame_timestamp_validated": {"const": true},
+        "clock_anchor_count": {"type": "integer", "minimum": 3},
+        "clock_max_offset_step_ms": {"type": "number", "minimum": 0, "maximum": 20},
+        "clock_max_anchor_gap_ms": {"type": "number", "minimum": 0, "maximum": 4000},
+        "clock_monotonic_bracketed": {"const": true},
+        "host_device_offset_ms": {"type": "number"},
+        "device_clock_uncertainty_ms": {"type": "integer", "minimum": 1, "maximum": 125},
+        "clock_uncertainty_us": {"type": "integer", "minimum": 1, "maximum": 2000000},
+        "interval_guard_ms": {"type": "number", "minimum": 100, "maximum": 2100},
+        "utterance_started_monotonic_ns": {"type": "integer", "minimum": 0},
+        "utterance_completed_monotonic_ns": {"type": "integer", "minimum": 0},
+        "pcm_start_ms": {"type": "number", "minimum": 0},
+        "pcm_end_ms": {"type": "number", "minimum": 250}
+      }
+    },
+    "sttCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "locale", "stimulus_sha256", "expected_transcript_sha256",
+        "offline_before", "offline_after", "downloaded_locale_required",
+        "virtual_microphone_observed", "final_transcript_observed",
+        "normalized_transcript_match", "input_capture", "raw_audio_retained"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/languageId"},
+        "locale": {"$ref": "#/$defs/locale"},
+        "stimulus_sha256": {"$ref": "#/$defs/sha256"},
+        "expected_transcript_sha256": {"$ref": "#/$defs/sha256"},
+        "offline_before": {"$ref": "#/$defs/offlineObservation"},
+        "offline_after": {"$ref": "#/$defs/offlineObservation"},
+        "downloaded_locale_required": {"const": true},
+        "virtual_microphone_observed": {"const": true},
+        "final_transcript_observed": {"const": true},
+        "normalized_transcript_match": {"const": true},
+        "input_capture": {"$ref": "#/$defs/audioMetrics"},
+        "raw_audio_retained": {"const": false}
+      }
+    },
+    "ttsCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "expected_locale", "requested_locale", "resolved_locale", "locale_match",
+        "utterance_id_sha256", "native_utterance_id_sha256", "utterance_source",
+        "utterance_channel", "device_process_id", "accepted_device_ms", "started_device_ms",
+        "completed_device_ms", "exclusive_capture", "capture_window",
+        "offline_synthesis_observed",
+        "autoplay_absent_before_tap", "playback_started", "playback_completed",
+        "android_playback_track_observed", "output_capture", "raw_audio_retained",
+        "offline_before"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/languageId"},
+        "expected_locale": {"$ref": "#/$defs/locale"},
+        "requested_locale": {"$ref": "#/$defs/locale"},
+        "resolved_locale": {"$ref": "#/$defs/locale"},
+        "locale_match": {"const": true},
+        "utterance_id_sha256": {"$ref": "#/$defs/sha256"},
+        "native_utterance_id_sha256": {"$ref": "#/$defs/sha256"},
+        "utterance_source": {"const": "ovid.release.logcat"},
+        "utterance_channel": {"const": "ovid.tts.utterance"},
+        "device_process_id": {"type": "integer", "minimum": 1},
+        "accepted_device_ms": {"type": "integer"},
+        "started_device_ms": {"type": "integer"},
+        "completed_device_ms": {"type": "integer"},
+        "exclusive_capture": {"$ref": "#/$defs/exclusiveCapture"},
+        "capture_window": {"$ref": "#/$defs/captureWindow"},
+        "offline_synthesis_observed": {"const": true},
+        "autoplay_absent_before_tap": {"const": true},
+        "playback_started": {"const": true},
+        "playback_completed": {"const": true},
+        "android_playback_track_observed": {"const": true},
+        "output_capture": {"$ref": "#/$defs/audioMetrics"},
+        "raw_audio_retained": {"const": false},
+        "offline_before": {"$ref": "#/$defs/offlineObservation"}
+      }
+    },
+    "lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stt_background_cancelled", "stt_background_mic_inactive",
+        "stt_foreground_no_auto_resume", "stt_new_gesture_required",
+        "stt_background_draft_unchanged", "stt_pre_background_draft_nonempty",
+        "stt_pre_background_draft_characters", "stt_pre_background_draft_sha256",
+        "stt_post_foreground_draft_sha256", "stt_restart_draft_sha256",
+        "stt_restart_gesture_observed", "stt_restart_draft_preserved",
+        "stt_record_tracks_before", "stt_record_tracks_background",
+        "stt_record_tracks_foreground", "stt_restart_record_tracks",
+        "stt_lifecycle_input_capture", "tts_background_playback_continues",
+        "tts_foreground_completion_without_new_gesture", "tts_background_coverage",
+        "tts_background_capture"
+      ],
+      "properties": {
+        "stt_background_cancelled": {"const": true},
+        "stt_background_mic_inactive": {"const": true},
+        "stt_foreground_no_auto_resume": {"const": true},
+        "stt_new_gesture_required": {"const": true},
+        "stt_background_draft_unchanged": {"const": true},
+        "stt_pre_background_draft_nonempty": {"const": true},
+        "stt_pre_background_draft_characters": {"type": "integer", "minimum": 3},
+        "stt_pre_background_draft_sha256": {"$ref": "#/$defs/sha256"},
+        "stt_post_foreground_draft_sha256": {"$ref": "#/$defs/sha256"},
+        "stt_restart_draft_sha256": {"$ref": "#/$defs/sha256"},
+        "stt_restart_gesture_observed": {"const": true},
+        "stt_restart_draft_preserved": {"const": true},
+        "stt_record_tracks_before": {"$ref": "#/$defs/trackObservation"},
+        "stt_record_tracks_background": {"$ref": "#/$defs/trackObservation"},
+        "stt_record_tracks_foreground": {"$ref": "#/$defs/trackObservation"},
+        "stt_restart_record_tracks": {"$ref": "#/$defs/trackObservation"},
+        "stt_lifecycle_input_capture": {"$ref": "#/$defs/audioMetrics"},
+        "tts_background_playback_continues": {"const": true},
+        "tts_foreground_completion_without_new_gesture": {"const": true},
+        "tts_background_coverage": {"$ref": "#/$defs/exclusiveCapture"},
+        "tts_background_capture": {"$ref": "#/$defs/audioMetrics"}
+      }
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope", "audit_authenticated", "audit_fresh", "request_count",
+        "json_message_requests", "text_only_message_requests",
+        "recognized_transcript_post_observed", "recognized_transcript_post_sha256",
+        "forbidden"
+      ],
+      "properties": {
+        "scope": {"const": "authorized_ovid_backend_and_object_storage"},
+        "audit_authenticated": {"type": "boolean"},
+        "audit_fresh": {"type": "boolean"},
+        "request_count": {"type": "integer", "minimum": 0},
+        "json_message_requests": {"type": "integer", "minimum": 0},
+        "text_only_message_requests": {"type": "integer", "minimum": 0},
+        "recognized_transcript_post_observed": {"type": "boolean"},
+        "recognized_transcript_post_sha256": {"$ref": "#/$defs/sha256"},
+        "forbidden": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "multipart", "audio_mime", "audio_fields", "attachment_uploads",
+            "websocket_binary_frames", "unclassified"
+          ],
+          "properties": {
+            "multipart": {"type": "integer", "minimum": 0},
+            "audio_mime": {"type": "integer", "minimum": 0},
+            "audio_fields": {"type": "integer", "minimum": 0},
+            "attachment_uploads": {"type": "integer", "minimum": 0},
+            "websocket_binary_frames": {"type": "integer", "minimum": 0},
+            "unclassified": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "server_audio_objects", "server_audio_records", "server_audio_bytes",
+        "scan_complete"
+      ],
+      "properties": {
+        "server_audio_objects": {"type": "integer", "minimum": 0},
+        "server_audio_records": {"type": "integer", "minimum": 0},
+        "server_audio_bytes": {"type": "integer", "minimum": 0},
+        "scan_complete": {"type": "boolean"}
+      }
+    }
+  }
+}

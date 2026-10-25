@@ -6,10 +6,15 @@ import 'package:ovid_ai/core/voice_input_service.dart';
 void main() {
   final voice = VoiceInputService.I;
 
+  setUp(() {
+    voice.ensureMicrophonePermissionForTest = () async => true;
+  });
+
   tearDown(() {
     voice.availabilityOverrideForTest = null;
     voice.startOverrideForTest = null;
     voice.stopOverrideForTest = null;
+    voice.ensureMicrophonePermissionForTest = null;
   });
 
   test('reports unavailable when the device has no STT', () async {
@@ -46,4 +51,3 @@ void main() {
     expect(stopped, isTrue);
     expect(voice.isListening, isFalse);
   });
-}

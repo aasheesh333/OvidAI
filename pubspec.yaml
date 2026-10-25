@@ -68,7 +68,6 @@ dependencies:
   app_links: ^6.4.1
   sqlite3: ^2.4.0
   sqlite3_flutter_libs: ^0.5.24
-  speech_to_text: ^7.4.0
   qr: ^4.0.0
   cryptography: ^2.9.0
   in_app_purchase: ^3.3.1

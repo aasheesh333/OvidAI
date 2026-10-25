@@ -2,6 +2,7 @@ package com.dhanuk.ovidai
 
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import android.app.Activity
@@ -13,6 +14,7 @@ import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.AudioAttributes
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -24,7 +26,10 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import android.speech.tts.Voice
 import android.system.Os
+import android.util.Log
 import android.system.OsConstants
 import android.system.ErrnoException
 import java.io.File
@@ -32,6 +37,7 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.URLConnection
 import java.util.Locale
+import java.util.concurrent.Executor
 import com.android.installreferrer.api.InstallReferrerClient
 import com.android.installreferrer.api.InstallReferrerStateListener
 
@@ -61,10 +67,27 @@ class MainActivity : FlutterActivity() {
     private var pendingRoute: String? = null
     private var pendingSessionId: String? = null
 
-    // W9 vernacular voice-first mode: the reply is spoken by the platform
-    // engine. Initialized on the Flutter engine and shut down with the host.
+    // Voice stays on device: only transcript text crosses the Dart boundary.
     private var tts: TextToSpeech? = null
     private var ttsReady = false
+    private var ttsText: String? = null
+    private var ttsUtteranceId: String? = null
+    // The Dart/logical id stays stable across pause/resume; the native engine
+    // receives a fresh id for every synthesis so stale callbacks cannot match.
+    private var ttsNativeUtteranceId: String? = null
+    private var ttsRequestCounter = 0L
+    private var ttsOffset = 0
+    private var ttsChunkOffset = 0
+    private var ttsPaused = false
+    // Structured metadata only: no prompt, answer, transcript, or account text.
+    private var ttsRequestedLocale: String? = null
+    private var ttsResolvedLocale: String? = null
+    private var speechRecognizer: OnDeviceSpeechRecognizer? = null
+    private var voiceEventSink: EventChannel.EventSink? = null
+
+    private fun emitVoiceEvent(event: Map<String, Any?>) {
+        runOnUiThread { voiceEventSink?.success(event) }
+    }
 
     private val safExportCoordinator = SafExportCoordinator<ParcelFileDescriptor, Uri> { source, destination ->
         val output = contentResolver.openOutputStream(destination, "w")
@@ -103,11 +126,36 @@ class MainActivity : FlutterActivity() {
         flutterEngine.platformViewsController.registry.registerViewFactory(
             "ovid/html-artifact", HtmlArtifactViewFactory(flutterEngine.dartExecutor.binaryMessenger),
         )
+        stopTts(notify = false)
         tts?.shutdown()
         ttsReady = false
         tts = TextToSpeech(this) { status ->
-            ttsReady = status == TextToSpeech.SUCCESS
+            runOnUiThread { ttsReady = status == TextToSpeech.SUCCESS }
+        }.also { engine ->
+            engine.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build(),
+            )
+            engine.setOnUtteranceProgressListener(TtsProgress())
         }
+        speechRecognizer?.shutdown()
+        speechRecognizer = OnDeviceSpeechRecognizer(
+            this,
+            Executor { command -> runOnUiThread(command) },
+            ::emitVoiceEvent,
+        )
+        EventChannel(flutterEngine.dartExecutor.binaryMessenger, "ovid/voice_events")
+            .setStreamHandler(object : EventChannel.StreamHandler {
+                override fun onListen(arguments: Any?, events: EventChannel.EventSink) {
+                    voiceEventSink = events
+                }
+
+                override fun onCancel(arguments: Any?) {
+                    voiceEventSink = null
+                }
+            })
         val nativeChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
         nativeChannel
             .setMethodCallHandler { call, rawResult ->
@@ -276,38 +324,44 @@ class MainActivity : FlutterActivity() {
                             result.success(false)
                         }
                     }
-                    "ttsAvailable" -> {
-                        result.success(ttsReady)
+                    "voiceCapability" -> {
+                        val locales = call.argument<List<String>>("locales")
+                            ?.filter { it.isNotBlank() }
+                            ?.distinct()
+                            .orEmpty()
+                        probeVoiceCapability(locales, result)
                     }
-                    "ttsSpeak" -> {
-                        val text = call.argument<String>("text")
-                        val engine = tts
-                        if (text.isNullOrBlank() || engine == null || !ttsReady) {
+                    "voiceSttStart" -> {
+                        val sessionId = call.argument<String>("sessionId")
+                        val localeId = call.argument<String>("locale")
+                        if (sessionId.isNullOrBlank()) {
                             result.success(false)
                         } else {
-                            val localeId = call.argument<String>("locale")
-                            if (!localeId.isNullOrBlank()) {
-                                val parts = localeId.split("-")
-                                val locale = if (parts.size >= 2) {
-                                    Locale(parts[0], parts[1])
-                                } else {
-                                    Locale(localeId)
-                                }
-                                if (engine.isLanguageAvailable(locale) >= TextToSpeech.LANG_AVAILABLE) {
-                                    engine.language = locale
-                                }
-                            }
-                            val queued = engine.speak(
-                                text,
-                                TextToSpeech.QUEUE_FLUSH,
-                                null,
-                                "ovid-voice",
-                            )
-                            result.success(queued == TextToSpeech.SUCCESS)
+                            speechRecognizer?.start(
+                                sessionId,
+                                localeId,
+                                call.argument<Number>("pauseFor")?.toInt() ?: 2000,
+                                call.argument<Number>("listenFor")?.toInt() ?: 60000,
+                                result,
+                            ) ?: result.success(false)
                         }
                     }
+                    "voiceSttStop" -> {
+                        call.argument<String>("sessionId")?.let { speechRecognizer?.stop(it) }
+                        result.success(null)
+                    }
+                    "voiceSttCancel" -> {
+                        speechRecognizer?.cancel(call.argument<String>("sessionId"))
+                        result.success(null)
+                    }
+                    "ttsAvailable" -> {
+                        result.success(ttsReady && tts?.voices.orEmpty().any(::isOfflineVoice))
+                    }
+                    "ttsSpeak" -> startTts(call, result)
+                    "ttsPause" -> result.success(pauseTts(call.argument<String>("utteranceId")))
+                    "ttsResume" -> result.success(resumeTts(call.argument<String>("utteranceId")))
                     "ttsStop" -> {
-                        tts?.stop()
+                        stopTts()
                         result.success(null)
                     }
                     "shareText" -> {
@@ -431,6 +485,259 @@ class MainActivity : FlutterActivity() {
             }
     }
 
+    private fun probeVoiceCapability(locales: List<String>, result: MethodChannel.Result) {
+        val requested = locales.ifEmpty { listOf("en-IN", "hi-IN", "pa-IN", "ta-IN") }
+        val ttsLocales = requested.associateWith { offlineVoice(tts, it) != null }
+        val recognizer = speechRecognizer
+        if (recognizer == null) {
+            result.success(mapOf("stt" to false, "tts" to false, "locales" to emptyMap<String, Any>()))
+            return
+        }
+        recognizer.probe(requested) { sttProbe ->
+            runOnUiThread {
+                val sttLocales = sttProbe["locales"] as? Map<*, *> ?: emptyMap<String, Any>()
+                val support = requested.associateWith { locale ->
+                    val stt = (sttLocales[locale] as? Map<*, *>)?.get("stt") == true
+                    mapOf("stt" to stt, "tts" to (ttsLocales[locale] == true))
+                }
+                val stt = support.values.any { it["stt"] == true }
+                val tts = ttsReady && support.values.any { it["tts"] == true }
+                result.success(
+                    mapOf(
+                        "stt" to stt,
+                        "tts" to tts,
+                        "locales" to support,
+                        "reason" to if (stt || tts) {
+                            null
+                        } else {
+                            "On-device voice needs Android 13 and downloaded speech and playback languages."
+                        },
+                    ),
+                )
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun isOfflineVoice(voice: Voice): Boolean =
+        !voice.isNetworkConnectionRequired &&
+            !voice.features.contains(TextToSpeech.Engine.KEY_FEATURE_NETWORK_SYNTHESIS) &&
+            !voice.features.contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED)
+
+    private fun offlineVoice(engine: TextToSpeech?, localeId: String?): Voice? {
+        if (engine == null || !ttsReady) return null
+        val voices = engine.voices.orEmpty().filter(::isOfflineVoice)
+        if (localeId.isNullOrBlank()) {
+            return engine.voice?.takeIf(::isOfflineVoice) ?: voices.firstOrNull()
+        }
+        val requested = Locale.forLanguageTag(localeId.replace('_', '-'))
+        return voices.firstOrNull { voice ->
+            val locale = voice.locale
+            locale.language.equals(requested.language, ignoreCase = true) &&
+                (requested.country.isEmpty() || locale.country.equals(requested.country, ignoreCase = true))
+        }
+    }
+
+    private fun evidenceToken(value: String?): String {
+        if (value.isNullOrBlank()) return "default"
+        return if (Regex("[A-Za-z0-9_.:-]{1,96}").matches(value)) value else "withheld"
+    }
+
+    private fun emitTtsEvidence(
+        event: String,
+        logicalId: String,
+        nativeId: String,
+    ) {
+        // App-authored utterance timing only, not independent player provenance.
+        // No hidden/SystemApi UID/session data is queried or inferred.
+        Log.i(
+            "OvidTtsEvidence",
+            "v3 event=$event logical=${evidenceToken(logicalId)} " +
+                "native=${evidenceToken(nativeId)} " +
+                "requested=${evidenceToken(ttsRequestedLocale)} " +
+                "resolved=${evidenceToken(ttsResolvedLocale)} " +
+                "epochMs=${System.currentTimeMillis()}",
+        )
+    }
+
+    private fun ttsResult(utteranceId: String, locale: String?, accepted: Boolean): Map<String, Any?> =
+        mapOf(
+            "accepted" to accepted,
+            "utteranceId" to utteranceId,
+            "locale" to locale,
+        )
+
+    private fun startTts(call: MethodCall, result: MethodChannel.Result) {
+        val engine = tts
+        val text = call.argument<String>("text")
+        val utteranceId = call.argument<String>("utteranceId")
+        if (engine == null || !ttsReady || text.isNullOrBlank() || utteranceId.isNullOrBlank()) {
+            result.success(ttsResult(utteranceId.orEmpty(), null, false))
+            return
+        }
+        val voice = offlineVoice(engine, call.argument<String>("locale"))
+        if (voice == null) {
+            result.success(ttsResult(utteranceId, null, false))
+            return
+        }
+        val offset = (call.argument<Number>("offset")?.toInt() ?: 0).coerceIn(0, text.length)
+        if (offset >= text.length) {
+            result.success(ttsResult(utteranceId, null, false))
+            return
+        }
+        stopTts(notify = false)
+        if (engine.setVoice(voice) != TextToSpeech.SUCCESS) {
+            result.success(ttsResult(utteranceId, null, false))
+            return
+        }
+        ttsText = text
+        ttsUtteranceId = utteranceId
+        ttsNativeUtteranceId = "$utteranceId:synthesis-${++ttsRequestCounter}"
+        ttsRequestedLocale = call.argument<String>("locale")
+        ttsResolvedLocale = voice.locale.toLanguageTag()
+        ttsOffset = offset
+        ttsChunkOffset = offset
+        ttsPaused = false
+        val accepted = engine.speak(
+            text.substring(offset),
+            TextToSpeech.QUEUE_FLUSH,
+            null,
+            ttsNativeUtteranceId,
+        ) == TextToSpeech.SUCCESS
+        if (accepted) {
+            emitTtsEvidence("accepted", utteranceId, ttsNativeUtteranceId.orEmpty())
+        } else {
+            clearTtsState()
+        }
+        result.success(ttsResult(utteranceId, voice.locale.toLanguageTag(), accepted))
+    }
+
+    private fun pauseTts(utteranceId: String?): Boolean {
+        val engine = tts ?: return false
+        if (utteranceId == null || utteranceId != ttsUtteranceId || ttsPaused) return false
+        ttsPaused = true
+        if (engine.stop() != TextToSpeech.SUCCESS) {
+            ttsPaused = false
+            return false
+        }
+        emitVoiceEvent(ttsEvent("paused", utteranceId))
+        return true
+    }
+
+    private fun resumeTts(utteranceId: String?): Boolean {
+        val engine = tts ?: return false
+        val text = ttsText ?: return false
+        if (utteranceId == null || utteranceId != ttsUtteranceId || !ttsPaused) return false
+        val offset = ttsOffset.coerceIn(0, text.length)
+        if (offset >= text.length) return false
+        ttsNativeUtteranceId = "$utteranceId:synthesis-${++ttsRequestCounter}"
+        ttsChunkOffset = offset
+        ttsPaused = false
+        val accepted = engine.speak(
+            text.substring(offset),
+            TextToSpeech.QUEUE_FLUSH,
+            null,
+            ttsNativeUtteranceId,
+        ) == TextToSpeech.SUCCESS
+        if (!accepted) ttsPaused = true
+        return accepted
+    }
+
+    private fun ttsEvent(type: String, utteranceId: String): MutableMap<String, Any?> =
+        mutableMapOf(
+            "source" to "tts",
+            "type" to type,
+            "utteranceId" to ttsUtteranceId,
+            "locale" to tts?.voice?.locale?.toLanguageTag(),
+        )
+
+    private fun clearTtsState() {
+        ttsText = null
+        ttsUtteranceId = null
+        ttsNativeUtteranceId = null
+        ttsOffset = 0
+        ttsChunkOffset = 0
+        ttsPaused = false
+        ttsRequestedLocale = null
+        ttsResolvedLocale = null
+    }
+
+    private fun stopTts(notify: Boolean = true) {
+        val utteranceId = ttsUtteranceId
+        // Invalidate before stopping: callbacks posted by stop() must find no
+        // matching request even when they arrive on another binder thread.
+        clearTtsState()
+        tts?.stop()
+        if (notify && utteranceId != null) {
+            emitVoiceEvent(
+                mapOf(
+                    "source" to "tts",
+                    "type" to "stopped",
+                    "utteranceId" to utteranceId,
+                ),
+            )
+        }
+    }
+
+    @Suppress("OVERRIDE_DEPRECATION")
+    private inner class TtsProgress : UtteranceProgressListener() {
+        // TextToSpeech may invoke any of these on a binder/engine thread. All
+        // identity checks and state reads/writes are serialized on the activity
+        // main thread; no callback mutates playback state on its arrival thread.
+        override fun onStart(utteranceId: String) {
+            runOnUiThread {
+                if (utteranceId == ttsNativeUtteranceId && !ttsPaused) {
+                    val logicalId = ttsUtteranceId ?: return@runOnUiThread
+                    emitTtsEvidence("start", logicalId, utteranceId)
+                    emitVoiceEvent(ttsEvent("start", utteranceId))
+                }
+            }
+        }
+
+        override fun onRangeStart(utteranceId: String, start: Int, end: Int, frame: Int) {
+            runOnUiThread {
+                if (utteranceId != ttsNativeUtteranceId || ttsPaused) return@runOnUiThread
+                val absoluteStart = ttsChunkOffset + start
+                ttsOffset = maxOf(ttsOffset, absoluteStart)
+                emitVoiceEvent(
+                    ttsEvent("progress", utteranceId).apply {
+                        put("start", absoluteStart)
+                        put("end", ttsChunkOffset + end)
+                    },
+                )
+            }
+        }
+
+        override fun onDone(utteranceId: String) {
+            runOnUiThread {
+                if (utteranceId != ttsNativeUtteranceId || ttsPaused) return@runOnUiThread
+                val logicalId = ttsUtteranceId ?: return@runOnUiThread
+                ttsOffset = ttsText?.length ?: ttsOffset
+                emitTtsEvidence("done", logicalId, utteranceId)
+                emitVoiceEvent(ttsEvent("done", utteranceId))
+                clearTtsState()
+            }
+        }
+
+        override fun onStop(utteranceId: String, interrupted: Boolean) {
+            runOnUiThread {
+                if (utteranceId != ttsNativeUtteranceId || ttsPaused) return@runOnUiThread
+                emitVoiceEvent(ttsEvent("stopped", utteranceId))
+                clearTtsState()
+            }
+        }
+
+        override fun onError(utteranceId: String) {
+            runOnUiThread {
+                if (utteranceId != ttsNativeUtteranceId || ttsPaused) return@runOnUiThread
+                emitVoiceEvent(ttsEvent("error", utteranceId))
+                clearTtsState()
+            }
+        }
+
+        override fun onError(utteranceId: String, errorCode: Int) = onError(utteranceId)
+    }
+
     /** Alarm + notification subset of the `ovid/native` channel. */
     private fun handleNativeBackground(call: MethodCall, result: MethodChannel.Result): Boolean {
         val app = applicationContext
@@ -522,12 +829,29 @@ class MainActivity : FlutterActivity() {
         routeSessionSelection(intent)
     }
 
+    override fun onStart() {
+        super.onStart()
+        // This only re-arms the fence. A fresh explicit user start is still
+        // required; no pending recognition is resumed here.
+        speechRecognizer?.setForeground(true)
+    }
+
+    override fun onStop() {
+        // Dictation is foreground-only. Invalidate even before a native
+        // session exists (capability/permission awaits may still be pending).
+        speechRecognizer?.setForeground(false)
+        super.onStop()
+    }
+
     override fun onDestroy() {
         safExportCoordinator.cleanup()
-        tts?.stop()
+        speechRecognizer?.shutdown()
+        speechRecognizer = null
+        stopTts(notify = false)
         tts?.shutdown()
         tts = null
         ttsReady = false
+        voiceEventSink = null
         super.onDestroy()
     }
 }

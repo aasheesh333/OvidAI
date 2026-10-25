@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../../core/voice_capability.dart';
 import '../../../core/voice_input_service.dart';
 
 // TODO(l10n): move user-facing copy to ARB keys in the localization pass.
@@ -11,6 +12,10 @@ import '../../../core/voice_input_service.dart';
 String v2SavedVoiceLanguage = '';
 
 /// Seam over [VoiceInputService] so the composer can be tested with a fake.
+abstract interface class V2VoiceCancellationEvents {
+  Stream<void> get lifecycleCancellations;
+}
+
 abstract class V2VoiceService {
   Future<bool> isAvailable();
 
@@ -27,7 +32,8 @@ abstract class V2VoiceService {
 }
 
 /// Production adapter around the on-device STT singleton.
-class V2PlatformVoiceService implements V2VoiceService {
+class V2PlatformVoiceService
+    implements V2VoiceService, V2VoiceCancellationEvents {
   const V2PlatformVoiceService();
 
   static const V2PlatformVoiceService instance = V2PlatformVoiceService();
@@ -35,11 +41,17 @@ class V2PlatformVoiceService implements V2VoiceService {
   VoiceInputService get _service => VoiceInputService.I;
 
   @override
+  Stream<void> get lifecycleCancellations => _service.lifecycleCancellations;
+
+  @override
   Future<bool> isAvailable() => _service.isAvailable();
 
   @override
   Future<bool> ensureMicrophonePermission() =>
       _service.ensureMicrophonePermission();
+
+  Future<bool> isLocaleAvailable(String localeId) =>
+      _service.isLocaleAvailable(localeId);
 
   @override
   Future<bool> start(
@@ -52,6 +64,16 @@ class V2PlatformVoiceService implements V2VoiceService {
 
   @override
   Future<void> cancel() => _service.cancel();
+}
+
+extension V2VoiceServiceOnDevice on V2VoiceService {
+  Future<bool> supportsLocale(String localeId) {
+    final service = this;
+    if (service is V2PlatformVoiceService) {
+      return service.isLocaleAvailable(localeId);
+    }
+    return isAvailable();
+  }
 }
 
 /// STT locales for the four voice-first languages.
@@ -108,9 +130,18 @@ abstract final class V2VoiceLocales {
 /// again, or sending, stops it early.
 class V2VoiceDictation extends ChangeNotifier {
   V2VoiceDictation({V2VoiceService? service, required this.localeId})
-    : _service = service ?? V2PlatformVoiceService.instance;
+    : _service = service ?? V2PlatformVoiceService.instance {
+    final service = _service;
+    if (service is V2VoiceCancellationEvents) {
+      _cancellationSubscription = (service as V2VoiceCancellationEvents)
+          .lifecycleCancellations
+          .listen((_) => _handleLifecycleCancellation());
+    }
+  }
 
   final V2VoiceService _service;
+  StreamSubscription<void>? _cancellationSubscription;
+  int _generation = 0;
 
   /// STT locale passed to the engine (`hi-IN`, `pa-IN`, `ta-IN`, `en-IN`).
   final String localeId;
@@ -121,6 +152,7 @@ class V2VoiceDictation extends ChangeNotifier {
   bool _listening = false;
   bool _busy = false;
   bool _disposed = false;
+  bool _acceptResults = false;
   String _base = '';
   String? _error;
 
@@ -129,8 +161,7 @@ class V2VoiceDictation extends ChangeNotifier {
 
   static const String permissionDeniedMessage =
       'Microphone access is off. Allow it in Settings to use voice input.';
-  static const String unavailableMessage =
-      'Voice input is not available on this device.';
+  static const String unavailableMessage = kOvidVoiceUnavailableMessage;
   static const String failedMessage = 'Voice input could not start. Try again.';
 
   /// Starts dictation, or stops it when already listening.
@@ -140,39 +171,64 @@ class V2VoiceDictation extends ChangeNotifier {
       await stop();
       return;
     }
+    final generation = _generation;
     _busy = true;
     _error = null;
     _notify();
     try {
+      final supported = await _service.supportsLocale(localeId);
+      if (_disposed || generation != _generation) return;
+      if (!supported) {
+        _error = unavailableMessage;
+        return;
+      }
       final permitted = await _service.ensureMicrophonePermission();
+      if (_disposed || generation != _generation) return;
       if (!permitted) {
         _error = permissionDeniedMessage;
         return;
       }
-      final available = await _service.isAvailable();
-      if (!available) {
-        _error = unavailableMessage;
+      _base = currentText.trimRight();
+      _acceptResults = true;
+      final started = await _service.start(_handleResult, localeId: localeId);
+      if (_disposed || generation != _generation) {
+        if (started) await _service.cancel();
         return;
       }
-      _base = currentText.trimRight();
-      final started = await _service.start(_handleResult, localeId: localeId);
       _listening = started;
-      if (!started) _error = failedMessage;
+      if (!started) {
+        _acceptResults = false;
+        _error = failedMessage;
+      }
     } catch (_) {
+      if (_disposed || generation != _generation) return;
+      _acceptResults = false;
       _listening = false;
       _error = failedMessage;
     } finally {
-      _busy = false;
-      _notify();
+      if (!_disposed && generation == _generation) {
+        _busy = false;
+        _notify();
+      }
     }
   }
 
   void _handleResult(String text, bool isFinal) {
+    if (!_acceptResults || _disposed) return;
     final heard = text.trim();
     if (heard.isNotEmpty) {
       onTranscript?.call(_base.isEmpty ? heard : '$_base $heard');
     }
     if (isFinal) unawaited(_finish());
+  }
+
+  void _handleLifecycleCancellation() {
+    if (_disposed) return;
+    ++_generation;
+    _acceptResults = false;
+    _listening = false;
+    _busy = false;
+    _notify();
   }
 
   Future<void> _finish() async {
@@ -182,6 +238,7 @@ class V2VoiceDictation extends ChangeNotifier {
     } catch (_) {
       // Stopping is best effort; the transcript is already in the draft.
     }
+    _acceptResults = false;
     _listening = false;
     _notify();
   }
@@ -200,12 +257,14 @@ class V2VoiceDictation extends ChangeNotifier {
 
   /// Stops dictation and discards the platform's final callback.
   Future<void> cancel() async {
+    ++_generation;
+    _acceptResults = false;
+    _listening = false;
     try {
       await _service.cancel();
     } catch (_) {
       // Best effort.
     }
-    _listening = false;
     _notify();
   }
 
@@ -221,7 +280,12 @@ class V2VoiceDictation extends ChangeNotifier {
 
   @override
   void dispose() {
+    final cancelInFlight = _busy || _listening;
+    ++_generation;
+    _acceptResults = false;
     _disposed = true;
+    unawaited(_cancellationSubscription?.cancel());
+    if (cancelInFlight) unawaited(_service.cancel());
     super.dispose();
   }
 }
