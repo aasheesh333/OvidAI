@@ -39,6 +39,7 @@ import {
   utcDayStart,
   utcMonthStart,
 } from "../tokenCaps.js";
+import { isDurableWorkerSession, refusePublicWorkerControl } from "./workerControlGuards.js";
 import {
   badRequest,
   etagFor,
@@ -582,6 +583,11 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
     if (!isUuid(sessionId)) return notFound(reply);
     const session = await sessions.get(deps.db, sessionId, uid);
     if (session === null) return notFound(reply);
+    // A durable child shares its parent's owner, but a Firebase-owned child ID
+    // is not main-agent authority. Fence before replay, mint, writes, or queue.
+    if (await isDurableWorkerSession(deps.db, sessionId)) {
+      return refusePublicWorkerControl(reply);
+    }
 
     // 2. Body validation: missing/empty/whitespace-only content → 400.
     const parsed = sendMessageBody.safeParse(request.body ?? undefined);

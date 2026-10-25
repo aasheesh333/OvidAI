@@ -3,6 +3,7 @@ import { eventMirror, runs } from "@ovid/db";
 import type { RunCancelResponse } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
 import { isUuid, notFound, sendError } from "./http.js";
+import { isDurableWorkerRun, refusePublicWorkerControl } from "./workerControlGuards.js";
 
 // Run routes (P8 Task 1): cooperative run cancel. All mounted inside the
 // authenticated /cloud/v1 scope.
@@ -28,6 +29,8 @@ export const CANCELLED_MESSAGE = "Stopped by user.";
  *     the C1 wait loop's ordering guarantee holds);
  *   - "cancelling": the flag is set; the worker's throttled check owns the
  *     terminalization (job remove failed, or a worker already claimed it).
+ *   - "refused": the run belongs to a durable worker; no flag, job, event, or
+ *     status was mutated because only main-mediated control may stop it.
  *
  * Never throws for a queue failure — the flag + worker check cover it.
  */
@@ -36,9 +39,13 @@ export async function cancelActiveRun(
   log: FastifyBaseLogger,
   uid: string,
   runId: string,
-): Promise<"cancelled" | "cancelling"> {
+): Promise<"cancelled" | "cancelling" | "refused"> {
   const row = await runs.get(deps.db, runId, uid);
-  if (row === null || TERMINAL_RUN_STATUSES.has(row.status)) return "cancelling";
+  if (row === null) return "cancelling";
+  // Shared callers (including session deletion) must not turn generic root-run
+  // cancellation into an unauthenticated-by-main worker lifecycle mutation.
+  if (await isDurableWorkerRun(deps.db, runId)) return "refused";
+  if (TERMINAL_RUN_STATUSES.has(row.status)) return "cancelling";
 
   // Conditional ownership-scoped write. null here means the run went
   // terminal between the read above and this UPDATE (race window) — the
@@ -102,6 +109,9 @@ export function registerRunRoutes(app: FastifyInstance, deps: GatewayDeps): void
 
     const row = await runs.get(deps.db, id, request.principal.uid);
     if (row === null) return notFound(reply, "Run not found.");
+    // Ownership of a parent account is not worker-control authority. Fence the
+    // route itself before terminal handling or its first cancel_requested write.
+    if (await isDurableWorkerRun(deps.db, id)) return refusePublicWorkerControl(reply);
     if (TERMINAL_RUN_STATUSES.has(row.status)) {
       return sendError(
         reply,
@@ -125,6 +135,7 @@ export function registerRunRoutes(app: FastifyInstance, deps: GatewayDeps): void
     }
 
     const status = await cancelActiveRun(deps, request.log, request.principal.uid, id);
+    if (status === "refused") return refusePublicWorkerControl(reply);
     const body: RunCancelResponse = { runId: id, status };
     return reply.code(202).send(body);
   });

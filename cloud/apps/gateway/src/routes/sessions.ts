@@ -16,6 +16,7 @@ function snapshotTime(raw: string | null): number | null | undefined {
     : null;
 }
 import { cancelActiveRun } from "./runs.js";
+import { isDurableWorkerSession, refusePublicWorkerControl } from "./workerControlGuards.js";
 
 // Session routes — all mounted inside the authenticated /cloud/v1 scope.
 
@@ -91,8 +92,18 @@ export function registerSessionRoutes(app: FastifyInstance, deps: GatewayDeps): 
     // (an empty body or {} → 400 bad_request, NOT a no-op 200).
     const parsed = sessionPatchSchema.safeParse(request.body ?? {});
     if (!parsed.success) return zodBadRequest(reply, parsed.error);
-    // sessions.update is ownership-scoped: unknown id and wrong owner both
-    // come back null → 404 (never 403 — no existence leaks).
+    // Ownership precedes the global durable-child predicate: a foreign child
+    // gets the same 404 as an unknown id, never a 403 existence oracle. Body
+    // parsing stays first to preserve the ordinary invalid-body behavior.
+    const existing = await sessions.get(deps.db, id, request.principal.uid);
+    if (existing === null) return notFound(reply);
+    // Full child PATCH refusal: title/mode/pinned are all main-controlled for
+    // durable workers. Fence before sessions.update and sessionState.patch.
+    if (await isDurableWorkerSession(deps.db, id)) {
+      return refusePublicWorkerControl(reply);
+    }
+    // Preserve the ownership-scoped update for ordinary roots and its 404 if
+    // the session disappears between the ownership read and this write.
     const row = await sessions.update(deps.db, id, request.principal.uid, parsed.data);
     if (row === null) return notFound(reply);
     // CH-001: the worker reads the mode from session_agent_state, not the
@@ -114,6 +125,11 @@ export function registerSessionRoutes(app: FastifyInstance, deps: GatewayDeps): 
     // wrong owner, and already-deleted all come back null → the same 404.
     const row = await sessions.get(deps.db, id, request.principal.uid);
     if (row === null) return notFound(reply);
+    // Account ownership is not main-agent cleanup authority. Refuse before the
+    // cancellation loop or soft delete; canonical controls own child cleanup.
+    if (await isDurableWorkerSession(deps.db, id)) {
+      return refusePublicWorkerControl(reply);
+    }
 
     // Cancel any still-active run FIRST — a soft-deleted session must not
     // leave a worker streaming into it. Same cooperative flow as POST
@@ -126,7 +142,10 @@ export function registerSessionRoutes(app: FastifyInstance, deps: GatewayDeps): 
     for (let pass = 0; pass < 10; pass++) {
       const active = await runs.activeForSession(deps.db, id);
       if (active === null || !seen.add(active.id)) break;
-      await cancelActiveRun(deps, request.log, request.principal.uid, active.id);
+      const status = await cancelActiveRun(deps, request.log, request.principal.uid, active.id);
+      // Keep the shared helper's refusal terminal for DELETE too: never fall
+      // through to soft-delete a child whose active run could not be cancelled.
+      if (status === "refused") return refusePublicWorkerControl(reply);
     }
 
     // Soft delete: the row (and its messages/runs) stays as history, but
