@@ -204,6 +204,10 @@ DECLARE
 	"month_start" timestamptz;
 	"month_end" timestamptz;
 BEGIN
+	-- BYOK is actual actor telemetry, but it never spends Ovid allowance.
+	IF NEW."billing_class" = 'byok' THEN
+		RETURN NEW;
+	END IF;
 	-- Preserve the legacy ledger's ability to record an already-deleted user.
 	-- Such a user cannot acquire a new quota reservation in any case.
 	IF NOT EXISTS (SELECT 1 FROM "users" WHERE "uid" = NEW."user_id") THEN

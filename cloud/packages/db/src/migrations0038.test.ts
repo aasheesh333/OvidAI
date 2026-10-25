@@ -369,6 +369,54 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("0038 against isolated real Postg
     expect(triggerRowsAfter).toEqual([{ count: 1 }]);
   });
 
+  it("bypasses Ovid counters only for exact BYOK while retaining every telemetry row", async () => {
+    const uid = newId();
+    const sessionId = newId();
+    const runId = newId();
+    const messageId = newId();
+    const defaultUsageId = newId();
+    const byokUsageId = newId();
+    const unknownUsageId = newId();
+    await users.ensure(freshDb, uid, null);
+    await fresh.client`INSERT INTO sessions (id, user_id, title)
+      VALUES (${sessionId}, ${uid}, 'billing class trigger')`;
+    await fresh.client`INSERT INTO messages (id, session_id, role, content)
+      VALUES (${messageId}, ${sessionId}, 'user', 'billing class trigger')`;
+    await fresh.client`INSERT INTO runs (id, session_id, status, prompt_message_id)
+      VALUES (${runId}, ${sessionId}, 'completed', ${messageId})`;
+    await fresh.client`INSERT INTO run_usage
+      (id, user_id, session_id, run_id, model, input_tokens, output_tokens, cost_usd, created_at)
+      VALUES (${defaultUsageId}, ${uid}, ${sessionId}, ${runId}, 'default-ovid', 1, 1,
+              0.1000000000, '2026-10-24T12:00:00.000Z')`;
+    await fresh.client`INSERT INTO run_usage
+      (id, user_id, session_id, run_id, model, input_tokens, output_tokens, cost_usd,
+       billing_class, created_at)
+      VALUES (${byokUsageId}, ${uid}, ${sessionId}, ${runId}, 'exact-byok', 4, 6,
+              0.2000000000, 'byok', '2026-10-24T12:00:00.000Z')`;
+    await fresh.client`INSERT INTO run_usage
+      (id, user_id, session_id, run_id, model, input_tokens, output_tokens, cost_usd,
+       billing_class, created_at)
+      VALUES (${unknownUsageId}, ${uid}, ${sessionId}, ${runId}, 'unknown-class', 8, 2,
+              0.3000000000, 'unrecognized', '2026-10-24T12:00:00.000Z')`;
+
+    const ledger = await fresh.client`
+      SELECT id, billing_class, input_tokens + output_tokens AS tokens
+        FROM run_usage WHERE id IN (${defaultUsageId}, ${byokUsageId}, ${unknownUsageId})
+       ORDER BY billing_class`;
+    expect(ledger).toEqual([
+      { id: byokUsageId, billing_class: "byok", tokens: 10 },
+      { id: defaultUsageId, billing_class: "ovid_allowance", tokens: 2 },
+      { id: unknownUsageId, billing_class: "unrecognized", tokens: 10 },
+    ]);
+    const counters = await fresh.client`
+      SELECT window_kind, used_tokens::int, used_usd::text
+        FROM usage_quota_counters WHERE actor_user_id = ${uid} ORDER BY window_kind`;
+    expect(counters).toEqual([
+      { window_kind: "day", used_tokens: 12, used_usd: "0.4000000000" },
+      { window_kind: "month", used_tokens: 12, used_usd: "0.4000000000" },
+    ]);
+  });
+
   it("enforces reservation identity/state checks and a real two-instance cap race after migration", async () => {
     const uid = newId();
     await users.ensure(freshDb, uid, null);
