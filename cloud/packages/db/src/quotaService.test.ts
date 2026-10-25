@@ -7,6 +7,7 @@ import {
   RUN_SOURCES,
   RunQuotaService,
   StorageReservationStore,
+  type QuotaBillingClass,
   type RunSource,
 } from "./quotaService.js";
 
@@ -107,6 +108,458 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("RunQuotaService on isolated real
       SELECT count(*)::int AS count FROM usage_run_admissions
        WHERE actor_user_id = ${actorUserId} AND source = 'parent_wake'`;
     expect(wakeUsage[0]?.count).toBe(1);
+  });
+
+  it("keeps BYOK telemetry out of Ovid allowance admission, reservations, and counters", async () => {
+    const { actorUserId, run } = await seedRun();
+    const service = quota(db);
+    const byokAdmission = await service.admitRun({
+      actorUserId,
+      source: "collab",
+      runId: run.id,
+      idempotencyKey: "byok-admission",
+      billingClass: "byok",
+    });
+    expect(byokAdmission).toEqual({ ok: true });
+    const byokReservation = await service.reserveModelCall({
+      actorUserId,
+      runId: run.id,
+      reservationKey: "byok-call",
+      inputTokens: 500,
+      maxOutputTokens: 500,
+      billingClass: "byok",
+    });
+    expect(byokReservation.ok).toBe(true);
+    if (!byokReservation.ok) throw new Error("BYOK was incorrectly capped");
+    await service.settleModelCall({
+      reservationId: byokReservation.reservationId,
+      usage: { inputTokens: 400, outputTokens: 100, billingClass: "byok" },
+    });
+    expect(await counters(actorUserId)).toEqual([]);
+
+    const ovidRun = await seedRun(actorUserId);
+    expect(await service.admitRun({
+      actorUserId,
+      source: "interactive",
+      runId: ovidRun.run.id,
+      idempotencyKey: "ovid-after-byok",
+      billingClass: "ovid_allowance",
+    })).toEqual({ ok: true });
+    const ovidReservation = await service.reserveModelCall({
+      actorUserId,
+      runId: ovidRun.run.id,
+      reservationKey: "ovid-call",
+      inputTokens: 60,
+      maxOutputTokens: 40,
+      billingClass: "ovid_allowance",
+    });
+    expect(ovidReservation.ok).toBe(true);
+    if (!ovidReservation.ok) throw new Error("Ovid reservation unexpectedly exhausted");
+    await service.settleModelCall({
+      reservationId: ovidReservation.reservationId,
+      usage: { inputTokens: 60, outputTokens: 40, billingClass: "ovid_allowance" },
+    });
+
+    const blockedRun = await seedRun(actorUserId);
+    expect(await service.admitRun({
+      actorUserId,
+      source: "interactive",
+      runId: blockedRun.run.id,
+      idempotencyKey: "ovid-at-cap",
+      billingClass: "ovid_allowance",
+    })).toMatchObject({ ok: false, window: "day" });
+    const byokAfterCap = await seedRun(actorUserId);
+    expect(await service.admitRun({
+      actorUserId,
+      source: "collab",
+      runId: byokAfterCap.run.id,
+      idempotencyKey: "byok-after-ovid-cap",
+      billingClass: "byok",
+    })).toEqual({ ok: true });
+
+    const ledger = await scratch.client`
+      SELECT billing_class, count(*)::int AS calls,
+             sum(input_tokens + output_tokens)::int AS tokens
+        FROM run_usage WHERE user_id = ${actorUserId}
+       GROUP BY billing_class ORDER BY billing_class`;
+    expect(ledger).toEqual([
+      { billing_class: "byok", calls: 1, tokens: 500 },
+      { billing_class: "ovid_allowance", calls: 1, tokens: 100 },
+    ]);
+    expect((await counters(actorUserId)).map((row) => row.used_tokens)).toEqual([100, 100]);
+    expect(await runUsage.totals(db, {
+      userId: actorUserId,
+      since: new Date("2026-10-24T00:00:00Z"),
+      until: new Date("2026-10-25T00:00:00Z"),
+      billingClass: "byok",
+    })).toMatchObject({ modelCalls: 1, inputTokens: 400, outputTokens: 100 });
+    expect(await runUsage.totals(db, {
+      userId: actorUserId,
+      since: new Date("2026-10-24T00:00:00Z"),
+      until: new Date("2026-10-25T00:00:00Z"),
+      billingClass: "ovid_allowance",
+    })).toMatchObject({ modelCalls: 1, inputTokens: 60, outputTokens: 40 });
+  });
+
+  // UNEXECUTED real-Postgres regression under the heavy-command pause.
+  it("preserves distinctive options through real forTransaction savepoints and outer rollback/commit", async () => {
+    const { actorUserId, run } = await seedRun();
+    const distinctiveNow = new Date("2031-04-05T06:07:08.090Z");
+    const service = new RunQuotaService(db, {
+      now: () => distinctiveNow,
+      tokenCaps: { perDay: 7, perMonth: 13 },
+      usdCaps: { perDay: "0.0000000007", perMonth: "0.0000000013" },
+    });
+    const admissionInput = {
+      actorUserId,
+      source: "collab" as const,
+      runId: run.id,
+      idempotencyKey: "nested-admission",
+    };
+    const reservationInput = {
+      actorUserId,
+      runId: run.id,
+      reservationKey: "nested-reservation",
+      inputTokens: 3,
+      maxOutputTokens: 4,
+      requestedModel: "auto",
+      maxCostUsd: "0.0000000006",
+    };
+
+    await expect(db.transaction(async (tx) => {
+      const nested = service.forTransaction(tx as unknown as Db);
+      expect(await nested.admitRun(admissionInput)).toEqual({ ok: true });
+      const reservation = await nested.reserveModelCall(reservationInput);
+      expect(reservation.ok).toBe(true);
+      throw new Error("force quota outer rollback");
+    })).rejects.toThrow("force quota outer rollback");
+    expect(await scratch.client`
+      SELECT
+        (SELECT count(*)::int FROM usage_run_admissions
+          WHERE actor_user_id = ${actorUserId}) AS admissions,
+        (SELECT count(*)::int FROM usage_quota_reservations
+          WHERE actor_user_id = ${actorUserId}) AS reservations`)
+      .toEqual([{ admissions: 0, reservations: 0 }]);
+    expect(await counters(actorUserId)).toEqual([]);
+
+    const committed = await db.transaction(async (tx) => {
+      const nested = service.forTransaction(tx as unknown as Db);
+      const admission = await nested.admitRun(admissionInput);
+      const reservation = await nested.reserveModelCall(reservationInput);
+      if (!reservation.ok) throw new Error("nested reservation unexpectedly exhausted");
+      const tokenLimited = await nested.admitRun({
+        ...admissionInput,
+        idempotencyKey: "nested-token-cap",
+      });
+      const usdLimited = await nested.reserveModelCall({
+        ...reservationInput,
+        reservationKey: "nested-usd-cap",
+        inputTokens: 0,
+        maxOutputTokens: 0,
+        maxCostUsd: "0.0000000002",
+      });
+      return { admission, reservation, tokenLimited, usdLimited };
+    });
+    expect(committed.admission).toEqual({ ok: true });
+    expect(committed.tokenLimited).toEqual({
+      ok: false,
+      window: "day",
+      resetsAt: new Date("2031-04-06T00:00:00.000Z"),
+    });
+    expect(committed.usdLimited).toEqual({
+      ok: false,
+      window: "day",
+      resetsAt: new Date("2031-04-06T00:00:00.000Z"),
+    });
+    expect(await scratch.client`
+      SELECT
+        (SELECT count(*)::int FROM usage_run_admissions
+          WHERE actor_user_id = ${actorUserId}) AS admissions,
+        (SELECT count(*)::int FROM usage_quota_reservations
+          WHERE actor_user_id = ${actorUserId}) AS reservations`)
+      .toEqual([{ admissions: 1, reservations: 1 }]);
+    expect(await scratch.client`
+      SELECT
+        (SELECT created_at = ${distinctiveNow.toISOString()}::timestamptz
+           FROM usage_run_admissions
+          WHERE actor_user_id = ${actorUserId}
+            AND idempotency_key = ${admissionInput.idempotencyKey}) AS admission_clock,
+        (SELECT reserved_at = ${distinctiveNow.toISOString()}::timestamptz
+            AND day_window_start = ${"2031-04-05T00:00:00.000Z"}::timestamptz
+            AND month_window_start = ${"2031-04-01T00:00:00.000Z"}::timestamptz
+           FROM usage_quota_reservations
+          WHERE id = ${committed.reservation.reservationId}) AS reservation_clock_and_windows`)
+      .toEqual([{ admission_clock: true, reservation_clock_and_windows: true }]);
+    expect(await counters(actorUserId)).toEqual([
+      { window_kind: "day", used_tokens: 0, reserved_tokens: 7, used_usd: "0.0000000000", reserved_usd: "0.0000000006" },
+      { window_kind: "month", used_tokens: 0, reserved_tokens: 7, used_usd: "0.0000000000", reserved_usd: "0.0000000006" },
+    ]);
+  });
+
+  // UNEXECUTED real-Postgres regression under the heavy-command pause.
+  it("rejects invalid runtime billingClass before admission or reservation writes", async () => {
+    const { actorUserId, run } = await seedRun();
+    const service = quota(db);
+    const invalidBillingClass = "invalid" as unknown as QuotaBillingClass;
+    await expect(service.admitRun({
+      actorUserId,
+      source: "interactive",
+      runId: run.id,
+      idempotencyKey: "invalid-billing-admission",
+      billingClass: invalidBillingClass,
+    })).rejects.toThrow("invalid billingClass");
+    await expect(service.reserveModelCall({
+      actorUserId,
+      runId: run.id,
+      reservationKey: "invalid-billing-reservation",
+      inputTokens: 1,
+      maxOutputTokens: 1,
+      billingClass: invalidBillingClass,
+    })).rejects.toThrow("invalid billingClass");
+    expect(await scratch.client`
+      SELECT
+        (SELECT count(*)::int FROM usage_run_admissions
+          WHERE actor_user_id = ${actorUserId}) AS admissions,
+        (SELECT count(*)::int FROM usage_quota_reservations
+          WHERE actor_user_id = ${actorUserId}) AS reservations`)
+      .toEqual([{ admissions: 0, reservations: 0 }]);
+    expect(await counters(actorUserId)).toEqual([]);
+  });
+
+  // UNEXECUTED real-Postgres regression under the heavy-command pause.
+  it("treats billingClass as admission and reservation idempotency identity", async () => {
+    const { actorUserId, run } = await seedRun();
+    const service = quota(db);
+    const admissionInput = {
+      actorUserId,
+      source: "subagent" as const,
+      runId: run.id,
+      idempotencyKey: "billing-identity-admission",
+      billingClass: "ovid_allowance" as const,
+    };
+    expect(await service.admitRun(admissionInput)).toEqual({ ok: true });
+    await expect(service.admitRun({
+      ...admissionInput,
+      billingClass: "byok" as const,
+    })).rejects.toMatchObject({ code: "idempotency_conflict" });
+
+    const reservationInput = {
+      actorUserId,
+      runId: run.id,
+      reservationKey: "billing-identity-reservation",
+      inputTokens: 11,
+      maxOutputTokens: 19,
+      requestedModel: "auto",
+      attemptId: newId(),
+      maxCostUsd: "0.0000000001",
+      billingClass: "ovid_allowance" as const,
+    };
+    const reservation = await service.reserveModelCall(reservationInput);
+    if (!reservation.ok) throw new Error("reservation unexpectedly exhausted");
+    await expect(service.reserveModelCall({
+      ...reservationInput,
+      billingClass: "byok" as const,
+    })).rejects.toMatchObject({ code: "idempotency_conflict" });
+
+    expect(await scratch.client`
+      SELECT billing_class FROM usage_run_admissions
+       WHERE actor_user_id = ${actorUserId}`)
+      .toEqual([{ billing_class: "ovid_allowance" }]);
+    expect(await scratch.client`
+      SELECT billing_class FROM usage_quota_reservations
+       WHERE id = ${reservation.reservationId}`)
+      .toEqual([{ billing_class: "ovid_allowance" }]);
+    expect(await counters(actorUserId)).toEqual([
+      { window_kind: "day", used_tokens: 0, reserved_tokens: 30, used_usd: "0.0000000000", reserved_usd: "0.0000000001" },
+      { window_kind: "month", used_tokens: 0, reserved_tokens: 30, used_usd: "0.0000000000", reserved_usd: "0.0000000001" },
+    ]);
+  });
+
+  // UNEXECUTED real-Postgres regression under the heavy-command pause.
+  it("rejects invalid and mismatched settlement billingClass without staged or ledger mutation", async () => {
+    const { actorUserId, run } = await seedRun();
+    const service = quota(db);
+    const reservation = await service.reserveModelCall({
+      actorUserId,
+      runId: run.id,
+      reservationKey: "billing-settlement-conflict",
+      inputTokens: 5,
+      maxOutputTokens: 7,
+      requestedModel: "auto",
+      billingClass: "ovid_allowance",
+    });
+    if (!reservation.ok) throw new Error("reservation unexpectedly exhausted");
+    const invalidBillingClass = "invalid" as unknown as QuotaBillingClass;
+    await expect(service.settleModelCall({
+      reservationId: reservation.reservationId,
+      usage: { inputTokens: 5, outputTokens: 7, billingClass: invalidBillingClass },
+    })).rejects.toThrow("invalid billingClass");
+    await expect(service.settleModelCall({
+      reservationId: reservation.reservationId,
+      usage: { inputTokens: 5, outputTokens: 7, billingClass: "byok" },
+    })).rejects.toMatchObject({ code: "billing_class_conflict" });
+
+    expect(await scratch.client`
+      SELECT state, billing_class, requested_model, provider_model,
+             actual_input_tokens::int, actual_output_tokens::int,
+             actual_cache_read_tokens::int, actual_cache_write_tokens::int,
+             cost_usd::text, cost_source, run_usage_id
+        FROM usage_quota_reservations WHERE id = ${reservation.reservationId}`)
+      .toEqual([{
+        state: "reserved",
+        billing_class: "ovid_allowance",
+        requested_model: "auto",
+        provider_model: null,
+        actual_input_tokens: null,
+        actual_output_tokens: null,
+        actual_cache_read_tokens: null,
+        actual_cache_write_tokens: null,
+        cost_usd: null,
+        cost_source: null,
+        run_usage_id: null,
+      }]);
+    expect(await scratch.client`
+      SELECT count(*)::int AS count FROM run_usage
+       WHERE quota_reservation_id = ${reservation.reservationId}`)
+      .toEqual([{ count: 0 }]);
+    expect(await counters(actorUserId)).toEqual([
+      { window_kind: "day", used_tokens: 0, reserved_tokens: 12, used_usd: "0.0000000000", reserved_usd: "0.0000000000" },
+      { window_kind: "month", used_tokens: 0, reserved_tokens: 12, used_usd: "0.0000000000", reserved_usd: "0.0000000000" },
+    ]);
+  });
+
+  it("settles actual usage exactly at the reserved input-plus-output boundary", async () => {
+    const { actorUserId, run } = await seedRun();
+    const service = quota(db);
+    const reservation = await service.reserveModelCall({
+      actorUserId,
+      runId: run.id,
+      reservationKey: "exact-boundary-call",
+      inputTokens: 40,
+      maxOutputTokens: 10,
+      billingClass: "ovid_allowance",
+    });
+    expect(reservation.ok).toBe(true);
+    if (!reservation.ok) throw new Error("reservation unexpectedly exhausted");
+    await service.settleModelCall({
+      reservationId: reservation.reservationId,
+      usage: { inputTokens: 40, outputTokens: 10 },
+    });
+    expect(await scratch.client`
+      SELECT sum(input_tokens + output_tokens)::int AS tokens
+        FROM run_usage WHERE run_id = ${run.id}`).toEqual([{ tokens: 50 }]);
+    expect((await counters(actorUserId)).map((row) => row.used_tokens)).toEqual([50, 50]);
+  });
+
+  it("settles actual over-reservation usage and blocks the next allowance call", async () => {
+    const { actorUserId, run } = await seedRun();
+    const service = quota(db);
+    const reservation = await service.reserveModelCall({
+      actorUserId,
+      runId: run.id,
+      reservationKey: "bounded-call",
+      inputTokens: 40,
+      maxOutputTokens: 10,
+      billingClass: "ovid_allowance",
+    });
+    expect(reservation.ok).toBe(true);
+    if (!reservation.ok) throw new Error("reservation unexpectedly exhausted");
+    await service.settleModelCall({
+      reservationId: reservation.reservationId,
+      usage: { inputTokens: 40, outputTokens: 11 },
+    });
+    expect(await scratch.client`
+      SELECT input_tokens, output_tokens FROM run_usage WHERE run_id = ${run.id}`)
+      .toEqual([{ input_tokens: 40, output_tokens: 11 }]);
+    expect((await counters(actorUserId)).map((row) => row.used_tokens)).toEqual([51, 51]);
+    await service.settleModelCall({
+      reservationId: reservation.reservationId,
+      usage: { inputTokens: 40, outputTokens: 11 },
+    });
+    expect((await counters(actorUserId)).map((row) => row.used_tokens)).toEqual([51, 51]);
+    const next = await service.reserveModelCall({
+      actorUserId,
+      runId: run.id,
+      reservationKey: "after-over-reservation",
+      inputTokens: 40,
+      maxOutputTokens: 11,
+      billingClass: "ovid_allowance",
+    });
+    expect(next).toMatchObject({ ok: false, window: "day" });
+    expect((await counters(actorUserId)).map((row) => row.used_tokens)).toEqual([51, 51]);
+  });
+
+  // UNEXECUTED real-Postgres regression under the heavy-command pause.
+  it("recovers staged actual usage without release or double settlement", async () => {
+    const { actorUserId, run } = await seedRun();
+    const service = quota(db);
+    const reservation = await service.reserveModelCall({
+      actorUserId,
+      runId: run.id,
+      reservationKey: "staged-recovery-call",
+      inputTokens: 40,
+      maxOutputTokens: 10,
+      billingClass: "ovid_allowance",
+    });
+    expect(reservation.ok).toBe(true);
+    if (!reservation.ok) throw new Error("reservation unexpectedly exhausted");
+    // Model a provider response whose actual facts were staged before a failed
+    // ledger commit. No provider is called again during recovery.
+    await scratch.client`
+      UPDATE usage_quota_reservations
+         SET actual_input_tokens = 40, actual_output_tokens = 11,
+             actual_cache_read_tokens = 0, actual_cache_write_tokens = 0,
+             provider_model = 'served-model', cost_usd = 0.0123456789,
+             cost_source = 'litellm'
+       WHERE id = ${reservation.reservationId}`;
+    const pending = await service.pendingSettlements();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({
+      reservationId: reservation.reservationId,
+      usage: {
+        inputTokens: 40,
+        outputTokens: 11,
+        providerModel: "served-model",
+        costUsd: "0.0123456789",
+        costSource: "litellm",
+      },
+    });
+    await expect(service.releaseModelCall(reservation.reservationId))
+      .rejects.toMatchObject({ code: "usage_settlement_pending" });
+    const recoveredUsage = pending[0]!.usage;
+    await service.settleModelCall({
+      reservationId: reservation.reservationId,
+      usage: recoveredUsage,
+    });
+    expect(await service.pendingSettlements()).toEqual([]);
+    expect(await scratch.client`
+      SELECT input_tokens, output_tokens, provider_model, cost_usd::text
+        FROM run_usage WHERE quota_reservation_id = ${reservation.reservationId}`)
+      .toEqual([{ input_tokens: 40, output_tokens: 11, provider_model: "served-model", cost_usd: "0.0123456789" }]);
+    const recoveredCounters = await counters(actorUserId);
+    expect(recoveredCounters).toEqual([
+      { window_kind: "day", used_tokens: 51, reserved_tokens: 0, used_usd: "0.0123456789", reserved_usd: "0.0000000000" },
+      { window_kind: "month", used_tokens: 51, reserved_tokens: 0, used_usd: "0.0123456789", reserved_usd: "0.0000000000" },
+    ]);
+
+    await service.settleModelCall({
+      reservationId: reservation.reservationId,
+      usage: recoveredUsage,
+    });
+    expect(await scratch.client`
+      SELECT count(*)::int AS count FROM run_usage
+       WHERE quota_reservation_id = ${reservation.reservationId}`)
+      .toEqual([{ count: 1 }]);
+    expect(await counters(actorUserId)).toEqual(recoveredCounters);
+    await expect(service.settleModelCall({
+      reservationId: reservation.reservationId,
+      usage: { ...recoveredUsage, outputTokens: 12 },
+    })).rejects.toMatchObject({ code: "idempotency_conflict" });
+    expect(await scratch.client`
+      SELECT count(*)::int AS count FROM run_usage
+       WHERE quota_reservation_id = ${reservation.reservationId}`)
+      .toEqual([{ count: 1 }]);
+    expect(await counters(actorUserId)).toEqual(recoveredCounters);
   });
 
   it("replays actor run admission after exhaustion and rejects changed idempotency payloads", async () => {

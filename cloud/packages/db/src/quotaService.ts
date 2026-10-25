@@ -18,6 +18,15 @@ export const RUN_SOURCES = [
 export type RunSource = (typeof RUN_SOURCES)[number];
 export type QuotaWindow = "day" | "month";
 export type QuotaCostSource = "litellm" | "provider";
+export type QuotaBillingClass = "ovid_allowance" | "byok";
+
+function billingClass(value: QuotaBillingClass | null | undefined): QuotaBillingClass {
+  const resolved = value ?? "ovid_allowance";
+  if (resolved !== "ovid_allowance" && resolved !== "byok") {
+    throw new RangeError("invalid billingClass");
+  }
+  return resolved;
+}
 
 export interface QuotaExhausted {
   ok: false;
@@ -38,6 +47,8 @@ export interface QuotaUsage {
   providerModel?: string | null;
   costUsd?: string | null;
   costSource?: QuotaCostSource | null;
+  /** BYOK remains actual actor telemetry but never enters Ovid allowance caps. */
+  billingClass?: QuotaBillingClass;
 }
 
 export interface RunQuotaAdmissionInput {
@@ -45,6 +56,7 @@ export interface RunQuotaAdmissionInput {
   source: RunSource;
   runId: string;
   idempotencyKey: string;
+  billingClass?: QuotaBillingClass;
 }
 
 export interface ModelCallReservationInput {
@@ -57,6 +69,7 @@ export interface ModelCallReservationInput {
   requestedModel?: string | null;
   /** Optional conservative USD allowance; exact decimal with at most 10 places. */
   maxCostUsd?: string;
+  billingClass?: QuotaBillingClass;
 }
 
 export interface RunQuotaServiceOptions {
@@ -239,6 +252,7 @@ async function changeReservationAllowance(
   direction: 1 | -1,
   now: Date,
 ): Promise<void> {
+  if (reservation.billing_class === "byok") return;
   const tokens = Number(reservation.input_tokens) + Number(reservation.max_output_tokens);
   const cost = String(reservation.reserved_cost_usd);
   const amount = direction === 1 ? tokens : -tokens;
@@ -266,6 +280,11 @@ function sameModel(a: unknown, b: string | null): boolean {
 export class RunQuotaService {
   constructor(private readonly db: Db, private readonly options: RunQuotaServiceOptions = {}) {}
 
+  /** Preserve plan/test options when Task 5 admits inside its canonical transaction. */
+  forTransaction(db: Db): RunQuotaService {
+    return new RunQuotaService(db, this.options);
+  }
+
   private now(): Date {
     const value = this.options.now?.() ?? new Date();
     if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
@@ -279,6 +298,7 @@ export class RunQuotaService {
     requiredId(input.runId, "runId");
     requiredId(input.idempotencyKey, "idempotencyKey");
     if (!RUN_SOURCES.includes(input.source)) throw new RangeError("invalid RunSource");
+    const billing = billingClass(input.billingClass);
     return this.db.transaction(async (tx) => {
       const tiers = await lockUsers(tx, [input.actorUserId]);
       const existing = await rows<Row>(tx, sql`
@@ -287,7 +307,11 @@ export class RunQuotaService {
            AND idempotency_key = ${input.idempotencyKey}
          LIMIT 1`);
       if (existing[0] !== undefined) {
-        if (existing[0].run_id !== input.runId || existing[0].source !== input.source) {
+        if (
+          existing[0].run_id !== input.runId ||
+          existing[0].source !== input.source ||
+          billingClass(existing[0].billing_class as QuotaBillingClass | null | undefined) !== billing
+        ) {
           throw new QuotaContractError("idempotency_conflict");
         }
         return { ok: true as const };
@@ -298,25 +322,27 @@ export class RunQuotaService {
         SELECT id FROM runs WHERE id = ${input.runId} FOR KEY SHARE`);
       if (run[0] === undefined) throw new QuotaContractError("run_not_found");
       const now = this.now();
-      const counters = {
-        day: await counterFor(tx, input.actorUserId, "day", now),
-        month: await counterFor(tx, input.actorUserId, "month", now),
-      };
-      const denied = exhaustion(
-        this.options,
-        tiers.get(input.actorUserId)!,
-        counters,
-        0,
-        "0",
-        true,
-      );
-      if (denied !== null) return denied;
+      if (billing === "ovid_allowance") {
+        const counters = {
+          day: await counterFor(tx, input.actorUserId, "day", now),
+          month: await counterFor(tx, input.actorUserId, "month", now),
+        };
+        const denied = exhaustion(
+          this.options,
+          tiers.get(input.actorUserId)!,
+          counters,
+          0,
+          "0",
+          true,
+        );
+        if (denied !== null) return denied;
+      }
       await tx.execute(sql`
         INSERT INTO usage_run_admissions
-          (id, actor_user_id, source, run_id, idempotency_key, created_at)
+          (id, actor_user_id, source, run_id, idempotency_key, billing_class, created_at)
         VALUES
           (${newId()}, ${input.actorUserId}, ${input.source}, ${input.runId},
-           ${input.idempotencyKey}, ${now.toISOString()}::timestamptz)`);
+           ${input.idempotencyKey}, ${billing}, ${now.toISOString()}::timestamptz)`);
       return { ok: true as const };
     });
   }
@@ -336,6 +362,7 @@ export class RunQuotaService {
     const reservedCost = input.maxCostUsd ?? "0";
     decimalUnits(reservedCost, "maxCostUsd");
     const allowance = input.inputTokens + input.maxOutputTokens;
+    const billing = billingClass(input.billingClass);
 
     return this.db.transaction(async (tx) => {
       const tiers = await lockUsers(tx, [input.actorUserId]);
@@ -351,6 +378,7 @@ export class RunQuotaService {
           Number(existing.input_tokens) === input.inputTokens &&
           Number(existing.max_output_tokens) === input.maxOutputTokens &&
           sameModel(existing.requested_model, requestedModel) &&
+          billingClass(existing.billing_class as QuotaBillingClass | null | undefined) === billing &&
           (existing.attempt_id ?? null) === attemptId &&
           decimalUnits(String(existing.reserved_cost_usd)) === decimalUnits(reservedCost);
         if (!unchanged) throw new QuotaContractError("idempotency_conflict");
@@ -372,19 +400,21 @@ export class RunQuotaService {
       if (sessionId === null) throw new QuotaContractError("run_lineage_missing");
 
       const now = this.now();
-      const counters = {
-        day: await counterFor(tx, input.actorUserId, "day", now),
-        month: await counterFor(tx, input.actorUserId, "month", now),
-      };
-      const denied = exhaustion(
-        this.options,
-        tiers.get(input.actorUserId)!,
-        counters,
-        allowance,
-        reservedCost,
-        false,
-      );
-      if (denied !== null) return denied;
+      if (billing === "ovid_allowance") {
+        const counters = {
+          day: await counterFor(tx, input.actorUserId, "day", now),
+          month: await counterFor(tx, input.actorUserId, "month", now),
+        };
+        const denied = exhaustion(
+          this.options,
+          tiers.get(input.actorUserId)!,
+          counters,
+          allowance,
+          reservedCost,
+          false,
+        );
+        if (denied !== null) return denied;
+      }
 
       const reservationId = existing === undefined ? newId() : String(existing.id);
       const admission = await rows<{ source: string }>(tx, sql`
@@ -399,13 +429,13 @@ export class RunQuotaService {
           INSERT INTO usage_quota_reservations
             (id, actor_user_id, run_id, attempt_id, session_id, run_source,
              reservation_key, state, input_tokens, max_output_tokens, reserved_cost_usd,
-             requested_model, day_window_start, month_window_start,
+             requested_model, billing_class, day_window_start, month_window_start,
              reserved_at, created_at, updated_at)
           VALUES
             (${reservationId}, ${input.actorUserId}, ${input.runId}, ${attemptId},
              ${sessionId}, ${runSource},
              ${input.reservationKey}, 'reserved', ${input.inputTokens}, ${input.maxOutputTokens},
-             ${reservedCost}::numeric, ${requestedModel},
+             ${reservedCost}::numeric, ${requestedModel}, ${billing},
              ${dayStart}::timestamptz, ${monthStart}::timestamptz,
              ${now.toISOString()}::timestamptz, ${now.toISOString()}::timestamptz,
              ${now.toISOString()}::timestamptz)`);
@@ -417,6 +447,7 @@ export class RunQuotaService {
                  run_source = ${runSource},
                  reserved_cost_usd = ${reservedCost}::numeric,
                  requested_model = ${requestedModel}, provider_model = NULL,
+                  billing_class = ${billing},
                  actual_input_tokens = NULL, actual_output_tokens = NULL,
                  actual_cache_read_tokens = NULL, actual_cache_write_tokens = NULL,
                  cost_usd = NULL, cost_source = NULL, run_usage_id = NULL,
@@ -433,6 +464,7 @@ export class RunQuotaService {
         input_tokens: input.inputTokens,
         max_output_tokens: input.maxOutputTokens,
         reserved_cost_usd: reservedCost,
+        billing_class: billing,
         day_window_start: dayStart,
         month_window_start: monthStart,
       }, 1, now);
@@ -463,6 +495,9 @@ export class RunQuotaService {
     modelValue(input.usage.requestedModel);
     modelValue(input.usage.providerModel);
 
+    // Persist observed usage before the ledger commit. If the commit fails,
+    // the reservation retains these exact facts for idempotent recovery rather
+    // than being released as if the provider call never happened.
     await this.db.transaction(async (tx) => {
       const identity = await rows<{ actor_user_id: string }>(tx, sql`
         SELECT actor_user_id FROM usage_quota_reservations
@@ -473,6 +508,67 @@ export class RunQuotaService {
         SELECT * FROM usage_quota_reservations
          WHERE id = ${input.reservationId} FOR UPDATE`);
       const reservation = found[0]!;
+      const billing = billingClass(reservation.billing_class as QuotaBillingClass | null | undefined);
+      if (input.usage.billingClass !== undefined && billingClass(input.usage.billingClass) !== billing) {
+        throw new QuotaContractError("billing_class_conflict");
+      }
+      if (reservation.state === "released") {
+        throw new QuotaContractError("reservation_released");
+      }
+      if (reservation.state === "settled") return;
+      if (reservation.state !== "reserved") {
+        throw new QuotaContractError("invalid_reservation_state");
+      }
+      const requestedModel = input.usage.requestedModel === undefined
+        ? (reservation.requested_model === null ? null : String(reservation.requested_model))
+        : modelValue(input.usage.requestedModel)!;
+      const providerModel = input.usage.providerModel === undefined
+        ? (reservation.provider_model === null || reservation.provider_model === undefined
+            ? null
+            : String(reservation.provider_model))
+        : modelValue(input.usage.providerModel)!;
+      const costSource = input.usage.costSource ?? null;
+      if (reservation.actual_input_tokens !== null && reservation.actual_input_tokens !== undefined) {
+        const unchanged =
+          Number(reservation.actual_input_tokens) === input.usage.inputTokens &&
+          Number(reservation.actual_output_tokens) === input.usage.outputTokens &&
+          Number(reservation.actual_cache_read_tokens) === cacheRead &&
+          Number(reservation.actual_cache_write_tokens) === cacheWrite &&
+          sameModel(reservation.requested_model, requestedModel) &&
+          sameModel(reservation.provider_model, providerModel) &&
+          sameModel(reservation.cost_source, costSource) &&
+          (reservation.cost_usd === null || reservation.cost_usd === undefined
+            ? costUsd === null
+            : costUsd !== null && decimalUnits(String(reservation.cost_usd)) === decimalUnits(costUsd));
+        if (!unchanged) throw new QuotaContractError("idempotency_conflict");
+        return;
+      }
+      await tx.execute(sql`
+        UPDATE usage_quota_reservations
+           SET requested_model = ${requestedModel}, provider_model = ${providerModel},
+               actual_input_tokens = ${input.usage.inputTokens},
+               actual_output_tokens = ${input.usage.outputTokens},
+               actual_cache_read_tokens = ${cacheRead},
+               actual_cache_write_tokens = ${cacheWrite},
+               cost_usd = ${costUsd}::numeric, cost_source = ${costSource},
+               updated_at = ${this.now().toISOString()}::timestamptz
+         WHERE id = ${input.reservationId}`);
+    });
+
+    await this.db.transaction(async (tx) => {
+      const identity = await rows<{ actor_user_id: string }>(tx, sql`
+        SELECT actor_user_id FROM usage_quota_reservations
+         WHERE id = ${input.reservationId} LIMIT 1`);
+      if (identity[0] === undefined) throw new QuotaContractError("reservation_not_found");
+      await lockUsers(tx, [identity[0].actor_user_id]);
+      const found = await rows<Row>(tx, sql`
+        SELECT * FROM usage_quota_reservations
+         WHERE id = ${input.reservationId} FOR UPDATE`);
+      const reservation = found[0]!;
+      const billing = billingClass(reservation.billing_class as QuotaBillingClass | null | undefined);
+      if (input.usage.billingClass !== undefined && billingClass(input.usage.billingClass) !== billing) {
+        throw new QuotaContractError("billing_class_conflict");
+      }
       if (reservation.state === "released") {
         throw new QuotaContractError("reservation_released");
       }
@@ -503,7 +599,10 @@ export class RunQuotaService {
       if (reservation.state !== "reserved") {
         throw new QuotaContractError("invalid_reservation_state");
       }
-
+      // The reserved allowance is a pre-call bound, not permission to erase
+      // observed overage. Settle the provider-reported actual consumption and
+      // release the reservation; subsequent admission/reservation reads the
+      // authoritative used counters and blocks further allowance spending.
       const now = this.now();
       if (reservation.session_id === null || reservation.session_id === undefined) {
         // Actual usage is authoritative only in run_usage. Never mark a call
@@ -520,13 +619,13 @@ export class RunQuotaService {
         INSERT INTO run_usage
           (id, user_id, session_id, run_id, model, input_tokens, output_tokens,
            cache_read_tokens, cache_write_tokens, quota_reservation_id, quota_call_id,
-           attempt_id, requested_model, provider_model, cost_usd, cost_source, created_at)
+           attempt_id, requested_model, provider_model, cost_usd, cost_source, billing_class, created_at)
         VALUES
           (${runUsageId}, ${String(reservation.actor_user_id)}, ${String(reservation.session_id)},
            ${String(reservation.run_id)}, ${legacyModel}, ${input.usage.inputTokens},
            ${input.usage.outputTokens}, ${cacheRead}, ${cacheWrite}, ${input.reservationId},
            ${String(reservation.reservation_key)}, ${reservation.attempt_id ?? null},
-           ${requestedModel}, ${providerModel}, ${costUsd}::numeric, ${costSource},
+           ${requestedModel}, ${providerModel}, ${costUsd}::numeric, ${costSource}, ${billing},
            ${now.toISOString()}::timestamptz)`);
       await changeReservationAllowance(tx, reservation, -1, now);
       await tx.execute(sql`
@@ -543,6 +642,37 @@ export class RunQuotaService {
     });
   }
 
+  /** Actual usage staged on reserved calls whose ledger commit needs retry. */
+  async pendingSettlements(limit = 50): Promise<Array<{ reservationId: string; usage: QuotaUsage }>> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new RangeError("settlement recovery limit must be an integer from 1 to 100");
+    }
+    const rows = await this.db.$client.unsafe(
+      `SELECT id, requested_model, provider_model, billing_class,
+              actual_input_tokens, actual_output_tokens,
+              actual_cache_read_tokens, actual_cache_write_tokens,
+              cost_usd, cost_source
+         FROM usage_quota_reservations
+        WHERE state = 'reserved' AND actual_input_tokens IS NOT NULL
+        ORDER BY created_at, id LIMIT $1`,
+      [limit],
+    ) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      reservationId: String(row.id),
+      usage: {
+        inputTokens: Number(row.actual_input_tokens),
+        outputTokens: Number(row.actual_output_tokens),
+        cacheReadTokens: Number(row.actual_cache_read_tokens ?? 0),
+        cacheWriteTokens: Number(row.actual_cache_write_tokens ?? 0),
+        requestedModel: row.requested_model === null ? null : String(row.requested_model),
+        providerModel: row.provider_model === null ? null : String(row.provider_model),
+        costUsd: row.cost_usd === null ? null : String(row.cost_usd),
+        costSource: row.cost_source === null ? null : row.cost_source as "litellm" | "provider",
+        billingClass: row.billing_class as "ovid_allowance" | "byok",
+      },
+    }));
+  }
+
   async releaseModelCall(reservationId: string): Promise<void> {
     requiredId(reservationId, "reservationId");
     await this.db.transaction(async (tx) => {
@@ -556,6 +686,9 @@ export class RunQuotaService {
       if (reservation.state === "settled" || reservation.state === "released") return;
       if (reservation.state !== "reserved") {
         throw new QuotaContractError("invalid_reservation_state");
+      }
+      if (reservation.actual_input_tokens !== null && reservation.actual_input_tokens !== undefined) {
+        throw new QuotaContractError("usage_settlement_pending");
       }
       const now = this.now();
       await changeReservationAllowance(tx, reservation, -1, now);
