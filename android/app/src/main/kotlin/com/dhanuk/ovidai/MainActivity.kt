@@ -2,6 +2,7 @@ package com.dhanuk.ovidai
 
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.embedding.engine.plugins.PluginRegistry
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -40,6 +41,11 @@ import java.util.Locale
 import java.util.concurrent.Executor
 import com.android.installreferrer.api.InstallReferrerClient
 import com.android.installreferrer.api.InstallReferrerStateListener
+
+/** Registers only the static renderer; existing voice/native channels stay as-is. */
+internal fun registerStaticRichContentRenderer(plugins: PluginRegistry) {
+    plugins.add(StaticRichContentRenderer())
+}
 
 /** Notification tap: consume the app route extra once (see OvidNotifications). */
 internal fun routeNotificationIntent(intent: Intent?, openRoute: (String) -> Unit) {
@@ -123,6 +129,7 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        registerStaticRichContentRenderer(flutterEngine.plugins)
         flutterEngine.platformViewsController.registry.registerViewFactory(
             "ovid/html-artifact", HtmlArtifactViewFactory(flutterEngine.dartExecutor.binaryMessenger),
         )
