@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/collaboration/models.dart';
 import '../../../core/collaboration/production.dart';
@@ -7,6 +8,8 @@ import '../../../core/collaboration/reducer.dart';
 import '../../../core/state.dart';
 import '../collab/collab_live_page.dart';
 import '../collab/collab_members_page.dart';
+import '../../collab_attachment_picker.dart';
+import '../../collab_report_sheet.dart';
 
 /// Routes for the live-collaboration surfaces.
 ///
@@ -66,6 +69,7 @@ class V2CollabRoutes {
   static V2CollabLivePageData liveDataFor(
     CollaborationState? state, {
     V2CollabLiveConnection connection = V2CollabLiveConnection.connected,
+    List<String> pendingAttachmentNames = const [],
   }) {
     if (state == null) {
       return V2CollabLivePageData(
@@ -79,7 +83,6 @@ class V2CollabRoutes {
     }
 
     final active = state.activeMembers;
-    final last = state.messages.isEmpty ? null : state.messages.last;
     final ended = state.status == CollaborationStatus.closed;
     final localName = state.names[state.localParticipantId] ?? '';
     final chatTitle = _chatTitle(state);
@@ -87,6 +90,14 @@ class V2CollabRoutes {
     final holderName = holderId == null ? '' : state.nameOf(holderId);
     // Turn timing is only ever the server's. A closed room keeps no countdown.
     final turn = ended ? null : state.session.turn;
+    final transcript = <({int sequence, V2CollabMessage message})>[
+      for (final message in state.messages)
+        (sequence: message.sequence, message: _messageFor(state, message)),
+      for (final tool in state.tools.values)
+        (sequence: tool.sequence, message: _toolFor(tool)),
+      for (final artifact in state.artifacts.values)
+        (sequence: artifact.sequence, message: _artifactFor(state, artifact)),
+    ]..sort((left, right) => left.sequence.compareTo(right.sequence));
 
     return V2CollabLivePageData(
       title: chatTitle.isEmpty ? 'Team chat' : chatTitle,
@@ -107,23 +118,13 @@ class V2CollabRoutes {
       turnHolderName: holderName,
       turnTimeLeftLabel: '',
       queueLabel: null,
-      messages: [
-        for (final message in state.messages)
-          _messageFor(
-            state,
-            message,
-            isTurnHolder:
-                holderId != null &&
-                message.clientEventId == last?.clientEventId &&
-                !message.isAssistant,
-          ),
-      ],
+      messages: [for (final row in transcript) row.message],
       // The collaboration contract makes the creator's plan pay for the room.
       creatorPaysStorage: true,
       capacity: maxActiveMembers,
-      // A free turn is this device's turn; a held turn belongs to its author.
-      // A closed room takes no turns.
-      isMyTurn: !ended && (holderId == null || holderId == state.localParticipantId),
+      // Only an absent server lease admits a new turn. Even this device's own
+      // accepted run keeps sending locked until fresh server state releases it.
+      isMyTurn: !ended && holderId == null,
       status: ended ? V2CollabLiveStatus.ended : V2CollabLiveStatus.ready,
       errorMessage: 'We could not load this live chat.',
       endedMessage: state.closeReason == CloseReason.localRemoved
@@ -131,7 +132,7 @@ class V2CollabRoutes {
           : 'This live chat has ended.',
       connection: connection,
       turnStartedAt: turn?.startedAt,
-      turnDuration: turn?.duration ?? const Duration(seconds: 90),
+      pendingAttachmentNames: pendingAttachmentNames,
     );
   }
 
@@ -161,31 +162,11 @@ class V2CollabRoutes {
   static bool atCapacity(CollaborationState? state) =>
       state != null && state.activeMembers.length >= maxActiveMembers;
 
-  /// The participant who currently holds the single-sender turn, or null when
-  /// the turn is free.
-  ///
-  /// A server-published lease is authoritative. Otherwise a running/queued
-  /// model status is the strongest signal. Failing both, the author of the
-  /// last unanswered message holds the turn until an assistant reply lands.
+  /// The holder of the authoritative full-run lease, or null only when fresh
+  /// server state publishes no lease. Replay text/status never infers a turn.
   @visibleForTesting
-  static String? turnHolderId(CollaborationState state) {
-    final leaseHolder = state.session.turn?.participantId;
-    if (leaseHolder != null) return leaseHolder;
-    for (final entry in state.modelStates.entries) {
-      // `streaming` is the transport's own "still producing" flag and is
-      // independent of `status`: a peer between tool calls reports
-      // status=idle while it is still streaming. Either one holds the turn.
-      if (entry.value.streaming ||
-          entry.value.status == ModelExecutionStatus.running ||
-          entry.value.status == ModelExecutionStatus.queued) {
-        return entry.key;
-      }
-    }
-    if (state.messages.isEmpty) return null;
-    final last = state.messages.last;
-    if (last.isAssistant) return null;
-    return last.author;
-  }
+  static String? turnHolderId(CollaborationState state) =>
+      state.session.turn?.holderParticipantId;
 
   /// Maps a live projection onto the member roster.
   @visibleForTesting
@@ -258,56 +239,40 @@ class V2CollabRoutes {
   static Future<void> _send(
     CollaborationProduction controller,
     CollaborationState state,
-    String text,
-  ) async {
+    String text, {
+    List<CollaborationAttachmentInput> attachments = const [],
+  }) async {
     final holder = turnHolderId(state);
-    // The screen releases an expired server turn locally; the send path uses
-    // the same rule instead of refusing after the deadline has passed.
-    final lease = state.session.turn;
-    final released = lease != null && lease.isExpiredAt(DateTime.now());
-    if (!released &&
-        holder != null &&
-        holder != state.localParticipantId) {
-      throw 'Wait for ${state.nameOf(holder)} to finish the turn.';
+    if (holder != null) {
+      throw holder == state.localParticipantId
+          ? 'Your reply is still running. Send when it finishes.'
+          : 'Wait for ${state.nameOf(holder)} to finish the turn.';
     }
     final model = _defaultModel();
     if (model == null) {
-      throw 'Add a key or sign in to reply.';
+      throw 'No chat model is available for this account.';
     }
     try {
       await controller.sendTurn(
         text,
-        providerId: model.$1,
-        model: model.$2,
-        modelLabel: model.$2,
+        model: model,
+        attachments: attachments,
       );
     } catch (error) {
       throw collaborationErrorMessage(error);
     }
   }
 
-  /// This device's own provider/model pair, never another participant's.
-  static (String, String)? _defaultModel() {
+  /// Server-populated Ovid Cloud catalog choices for this sender. Local
+  /// provider keys, host credentials and other participants' choices are not
+  /// consulted or uploaded.
+  static String? _defaultModel() {
     final app = AppState.I;
-    final usable = [
-      for (final provider in app.providers)
-        if (provider.hasKey || !provider.requiresApiKey) provider,
-    ];
-    for (final provider in usable) {
-      for (final model in provider.models) {
-        if (model.trim().isEmpty) continue;
-        if (provider.id == app.lastSelectedProviderId &&
-            model == app.lastSelectedModel) {
-          return (provider.id, model);
-        }
-      }
-    }
-    for (final provider in usable) {
-      for (final model in provider.models) {
-        if (model.trim().isNotEmpty) return (provider.id, model);
-      }
-    }
-    return null;
+    final provider = app.providerById(AppState.ovidCloudProviderId);
+    if (provider == null) return null;
+    final models = provider.models.where((model) => model.trim().isNotEmpty);
+    if (models.contains(app.lastSelectedModel)) return app.lastSelectedModel;
+    return models.isEmpty ? null : models.first;
   }
 
   static Future<void> _invite(
@@ -386,7 +351,7 @@ class V2CollabRoutes {
     CollaborationProduction controller,
     V2CollabMember member,
   ) async {
-    final remove = await showModalBottomSheet<bool>(
+    final action = await showModalBottomSheet<String>(
       context: context,
       builder: (sheetContext) => SafeArea(
         child: Column(
@@ -401,16 +366,56 @@ class V2CollabRoutes {
               ),
             ),
             ListTile(
-              leading: const Icon(Icons.person_remove_outlined),
-              title: const Text('Remove from this room'),
-              onTap: () => Navigator.pop(sheetContext, true),
+              leading: const Icon(Icons.flag_outlined),
+              title: const Text('Report participant'),
+              onTap: () => Navigator.pop(sheetContext, 'report'),
             ),
+            ListTile(
+              leading: const Icon(Icons.block_outlined),
+              title: const Text('Block participant'),
+              onTap: () => Navigator.pop(sheetContext, 'block'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.check_circle_outline),
+              title: const Text('Unblock participant'),
+              onTap: () => Navigator.pop(sheetContext, 'unblock'),
+            ),
+            if (member.canRemove)
+              ListTile(
+                leading: const Icon(Icons.person_remove_outlined),
+                title: const Text('Remove from this room'),
+                onTap: () => Navigator.pop(sheetContext, 'remove'),
+              ),
             const SizedBox(height: 8),
           ],
         ),
       ),
     );
-    if (remove != true || !context.mounted) return;
+    if (action == null || !context.mounted) return;
+    if (action == 'report') {
+      await showCollaborationReportSheet(
+        context,
+        controller,
+        kind: 'collab_participant',
+        targetId: member.id,
+      );
+      return;
+    }
+    if (action == 'block' || action == 'unblock') {
+      try {
+        if (action == 'block') {
+          await controller.block(member.id);
+        } else {
+          await controller.unblock(member.id);
+        }
+        if (context.mounted) {
+          _snack(context, '${member.name} ${action == 'block' ? 'blocked' : 'unblocked'}.');
+        }
+      } catch (error) {
+        if (context.mounted) _snack(context, collaborationErrorMessage(error));
+      }
+      return;
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -454,12 +459,16 @@ class V2CollabRoutes {
 
   static V2CollabMessage _messageFor(
     CollaborationState state,
-    CollaborationMessage message, {
-    required bool isTurnHolder,
-  }) {
+    CollaborationMessage message,
+  ) {
     final assistant = message.isAssistant;
     return V2CollabMessage(
       id: message.clientEventId,
+      authorId: message.author,
+      canReport: message.author != state.localParticipantId &&
+          collaborationIsCanonicalMessageSource(message.clientEventId),
+      canRemove: state.localParticipantId == state.session.ownerParticipantId &&
+          collaborationIsCanonicalMessageSource(message.clientEventId),
       speakerName: assistant
           ? (message.model ?? state.nameOf(message.author))
           : _authorName(state, message),
@@ -467,8 +476,37 @@ class V2CollabRoutes {
       text: message.text,
       kind: assistant ? V2CollabMessageKind.agent : V2CollabMessageKind.person,
       initials: _initials(_authorName(state, message)),
-      isTurnHolder: isTurnHolder,
       agentStatus: assistant ? message.model : null,
+    );
+  }
+
+  static V2CollabMessage _toolFor(CollaborationToolState tool) {
+    final name = tool.name ?? 'Tool activity';
+    return V2CollabMessage(
+      id: tool.eventId,
+      speakerName: 'Ovid',
+      timeLabel: '',
+      text: name,
+      kind: V2CollabMessageKind.agent,
+      toolName: name,
+      toolResult: tool.isError == true ? 'Failed' : tool.status.name,
+      agentStatus: tool.status.name,
+    );
+  }
+
+  static V2CollabMessage _artifactFor(
+    CollaborationState state,
+    CollaborationArtifact artifact,
+  ) {
+    final name = artifact.name ?? 'Artifact';
+    return V2CollabMessage(
+      id: artifact.eventId,
+      speakerName: artifact.author.isEmpty ? 'Ovid' : state.nameOf(artifact.author),
+      timeLabel: '',
+      text: name,
+      kind: V2CollabMessageKind.agent,
+      artifactName: name,
+      artifactId: artifact.artifactId,
     );
   }
 
@@ -517,6 +555,102 @@ class _LiveCollabRoute extends StatefulWidget {
 }
 
 class _LiveCollabRouteState extends State<_LiveCollabRoute> {
+  List<CollaborationAttachmentInput> _attachments = const [];
+
+  Future<void> _attach() async {
+    try {
+      final picked = await pickCollaborationAttachments();
+      if (picked == null || !mounted) return;
+      setState(() => _attachments = [..._attachments, ...picked]);
+    } catch (error) {
+      if (!mounted) return;
+      V2CollabRoutes._snack(
+        context,
+        error is StateError ? error.message : 'Could not read that file.',
+      );
+    }
+  }
+
+  void _removeAttachment(int index) {
+    setState(() => _attachments = [
+      for (var i = 0; i < _attachments.length; i++)
+        if (i != index) _attachments[i],
+    ]);
+  }
+
+  Future<void> _send(
+    CollaborationProduction controller,
+    CollaborationState state,
+    String text,
+  ) async {
+    await V2CollabRoutes._send(
+      controller,
+      state,
+      text,
+      attachments: _attachments,
+    );
+    if (mounted) setState(() => _attachments = const []);
+  }
+
+  Future<void> _openArtifact(
+    CollaborationProduction controller,
+    String artifactId,
+  ) async {
+    try {
+      final minted = await controller.objectUrl(artifactId: artifactId);
+      final opened = await launchUrl(
+        minted.url,
+        mode: LaunchMode.externalApplication,
+      );
+      if (!opened && mounted) {
+        V2CollabRoutes._snack(context, 'Could not open the artifact.');
+      }
+    } catch (error) {
+      if (mounted) V2CollabRoutes._snack(context, collaborationErrorMessage(error));
+    }
+  }
+
+  Future<void> _reportMessage(
+    CollaborationProduction controller,
+    V2CollabMessage message,
+  ) =>
+      showCollaborationReportSheet(
+        context,
+        controller,
+        kind: 'collab_message',
+        targetId: collaborationCanonicalMessageId(message.id),
+      );
+
+  Future<void> _removeMessage(
+    CollaborationProduction controller,
+    V2CollabMessage message,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Remove this message from the room?'),
+        content: const Text('The server keeps canonical history for moderation.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Remove'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await controller.removeMessage(collaborationCanonicalMessageId(message.id));
+      if (mounted) V2CollabRoutes._snack(context, 'Message removed from the room.');
+    } catch (error) {
+      if (mounted) V2CollabRoutes._snack(context, collaborationErrorMessage(error));
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -547,18 +681,34 @@ class _LiveCollabRouteState extends State<_LiveCollabRoute> {
           data: V2CollabRoutes.liveDataFor(
             state,
             connection: V2CollabRoutes.connectionFor(controller),
+            pendingAttachmentNames: [
+              for (final attachment in _attachments) attachment.name,
+            ],
           ),
           onOpenMembers: () =>
               V2CollabRoutes.openMembers(context, widget.sessionId),
           // No server turn-queue endpoint exists, so no request control is
           // drawn. A handler that silently did nothing would be a dead button.
           onRequestTurnAsync: null,
-          onSendAsync: state == null
+          onSendAsync: state == null ? null : (text) => _send(controller, state, text),
+          onAttach: state == null ? null : _attach,
+          onRemoveAttachment: state == null ? null : _removeAttachment,
+          onOpenArtifact: state == null ? null : (id) => _openArtifact(controller, id),
+          onReportMessage: state == null
               ? null
-              : (text) => V2CollabRoutes._send(controller, state, text),
-          // The deadline is the server's; when it passes, re-read the room so
-          // the host's projection can catch up.
-          onTurnExpired: controller.refresh,
+              : (message) {
+                  if (!collaborationIsCanonicalMessageSource(message.id) ||
+                      message.authorId == state.localParticipantId) {
+                    return;
+                  }
+                  _reportMessage(controller, message);
+                },
+          onRemoveMessage: state == null || !controller.isOwner
+              ? null
+              : (message) {
+                  if (!collaborationIsCanonicalMessageSource(message.id)) return;
+                  _removeMessage(controller, message);
+                },
           onRetry: controller.refresh,
         );
       },
@@ -600,7 +750,7 @@ class _CollabMembersRouteState extends State<_CollabMembersRoute> {
               ? () => V2CollabRoutes._invite(context, controller)
               : null,
           onLeave: () => V2CollabRoutes._leave(context, controller),
-          onMemberMenu: (member) =>
+          onMemberActions: (member) =>
               V2CollabRoutes._memberMenu(context, controller, member),
           onRetry: controller.refresh,
         );

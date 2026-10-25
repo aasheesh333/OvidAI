@@ -1404,12 +1404,6 @@ class AppState extends ChangeNotifier {
   Future<void>? _featureBinding;
   bool _featureBindQueued = false;
 
-  /// Shown when a live-collaboration turn is attempted on the thin client.
-  /// Collab EXECUTION is flag-gated OFF here (owner question Q6; the default
-  /// is reversible in Task 20 — collab v2 lands in P9).
-  static const String kCollaborationReadOnlyNotice =
-      'Collaboration is moving to the cloud — read-only for now';
-
   /// Called by main before readiness begins. Registers the actual singleton
   /// owners with account transitions and verified per-feature reset.
   void registerProductionAccountFeatures({FirebaseService? firebaseService}) {
@@ -1422,9 +1416,6 @@ class AppState extends ChangeNotifier {
       activatedByFirebase: () => firebase.accountService.enabled,
     ).provider;
     collaboration = CollaborationProduction(
-      // Each participant's turns run on THEIR device, model and key — except
-      // on the thin client, where collab execution is read-only for now.
-      turnRunner: _collaborationTurnRunner,
       rootDirectory: getApplicationSupportDirectory,
       accountReady: () => firebase.isAvailable && firebase.accountReady,
       currentUid: () => firebase.uid,
@@ -1449,48 +1440,6 @@ class AppState extends ChangeNotifier {
     firebase.addListener(_queueProductionAccountBind);
     _queueProductionAccountBind();
   }
-
-  /// Collab-turn path shared by the production runner and the gate test.
-  /// On the thin client it appends the read-only notice as a turn-tail row
-  /// and performs NO agent execution.
-  Future<String> _collaborationTurnRunner({
-    required String providerId,
-    required String model,
-    required List<Map<String, dynamic>> messages,
-  }) async {
-    // Local provider execution died with the retired local service (P8 Task 19).
-    // Live collaboration replies are server-owned; the thin client cannot
-    // call a user's provider from this device.
-    _appendCollabReadOnlyNotice();
-    throw StateError(kCollaborationReadOnlyNotice);
-  }
-
-  void _appendCollabReadOnlyNotice() {
-    final session = activeSession;
-    if (session == null) return;
-    session.messages.add(
-      Message(
-        role: 'assistant',
-        kind: MsgKind.turnTail,
-        content: kCollaborationReadOnlyNotice,
-      ),
-    );
-    _markSessionDirty(session.id);
-    notifyListeners();
-    unawaited(persistSessions());
-  }
-
-  /// Test seam: drives the same collab-turn path the production runner uses.
-  @visibleForTesting
-  Future<String> collaborationTurnForTest({
-    required String providerId,
-    required String model,
-    required List<Map<String, dynamic>> messages,
-  }) => _collaborationTurnRunner(
-    providerId: providerId,
-    model: model,
-    messages: messages,
-  );
 
   void _queueProductionAccountBind() {
     if (_settingsBusy || _featureBindQueued || collaboration == null) return;

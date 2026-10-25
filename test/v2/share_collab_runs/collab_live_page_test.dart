@@ -44,7 +44,6 @@ V2CollabLivePageData _data({
   String turnHolderName = 'Rahul Verma',
   String turnTimeLeftLabel = '24s left',
   DateTime? turnStartedAt,
-  Duration turnDuration = const Duration(seconds: 90),
   bool sending = false,
   int totalMembers = 50,
   int capacity = 50,
@@ -66,7 +65,6 @@ V2CollabLivePageData _data({
     status: status,
     connection: connection,
     turnStartedAt: turnStartedAt,
-    turnDuration: turnDuration,
     sending: sending,
   );
 }
@@ -191,150 +189,49 @@ void main() {
     handle.dispose();
   });
 
-  testWidgets('a real deadline ticks down and releases the turn once', (
+  testWidgets('an old lease start never expires locally or unlocks sending', (
     tester,
   ) async {
-    final start = DateTime(2026, 10, 22, 12);
-    var now = start;
-    var expired = 0;
     await pumpAt(
       tester,
       CollabLivePage(
         data: _data(
-          turnStartedAt: start,
-          turnDuration: const Duration(seconds: 30),
+          turnStartedAt: DateTime(2020),
           turnTimeLeftLabel: '',
         ),
         onSend: (_) {},
-        onTurnExpired: () => expired++,
-        now: () => now,
       ),
     );
 
-    expect(find.text('Rahul Verma · 30s left'), findsOneWidget);
-    expect(expired, 0);
+    await tester.pump(const Duration(seconds: 120));
+    expect(find.text('Your turn'), findsNothing);
+    expect(find.text('Wait for the turn'), findsOneWidget);
+    expect(tester.widget<TextField>(find.byType(TextField)).enabled, isFalse);
+  });
 
-    now = start.add(const Duration(seconds: 29));
-    await tester.pump(const Duration(seconds: 1));
-    expect(find.text('Rahul Verma · 1s left'), findsOneWidget);
-    expect(expired, 0);
+  testWidgets('only fresh server facts without a lease unlock sending', (
+    tester,
+  ) async {
+    await pumpAt(
+      tester,
+      CollabLivePage(data: _data(), onSend: (_) {}),
+    );
+    expect(tester.widget<TextField>(find.byType(TextField)).enabled, isFalse);
 
-    now = start.add(const Duration(seconds: 30));
-    await tester.pump(const Duration(seconds: 1));
-    expect(expired, 1);
+    await pumpAt(
+      tester,
+      CollabLivePage(
+        data: _data(
+          isMyTurn: true,
+          turnHolderName: '',
+          turnTimeLeftLabel: '',
+        ),
+        onSend: (_) {},
+      ),
+    );
     expect(find.text('Your turn'), findsOneWidget);
     expect(find.text('Message'), findsOneWidget);
     expect(tester.widget<TextField>(find.byType(TextField)).enabled, isTrue);
-
-    await tester.pump(const Duration(seconds: 2));
-    expect(expired, 1);
-
-    // A new turn start re-arms the one-shot callback.
-    now = start.add(const Duration(seconds: 30));
-    await pumpAt(
-      tester,
-      CollabLivePage(
-        data: _data(
-          turnStartedAt: now,
-          turnDuration: const Duration(seconds: 30),
-          turnTimeLeftLabel: '',
-        ),
-        onSend: (_) {},
-        onTurnExpired: () => expired++,
-        now: () => now,
-      ),
-    );
-    now = now.add(const Duration(seconds: 30));
-    await tester.pump(const Duration(seconds: 1));
-    expect(expired, 2);
-  });
-
-  testWidgets('a deadline that already passed fires once on arrival', (
-    tester,
-  ) async {
-    final now = DateTime(2026, 10, 22, 12);
-    var expired = 0;
-    await pumpAt(
-      tester,
-      CollabLivePage(
-        data: _data(
-          turnStartedAt: now.subtract(const Duration(seconds: 45)),
-          turnDuration: const Duration(seconds: 30),
-          turnTimeLeftLabel: '0s left',
-        ),
-        onSend: (_) {},
-        onTurnExpired: () => expired++,
-        now: () => now,
-      ),
-    );
-
-    expect(expired, 1);
-    expect(find.text('Your turn'), findsOneWidget);
-    expect(
-      tester.widget<OLiveRegion>(find.byType(OLiveRegion)).message,
-      'Your turn',
-    );
-    await tester.pump(const Duration(seconds: 3));
-    expect(expired, 1);
-  });
-
-  testWidgets('a deadline that passed offline unlocks on reconnect, once', (
-    tester,
-  ) async {
-    final start = DateTime(2026, 10, 22, 12);
-    var now = start;
-    var expired = 0;
-
-    await pumpAt(
-      tester,
-      CollabLivePage(
-        data: _data(
-          turnStartedAt: start,
-          turnDuration: const Duration(seconds: 30),
-          turnTimeLeftLabel: '',
-          connection: V2CollabLiveConnection.disconnected,
-        ),
-        onSend: (_) {},
-        onTurnExpired: () => expired++,
-        now: () => now,
-      ),
-    );
-
-    now = start.add(const Duration(seconds: 31));
-    await tester.pump(const Duration(seconds: 1));
-
-    // The deadline released the turn, but the dropped socket keeps it locked
-    // and silent: the screen must not promise a turn it cannot deliver.
-    expect(expired, 1);
-    expect(find.text('Disconnected'), findsOneWidget);
-    expect(tester.widget<TextField>(find.byType(TextField)).enabled, isFalse);
-    expect(
-      tester.widget<OLiveRegion>(find.byType(OLiveRegion)).message,
-      isNot('Your turn'),
-    );
-
-    await pumpAt(
-      tester,
-      CollabLivePage(
-        data: _data(
-          turnStartedAt: start,
-          turnDuration: const Duration(seconds: 30),
-          turnTimeLeftLabel: '',
-        ),
-        onSend: (_) {},
-        onTurnExpired: () => expired++,
-        now: () => now,
-      ),
-    );
-
-    // Back online: the turn is this device's, spoken once, no second callback.
-    expect(expired, 1);
-    expect(find.text('Your turn'), findsOneWidget);
-    expect(tester.widget<TextField>(find.byType(TextField)).enabled, isTrue);
-    expect(
-      tester.widget<OLiveRegion>(find.byType(OLiveRegion)).message,
-      'Your turn',
-    );
   });
 
   testWidgets('the live member count is announced and kept current', (

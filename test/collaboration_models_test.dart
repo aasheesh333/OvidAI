@@ -1,3 +1,5 @@
+// UNEXECUTED under HEAVY-COMMANDS-PAUSED.md.
+
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ovid_ai/core/collaboration/models.dart';
@@ -338,51 +340,42 @@ void main() {
         throwsA(isA<CollaborationWireException>()));
   });
 
-  test('a server turn lease parses, round-trips and keeps real timing', () {
+  test('a canonical heartbeat lease round-trips without a local deadline', () {
     final json = {
+      'holderParticipantId': 'p-owner',
+      'runId': 'run-1',
+      'startedAt': '2026-10-22T10:00:00.000Z',
+      'heartbeatAt': '2026-10-22T10:00:08.000Z',
+    };
+    final turn = CollaborationTurn.fromWire(json);
+
+    expect(turn.holderParticipantId, 'p-owner');
+    expect(turn.participantId, 'p-owner');
+    expect(turn.runId, 'run-1');
+    expect(turn.startedAt, DateTime.utc(2026, 10, 22, 10));
+    expect(turn.heartbeatAt, DateTime.utc(2026, 10, 22, 10, 0, 8));
+    expect(turn.toWire(), json);
+  });
+
+  test('session wire has no embedded lease; in-memory facts can attach one', () {
+    final session = CollaborationSession.fromWire({
       'schemaVersion': 1,
       'sessionId': 'sess-1',
       'ownerParticipantId': 'p-owner',
       'lifecycle': 'active',
-      'turn': {
-        'participantId': 'p-owner',
-        'startedAt': '2026-10-22T10:00:00.000Z',
-        'expiresAt': '2026-10-22T10:01:30.000Z',
-      },
-    };
-    final session = CollaborationSession.fromWire(json);
-    final turn = session.turn!;
-
-    expect(turn.participantId, 'p-owner');
-    expect(turn.startedAt, DateTime.utc(2026, 10, 22, 10));
-    expect(turn.deadline, DateTime.utc(2026, 10, 22, 10, 1, 30));
-    expect(turn.duration, const Duration(seconds: 90));
-    expect(session.toWire(), json);
-
-    // A lifecycle change never drops the server's lease.
-    expect(
-      session.withLifecycle(SessionLifecycle.closing).turn,
-      turn,
-    );
-  });
-
-  test('turn aliases are accepted and normalised', () {
+    });
     final turn = CollaborationTurn.fromWire({
-      'holderParticipantId': 'p-2',
+      'holderParticipantId': 'p-owner',
+      'runId': 'run-1',
       'startedAt': '2026-10-22T10:00:00Z',
-      'deadline': '2026-10-22T10:00:45Z',
+      'heartbeatAt': '2026-10-22T10:00:08Z',
     });
-
-    expect(turn.participantId, 'p-2');
-    expect(turn.duration, const Duration(seconds: 45));
-    expect(turn.toWire(), {
-      'startedAt': '2026-10-22T10:00:00.000Z',
-      'expiresAt': '2026-10-22T10:00:45.000Z',
-      'participantId': 'p-2',
-    });
+    final withFacts = session.withTurn(turn).withLifecycle(SessionLifecycle.closing);
+    expect(withFacts.turn, turn);
+    expect(withFacts.toWire().containsKey('turn'), isFalse);
   });
 
-  test('a turn without honest timing is rejected', () {
+  test('a lease with missing timing or forged deadline fields is rejected', () {
     CollaborationWireReason reasonOfTurn(Object? json) {
       try {
         CollaborationTurn.fromWire(json);
@@ -392,45 +385,21 @@ void main() {
       fail('expected CollaborationWireException');
     }
 
-    expect(
-      reasonOfTurn({'startedAt': '2026-10-22T10:00:00Z'}),
-      CollaborationWireReason.missingField,
-    );
-    expect(
-      reasonOfTurn({
-        'startedAt': '2026-10-22T10:00:00Z',
-        'expiresAt': '2026-10-22T10:00:00Z',
-      }),
-      CollaborationWireReason.invalidValue,
-    );
-    expect(
-      reasonOfTurn({
-        'startedAt': '2026-10-22T10:00:00Z',
-        'expiresAt': '2026-10-22T09:59:00Z',
-      }),
-      CollaborationWireReason.invalidValue,
-    );
-    expect(
-      reasonOfTurn({
-        'startedAt': '2026-10-22T10:00:00Z',
-        'expiresAt': '2026-10-22T10:01:00Z',
-        'participantId': 'p-1',
-        'holderParticipantId': 'p-2',
-      }),
-      CollaborationWireReason.invalidValue,
-    );
-    expect(
-      reasonOfTurn({
-        'startedAt': '2026-10-22T10:00:00Z',
-        'expiresAt': '2026-10-22T10:01:00Z',
-        'apiKey': 'sk-live-sentinel',
-      }),
-      CollaborationWireReason.credentialField,
-    );
-    expect(
-      reasonOfTurn('not-a-turn'),
-      CollaborationWireReason.wrongType,
-    );
+    final valid = <String, Object?>{
+      'holderParticipantId': 'p-owner',
+      'runId': 'run-1',
+      'startedAt': '2026-10-22T10:00:00Z',
+      'heartbeatAt': '2026-10-22T10:00:08Z',
+    };
+    expect(reasonOfTurn({...valid}..remove('heartbeatAt')),
+        CollaborationWireReason.missingField);
+    expect(reasonOfTurn({...valid, 'heartbeatAt': '2026-10-22T09:59:00Z'}),
+        CollaborationWireReason.invalidValue);
+    expect(reasonOfTurn({...valid, 'deadline': '2026-10-22T10:01:00Z'}),
+        CollaborationWireReason.unknownField);
+    expect(reasonOfTurn({...valid, 'apiKey': 'sk-live-sentinel'}),
+        CollaborationWireReason.credentialField);
+    expect(reasonOfTurn('not-a-turn'), CollaborationWireReason.wrongType);
   });
 
   test('ParticipantModelState holds labels and usage reference only', () {

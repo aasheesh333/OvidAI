@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../core/collaboration/models.dart';
 import '../core/collaboration/production.dart';
@@ -10,12 +11,12 @@ import '../core/state.dart';
 import '../core/theme.dart';
 import 'auth_screen.dart';
 import 'share_actions.dart';
-import '../core/content_report_service.dart';
-import 'content_report_sheet.dart';
 import 'widgets/aether_primitives.dart';
 import 'widgets/read_only_markdown.dart';
+import 'collab_attachment_picker.dart';
+import 'collab_report_sheet.dart';
 
-/// A provider/model pair this device can answer with (its own key).
+/// A model choice from the sender's server-populated Ovid Cloud catalog.
 class CollabModelChoice {
   const CollabModelChoice(this.providerId, this.model, this.providerName);
   final String providerId;
@@ -34,11 +35,11 @@ class CollabModelChoice {
   int get hashCode => Object.hash(providerId, model);
 }
 
-/// Models usable for live replies on THIS device: providers with their own
-/// key (or keyless local providers). Never another participant's.
+/// Models advertised by the sender's Ovid Cloud catalog. Local provider keys
+/// and host credentials are never consulted for collaboration.
 List<CollabModelChoice> collabModelChoices(AppState app) => [
   for (final p in app.providers)
-    if (p.hasKey || !p.requiresApiKey)
+    if (p.id == AppState.ovidCloudProviderId)
       for (final model in p.models)
         if (model.trim().isNotEmpty) CollabModelChoice(p.id, model, p.name),
 ];
@@ -71,6 +72,7 @@ class CollabSessionScreen extends StatefulWidget {
 class _CollabSessionScreenState extends State<CollabSessionScreen> {
   final _composer = TextEditingController();
   CollabModelChoice? _model;
+  List<CollaborationAttachmentInput> _attachments = const [];
 
   CollaborationProduction? get _controller =>
       widget.controller ?? AppState.I.collaboration;
@@ -103,23 +105,48 @@ class _CollabSessionScreenState extends State<CollabSessionScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
   }
 
+  Future<void> _pickAttachments() async {
+    try {
+      final picked = await pickCollaborationAttachments();
+      if (picked == null || !mounted) return;
+      setState(() => _attachments = [..._attachments, ...picked]);
+    } catch (error) {
+      _snack(error is StateError ? error.message : 'Could not read that file.');
+    }
+  }
+
+  void _removeAttachment(int index) {
+    setState(() => _attachments = [
+      for (var i = 0; i < _attachments.length; i++)
+        if (i != index) _attachments[i],
+    ]);
+  }
+
   Future<void> _send() async {
     final controller = _controller;
     final model = _model;
     final text = _composer.text.trim();
     if (controller == null || text.isEmpty) return;
+    final state = controller.state;
+    final holder = state?.session.turn?.holderParticipantId;
+    if (holder != null) {
+      _snack(holder == state!.localParticipantId
+          ? 'Your reply is still running. Send when it finishes.'
+          : 'Wait for ${state.nameOf(holder)} to finish the turn.');
+      return;
+    }
     if (model == null) {
-      _snack('Add a provider with your own key, or sign in to Ovid Cloud, to reply.');
+      _snack('No chat model is available for this account.');
       return;
     }
     _composer.clear();
     try {
       await controller.sendTurn(
         text,
-        providerId: model.providerId,
         model: model.model,
-        modelLabel: model.label,
+        attachments: _attachments,
       );
+      if (mounted) setState(() => _attachments = const []);
     } catch (error) {
       if (_composer.text.isEmpty) _composer.text = text;
       _snack(collaborationErrorMessage(error));
@@ -138,13 +165,13 @@ class _CollabSessionScreenState extends State<CollabSessionScreen> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(
-              'Your messages are answered by this model with your own account or key. Others use their own.',
+              'The server runs your messages with this model on your account. Other members use their own accounts.',
               style: AetherType.bodyMuted,
             ),
             const SizedBox(height: 8),
             if (models.isEmpty)
               Text(
-                'No connected models. Add a provider in Settings > Providers.',
+                'No chat models are available for this account.',
                 style: AetherType.body,
               ),
             for (final choice in models)
@@ -160,6 +187,52 @@ class _CollabSessionScreenState extends State<CollabSessionScreen> {
       ),
     );
     if (picked != null && mounted) setState(() => _model = picked);
+  }
+
+  Future<void> _removeMessage(
+    CollaborationProduction controller,
+    String messageId,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Remove this message from the room?'),
+        content: const Text('The server keeps canonical history for moderation.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Remove'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await controller.removeMessage(messageId);
+      _snack('Message removed from the room.');
+    } catch (error) {
+      _snack(collaborationErrorMessage(error));
+    }
+  }
+
+  Future<void> _openArtifact(
+    CollaborationProduction controller,
+    String artifactId,
+  ) async {
+    try {
+      final minted = await controller.objectUrl(artifactId: artifactId);
+      final opened = await launchUrl(
+        minted.url,
+        mode: LaunchMode.externalApplication,
+      );
+      if (!opened) _snack('Could not open the artifact.');
+    } catch (error) {
+      _snack(collaborationErrorMessage(error));
+    }
   }
 
   Future<void> _openMembers() => showModalBottomSheet<void>(
@@ -226,10 +299,16 @@ class _CollabSessionScreenState extends State<CollabSessionScreen> {
                     ? 'You are no longer a member of this session.'
                     : 'The owner ended this live session.',
               )
+            else if (state.session.turn != null)
+              _Banner(
+                text: state.session.turn!.holderParticipantId == state.localParticipantId
+                    ? 'Your reply is still running.'
+                    : "${state.nameOf(state.session.turn!.holderParticipantId)}'s reply is still running.",
+              )
             else if (controller.stale)
               const _Banner(text: 'Reconnecting… messages may be delayed.'),
             Expanded(
-              child: state.messages.isEmpty
+              child: state.messages.isEmpty && state.artifacts.isEmpty
                   ? const AetherEmptyState(
                       icon: Icons.forum_outlined,
                       title: 'No messages yet',
@@ -238,8 +317,19 @@ class _CollabSessionScreenState extends State<CollabSessionScreen> {
                   : ListView.builder(
                       reverse: true,
                       padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
-                      itemCount: state.messages.length,
+                      itemCount: state.messages.length + state.artifacts.length,
                       itemBuilder: (context, index) {
+                        if (index >= state.messages.length) {
+                          final artifact = state.artifacts.values.elementAt(
+                            index - state.messages.length,
+                          );
+                          return CollabArtifactTile(
+                            artifact: artifact,
+                            onOpen: artifact.artifactId == null
+                                ? null
+                                : () => _openArtifact(controller, artifact.artifactId!),
+                          );
+                        }
                         final message = state.messages[state.messages.length - 1 - index];
                         final mine = message.author == state.localParticipantId;
                         return CollabMessageBubble(
@@ -248,14 +338,29 @@ class _CollabSessionScreenState extends State<CollabSessionScreen> {
                           mine: mine,
                           // Play UGC policy: other people's messages and
                           // their AI replies can be reported (audit §6).
-                          onReport: mine
+                          onReport: mine ||
+                                  !collaborationIsCanonicalMessageSource(
+                                    message.clientEventId,
+                                  )
                               ? null
-                              : () => showContentReportSheet(
+                              : () => showCollaborationReportSheet(
                                   context,
-                                  kind: ContentReportKind.collabMessage,
-                                  targetId: message.clientEventId,
-                                  excerpt: message.text,
-                                  model: message.model,
+                                  controller,
+                                  kind: 'collab_message',
+                                  targetId: collaborationCanonicalMessageId(
+                                    message.clientEventId,
+                                  ),
+                                ),
+                          onRemove: !controller.isOwner ||
+                                  !collaborationIsCanonicalMessageSource(
+                                    message.clientEventId,
+                                  )
+                              ? null
+                              : () => _removeMessage(
+                                  controller,
+                                  collaborationCanonicalMessageId(
+                                    message.clientEventId,
+                                  ),
                                 ),
                         );
                       },
@@ -287,7 +392,10 @@ class _CollabSessionScreenState extends State<CollabSessionScreen> {
               _Composer(
                 controller: _composer,
                 model: _model,
-                busy: controller.turnRunning,
+                busy: controller.turnRunning || state.session.turn != null,
+                attachments: _attachments,
+                onAttach: _pickAttachments,
+                onRemoveAttachment: _removeAttachment,
                 onPickModel: _pickModel,
                 onSend: _send,
               ),
@@ -331,6 +439,9 @@ class _Composer extends StatelessWidget {
     required this.controller,
     required this.model,
     required this.busy,
+    required this.attachments,
+    required this.onAttach,
+    required this.onRemoveAttachment,
     required this.onPickModel,
     required this.onSend,
   });
@@ -338,6 +449,9 @@ class _Composer extends StatelessWidget {
   final TextEditingController controller;
   final CollabModelChoice? model;
   final bool busy;
+  final List<CollaborationAttachmentInput> attachments;
+  final VoidCallback onAttach;
+  final ValueChanged<int> onRemoveAttachment;
   final VoidCallback onPickModel;
   final VoidCallback onSend;
 
@@ -362,9 +476,26 @@ class _Composer extends StatelessWidget {
             ),
             onPressed: onPickModel,
           ),
+          if (attachments.isNotEmpty)
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                for (var index = 0; index < attachments.length; index++)
+                  InputChip(
+                    label: Text(attachments[index].name),
+                    onDeleted: busy ? null : () => onRemoveAttachment(index),
+                  ),
+              ],
+            ),
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
+              IconButton(
+                tooltip: 'Attach files',
+                onPressed: busy ? null : onAttach,
+                icon: const Icon(Icons.attach_file),
+              ),
               Expanded(
                 child: TextField(
                   controller: controller,
@@ -404,6 +535,7 @@ class CollabMessageBubble extends StatelessWidget {
     required this.authorName,
     required this.mine,
     this.onReport,
+    this.onRemove,
   });
 
   final CollaborationMessage message;
@@ -412,9 +544,13 @@ class CollabMessageBubble extends StatelessWidget {
 
   /// Opens the content report sheet; null for the user's own messages.
   final VoidCallback? onReport;
+  final VoidCallback? onRemove;
 
   @override
   Widget build(BuildContext context) {
+    final canonicalSource = collaborationIsCanonicalMessageSource(
+      message.clientEventId,
+    );
     final assistant = message.isAssistant;
     final who = mine ? 'You' : authorName;
     final header = assistant
@@ -456,7 +592,7 @@ class CollabMessageBubble extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  if (onReport != null)
+                  if (canonicalSource && onReport != null)
                     IconButton(
                       tooltip: 'Report message',
                       icon: Icon(
@@ -466,6 +602,16 @@ class CollabMessageBubble extends StatelessWidget {
                       ),
                       onPressed: onReport,
                     ),
+                  if (canonicalSource && onRemove != null)
+                    IconButton(
+                      tooltip: 'Remove message',
+                      icon: Icon(
+                        Icons.delete_outline,
+                        size: 16,
+                        color: Aether.textMuted,
+                      ),
+                      onPressed: onRemove,
+                    ),
                 ],
               ),
               const SizedBox(height: 4),
@@ -473,6 +619,32 @@ class CollabMessageBubble extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class CollabArtifactTile extends StatelessWidget {
+  const CollabArtifactTile({
+    super.key,
+    required this.artifact,
+    this.onOpen,
+  });
+
+  final CollaborationArtifact artifact;
+  final VoidCallback? onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: ListTile(
+        leading: const Icon(Icons.data_object_outlined),
+        title: Text(artifact.name ?? 'Artifact'),
+        subtitle: Text(artifact.sizeBytes == null
+            ? 'Size unavailable'
+            : '${artifact.sizeBytes} bytes'),
+        trailing: onOpen == null ? null : const Icon(Icons.open_in_new),
+        onTap: onOpen,
       ),
     );
   }
@@ -564,15 +736,26 @@ class _CollabMembersSheetState extends State<CollabMembersSheet> {
                   trailing: member.participantId != state.localParticipantId
                       ? Wrap(
                           children: [
-                            // Play UGC policy: report a participant (§6).
                             TextButton(
-                              onPressed: () => showContentReportSheet(
+                              onPressed: () => showCollaborationReportSheet(
                                 context,
-                                kind: ContentReportKind.collabParticipant,
+                                controller,
+                                kind: 'collab_participant',
                                 targetId: member.participantId,
-                                excerpt: state.nameOf(member.participantId),
                               ),
                               child: const Text('Report'),
+                            ),
+                            TextButton(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _run(() => controller.block(member.participantId)),
+                              child: const Text('Block'),
+                            ),
+                            TextButton(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _run(() => controller.unblock(member.participantId)),
+                              child: const Text('Unblock'),
                             ),
                             if (owner && member.role != MemberRole.owner)
                               TextButton(
@@ -759,7 +942,7 @@ class _CollabJoinScreenState extends State<CollabJoinScreen> {
               ),
               const SizedBox(height: 8),
               Text(
-                'Your messages are answered by the model you choose, on your own account or key. Your name from your Ovid account is shown to other members.',
+                'The server runs your messages with the model you choose on your account. Your name from your Ovid account is shown to other members.',
                 style: AetherType.bodyMuted,
               ),
               const SizedBox(height: 20),

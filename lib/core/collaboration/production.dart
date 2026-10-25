@@ -94,21 +94,27 @@ class _AtomicAccountFile {
   }
 }
 
-/// Runs one AI turn on THIS device's own provider/model/key and returns the
-/// reply text. Injected by the caller in production so this owner never
-/// imports an agent runtime; remote events can never invoke it.
-typedef CollaborationTurnRunner =
-    Future<String> Function({
-      required String providerId,
-      required String model,
-      required List<Map<String, dynamic>> messages,
-    });
-
-/// A message copied from the owner's local chat when Collab starts.
+/// Legacy call-site metadata only. These values are never uploaded or used to
+/// seed a collaboration; the canonical server session owns its existing history.
+@Deprecated('Pass only sourceSessionId; server history is authoritative.')
 class CollaborationSeedMessage {
   const CollaborationSeedMessage(this.role, this.text);
   final MessageRole role;
   final String text;
+}
+
+/// Actual user-selected file bytes for the real attachment pipeline. Local
+/// filesystem paths are deliberately not accepted or put on the wire.
+class CollaborationAttachmentInput {
+  const CollaborationAttachmentInput({
+    required this.name,
+    required this.bytes,
+    this.contentType,
+  });
+
+  final String name;
+  final List<int> bytes;
+  final String? contentType;
 }
 
 /// The gateway's own `turn_locked` copy, kept verbatim so the Android app and
@@ -154,9 +160,9 @@ String collaborationErrorMessage(Object error) {
   return 'Live session request failed. Check your connection and retry.';
 }
 
-/// Owns the real account-scoped collaboration transport and inert projection.
-/// Model turns run only through the injected [turnRunner], and only for text
-/// the LOCAL user explicitly sends; remote events never reach it.
+/// Owns account-fenced transport and an inert server replay projection.
+/// Turns, assistant text, model status, usage, and membership facts originate
+/// only at the server. This class has no model/provider execution dependency.
 class CollaborationProduction extends ChangeNotifier {
   CollaborationProduction({
     this.endpoint = const String.fromEnvironment(
@@ -167,7 +173,6 @@ class CollaborationProduction extends ChangeNotifier {
       'OVID_PUBLIC_SHARE_ORIGIN',
       defaultValue: 'https://ovidsi.com',
     ),
-    this.turnRunner,
     required this.rootDirectory,
     required this.accountReady,
     required this.currentUid,
@@ -179,7 +184,6 @@ class CollaborationProduction extends ChangeNotifier {
 
   final String endpoint;
   final String publicOrigin;
-  final CollaborationTurnRunner? turnRunner;
   final Future<Directory> Function() rootDirectory;
   final bool Function() accountReady;
   final String? Function() currentUid;
@@ -189,7 +193,11 @@ class CollaborationProduction extends ChangeNotifier {
   final http.Client Function() httpClientFactory;
   final CollaborationTimerScheduler? scheduler;
   String? _uid;
+  int? _accountGeneration;
   int _epoch = 0;
+  Future<void>? _profileRefresh;
+  bool _profileRefreshScheduled = false;
+  bool _profileRefreshAgain = false;
   bool _foreground = false;
   Directory? _root;
   Map<String, dynamic> _metadata = {};
@@ -203,6 +211,8 @@ class CollaborationProduction extends ChangeNotifier {
   String? invitationCode;
 
   bool get configured => _configuredHttpsEndpoint(endpoint) != null;
+  String? get accountUid => _uid;
+  int? get accountGeneration => _accountGeneration;
   bool get available =>
       configured && _uid != null && accountReady() && currentUid() == _uid;
   String? get sessionToken =>
@@ -258,9 +268,15 @@ class CollaborationProduction extends ChangeNotifier {
 
   Future<void> bind(String uid, int generation) async {
     if (!configured || !accountReady() || currentUid() != uid) return;
-    if (_uid == uid && _store != null && _client != null) return;
+    if (_uid == uid &&
+        _accountGeneration == generation &&
+        _store != null &&
+        _client != null) {
+      return;
+    }
     await release();
     _uid = uid;
+    _accountGeneration = generation;
     final epoch = _epoch;
     final base = await rootDirectory();
     if (!_owns(epoch)) return;
@@ -327,15 +343,16 @@ class CollaborationProduction extends ChangeNotifier {
     }
   }
 
-  Future<void> create() => _serialize(() async {
+  Future<void> create({String? sessionId}) => _serialize(() async {
     _check();
     final epoch = _epoch;
-    final key = await _requestKey('create');
+    final operation = 'create:${sessionId ?? 'new'}';
+    final key = await _requestKey(operation);
     if (!_owns(epoch)) return;
-    final result = await _client!.create(requestId: key);
+    final result = await _client!.create(requestId: key, sessionId: sessionId);
     if (!_owns(epoch)) return;
     _metadata['sessionToken'] = result.sessionToken;
-    _metadata.remove('request:create');
+    _metadata.remove('request:$operation');
     await _save();
     if (!_owns(epoch)) return;
     await _store!.installBootstrap(
@@ -372,11 +389,12 @@ class CollaborationProduction extends ChangeNotifier {
     notifyListeners();
   });
 
-  /// Owner: create a live session from a local chat, copy its recent visible
-  /// messages in as context, and mint a multi-use share link.
+  /// Adopts an existing canonical chat. The server derives all history; no
+  /// local message seed, presence event, or assistant synthesis is uploaded.
   Future<void> startFromConversation({
     required String sourceSessionId,
-    required List<CollaborationSeedMessage> seed,
+    @Deprecated('Ignored; canonical server history is authoritative.')
+    List<CollaborationSeedMessage> seed = const [],
   }) async {
     if (sessionToken != null) {
       if (sourceSessionId == this.sourceSessionId && isOwner) {
@@ -387,22 +405,14 @@ class CollaborationProduction extends ChangeNotifier {
         'You are already in a live session. Leave it before starting another.',
       );
     }
-    await create();
+    await create(sessionId: sourceSessionId);
     await _serialize(() async {
       _check();
-      final token = sessionToken;
-      if (token == null) throw StateError('Live session was not created.');
+      if (sessionToken == null) {
+        throw StateError('Live session was not created.');
+      }
       _metadata['sourceSessionId'] = sourceSessionId;
       await _save();
-      final events = <Map<String, Object?>>[
-        _event('presence', const PresencePayload(PresenceState.online)),
-        for (final message in seed.length > maxSeedMessages
-            ? seed.sublist(seed.length - maxSeedMessages)
-            : seed)
-          if (message.text.trim().isNotEmpty)
-            _event('message', MessagePayload(message.text, role: message.role)),
-      ];
-      await _append(token, events);
     });
     await newLink();
   }
@@ -472,82 +482,110 @@ class CollaborationProduction extends ChangeNotifier {
       );
     }
     await join(token, code);
-    await _serialize(() async {
-      _check();
-      // Presence stamps this member's verified name for everyone's roster.
-      await _append(token, [
-        _event('presence', const PresencePayload(PresenceState.online)),
-      ]);
-    });
   }
 
-  /// Sends the local user's prompt, then answers it with THIS user's own
-  /// provider/model/key and publishes the reply. Everyone sees both.
+  /// Admits a turn and returns after the authoritative DTO arrives. No prompt,
+  /// status, assistant reply, or usage event is synthesized locally; visible
+  /// changes arrive only through subsequent authoritative state/replay.
   Future<void> sendTurn(
     String text, {
-    required String providerId,
-    required String model,
-    required String modelLabel,
+    String? model,
+    @Deprecated('Legacy UI argument; never sent or used for execution.')
+    String? providerId,
+    @Deprecated('Legacy UI argument; never sent or used for execution.')
+    String? modelLabel,
+    List<CollaborationAttachmentInput> attachments = const [],
   }) async {
-    final runner = turnRunner;
-    if (runner == null) throw StateError('Live replies are unavailable in this build.');
     if (text.trim().isEmpty) throw StateError('Type a message first.');
     if (_turnRunning) throw StateError('Wait for your current reply to finish.');
+    final epoch = _epoch;
     _turnRunning = true;
     notifyListeners();
     try {
-      late String promptId;
-      late List<Map<String, dynamic>> context;
       await _serialize(() async {
         _check();
         final token = _liveToken();
-        final prompt = _event('message', MessagePayload(text, role: MessageRole.user));
-        promptId = prompt['eventId']! as String;
-        await _append(token, [
-          prompt,
-          _event('modelStatus', _status(providerId, model, modelLabel, ModelExecutionStatus.running)),
-        ]);
-        context = _context(state!);
-      });
-      String reply;
-      try {
-        reply = await runner(providerId: providerId, model: model, messages: context);
-      } catch (error) {
-        await _serialize(() async {
-          _check();
-          await _append(_liveToken(), [
-            _event('modelStatus', _status(providerId, model, modelLabel, ModelExecutionStatus.failed)),
-          ]);
-        });
-        rethrow;
-      }
-      await _serialize(() async {
-        _check();
-        await _append(_liveToken(), [
-          _event(
-            'message',
-            MessagePayload(
-              _bounded(reply),
-              role: MessageRole.assistant,
-              model: modelLabel,
-              replyTo: promptId,
-            ),
-          ),
-          _event('modelStatus', _status(providerId, model, modelLabel, ModelExecutionStatus.completed)),
-        ]);
+        final identity = sha256.convert(utf8.encode(jsonEncode({
+          'text': text,
+          'model': model,
+          'attachments': [
+            for (final attachment in attachments)
+              {
+                'name': attachment.name,
+                'contentType': attachment.contentType,
+                'sha256': sha256.convert(attachment.bytes).toString(),
+              },
+          ],
+        })));
+        final operation = 'turn:$token:$identity';
+        final key = await _requestKey(operation);
+        if (!_owns(epoch)) return;
+        final attachmentIds = <String>[];
+        for (var index = 0; index < attachments.length; index++) {
+          final pendingAttachment = 'turn-attachment:$operation:$index';
+          final finalizedId = _metadata[pendingAttachment];
+          if (finalizedId is String && finalizedId.isNotEmpty) {
+            attachmentIds.add(finalizedId);
+            continue;
+          }
+          final input = attachments[index];
+          final ticket = await _client!.createAttachment(
+            token,
+            idempotencyKey: '$key-a$index-c',
+            name: input.name,
+            size: input.bytes.length,
+            contentType: input.contentType ?? 'application/octet-stream',
+          );
+          if (!_owns(epoch)) return;
+          await _client!.uploadAttachment(ticket, input.bytes);
+          if (!_owns(epoch)) return;
+          final finalized = await _client!.finalizeAttachment(
+            token,
+            attachmentId: ticket.attachmentId,
+          );
+          if (!_owns(epoch)) return;
+          // Durably retain the ready identity before admission. A lost turn
+          // response must reuse this ID because ready objects cannot be
+          // created again through the pending-ticket endpoint.
+          _metadata[pendingAttachment] = finalized.attachmentId;
+          await _save();
+          if (!_owns(epoch)) return;
+          attachmentIds.add(finalized.attachmentId);
+        }
+        await _client!.turn(
+          token,
+          idempotencyKey: key,
+          text: text,
+          model: model,
+          attachmentIds: attachmentIds,
+        );
+        if (!_owns(epoch)) return;
+        // Cleanup is an in-memory transaction as well as a disk write. If the
+        // write fails, retain the old operation key and ready IDs so the next
+        // call replays the accepted admission instead of creating another run.
+        final pending = Map<String, dynamic>.from(_metadata);
+        _metadata.remove('request:$operation');
+        for (var index = 0; index < attachments.length; index++) {
+          _metadata.remove('request:$operation:a$index-c');
+          _metadata.remove('turn-attachment:$operation:$index');
+        }
+        try {
+          await _save();
+        } catch (_) {
+          _metadata = pending;
+          rethrow;
+        }
+        if (!_owns(epoch)) return;
+        _coordinator?.refresh();
+        notifyListeners();
       });
     } finally {
-      _turnRunning = false;
-      notifyListeners();
+      if (epoch == _epoch) {
+        _turnRunning = false;
+        notifyListeners();
+      }
     }
   }
-
-  static const maxSeedMessages = 40;
-  static const _maxMessageChars = 60000;
-
-  static String _bounded(String text) => text.length <= _maxMessageChars
-      ? text
-      : '${text.substring(0, _maxMessageChars)}\n\n[Reply truncated for the live session]';
 
   String _liveToken() {
     final token = sessionToken;
@@ -559,127 +597,88 @@ class CollaborationProduction extends ChangeNotifier {
     return token;
   }
 
-  ModelStatusPayload _status(
-    String providerId,
-    String model,
-    String label,
-    ModelExecutionStatus status,
-  ) => ModelStatusPayload(
-    providerId: providerId,
-    requestedModel: model,
-    reportedModel: null,
-    displayName: label,
-    streaming: false,
-    status: status,
-  );
+  /// Compatibility alias for older callers. It uses the same server admission
+  /// contract as [sendTurn], never the retired arbitrary event writer.
+  Future<void> sendMessage(String text) => sendTurn(text);
 
-  Map<String, Object?> _event(String kind, CollaborationPayload payload) => {
-    'schemaVersion': collaborationSchemaVersion,
-    'eventId': _productionId(),
-    'kind': kind,
-    'payload': payload.toWire(),
-  };
-
-  Future<void> _append(String token, List<Map<String, Object?>> events) async {
-    final epoch = _epoch;
-    final store = _store!;
-    final generation = store.sessionGeneration;
-    for (var i = 0; i < events.length; i += maxCollaborationEvents) {
-      final batch = events.sublist(i, min(i + maxCollaborationEvents, events.length));
-      final key = batch.first['eventId']! as String;
-      final result = await _client!.appendEvents(token, events: batch, idempotencyKey: key);
+  Future<String> report({
+    required String kind,
+    required String targetId,
+    required String reason,
+    String? details,
+  }) async {
+    var reportId = '';
+    await _serialize(() async {
+      _check();
+      final token = _liveToken();
+      final epoch = _epoch;
+      final operation = 'report:$token:${sha256.convert(utf8.encode(jsonEncode({
+        'kind': kind,
+        'targetId': targetId,
+        'reason': reason,
+        'details': details,
+      })))}';
+      final key = await _requestKey(operation);
       if (!_owns(epoch)) return;
-      if (generation != null) {
-        await store.applyAcknowledgement(
-          ownerFence: _uid!,
-          sessionGeneration: generation,
-          page: result.events,
-        );
-      }
-    }
-    if (_owns(epoch)) {
-      _coordinator?.refresh();
-      notifyListeners();
-    }
-  }
-
-  /// Shared transcript as chat turns for the local model. Other people's
-  /// prompts are attributed by name so the model can tell speakers apart.
-  static List<Map<String, dynamic>> contextFor(
-    projection.CollaborationState state, {
-    int maxMessages = 40,
-    int maxChars = 120000,
-  }) {
-    final rows = <Map<String, dynamic>>[];
-    var used = 0;
-    for (final message in state.messages.reversed) {
-      if (rows.length >= maxMessages || used + message.text.length > maxChars) break;
-      used += message.text.length;
-      rows.add(
-        message.isAssistant
-            ? {'role': 'assistant', 'content': message.text}
-            : {
-                'role': 'user',
-                'content': '${state.nameOf(message.author)}: ${message.text}',
-              },
+      reportId = await _client!.report(
+        token,
+        requestId: key,
+        kind: kind,
+        targetId: targetId,
+        reason: reason,
+        details: details,
       );
+      if (!_owns(epoch)) return;
+      _metadata.remove('request:$operation');
+      await _save();
+    });
+    if (reportId.isEmpty) {
+      throw StateError('Collaboration account changed.');
     }
-    return [
-      {
-        'role': 'system',
-        'content':
-            'You are an AI assistant inside a shared live chat with several '
-            'people. Each user message starts with the author\'s name. Earlier '
-            'assistant replies may come from other people\'s models. Answer the '
-            'latest user message, addressing its author.',
-      },
-      ...rows.reversed,
-    ];
+    return reportId;
   }
 
-  List<Map<String, dynamic>> _context(projection.CollaborationState state) =>
-      contextFor(state);
-
-  Future<void> sendMessage(String text) => _serialize(() async {
+  Future<void> block(String participantId) => _serialize(() async {
     _check();
-    final token = sessionToken;
-    if (token == null ||
-        state == null ||
-        state!.status != projection.CollaborationStatus.live ||
-        text.trim().isEmpty) {
-      throw StateError('An active collaboration and message are required');
-    }
     final epoch = _epoch;
-    final operation = 'message:${sha256.convert(utf8.encode('$token:$text'))}';
-    final store = _store!;
-    final generation = store.sessionGeneration;
-    final key = await _requestKey(operation);
-    if (!_owns(epoch)) return;
-    // The only outbound event from this screen is an explicit local message.
-    // Replay is never fed into an agent prompt, queue, tool, or execution bridge.
-    final result = await _client!.appendEvents(
-      token,
-      events: [
-        {
-          'schemaVersion': 1,
-          'eventId': key,
-          'kind': 'message',
-          'payload': MessagePayload(text).toWire(),
-        },
-      ],
-      idempotencyKey: key,
-    );
-    if (!_owns(epoch)) return;
-    if (generation != null) {
-      await store.applyAcknowledgement(ownerFence: _uid!, sessionGeneration: generation, page: result.events);
-    }
-    _metadata.remove('request:$operation');
-    await _save();
-    if (_owns(epoch)) {
-      _coordinator?.refresh();
-      notifyListeners();
-    }
+    await _client!.block(_liveToken(), participantId: participantId);
+    if (_owns(epoch)) _coordinator?.refresh();
   });
+
+  Future<void> unblock(String participantId) => _serialize(() async {
+    _check();
+    final epoch = _epoch;
+    await _client!.unblock(_liveToken(), participantId: participantId);
+    if (_owns(epoch)) _coordinator?.refresh();
+  });
+
+  Future<void> removeMessage(String messageId) => _serialize(() async {
+    _check();
+    if (!isOwner) throw StateError('Owner permission required');
+    final epoch = _epoch;
+    await _client!.removeMessage(_liveToken(), messageId: messageId);
+    if (_owns(epoch)) _coordinator?.refresh();
+  });
+
+  /// Mints a fresh authorized object capability without persisting or logging
+  /// its signed URL. A stale account/session response is never returned.
+  Future<CollaborationObjectUrl> objectUrl({
+    String? artifactId,
+    String? attachmentId,
+  }) async {
+    _check();
+    final epoch = _epoch;
+    final token = _liveToken();
+    final result = await _client!.objectUrl(
+      token,
+      artifactId: artifactId,
+      attachmentId: attachmentId,
+    );
+    if (!_owns(epoch) || sessionToken != token) {
+      throw StateError('Collaboration account changed.');
+    }
+    return result;
+  }
 
   Future<void> invite() => _serialize(() async {
     _check();
@@ -779,6 +778,9 @@ class CollaborationProduction extends ChangeNotifier {
         },
       ),
       random: Random().nextDouble,
+      onChanged: () {
+        if (_owns(epoch)) notifyListeners();
+      },
       onTerminal: (_) {
         unawaited(_serialize(() => _disconnect(epoch, token)).catchError((Object _) {}));
       },
@@ -800,6 +802,109 @@ class CollaborationProduction extends ChangeNotifier {
     }
   }
 
+  bool _ownsProfile(String uid, int generation, int epoch) =>
+      _owns(epoch) &&
+      _uid == uid &&
+      _accountGeneration == generation &&
+      currentUid() == uid;
+
+  /// Fire-and-forget after the account server confirms a profile rename. It
+  /// never awaits or rethrows into the rename/Firebase-mirror path. Duplicate
+  /// same-tick calls coalesce; a later confirmed rename leaves a trailing read.
+  void forceRefreshAfterProfileRename({
+    required String uid,
+    required int generation,
+  }) {
+    final epoch = _epoch;
+    if (!_ownsProfile(uid, generation, epoch)) return;
+    final token = sessionToken;
+    if (token == null || _client == null || _store == null) return;
+    if (_coordinator != null) {
+      if (_profileRefreshScheduled) return;
+      _profileRefreshScheduled = true;
+      scheduleMicrotask(() {
+        if (epoch != _epoch) return;
+        _profileRefreshScheduled = false;
+        if (_ownsProfile(uid, generation, epoch)) {
+          _coordinator?.refreshRoomFacts();
+        }
+      });
+      return;
+    }
+    if (_profileRefresh != null) {
+      _profileRefreshAgain = true;
+      return;
+    }
+    if (_profileRefreshScheduled) return;
+    _profileRefreshScheduled = true;
+    scheduleMicrotask(() {
+      if (epoch != _epoch) return;
+      _profileRefreshScheduled = false;
+      if (!_ownsProfile(uid, generation, epoch)) return;
+      final operation = _refreshProfileWithoutCoordinator(
+        uid,
+        generation,
+        epoch,
+        token,
+      );
+      _profileRefresh = operation;
+      unawaited(operation.whenComplete(() {
+        if (identical(_profileRefresh, operation)) _profileRefresh = null;
+      }));
+    });
+  }
+
+  Future<void> _refreshProfileWithoutCoordinator(
+    String uid,
+    int generation,
+    int epoch,
+    String token,
+  ) async {
+    do {
+      _profileRefreshAgain = false;
+      try {
+        final fresh = await _client!.state(token);
+        if (!_ownsProfile(uid, generation, epoch) || sessionToken != token) {
+          return;
+        }
+        final coordinator = _coordinator;
+        if (coordinator != null) {
+          coordinator.refreshRoomFacts();
+          return;
+        }
+        final store = _store!;
+        final current = store.state;
+        if (current != null &&
+            current.status == projection.CollaborationStatus.live) {
+          final storeGeneration = store.sessionGeneration;
+          if (store.accountId != uid || storeGeneration == null) return;
+          store.state = current.refreshServerFacts(
+            session: fresh.session,
+            members: fresh.members,
+            turn: fresh.turn,
+          );
+        } else {
+          await store.installBootstrap(
+            accountId: uid,
+            sessionGeneration: epoch,
+            state: projection.CollaborationState.bootstrap(
+              session: fresh.session.withTurn(fresh.turn),
+              members: fresh.members,
+              localParticipantId: fresh.member.participantId,
+              lastSequence: 0,
+              replayThroughSequence: fresh.replayThroughSequence,
+            ),
+          );
+        }
+        if (_ownsProfile(uid, generation, epoch)) notifyListeners();
+      } catch (_) {
+        // Isolated from the already-successful server rename and Firebase
+        // mirror. Ordinary polling or a later confirmation can retry.
+      }
+    } while (_profileRefreshAgain &&
+        _ownsProfile(uid, generation, epoch));
+  }
+
   Future<void> _serialize(Future<void> Function() action) {
     final epoch = _epoch;
     final token = sessionToken;
@@ -818,6 +923,10 @@ class CollaborationProduction extends ChangeNotifier {
   void fence() {
     _epoch++;
     _uid = null;
+    _accountGeneration = null;
+    _profileRefresh = null;
+    _profileRefreshScheduled = false;
+    _profileRefreshAgain = false;
     _coordinator?.dispose();
     _coordinator = null;
     _store?.fence();
@@ -825,6 +934,7 @@ class CollaborationProduction extends ChangeNotifier {
     _http = null;
     _client = null;
     invitationCode = null;
+    _turnRunning = false;
     notifyListeners();
   }
 

@@ -384,7 +384,7 @@ void main() {
     });
 
     test(
-      'the turn belongs to the last unanswered author, not a placeholder',
+      'replay messages never infer a lease holder',
       () {
         final state = _collabState(local: 'p2');
         final message = CollaborationEvent.fromWire({
@@ -399,10 +399,10 @@ void main() {
         });
         final withMessage = const CollaborationReducer().apply(state, message);
 
-        expect(V2CollabRoutes.turnHolderId(withMessage), 'p1');
+        expect(V2CollabRoutes.turnHolderId(withMessage), isNull);
         final live = V2CollabRoutes.liveDataFor(withMessage);
-        expect(live.turnHolderName, 'Priya Patel');
-        expect(live.isMyTurn, isFalse);
+        expect(live.turnHolderName, isEmpty);
+        expect(live.isMyTurn, isTrue);
         expect(live.capacity, maxActiveMembers);
         expect(live.creatorPaysStorage, isTrue);
 
@@ -527,17 +527,18 @@ void main() {
     });
 
     test('a server turn lease is passed, and no start is ever invented', () {
-      final session = CollaborationSession.fromWire({
-        'schemaVersion': 1,
-        'sessionId': 'collab-1',
-        'ownerParticipantId': 'p1',
-        'lifecycle': 'active',
-        'turn': {
-          'participantId': 'p1',
-          'startedAt': '2026-10-22T10:00:00.000Z',
-          'expiresAt': '2026-10-22T10:01:30.000Z',
-        },
-      });
+      final session = const CollaborationSession(
+        sessionId: 'collab-1',
+        ownerParticipantId: 'p1',
+        lifecycle: SessionLifecycle.active,
+      ).withTurn(
+        CollaborationTurn(
+          holderParticipantId: 'p1',
+          runId: 'run-1',
+          startedAt: DateTime.utc(2026, 10, 22, 10),
+          heartbeatAt: DateTime.utc(2026, 10, 22, 10, 0, 8),
+        ),
+      );
       final withTurn = CollaborationState.bootstrap(
         session: session,
         members: const [
@@ -560,7 +561,6 @@ void main() {
 
       final data = V2CollabRoutes.liveDataFor(withTurn);
       expect(data.turnStartedAt, DateTime.utc(2026, 10, 22, 10));
-      expect(data.turnDuration, const Duration(seconds: 90));
       // The server's lease names the holder, so an empty transcript cannot
       // misattribute the running turn to this device.
       expect(data.turnHolderName, 'Priya Patel');

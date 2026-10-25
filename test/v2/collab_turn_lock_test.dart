@@ -1,10 +1,5 @@
-// One sender at a time in a Collab room.
-//
-// The gate existed, but `turnHolderId` only recognised a peer that was
-// `running` or `queued`. A peer whose agent is still producing text can be
-// reported with `streaming: true` and `status: idle` (between tool calls), and
-// in that window the room fell through to "the last message was the
-// assistant's, so nobody holds the turn" — every other member could send.
+// One sender at a time in a Collab room, derived only from the server's lease.
+// Replay status and transcript text never manufacture or release a lease.
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/collaboration/client.dart'
@@ -74,10 +69,9 @@ ModelStatusPayload _modelStatus({
 void main() {
   _mentionKindsContract();
 
-  test('a peer streaming with an idle status still holds the turn', () {
-    final state = _room();
+  test('streaming replay without a lease does not infer a turn', () {
     final applied = const CollaborationReducer().apply(
-      state,
+      _room(),
       _event(
         id: 'e1',
         sequence: 1,
@@ -87,44 +81,53 @@ void main() {
       ),
     );
 
-    expect(V2CollabRoutes.turnHolderId(applied), 'p1');
-    // The local member is p2, so its composer must be locked.
-    expect(V2CollabRoutes.liveDataFor(applied).isMyTurn, isFalse);
-  });
-
-  test('the holder can send while it is the one streaming', () {
-    final state = _room(local: 'p1');
-    final applied = const CollaborationReducer().apply(
-      state,
-      _event(
-        id: 'e1',
-        sequence: 1,
-        author: 'p1',
-        kind: CollaborationEventType.modelStatus,
-        payload: _modelStatus(streaming: true, status: ModelExecutionStatus.idle),
-      ),
-    );
-
+    expect(V2CollabRoutes.turnHolderId(applied), isNull);
     expect(V2CollabRoutes.liveDataFor(applied).isMyTurn, isTrue);
   });
 
-  test('a finished peer frees the turn', () {
-    final state = _room();
-    final applied = const CollaborationReducer().apply(
-      state,
-      _event(
-        id: 'e1',
-        sequence: 1,
-        author: 'p1',
-        kind: CollaborationEventType.modelStatus,
-        payload: _modelStatus(
-          streaming: false,
-          status: ModelExecutionStatus.completed,
+  test('an active lease locks sending even for its own sender', () {
+    final state = _room(local: 'p1').refreshServerFacts(
+      session: _room().session.withTurn(
+        CollaborationTurn(
+          holderParticipantId: 'p1',
+          runId: 'run-1',
+          startedAt: DateTime.utc(2026, 10, 23, 10),
+          heartbeatAt: DateTime.utc(2026, 10, 23, 10, 0, 8),
         ),
       ),
+      members: _room().members.values.toList(),
+      turn: CollaborationTurn(
+        holderParticipantId: 'p1',
+        runId: 'run-1',
+        startedAt: DateTime.utc(2026, 10, 23, 10),
+        heartbeatAt: DateTime.utc(2026, 10, 23, 10, 0, 8),
+      ),
     );
 
-    expect(V2CollabRoutes.liveDataFor(applied).isMyTurn, isTrue);
+    expect(V2CollabRoutes.turnHolderId(state), 'p1');
+    expect(V2CollabRoutes.liveDataFor(state).isMyTurn, isFalse);
+  });
+
+  test('only fresh server state with no lease releases sending', () {
+    final turn = CollaborationTurn(
+      holderParticipantId: 'p1',
+      runId: 'run-1',
+      startedAt: DateTime.utc(2026, 10, 23, 10),
+      heartbeatAt: DateTime.utc(2026, 10, 23, 10, 0, 8),
+    );
+    final held = _room().refreshServerFacts(
+      session: _room().session.withTurn(turn),
+      members: _room().members.values.toList(),
+      turn: turn,
+    );
+    expect(V2CollabRoutes.liveDataFor(held).isMyTurn, isFalse);
+
+    final released = held.refreshServerFacts(
+      session: held.session.withTurn(null),
+      members: held.members.values.toList(),
+    );
+    expect(released.session.turn, isNull);
+    expect(V2CollabRoutes.liveDataFor(released).isMyTurn, isTrue);
   });
 
   test('a turn_locked refusal is one plain sentence, never a code', () {

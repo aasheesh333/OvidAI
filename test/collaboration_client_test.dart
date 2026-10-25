@@ -114,22 +114,20 @@ void main() {
     expect(cancelled, isTrue);
   });
 
-  test('request event count, bytes, ids and server fields rejected before transport', () async {
+  test('invalid create and turn admission fields are rejected before transport', () async {
     var sent = 0;
     final client = CollaborationClient(baseUri: Uri.parse('https://collab.example.test'),
       accessToken: () async => 'token', appCheckToken: () async => 'check',
       httpClient: MockClient((_) async { sent++; return http.Response('{}', 200); }));
-    final event = <String, Object?>{'schemaVersion': 1, 'eventId': 'e', 'kind': 'message', 'payload': {'text': 'hi'}};
-    for (final events in <List<Map<String, Object?>>>[
-      [], List.generate(101, (i) => {...event, 'eventId': 'e$i'}),
-      [event, event], [{...event, 'senderParticipantId': 'spoof'}],
-      [{...event, 'payload': {'text': 'x' * (256 * 1024)}}],
-      List.generate(8, (i) => {...event, 'eventId': 'e$i', 'payload': {'text': 'x' * (200 * 1024)}}),
-    ]) {
-      await expectLater(client.appendEvents('tok', events: events, idempotencyKey: 'batch'),
+    await expectLater(client.create(requestId: 'bad key!'),
         throwsA(isA<CollaborationClientException>()));
-    }
-    await expectLater(client.create(requestId: 'bad key!'), throwsA(isA<CollaborationClientException>()));
+    await expectLater(client.create(requestId: 'valid', sessionId: 'not-a-session'),
+        throwsA(isA<CollaborationClientException>()));
+    await expectLater(client.turn('tok', idempotencyKey: 'turn', text: ' ', model: 'auto'),
+        throwsA(isA<CollaborationClientException>()));
+    await expectLater(client.turn('tok', idempotencyKey: 'turn', text: 'x', model: 'auto',
+        attachmentIds: const ['not-an-attachment']),
+        throwsA(isA<CollaborationClientException>()));
     expect(sent, 0);
   });
 

@@ -59,6 +59,10 @@ class V2CollabMessage {
     this.toolName,
     this.toolResult,
     this.artifactName,
+    this.artifactId,
+    this.authorId,
+    this.canReport = false,
+    this.canRemove = false,
   });
 
   final String id;
@@ -81,6 +85,10 @@ class V2CollabMessage {
   final String? toolName;
   final String? toolResult;
   final String? artifactName;
+  final String? artifactId;
+  final String? authorId;
+  final bool canReport;
+  final bool canRemove;
 }
 
 /// Immutable state for [CollabLivePage].
@@ -107,7 +115,7 @@ class V2CollabLivePageData {
     this.endedMessage = 'This live chat has ended.',
     this.connection = V2CollabLiveConnection.connected,
     this.turnStartedAt,
-    this.turnDuration = const Duration(seconds: 90),
+    this.pendingAttachmentNames = const [],
     this.sending = false,
   }) : assert(totalMembers >= 0, 'totalMembers cannot be negative'),
        assert(capacity >= 0, 'capacity cannot be negative');
@@ -144,8 +152,8 @@ class V2CollabLivePageData {
   /// Hard cap on active members, including the creator.
   final int capacity;
 
-  /// True when this device holds the turn, so sending is allowed. While
-  /// another member's output runs every other send stays disabled.
+  /// True only when fresh server state has no active full-run lease, so this
+  /// device may admit a turn. Any active lease locks every sender.
   final bool isMyTurn;
 
   final bool turnRequested;
@@ -159,14 +167,13 @@ class V2CollabLivePageData {
   /// composer, even when the last projection said it was this device's turn.
   final V2CollabLiveConnection connection;
 
-  /// Real start of the current turn. When set, the screen owns a one-second
-  /// clock and renders the remaining time from this instant; when it is null
-  /// the host-provided [turnTimeLeftLabel] is shown unchanged.
+  /// Server-stamped lease start, when one exists. It is not a deadline and
+  /// never causes a local expiry or send unlock.
   final DateTime? turnStartedAt;
 
-  /// Deadline length measured from [turnStartedAt]. At the deadline the turn
-  /// is released locally and [CollabLivePage.onTurnExpired] fires once.
-  final Duration turnDuration;
+  /// Real files staged for the next server admission. No upload or acceptance
+  /// is claimed until the corresponding `/turns` response succeeds.
+  final List<String> pendingAttachmentNames;
 
   /// True while this device's send is in flight. Locks the composer without
   /// waiting for the next projection frame.
@@ -183,10 +190,12 @@ class CollabLivePage extends StatefulWidget {
     this.onRequestTurnAsync,
     this.onSend,
     this.onSendAsync,
+    this.onAttach,
+    this.onRemoveAttachment,
+    this.onReportMessage,
+    this.onRemoveMessage,
     this.onOpenArtifact,
     this.onRetry,
-    this.onTurnExpired,
-    this.now,
   });
 
   final V2CollabLivePageData data;
@@ -199,146 +208,45 @@ class CollabLivePage extends StatefulWidget {
   /// The real turn request. A returned string is a refusal reason.
   final Future<String?> Function()? onRequestTurnAsync;
 
-  /// Sends the typed draft. Only offered while the turn is this device's and
-  /// the socket is connected.
+  /// Sends the typed draft. Only offered while fresh server state has no
+  /// active lease and the socket is connected.
   final ValueChanged<String>? onSend;
 
   /// Async send path. When provided it wins over [onSend], keeps the draft on
   /// failure and shows the in-flight state while the future is pending.
   final Future<void> Function(String)? onSendAsync;
 
+  final VoidCallback? onAttach;
+  final ValueChanged<int>? onRemoveAttachment;
+  final ValueChanged<V2CollabMessage>? onReportMessage;
+  final ValueChanged<V2CollabMessage>? onRemoveMessage;
+
   final ValueChanged<String>? onOpenArtifact;
   final VoidCallback? onRetry;
-
-  /// Fired once when the real turn deadline passes. The host can refresh its
-  /// projection; the screen releases the turn locally in the meantime.
-  final VoidCallback? onTurnExpired;
-
-  /// Test seam for the one-second clock. Production uses [DateTime.now].
-  final DateTime Function()? now;
 
   @override
   State<CollabLivePage> createState() => _CollabLivePageState();
 }
 
 class _CollabLivePageState extends State<CollabLivePage> {
-  late final ValueNotifier<DateTime> _clock;
-  Timer? _ticker;
   Timer? _announcementTimer;
   String _announcement = '';
-
-  /// The turn start whose deadline this screen has already reported. Guarding
-  /// on the start (not a bool) lets a new turn re-arm the callback.
-  DateTime? _reportedTurnStart;
-
-  /// The turn start whose release has already been spoken. Kept apart from
-  /// [_reportedTurnStart] so a deadline that passes while the socket is down
-  /// still announces "Your turn" when the transport comes back.
-  DateTime? _announcedTurnStart;
-
-  @override
-  void initState() {
-    super.initState();
-    _clock = ValueNotifier<DateTime>(_now());
-    _syncTicker();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _reportExpiryIfNeeded(_clock.value);
-    });
-  }
 
   @override
   void didUpdateWidget(covariant CollabLivePage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    final old = oldWidget.data;
-    final data = widget.data;
-    if (old.turnStartedAt != data.turnStartedAt ||
-        old.turnDuration != data.turnDuration) {
-      _reportedTurnStart = null;
-      _announcedTurnStart = null;
-    }
-    _clock.value = _now();
-    _syncTicker();
-    _announceChanges(old, data);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _reportExpiryIfNeeded(_clock.value);
-    });
+    _announceChanges(oldWidget.data, widget.data);
   }
 
   @override
   void dispose() {
     _announcementTimer?.cancel();
-    _ticker?.cancel();
-    _clock.dispose();
     super.dispose();
   }
-
-  DateTime _now() => widget.now?.call() ?? DateTime.now();
 
   V2CollabLivePageData get _data => widget.data;
 
   bool get _hasHandler => widget.onSend != null || widget.onSendAsync != null;
-
-  bool get _hasTimedTurn {
-    final start = _data.turnStartedAt;
-    return start != null &&
-        (_data.isMyTurn || _data.turnHolderName.trim().isNotEmpty);
-  }
-
-  bool _isExpired(DateTime now) {
-    final start = _data.turnStartedAt;
-    if (start == null) return false;
-    return !now.isBefore(start.add(_data.turnDuration));
-  }
-
-  /// The turn belongs to this device when the host says so, or when the real
-  /// deadline passed while someone else held it. Expiry is a release, not a
-  /// refresh: the composer unlocks on the next clock tick.
-  bool _effectiveMyTurn(DateTime now) {
-    if (_data.isMyTurn) return true;
-    if (!_isExpired(now)) return false;
-    return _data.turnHolderName.trim().isNotEmpty;
-  }
-
-  void _syncTicker() {
-    _ticker?.cancel();
-    _ticker = null;
-    if (_data.status != V2CollabLiveStatus.ready &&
-        _data.status != V2CollabLiveStatus.empty) {
-      return;
-    }
-    if (!_hasTimedTurn || _isExpired(_clock.value)) return;
-    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
-      final now = _now();
-      _clock.value = now;
-      _reportExpiryIfNeeded(now);
-      if (_isExpired(now)) _syncTicker();
-    });
-  }
-
-  void _reportExpiryIfNeeded(DateTime now) {
-    final start = _data.turnStartedAt;
-    if (start == null) return;
-    if (_data.status != V2CollabLiveStatus.ready &&
-        _data.status != V2CollabLiveStatus.empty) {
-      return;
-    }
-    if (_data.turnHolderName.trim().isEmpty && !_data.isMyTurn) return;
-    if (now.isBefore(start.add(_data.turnDuration))) return;
-    if (_reportedTurnStart != start) {
-      _reportedTurnStart = start;
-      widget.onTurnExpired?.call();
-    }
-    // A dropped socket keeps the composer locked even though the deadline
-    // passed, so do not promise the turn until the transport is back. The
-    // announcement is tracked separately, so a later reconnect still speaks it
-    // once without re-firing [CollabLivePage.onTurnExpired].
-    if (_data.connection == V2CollabLiveConnection.connected &&
-        _announcedTurnStart != start) {
-      _announcedTurnStart = start;
-      _announce('Your turn');
-    }
-  }
 
   void _announceChanges(V2CollabLivePageData old, V2CollabLivePageData data) {
     if (old.status != data.status && data.status == V2CollabLiveStatus.ended) {
@@ -378,33 +286,26 @@ class _CollabLivePageState extends State<CollabLivePage> {
     return total == 1 ? '1 member' : '$total members';
   }
 
-  V2CollabTurnBannerStatus _bannerStatus(DateTime now) {
+  V2CollabTurnBannerStatus get _bannerStatus {
     switch (_data.connection) {
       case V2CollabLiveConnection.connecting:
         return V2CollabTurnBannerStatus.connecting;
       case V2CollabLiveConnection.disconnected:
         return V2CollabTurnBannerStatus.disconnected;
       case V2CollabLiveConnection.connected:
-        return _effectiveMyTurn(now) || _data.turnHolderName.trim().isNotEmpty
+        return _data.isMyTurn || _data.turnHolderName.trim().isNotEmpty
             ? V2CollabTurnBannerStatus.ready
             : V2CollabTurnBannerStatus.empty;
     }
   }
 
-  V2CollabTurnBannerData _bannerData(DateTime now) {
-    final expired = _isExpired(now);
-    final mine = _effectiveMyTurn(now);
-    final time = expired
-        ? ''
-        : (_data.turnStartedAt == null
-              ? _data.turnTimeLeftLabel
-              : _remainingLabel(now));
+  V2CollabTurnBannerData get _bannerData {
     return V2CollabTurnBannerData(
-      status: _bannerStatus(now),
-      holderName: expired ? '' : _data.turnHolderName,
-      timeLeftLabel: time,
-      isMyTurn: mine,
-      turnRequested: expired ? false : _data.turnRequested,
+      status: _bannerStatus,
+      holderName: _data.turnHolderName,
+      timeLeftLabel: _data.turnTimeLeftLabel,
+      isMyTurn: _data.isMyTurn,
+      turnRequested: _data.turnRequested,
       queue: [
         for (final name in _data.turnQueue)
           V2CollabTurnWaiter(
@@ -416,30 +317,12 @@ class _CollabLivePageState extends State<CollabLivePage> {
     );
   }
 
-  String _remainingLabel(DateTime now) {
-    final start = _data.turnStartedAt;
-    if (start == null) return _data.turnTimeLeftLabel;
-    final remaining = start.add(_data.turnDuration).difference(now);
-    var seconds = remaining.inMilliseconds <= 0
-        ? 0
-        : (remaining.inMilliseconds / 1000).ceil();
-    final cap = _data.turnDuration.inSeconds;
-    if (seconds > cap) seconds = cap;
-    if (seconds <= 0) return '';
-    if (seconds >= 60) {
-      final minutes = seconds ~/ 60;
-      final rest = seconds % 60;
-      return rest == 0 ? '${minutes}m left' : '${minutes}m ${rest}s left';
-    }
-    return '${seconds}s left';
-  }
-
-  bool _composerEnabled(DateTime now) =>
+  bool get _composerEnabled =>
       _data.connection == V2CollabLiveConnection.connected &&
       !_data.sending &&
-      _effectiveMyTurn(now);
+      _data.isMyTurn;
 
-  String? _lockReason(DateTime now) {
+  String? get _lockReason {
     if (_data.connection == V2CollabLiveConnection.connecting) {
       return 'Connecting';
     }
@@ -447,7 +330,7 @@ class _CollabLivePageState extends State<CollabLivePage> {
       return 'No connection';
     }
     if (_data.sending) return 'Sending';
-    if (!_effectiveMyTurn(now)) return 'Wait for the turn';
+    if (!_data.isMyTurn) return 'Wait for the turn';
     return null;
   }
 
@@ -463,6 +346,12 @@ class _CollabLivePageState extends State<CollabLivePage> {
           padding: const EdgeInsets.only(bottom: OSpace.l),
           child: _MessageTile(
             message: message,
+            onReport: !message.canReport || widget.onReportMessage == null
+                ? null
+                : () => widget.onReportMessage!(message),
+            onRemove: !message.canRemove || widget.onRemoveMessage == null
+                ? null
+                : () => widget.onRemoveMessage!(message),
             onOpenArtifact: widget.onOpenArtifact,
           ),
         );
@@ -573,15 +462,12 @@ class _CollabLivePageState extends State<CollabLivePage> {
       children: [
         Padding(
           padding: EdgeInsets.fromLTRB(gutter, OSpace.m, gutter, OSpace.s),
-          child: ValueListenableBuilder<DateTime>(
-            valueListenable: _clock,
-            builder: (context, now, _) => CollabTurnBanner(
-              data: _bannerData(now),
-              onRequestTurn: widget.onRequestTurn,
-              onRequestTurnAsync: widget.onRequestTurnAsync,
-              onViewQueue: widget.onOpenMembers,
-              onRetry: widget.onRetry,
-            ),
+          child: CollabTurnBanner(
+            data: _bannerData,
+            onRequestTurn: widget.onRequestTurn,
+            onRequestTurnAsync: widget.onRequestTurnAsync,
+            onViewQueue: widget.onOpenMembers,
+            onRetry: widget.onRetry,
           ),
         ),
         Expanded(
@@ -594,16 +480,15 @@ class _CollabLivePageState extends State<CollabLivePage> {
               : _transcript(messages, gutter),
         ),
         if (_hasHandler)
-          ValueListenableBuilder<DateTime>(
-            valueListenable: _clock,
-            builder: (context, now, _) => _ComposerDock(
-              data: _data,
-              enabled: _composerEnabled(now),
-              lockReason: _lockReason(now),
-              onSend: widget.onSend,
-              onSendAsync: widget.onSendAsync,
-              onAnnounce: _announce,
-            ),
+          _ComposerDock(
+            data: _data,
+            enabled: _composerEnabled,
+            lockReason: _lockReason,
+            onSend: widget.onSend,
+            onSendAsync: widget.onSendAsync,
+            onAttach: widget.onAttach,
+            onRemoveAttachment: widget.onRemoveAttachment,
+            onAnnounce: _announce,
           ),
         OLiveRegion(message: _announcement),
       ],
@@ -612,9 +497,16 @@ class _CollabLivePageState extends State<CollabLivePage> {
 }
 
 class _MessageTile extends StatelessWidget {
-  const _MessageTile({required this.message, this.onOpenArtifact});
+  const _MessageTile({
+    required this.message,
+    this.onReport,
+    this.onRemove,
+    this.onOpenArtifact,
+  });
 
   final V2CollabMessage message;
+  final VoidCallback? onReport;
+  final VoidCallback? onRemove;
   final ValueChanged<String>? onOpenArtifact;
 
   @override
@@ -674,6 +566,18 @@ class _MessageTile extends StatelessWidget {
                       ),
                     ),
                   ],
+                  if (onReport != null)
+                    OIconButton(
+                      icon: Icons.flag_outlined,
+                      semanticLabel: 'Report message',
+                      onPressed: onReport,
+                    ),
+                  if (onRemove != null)
+                    OIconButton(
+                      icon: Icons.delete_outline_rounded,
+                      semanticLabel: 'Remove message',
+                      onPressed: onRemove,
+                    ),
                   if (message.isTurnHolder) ...[
                     const SizedBox(width: OSpace.s),
                     ExcludeSemantics(
@@ -739,9 +643,11 @@ class _MessageTile extends StatelessWidget {
                       const SizedBox(height: OSpace.s),
                       _ArtifactRow(
                         name: message.artifactName!,
-                        onOpen: onOpenArtifact == null
+                        onOpen: message.artifactId == null ||
+                                message.artifactId!.isEmpty ||
+                                onOpenArtifact == null
                             ? null
-                            : () => onOpenArtifact!(message.artifactName!),
+                            : () => onOpenArtifact!(message.artifactId!),
                       ),
                     ],
                   ],
@@ -803,6 +709,8 @@ class _ComposerDock extends StatefulWidget {
     required this.lockReason,
     this.onSend,
     this.onSendAsync,
+    this.onAttach,
+    this.onRemoveAttachment,
     this.onAnnounce,
   });
 
@@ -818,6 +726,8 @@ class _ComposerDock extends StatefulWidget {
 
   final ValueChanged<String>? onSend;
   final Future<void> Function(String)? onSendAsync;
+  final VoidCallback? onAttach;
+  final ValueChanged<int>? onRemoveAttachment;
   final ValueChanged<String>? onAnnounce;
 
   @override
@@ -943,6 +853,25 @@ class _ComposerDockState extends State<_ComposerDock> {
               ),
               const SizedBox(height: OSpace.s),
             ],
+            if (widget.data.pendingAttachmentNames.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: OSpace.s),
+                child: Wrap(
+                  spacing: OSpace.xs,
+                  runSpacing: OSpace.xs,
+                  children: [
+                    for (var index = 0;
+                        index < widget.data.pendingAttachmentNames.length;
+                        index++)
+                      InputChip(
+                        label: Text(widget.data.pendingAttachmentNames[index]),
+                        onDeleted: _busy || widget.onRemoveAttachment == null
+                            ? null
+                            : () => widget.onRemoveAttachment!(index),
+                      ),
+                  ],
+                ),
+              ),
             Container(
               padding: const EdgeInsets.only(left: OSpace.m, right: OSpace.xxs),
               decoration: BoxDecoration(
@@ -952,6 +881,12 @@ class _ComposerDockState extends State<_ComposerDock> {
               ),
               child: Row(
                 children: [
+                  if (widget.onAttach != null)
+                    OIconButton(
+                      icon: Icons.attach_file_rounded,
+                      semanticLabel: 'Attach files',
+                      onPressed: _busy || !widget.enabled ? null : widget.onAttach,
+                    ),
                   Expanded(
                     child: TextField(
                       controller: _controller,

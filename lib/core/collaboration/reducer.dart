@@ -30,6 +30,7 @@ enum ReduceOutcome {
   ignoredClosed,
   ignoredResyncRequired,
   resyncRequired,
+  serverFactsRefreshed,
 }
 
 /// A rendered session message attributed to its author.
@@ -65,6 +66,69 @@ class CollaborationMessage {
   bool get isAssistant => role == MessageRole.assistant;
 }
 
+class CollaborationToolState {
+  const CollaborationToolState({
+    required this.sequence,
+    required this.eventId,
+    required this.runId,
+    required this.callId,
+    required this.name,
+    required this.status,
+    required this.isError,
+  });
+
+  final int sequence;
+  final String eventId;
+  final String? runId;
+  final String? callId;
+  final String? name;
+  final ModelExecutionStatus status;
+  final bool? isError;
+
+  Map<String, Object?> toWire() => {
+    'sequence': sequence,
+    'eventId': eventId,
+    'runId': runId,
+    'callId': callId,
+    'name': name,
+    'status': status.name,
+    'isError': isError,
+  };
+}
+
+class CollaborationArtifact {
+  const CollaborationArtifact({
+    required this.sequence,
+    required this.eventId,
+    required this.artifactId,
+    required this.author,
+    required this.runId,
+    required this.name,
+    required this.sizeBytes,
+    required this.contentType,
+  });
+
+  final int sequence;
+  final String eventId;
+  final String? artifactId;
+  final String author;
+  final String? runId;
+  final String? name;
+  final int? sizeBytes;
+  final String? contentType;
+
+  Map<String, Object?> toWire() => {
+    'sequence': sequence,
+    'eventId': eventId,
+    'artifactId': artifactId,
+    'author': author,
+    'runId': runId,
+    'name': name,
+    'sizeBytes': sizeBytes,
+    'contentType': contentType,
+  };
+}
+
 /// Immutable client projection of a collaboration session.
 class CollaborationState {
   CollaborationState._({
@@ -75,6 +139,8 @@ class CollaborationState {
     required this.replayThroughSequence,
     required List<CollaborationMessage> messages,
     required Map<String, ParticipantModelState> modelStates,
+    required Map<String, CollaborationToolState> tools,
+    required Map<String, CollaborationArtifact> artifacts,
     required Map<String, PresenceState> presence,
     required Set<String> seenEventIds,
     required Map<int, CollaborationEvent> buffer,
@@ -87,6 +153,8 @@ class CollaborationState {
        members = UnmodifiableMapView(Map.of(members)),
        messages = List.unmodifiable(messages),
        modelStates = UnmodifiableMapView(Map.of(modelStates)),
+       tools = UnmodifiableMapView(Map.of(tools)),
+       artifacts = UnmodifiableMapView(Map.of(artifacts)),
        presence = UnmodifiableMapView(Map.of(presence)),
        _seenEventIds = Set.unmodifiable(seenEventIds),
        _buffer = UnmodifiableMapView(Map.of(buffer));
@@ -129,6 +197,8 @@ class CollaborationState {
       replayThroughSequence: replayThroughSequence,
       messages: const [],
       modelStates: const {},
+      tools: const {},
+      artifacts: const {},
       presence: const {},
       seenEventIds: const {},
       buffer: const {},
@@ -160,6 +230,8 @@ class CollaborationState {
   final int replayThroughSequence;
   final List<CollaborationMessage> messages;
   final Map<String, ParticipantModelState> modelStates;
+  final Map<String, CollaborationToolState> tools;
+  final Map<String, CollaborationArtifact> artifacts;
   final Map<String, PresenceState> presence;
   final Set<String> _seenEventIds;
   final Map<int, CollaborationEvent> _buffer;
@@ -181,6 +253,8 @@ class CollaborationState {
     int? lastSequence,
     List<CollaborationMessage>? messages,
     Map<String, ParticipantModelState>? modelStates,
+    Map<String, CollaborationToolState>? tools,
+    Map<String, CollaborationArtifact>? artifacts,
     Map<String, PresenceState>? presence,
     Set<String>? seenEventIds,
     Map<int, CollaborationEvent>? buffer,
@@ -197,6 +271,8 @@ class CollaborationState {
     replayThroughSequence: replayThroughSequence,
     messages: messages ?? this.messages,
     modelStates: modelStates ?? this.modelStates,
+    tools: tools ?? this.tools,
+    artifacts: artifacts ?? this.artifacts,
     presence: presence ?? this.presence,
     seenEventIds: seenEventIds ?? _seenEventIds,
     buffer: buffer ?? _buffer,
@@ -209,6 +285,48 @@ class CollaborationState {
 
   CollaborationState _withOutcome(ReduceOutcome outcome) => _copy(lastOutcome: outcome);
 
+  /// Replaces only fresh server-owned room facts. Messages, sequence, cursor
+  /// history, model/tool/artifact projections, and pending replay stay intact.
+  CollaborationState refreshServerFacts({
+    required CollaborationSession session,
+    required List<Member> members,
+    CollaborationTurn? turn,
+  }) {
+    if (status != CollaborationStatus.live ||
+        session.sessionId != this.session.sessionId ||
+        session.ownerParticipantId != this.session.ownerParticipantId) {
+      throw ArgumentError('foreign or closed collaboration state');
+    }
+    final byId = <String, Member>{};
+    final nextNames = <String, String>{};
+    for (final member in members) {
+      if (!member.isActive || byId.containsKey(member.participantId)) {
+        throw ArgumentError('invalid active member roster');
+      }
+      byId[member.participantId] = member;
+      if (member.displayName != null) {
+        nextNames[member.participantId] = member.displayName!;
+      }
+    }
+    final owner = byId[session.ownerParticipantId];
+    if (owner == null ||
+        owner.role != MemberRole.owner ||
+        byId.values.where((member) => member.role == MemberRole.owner).length != 1 ||
+        byId.length > maxActiveMembers) {
+      throw ArgumentError('invalid active member roster');
+    }
+    final local = byId[localParticipantId];
+    if (local == null) {
+      throw ArgumentError('local member missing from active roster');
+    }
+    return _copy(
+      session: session.withTurn(turn),
+      members: byId,
+      names: nextNames,
+      lastOutcome: ReduceOutcome.serverFactsRefreshed,
+    );
+  }
+
   /// Value snapshot for equality checks in tests. Contains no session token.
   Map<String, Object?> debugSnapshot() => {
     'session': session.toWire(),
@@ -217,6 +335,8 @@ class CollaborationState {
     'lastSequence': lastSequence,
     'messages': [for (final m in messages) '${m.sequence}:${m.author}:${m.text}'],
     'modelStates': {for (final e in modelStates.entries) e.key: e.value.toWire()},
+    'tools': {for (final e in tools.entries) e.key: e.value.toWire()},
+    'artifacts': {for (final e in artifacts.entries) e.key: e.value.toWire()},
     'presence': {for (final e in presence.entries) e.key: e.value.name},
     'seen': _seenEventIds.toList()..sort(),
     'buffer': _buffer.keys.toList()..sort(),
@@ -317,8 +437,16 @@ class CollaborationReducer {
         s._copy(lastSequence: seq, seenEventIds: seen, lastOutcome: outcome);
 
     final authorMember = s.members[e.author];
-    final authorActive = authorMember != null && authorMember.isActive;
-    final isOwner = e.author == s.session.ownerParticipantId && authorActive;
+    // Canonical message:/mirror: IDs identify immutable server sources. The
+    // active-only roster cannot name every historical sender, so those events
+    // remain renderable without inventing membership or executing their data.
+    final canonicalSource = e.clientEventId.startsWith('message:') ||
+        e.clientEventId.startsWith('mirror:');
+    final authorActive =
+        (authorMember != null && authorMember.isActive) || canonicalSource;
+    final isOwner = e.author == s.session.ownerParticipantId &&
+        authorMember != null &&
+        authorMember.isActive;
 
     final payload = e.payload;
     switch (payload) {
@@ -361,6 +489,77 @@ class CollaborationReducer {
               streaming: p.streaming,
               status: p.status,
               usage: previous?.usage,
+            ),
+          },
+          lastOutcome: ReduceOutcome.applied,
+        );
+
+      case RunModelStatusPayload p:
+        if (!authorActive) return consume(ReduceOutcome.ignoredInactiveAuthor);
+        final previous = s.modelStates[e.author];
+        return s._copy(
+          lastSequence: seq,
+          seenEventIds: seen,
+          modelStates: {
+            ...s.modelStates,
+            e.author: ParticipantModelState(
+              participantId: e.author,
+              providerId: previous?.providerId,
+              requestedModel: p.model ?? previous?.requestedModel,
+              reportedModel: previous?.reportedModel,
+              displayName: previous?.displayName,
+              streaming: p.streaming,
+              status: p.status,
+              usage: previous?.usage,
+              runId: p.runId,
+              model: p.model,
+            ),
+          },
+          lastOutcome: ReduceOutcome.applied,
+        );
+
+      case ToolStatusPayload p:
+        if (e.author.isNotEmpty && !authorActive) {
+          return consume(ReduceOutcome.ignoredInactiveAuthor);
+        }
+        final key = p.callId ?? e.clientEventId;
+        return s._copy(
+          lastSequence: seq,
+          seenEventIds: seen,
+          tools: {
+            ...s.tools,
+            key: CollaborationToolState(
+              sequence: seq,
+              eventId: e.clientEventId,
+              runId: p.runId,
+              callId: p.callId,
+              name: p.name,
+              status: p.status,
+              isError: p.isError,
+            ),
+          },
+          lastOutcome: ReduceOutcome.applied,
+        );
+
+      case ArtifactCreatedPayload p:
+        if (e.author.isNotEmpty && !authorActive) {
+          return consume(ReduceOutcome.ignoredInactiveAuthor);
+        }
+        final key = p.artifactId ?? e.clientEventId;
+        return s._copy(
+          lastSequence: seq,
+          seenEventIds: seen,
+          artifacts: {
+            ...s.artifacts,
+            key: CollaborationArtifact(
+              sequence: seq,
+              eventId: e.clientEventId,
+              artifactId: p.artifactId,
+              author: e.author,
+              runId: p.runId,
+              name: p.name,
+              sizeBytes: p.sizeBytes,
+              contentType: p.contentType,
             ),
           },
           lastOutcome: ReduceOutcome.applied,

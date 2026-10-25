@@ -1,3 +1,5 @@
+// UNEXECUTED under HEAVY-COMMANDS-PAUSED.md.
+
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -48,6 +50,46 @@ void main() {
     expect(store.state!.messages.map((m) => m.text), ['hello', 'missing', 'gap']);
   });
 
+  test('non-owner in a zero-history room stays live with the full roster', () async {
+    transport.stateResult = (_) async => emptyNonOwnerState();
+    transport.replayResult = (_, _) async => client.CollaborationEventPage(
+      events: const [],
+      nextCursor: const client.CollaborationCursor('v1:0'),
+      hasMore: false,
+    );
+    coordinator.start();
+    await flush();
+
+    expect(store.state!.status, CollaborationStatus.live);
+    expect(store.state!.closeReason, isNull);
+    expect(store.state!.localParticipantId, 'p-guest');
+    expect(store.state!.members, hasLength(2));
+    expect(store.state!.activeMembers, hasLength(2));
+    expect(store.cursor, 0);
+  });
+
+  test('historical revoke followed by rejoin does not classify local as removed', () async {
+    transport.stateResult = (_) async => emptyNonOwnerState(replayThroughSequence: 2);
+    transport.replayResult = (_, _) async => client.CollaborationEventPage(
+      events: [
+        membershipEvent(sequence: 1, action: 'revoked'),
+        membershipEvent(sequence: 2, action: 'joined'),
+      ],
+      nextCursor: const client.CollaborationCursor('v1:2'),
+      hasMore: false,
+    );
+    coordinator.start();
+    await flush();
+
+    expect(store.state!.status, CollaborationStatus.live);
+    expect(store.state!.closeReason, isNull);
+    expect(store.state!.localParticipantId, 'p-guest');
+    expect(store.state!.members['p-guest']!.status, MemberStatus.active);
+    expect(store.state!.activeMembers, hasLength(2));
+    expect(store.state!.lastSequence, 2);
+    expect(store.cursor, 2);
+  });
+
   test('failed initial state retries bootstrap before replay', () async {
     var offline = true;
     transport.stateResult = (_) async {
@@ -59,7 +101,7 @@ void main() {
     offline = false;
     scheduler.advance(const Duration(seconds: 2));
     await flush();
-    expect(transport.stateCalls, 2);
+    expect(transport.stateCalls, 3);
     expect(store.state!.messages.single.text, 'hello');
     expect(transport.cursors, ['bootstrap-cursor']);
   });
@@ -161,7 +203,7 @@ void main() {
     };
     scheduler.advance(const Duration(seconds: 15));
     await flush();
-    expect(transport.stateCalls, 2);
+    expect(transport.stateCalls, 4);
     expect(transport.cursors, ['bootstrap-cursor', 'cursor-1', 'bootstrap-cursor']);
     expect(store.state!.messages.single.text, 'hello');
     expect(coordinator.cursor!.value, 'cursor-1');
@@ -179,7 +221,7 @@ void main() {
     transport.replayResult = (_, _) async => page();
     scheduler.advance(const Duration(seconds: 2));
     await flush();
-    expect(transport.stateCalls, 3);
+    expect(transport.stateCalls, 5);
     expect(transport.cursors.last, 'bootstrap-cursor');
   });
 
@@ -246,6 +288,42 @@ void main() {
     expect(transport.cursors.length, 2);
     expect(scheduler.activeCount, 0);
   });
+}
+
+client.CollaborationEvent membershipEvent({
+  required int sequence,
+  required String action,
+}) =>
+    CollaborationEvent.fromWire({
+      'schemaVersion': 1,
+      'eventId': 'membership-$sequence',
+      'sessionId': 'session-a',
+      'eventSequence': sequence,
+      'senderParticipantId': 'p-guest',
+      'kind': 'membership',
+      'createdAt': '2026-10-09T00:00:00Z',
+      'payload': {
+        'action': action,
+        'participantId': 'p-guest',
+        'role': action == 'joined' ? 'participant' : null,
+      },
+    });
+
+client.CollaborationState emptyNonOwnerState({int replayThroughSequence = 0}) {
+  const owner = Member(participantId: 'p-owner', role: MemberRole.owner, status: MemberStatus.active);
+  const guest = Member(participantId: 'p-guest', role: MemberRole.participant, status: MemberStatus.active);
+  return client.CollaborationState(
+    session: const CollaborationSession(
+      sessionId: 'session-a',
+      ownerParticipantId: 'p-owner',
+      lifecycle: SessionLifecycle.active,
+    ),
+    member: guest,
+    members: const [owner, guest],
+    initialMembers: const [owner],
+    replayThroughSequence: replayThroughSequence,
+    cursor: const client.CollaborationCursor('v1:0'),
+  );
 }
 
 client.CollaborationState bootstrap(String session) => client.CollaborationState(

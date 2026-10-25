@@ -79,7 +79,23 @@ List<int> _canonicalUtf8Bytes(Object? value) =>
 // Enums
 // ---------------------------------------------------------------------------
 
-enum CollaborationEventType { message, modelStatus, usage, presence, membership, system }
+enum CollaborationEventType {
+  message('message'),
+  modelStatus('modelStatus'),
+  usage('usage'),
+  presence('presence'),
+  membership('membership'),
+  system('system'),
+  toolStarted('tool_started'),
+  toolCompleted('tool_completed'),
+  artifactCreated('artifact_created');
+
+  const CollaborationEventType(this.wireName);
+
+  final String wireName;
+}
+
+enum CollaborationTurnResultStatus { queued, completed, failed, cancelled, interrupted }
 
 enum MemberRole { owner, participant }
 
@@ -300,6 +316,20 @@ class _Closed {
     return v;
   }
 
+  String? nullableId(String key) => _map[key] == null ? null : id(key);
+
+  /// Canonical run/tool/artifact events can have no attributable participant.
+  /// Preserve that unknown author as empty; never substitute the room owner.
+  String senderId(String key) {
+    final v = string(key);
+    if (v.isEmpty) return v;
+    if (_unicodeLength(v) > _maxIdLength || !_idPattern.hasMatch(v)) {
+      _reject(CollaborationWireReason.invalidValue);
+    }
+    _screenMetadataValue(v);
+    return v;
+  }
+
   String label(String key) {
     final v = string(key);
     _screenMetadataValue(v);
@@ -331,6 +361,17 @@ class _Closed {
     return v;
   }
 
+  int? nullableSize(String key) {
+    final v = _map[key];
+    if (v == null) return null;
+    if (v is! int) _reject(CollaborationWireReason.wrongType);
+    if (v < 0) _reject(CollaborationWireReason.invalidValue);
+    return v;
+  }
+
+  bool? nullableBoolean(String key) =>
+      _map[key] == null ? null : boolean(key);
+
   T enumValue<T extends Enum>(String key, List<T> values) {
     final v = string(key);
     for (final value in values) {
@@ -361,96 +402,112 @@ class _Closed {
 // Session / member
 // ---------------------------------------------------------------------------
 
-/// Server-owned single-sender turn lease.
+/// Canonical server-owned full-run sender lease.
 ///
-/// The client never invents a start: [startedAt] and [deadline] are only ever
-/// what the server stamped. A session without a lease has a free turn (or a
-/// turn the server has not published yet), and the screen shows no countdown.
+/// There is deliberately no client deadline. Only a later authoritative state
+/// with `turn: null` releases the lease; heartbeat age is not a local timeout.
 class CollaborationTurn {
   const CollaborationTurn({
+    required this.holderParticipantId,
+    required this.runId,
     required this.startedAt,
-    required this.deadline,
-    this.participantId,
+    required this.heartbeatAt,
   });
 
-  /// Parses the optional server `turn` object. Absent means "no published
-  /// lease", which is not an error.
-  ///
-  /// Accepted shape (the second spelling of each alias is tolerated so an
-  /// older/newer gateway field name cannot silently drop the countdown):
-  /// `{participantId|holderParticipantId, startedAt, expiresAt|deadline}`.
   factory CollaborationTurn.fromWire(Object? json) {
     final r = _Closed(
       json,
-      const {'startedAt'},
-      optional: const {
-        'participantId',
-        'holderParticipantId',
-        'expiresAt',
-        'deadline',
-      },
+      const {'holderParticipantId', 'runId', 'startedAt', 'heartbeatAt'},
     );
     final startedAt = DateTime.parse(r.timestamp('startedAt'));
-    final String rawDeadline;
-    if (r.has('expiresAt')) {
-      rawDeadline = r.timestamp('expiresAt');
-      if (r.has('deadline') && r.timestamp('deadline') != rawDeadline) {
-        _reject(CollaborationWireReason.invalidValue);
-      }
-    } else if (r.has('deadline')) {
-      rawDeadline = r.timestamp('deadline');
-    } else {
-      _reject(CollaborationWireReason.missingField);
-    }
-    final deadline = DateTime.parse(rawDeadline);
-    if (!deadline.isAfter(startedAt)) {
+    final heartbeatAt = DateTime.parse(r.timestamp('heartbeatAt'));
+    if (heartbeatAt.isBefore(startedAt)) {
       _reject(CollaborationWireReason.invalidValue);
     }
-    String? participantId;
-    if (r.has('participantId')) participantId = r.id('participantId');
-    if (r.has('holderParticipantId')) {
-      final holder = r.id('holderParticipantId');
-      if (participantId != null && participantId != holder) {
-        _reject(CollaborationWireReason.invalidValue);
-      }
-      participantId = holder;
-    }
     return CollaborationTurn(
+      holderParticipantId: r.id('holderParticipantId'),
+      runId: r.id('runId'),
       startedAt: startedAt,
-      deadline: deadline,
-      participantId: participantId,
+      heartbeatAt: heartbeatAt,
     );
   }
 
-  /// When the server started this turn. Never a local clock reading.
+  final String holderParticipantId;
+  final String runId;
   final DateTime startedAt;
+  final DateTime heartbeatAt;
 
-  /// Absolute server deadline for this turn.
-  final DateTime deadline;
-
-  /// The participant holding the turn, when the server names one.
-  final String? participantId;
-
-  /// Turn length measured from [startedAt]; always positive.
-  Duration get duration => deadline.difference(startedAt);
-
-  bool isExpiredAt(DateTime now) => !now.isBefore(deadline);
+  /// Compatibility alias for the existing read-only projection adapters.
+  String get participantId => holderParticipantId;
 
   Map<String, Object?> toWire() => {
+    'holderParticipantId': holderParticipantId,
+    'runId': runId,
     'startedAt': startedAt.toUtc().toIso8601String(),
-    'expiresAt': deadline.toUtc().toIso8601String(),
-    if (participantId != null) 'participantId': participantId,
+    'heartbeatAt': heartbeatAt.toUtc().toIso8601String(),
   };
 
   @override
   bool operator ==(Object other) =>
       other is CollaborationTurn &&
+      other.holderParticipantId == holderParticipantId &&
+      other.runId == runId &&
       other.startedAt == startedAt &&
-      other.deadline == deadline &&
-      other.participantId == participantId;
+      other.heartbeatAt == heartbeatAt;
 
   @override
-  int get hashCode => Object.hash(startedAt, deadline, participantId);
+  int get hashCode => Object.hash(holderParticipantId, runId, startedAt, heartbeatAt);
+}
+
+/// Accepted server admission. Every ID is returned by the authority; a retry
+/// replays these same values instead of manufacturing another run or message.
+class CollaborationTurnResult {
+  const CollaborationTurnResult({
+    required this.turnId,
+    required this.runId,
+    required this.userMessageId,
+    required this.userEventId,
+    required this.status,
+    required this.model,
+  });
+
+  factory CollaborationTurnResult.fromWire(Object? json) {
+    final r = _Closed(json, const {
+      'schemaVersion',
+      'turnId',
+      'runId',
+      'userMessageId',
+      'userEventId',
+      'status',
+      'model',
+    });
+    r.schemaVersion();
+    return CollaborationTurnResult(
+      turnId: r.id('turnId'),
+      runId: r.id('runId'),
+      userMessageId: r.id('userMessageId'),
+      userEventId: r.id('userEventId'),
+      status: r.enumValue('status', CollaborationTurnResultStatus.values),
+      model: r.label('model'),
+    );
+  }
+
+  final String turnId;
+  final String runId;
+  final String userMessageId;
+  final String userEventId;
+  final CollaborationTurnResultStatus status;
+  final String model;
+
+  Map<String, Object?> toWire() => {
+    'schemaVersion': collaborationSchemaVersion,
+    'turnId': turnId,
+    'runId': runId,
+    'userMessageId': userMessageId,
+    'userEventId': userEventId,
+    'status': status.name,
+    'model': model,
+  };
 }
 
 /// Bounded session descriptor. The opaque route `SessionToken` is deliberately
@@ -467,14 +524,12 @@ class CollaborationSession {
     final r = _Closed(
       json,
       const {'schemaVersion', 'sessionId', 'ownerParticipantId', 'lifecycle'},
-      optional: const {'turn'},
     );
     r.schemaVersion();
     return CollaborationSession(
       sessionId: r.id('sessionId'),
       ownerParticipantId: r.id('ownerParticipantId'),
       lifecycle: r.enumValue('lifecycle', SessionLifecycle.values),
-      turn: r.raw('turn') == null ? null : CollaborationTurn.fromWire(r.raw('turn')),
     );
   }
 
@@ -492,12 +547,20 @@ class CollaborationSession {
     turn: turn,
   );
 
+  /// Attaches the latest top-level server lease for in-memory projection only.
+  CollaborationSession withTurn(CollaborationTurn? next) => CollaborationSession(
+    sessionId: sessionId,
+    ownerParticipantId: ownerParticipantId,
+    lifecycle: lifecycle,
+    turn: next,
+  );
+
   Map<String, Object?> toWire() => {
     'schemaVersion': collaborationSchemaVersion,
     'sessionId': sessionId,
     'ownerParticipantId': ownerParticipantId,
     'lifecycle': lifecycle.name,
-    if (turn != null) 'turn': turn!.toWire(),
+    // A lease is volatile server state, never a durable local countdown.
   };
 
   @override
@@ -622,26 +685,32 @@ class UsageSummary {
 class ParticipantModelState {
   const ParticipantModelState({
     required this.participantId,
-    required this.providerId,
-    required this.requestedModel,
-    required this.reportedModel,
-    required this.displayName,
+    this.providerId,
+    this.requestedModel,
+    this.reportedModel,
+    this.displayName,
     required this.streaming,
     required this.status,
     required this.usage,
+    this.runId,
+    this.model,
   });
 
   factory ParticipantModelState.fromWire(Map<String, Object?> json) {
-    final r = _Closed(json, const {
-      'participantId',
-      'providerId',
-      'requestedModel',
-      'reportedModel',
-      'displayName',
-      'streaming',
-      'status',
-      'usage',
-    });
+    final r = _Closed(
+      json,
+      const {
+        'participantId',
+        'providerId',
+        'requestedModel',
+        'reportedModel',
+        'displayName',
+        'streaming',
+        'status',
+        'usage',
+      },
+      optional: const {'runId', 'model'},
+    );
     return ParticipantModelState(
       participantId: r.id('participantId'),
       providerId: r.label('providerId'),
@@ -651,17 +720,21 @@ class ParticipantModelState {
       streaming: r.boolean('streaming'),
       status: r.enumValue('status', ModelExecutionStatus.values),
       usage: r.raw('usage') == null ? null : UsageSummary.fromWire(r.raw('usage')),
+      runId: r.has('runId') ? r.nullableId('runId') : null,
+      model: r.has('model') ? r.nullableLabel('model') : null,
     );
   }
 
   final String participantId;
-  final String providerId;
-  final String requestedModel;
+  final String? providerId;
+  final String? requestedModel;
   final String? reportedModel;
-  final String displayName;
+  final String? displayName;
   final bool streaming;
   final ModelExecutionStatus status;
   final UsageSummary? usage;
+  final String? runId;
+  final String? model;
 
   ParticipantModelState withUsage(UsageSummary? next) => ParticipantModelState(
     participantId: participantId,
@@ -672,6 +745,8 @@ class ParticipantModelState {
     streaming: streaming,
     status: status,
     usage: next,
+    runId: runId,
+    model: model,
   );
 
   Map<String, Object?> toWire() => {
@@ -683,6 +758,8 @@ class ParticipantModelState {
     'streaming': streaming,
     'status': status.name,
     'usage': usage?.toWire(),
+    if (runId != null) 'runId': runId,
+    if (model != null) 'model': model,
   };
 }
 
@@ -698,11 +775,19 @@ sealed class CollaborationPayload {
   static CollaborationPayload fromWire(CollaborationEventType type, Object? json) =>
       switch (type) {
         CollaborationEventType.message => MessagePayload._fromWire(json),
-        CollaborationEventType.modelStatus => ModelStatusPayload._fromWire(json),
+        CollaborationEventType.modelStatus =>
+          json is Map && json.containsKey('runId')
+              ? RunModelStatusPayload._fromWire(json)
+              : ModelStatusPayload._fromWire(json),
         CollaborationEventType.usage => UsagePayload(UsageSummary.fromWire(json)),
         CollaborationEventType.presence => PresencePayload._fromWire(json),
         CollaborationEventType.membership => MembershipPayload._fromWire(json),
         CollaborationEventType.system => SystemPayload._fromWire(json),
+        CollaborationEventType.toolStarted =>
+          ToolStatusPayload._fromWire(json, completed: false),
+        CollaborationEventType.toolCompleted =>
+          ToolStatusPayload._fromWire(json, completed: true),
+        CollaborationEventType.artifactCreated => ArtifactCreatedPayload._fromWire(json),
       };
 }
 
@@ -787,6 +872,134 @@ class ModelStatusPayload extends CollaborationPayload {
     'displayName': displayName,
     'streaming': streaming,
     'status': status.name,
+  };
+}
+
+/// Canonical run status from `session_event_mirror`, with no provider config,
+/// client display name, usage, reasoning, or hidden request data.
+class RunModelStatusPayload extends CollaborationPayload {
+  const RunModelStatusPayload({
+    required this.runId,
+    required this.status,
+    required this.streaming,
+    required this.model,
+  });
+
+  factory RunModelStatusPayload._fromWire(Object? json) {
+    final r = _Closed(json, const {'runId', 'status', 'streaming', 'model'});
+    return RunModelStatusPayload(
+      runId: r.nullableId('runId'),
+      status: r.enumValue('status', ModelExecutionStatus.values),
+      streaming: r.boolean('streaming'),
+      model: r.nullableLabel('model'),
+    );
+  }
+
+  final String? runId;
+  final ModelExecutionStatus status;
+  final bool streaming;
+  final String? model;
+
+  @override
+  Map<String, Object?> toWire() => {
+    'runId': runId,
+    'status': status.name,
+    'streaming': streaming,
+    'model': model,
+  };
+}
+
+/// Inert tool progress. Inputs, outputs, arguments, and credentials are not
+/// part of the collaboration wire and can never be executed by this codec.
+class ToolStatusPayload extends CollaborationPayload {
+  const ToolStatusPayload({
+    required this.runId,
+    required this.callId,
+    required this.name,
+    required this.status,
+    required this.isError,
+    required this.completed,
+  });
+
+  factory ToolStatusPayload._fromWire(Object? json, {required bool completed}) {
+    final r = _Closed(json, {
+      'runId',
+      'callId',
+      'name',
+      'status',
+      if (completed) 'isError',
+    });
+    final status = r.enumValue('status', ModelExecutionStatus.values);
+    final expected = completed ? ModelExecutionStatus.completed : ModelExecutionStatus.running;
+    if (status != expected) _reject(CollaborationWireReason.invalidValue);
+    return ToolStatusPayload(
+      runId: r.nullableId('runId'),
+      callId: r.nullableId('callId'),
+      name: r.nullableLabel('name'),
+      status: status,
+      isError: completed ? r.nullableBoolean('isError') : null,
+      completed: completed,
+    );
+  }
+
+  final String? runId;
+  final String? callId;
+  final String? name;
+  final ModelExecutionStatus status;
+  final bool? isError;
+  final bool completed;
+
+  @override
+  Map<String, Object?> toWire() => {
+    'runId': runId,
+    'callId': callId,
+    'name': name,
+    if (completed) 'isError': isError,
+    'status': status.name,
+  };
+}
+
+/// Display-safe generated-object metadata. Signed URLs and local paths are
+/// deliberately absent; clients mint fresh authorized URLs when needed.
+class ArtifactCreatedPayload extends CollaborationPayload {
+  const ArtifactCreatedPayload({
+    required this.runId,
+    required this.artifactId,
+    required this.name,
+    required this.sizeBytes,
+    required this.contentType,
+  });
+
+  factory ArtifactCreatedPayload._fromWire(Object? json) {
+    final r = _Closed(json, const {
+      'runId',
+      'artifactId',
+      'name',
+      'sizeBytes',
+      'contentType',
+    });
+    return ArtifactCreatedPayload(
+      runId: r.nullableId('runId'),
+      artifactId: r.nullableId('artifactId'),
+      name: r.nullableLabel('name'),
+      sizeBytes: r.nullableSize('sizeBytes'),
+      contentType: r.nullableLabel('contentType'),
+    );
+  }
+
+  final String? runId;
+  final String? artifactId;
+  final String? name;
+  final int? sizeBytes;
+  final String? contentType;
+
+  @override
+  Map<String, Object?> toWire() => {
+    'runId': runId,
+    'artifactId': artifactId,
+    'name': name,
+    'sizeBytes': sizeBytes,
+    'contentType': contentType,
   };
 }
 
@@ -887,7 +1100,7 @@ class CollaborationEvent {
       sessionId: r.id('sessionId'),
       sequence: sequence,
       clientEventId: r.id('eventId'),
-      author: r.id('senderParticipantId'),
+      author: r.senderId('senderParticipantId'),
       type: type,
       createdAt: r.timestamp('createdAt'),
       payload: CollaborationPayload.fromWire(type, r.raw('payload')),
@@ -907,7 +1120,7 @@ class CollaborationEvent {
 
   static CollaborationEventType _parseKind(String kind) {
     for (final t in CollaborationEventType.values) {
-      if (t.name == kind) return t;
+      if (t.wireName == kind) return t;
     }
     final k = _normalizeKey(kind);
     if (_executableKindParts.any(k.contains)) _reject(CollaborationWireReason.executableKind);
@@ -931,7 +1144,7 @@ class CollaborationEvent {
     'sessionId': sessionId,
     'eventSequence': sequence,
     'senderParticipantId': author,
-    'kind': type.name,
+    'kind': type.wireName,
     'createdAt': createdAt,
     'payload': payload.toWire(),
     if (senderDisplayName != null) 'senderDisplayName': senderDisplayName,

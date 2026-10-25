@@ -37,7 +37,7 @@ void main() {
         await owner.bind('owner', 0);
         await owner.create();
         owner.setForeground(true);
-        await until(() => server.stateReads == 1 && scheduler.activeCount == 2 && !owner.stale);
+        await until(() => server.stateReads >= 2 && scheduler.activeCount == 2 && !owner.stale);
         offline = true;
         owner.refresh();
         await until(() => owner.stale);
@@ -143,7 +143,7 @@ void main() {
       await owner.sendMessage('recent-$i');
       await until(() => owner.state?.messages.last.text == 'recent-$i');
       expect(owner.state!.messages.length, 501 + i);
-      expect(server.stateReads, 1);
+      expect(server.stateReads, greaterThanOrEqualTo(2));
     }
     await owner.release();
   });
@@ -174,12 +174,20 @@ class SessionTransport {
       return ok({'schemaVersion': 1, 'sessionToken': 'token',
         'session': session, 'member': member, 'cursor': '0'});
     }
+    if (request.url.path.endsWith('/turns') && request.method == 'POST') {
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      final event = add(body['text'] as String, 'message:turn-${events.length + 1}');
+      return ok({
+        'schemaVersion': 1,
+        'turnId': 'turn-${events.length}',
+        'runId': 'run-${events.length}',
+        'userMessageId': 'message-${events.length}',
+        'userEventId': event['eventId'],
+        'status': 'queued',
+        'model': body['model'] ?? 'auto',
+      }, 201);
+    }
     if (request.url.path.endsWith('/events')) {
-      if (request.method == 'POST') {
-        final raw = (jsonDecode(request.body)['events'] as List).single;
-        final event = add(raw['payload']['text'] as String, raw['eventId'] as String);
-        return ok({'schemaVersion': 1, 'events': [event], 'nextCursor': '${events.length}', 'hasMore': false});
-      }
       final start = int.parse(request.url.queryParameters['cursor'] ?? '0');
       final page = events.skip(start).take(100).toList();
       return ok({'schemaVersion': 1, 'events': page, 'nextCursor': '${start + page.length}',

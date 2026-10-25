@@ -29,6 +29,7 @@ class CollaborationCoordinator {
     required this._sessionToken,
     required this.scheduler,
     this.onTerminal,
+    this.onChanged,
     double Function()? random,
   }) : _random = random ?? (() => 0.5);
 
@@ -38,12 +39,15 @@ class CollaborationCoordinator {
   String _sessionToken;
   final CollaborationTimerScheduler scheduler;
   final void Function(client.CollaborationClientException)? onTerminal;
+  final void Function()? onChanged;
   final double Function() _random;
   int _generation = 0;
   bool _started = false;
   bool _busy = false;
   bool _bootstrapped = false;
   bool _refreshPending = false;
+  bool _roomFactsRefreshPending = false;
+  bool _roomFactsStartScheduled = false;
   bool _stale = false;
   int _failures = 0;
   CollaborationTimer? _pollTimer;
@@ -77,10 +81,38 @@ class CollaborationCoordinator {
     }
   }
 
+  /// Forces an authoritative state read even after bootstrap. Same-tick calls
+  /// coalesce. A later call during any poll/read is never folded into a
+  /// potentially pre-confirmation response: it leaves a trailing forced read.
+  void refreshRoomFacts() {
+    if (!_started) return;
+    if (_busy) {
+      _roomFactsRefreshPending = true;
+      return;
+    }
+    if (_roomFactsStartScheduled) return;
+    _roomFactsStartScheduled = true;
+    final generation = _generation;
+    scheduleMicrotask(() {
+      if (!_valid(generation)) return;
+      _roomFactsStartScheduled = false;
+      if (_busy) {
+        _roomFactsRefreshPending = true;
+        return;
+      }
+      _roomFactsRefreshPending = false;
+      unawaited(_bootstrapAndPoll(generation));
+    });
+  }
+
   void _finish(int generation) {
     if (!_valid(generation)) return;
     _busy = false;
-    if (_refreshPending) {
+    if (_roomFactsRefreshPending) {
+      _roomFactsRefreshPending = false;
+      _refreshPending = false;
+      refreshRoomFacts();
+    } else if (_refreshPending) {
       _refreshPending = false;
       refresh();
     }
@@ -107,6 +139,9 @@ class CollaborationCoordinator {
     if (client != null) _client = client;
     _busy = false;
     _bootstrapped = false;
+    _refreshPending = false;
+    _roomFactsRefreshPending = false;
+    _roomFactsStartScheduled = false;
     cursor = null;
     _failures = 0;
     reconnectDelay = null;
@@ -129,24 +164,13 @@ class CollaborationCoordinator {
     if (!_valid(generation) || _busy) return;
     _busy = true;
     try {
-      final state = await _client.state(_sessionToken);
+      await _readAndApplyRoomFacts(generation);
       if (!_valid(generation)) return;
-      final projection = CollaborationState.bootstrap(
-        session: state.session,
-        members: state.initialMembers ?? state.members,
-        localParticipantId: state.member.participantId,
-        lastSequence: 0,
-        replayThroughSequence: state.replayThroughSequence,
-      );
-      await _store.installBootstrap(
-        accountId: _accountId,
-        sessionGeneration: generation,
-        state: projection,
-      );
-      if (!_valid(generation)) return;
-      cursor = state.cursor;
-      _bootstrapped = true;
       await _replay(generation);
+      if (!_valid(generation)) return;
+      // The first drain can admit/finish work. Refresh only volatile room
+      // facts afterwards, matching the Web replay-then-state ordering.
+      await _readAndApplyRoomFacts(generation);
       if (_valid(generation)) {
         _failures = 0;
         reconnectDelay = null;
@@ -172,11 +196,58 @@ class CollaborationCoordinator {
     }
   }
 
+  Future<void> _readAndApplyRoomFacts(int generation) async {
+    final fresh = await _client.state(_sessionToken);
+    if (!_valid(generation)) return;
+    final current = _store.state;
+    if (_bootstrapped &&
+        current != null &&
+        current.status == CollaborationStatus.live) {
+      if (_store.accountId != _accountId ||
+          _store.sessionGeneration != generation) {
+        throw const CollaborationStoreException('room facts fence mismatch');
+      }
+      // CollaborationStore's durable cursor API is intentionally unchanged.
+      // This synchronous, generation-checked merge changes no cursor, event,
+      // bootstrap record, or persisted replay position.
+      _store.state = current.refreshServerFacts(
+        session: fresh.session,
+        members: fresh.members,
+        turn: fresh.turn,
+      );
+      onChanged?.call();
+      return;
+    }
+    final projection = CollaborationState.bootstrap(
+      session: fresh.session.withTurn(fresh.turn),
+      // Zero-history rooms have no membership replay that could prove a local
+      // departure. Use the authorized FULL roster before localRemoved is
+      // classified; legacy non-empty history retains its owner-only boundary.
+      members: fresh.replayThroughSequence == 0
+          ? fresh.members
+          : (fresh.initialMembers ?? fresh.members),
+      localParticipantId: fresh.member.participantId,
+      lastSequence: 0,
+      replayThroughSequence: fresh.replayThroughSequence,
+    );
+    await _store.installBootstrap(
+      accountId: _accountId,
+      sessionGeneration: generation,
+      state: projection,
+    );
+    if (!_valid(generation)) return;
+    cursor = fresh.cursor;
+    _bootstrapped = true;
+    onChanged?.call();
+  }
+
   Future<void> _poll(int generation) async {
     if (!_valid(generation) || _busy) return;
     _busy = true;
     try {
       await _replay(generation, wait: _live);
+      if (!_valid(generation)) return;
+      await _readAndApplyRoomFacts(generation);
       if (_valid(generation)) {
         _failures = 0;
         reconnectDelay = null;
@@ -211,6 +282,9 @@ class CollaborationCoordinator {
     _generation++;
     _busy = false;
     _bootstrapped = false;
+    _refreshPending = false;
+    _roomFactsRefreshPending = false;
+    _roomFactsStartScheduled = false;
     cursor = null;
     reconnectDelay = null;
     _setStale(true);

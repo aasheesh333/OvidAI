@@ -186,6 +186,7 @@ class CollabMembersPage extends StatefulWidget {
     this.onSearch,
     this.onInvite,
     this.onMemberMenu,
+    this.onMemberActions,
     this.onLeave,
     this.onRetry,
     this.onRoleChanged,
@@ -206,6 +207,10 @@ class CollabMembersPage extends StatefulWidget {
   /// Host-owned member actions. The page calls this only for a removable
   /// member; the host owns the menu, confirmation and outcome.
   final ValueChanged<V2CollabMember>? onMemberMenu;
+
+  /// Full participant actions (report/block and, only when permitted, remove).
+  /// Unlike [onMemberMenu], this does not require owner-removal permission.
+  final ValueChanged<V2CollabMember>? onMemberActions;
 
   /// Host-owned leave action. The host owns the confirmation and outcome.
   final V2CollabAction? onLeave;
@@ -409,13 +414,12 @@ class _CollabMembersPageState extends State<CollabMembersPage> {
         // The owner can never be removed or demoted, even if a host marks the
         // row removable by mistake. A row with a mutation in flight does not
         // accept a second, conflicting one.
-        final canRemove =
-            !roleUpdating &&
-            !removing &&
-            !member.isOwner &&
-            !member.isYou &&
-            member.canRemove &&
-            (widget.onRemove != null || widget.onMemberMenu != null);
+        final hasParticipantActions =
+            !roleUpdating && !removing && !member.isOwner && !member.isYou;
+        final canRemove = hasParticipantActions &&
+            (widget.onMemberActions != null ||
+                (member.canRemove &&
+                    (widget.onRemove != null || widget.onMemberMenu != null)));
         final role = _roleOverrides[member.id] ?? member.role;
         final canChangeRole =
             widget.onRoleChanged != null &&
@@ -431,6 +435,11 @@ class _CollabMembersPageState extends State<CollabMembersPage> {
               role: role,
               roleUpdating: roleUpdating,
               removing: removing,
+              actionSemanticLabel: widget.onMemberActions != null &&
+                      widget.onRemove == null &&
+                      widget.onMemberMenu == null
+                  ? 'Actions for ${member.name}'
+                  : null,
               onRoleTap: canChangeRole
                   ? () => _pickRole(member, role)
                   : null,
@@ -544,7 +553,11 @@ class _CollabMembersPageState extends State<CollabMembersPage> {
     final remove = widget.onRemove;
     if (remove == null) {
       // Host-owned flow: it owns the menu, confirmation and outcome.
-      widget.onMemberMenu?.call(member);
+      if (widget.onMemberActions != null) {
+        widget.onMemberActions!(member);
+      } else {
+        widget.onMemberMenu?.call(member);
+      }
       return;
     }
     final confirmed = await _confirm(
@@ -645,6 +658,7 @@ class _MemberRow extends StatelessWidget {
     required this.removing,
     this.onRoleTap,
     this.onRemove,
+    this.actionSemanticLabel,
   });
 
   final V2CollabMember member;
@@ -653,6 +667,7 @@ class _MemberRow extends StatelessWidget {
   final bool removing;
   final VoidCallback? onRoleTap;
   final VoidCallback? onRemove;
+  final String? actionSemanticLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -779,7 +794,8 @@ class _MemberRow extends StatelessWidget {
                 const SizedBox(width: OSpace.s),
                 OIconButton(
                   icon: Icons.person_remove_rounded,
-                  semanticLabel: 'Remove ${member.name}, destructive',
+                  semanticLabel: actionSemanticLabel ??
+                      'Remove ${member.name}, destructive',
                   onPressed: onRemove,
                 ),
               ],

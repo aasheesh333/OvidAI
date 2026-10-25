@@ -39,12 +39,25 @@ class V2SettingsActions {
     this.usage, {
     AccountProfileClient? accountProfile,
     AccountSettingsClient? accountSettings,
+    Future<String?> Function(String displayName)? updateDisplayName,
   }) : _accountProfile =
            accountProfile ??
            AccountProfileClient(
-             refreshCollabProjection: () => AppState.I.collaboration?.refresh(),
+             refreshCollabProjection: () {
+               final collaboration = AppState.I.collaboration;
+               final uid = collaboration?.accountUid;
+               final generation = collaboration?.accountGeneration;
+               if (uid != null && generation != null) {
+                 collaboration!.forceRefreshAfterProfileRename(
+                   uid: uid,
+                   generation: generation,
+                 );
+               }
+             },
            ),
-       _accountSettings = accountSettings ?? AccountSettingsClient.I {
+       _accountSettings = accountSettings ?? AccountSettingsClient.I,
+       _updateDisplayName =
+           updateDisplayName ?? FirebaseService.I.updateDisplayName {
     // Launch hook: reconcile the cached plan with the store's entitlements
     // (refunds/cancellations) and mirror every server plan answer.
     usage.addListener(_onUsage);
@@ -54,6 +67,7 @@ class V2SettingsActions {
   final CloudUsageStore usage;
   final AccountProfileClient _accountProfile;
   final AccountSettingsClient _accountSettings;
+  final Future<String?> Function(String displayName) _updateDisplayName;
 
   /// Drops the listener this object added to [usage].
   ///
@@ -187,7 +201,7 @@ class V2SettingsActions {
       }
       return;
     }
-    final error = await FirebaseService.I.updateDisplayName(clean);
+    final error = await _updateDisplayName(clean);
     if (error != null && context.mounted) {
       _snack(
         context,

@@ -48,26 +48,18 @@ void main() {
             headers: {'cache-control': 'no-store'},
           );
         }
-        if (request.url.path.endsWith('/events')) {
-          final event =
-              ((jsonDecode(request.body) as Map)['events'] as List).single
-                  as Map;
+        if (request.url.path.endsWith('/turns')) {
           return http.Response(
             jsonEncode({
               'schemaVersion': 1,
-              'events': [
-                {
-                  ...event,
-                  'sessionId': 'session-id',
-                  'senderParticipantId': 'alice-participant',
-                  'eventSequence': 1,
-                  'createdAt': '2026-10-10T00:00:00Z',
-                },
-              ],
-              'nextCursor': 'next',
-              'hasMore': false,
+              'turnId': 'turn-1',
+              'runId': 'run-1',
+              'userMessageId': 'message-1',
+              'userEventId': 'message:message-1',
+              'status': 'queued',
+              'model': 'auto',
             }),
-            200,
+            201,
             headers: {'cache-control': 'no-store'},
           );
         }
@@ -99,15 +91,14 @@ void main() {
     await owner.create();
     expect(owner.sessionToken, 'session-token');
     expect(requests.single.url.path, '/chat');
-    // The production send must reach the real client's closed event encoder.
+    // The production send reaches only the strict server turn admission DTO.
     await owner.sendMessage('my local message');
     expect(requests, hasLength(2));
+    expect(requests.last.url.path, '/chat/session-token/turns');
     final sent = jsonDecode(requests.last.body) as Map;
-    expect((sent['events'] as List).single, containsPair('kind', 'message'));
-    expect(
-      (sent['events'] as List).single,
-      containsPair('payload', {'text': 'my local message'}),
-    );
+    expect(sent['text'], 'my local message');
+    expect(sent.containsKey('events'), isFalse);
+    expect(sent.containsKey('role'), isFalse);
     await owner.invite();
     expect(owner.invitationCode, 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ');
     await owner.revokeMember('bob');

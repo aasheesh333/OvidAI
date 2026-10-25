@@ -23,7 +23,7 @@ Map<String, Object?> _envelope(
   String? name = 'Alice Example',
 }) => {
   ...event,
-  'sessionId': 'session-id',
+  'sessionId': '00000000-0000-4000-8000-000000000001',
   'senderParticipantId': sender,
   'eventSequence': sequence,
   'createdAt': '2026-10-10T00:00:00.000Z',
@@ -33,9 +33,8 @@ Map<String, Object?> _envelope(
 /// Minimal in-memory stand-in for the account service's /chat routes.
 class _FakeServer {
   final requests = <http.Request>[];
-  final appended = <Map<String, Object?>>[];
-  var sequence = 0;
   String? joinError;
+  String? turnError;
 
   http.Response _json(Object body, [int status = 200]) => http.Response(
     jsonEncode(body),
@@ -45,7 +44,7 @@ class _FakeServer {
 
   Map<String, Object?> get _session => {
     'schemaVersion': 1,
-    'sessionId': 'session-id',
+    'sessionId': '00000000-0000-4000-8000-000000000001',
     'ownerParticipantId': 'p-alice',
     'lifecycle': 'active',
   };
@@ -62,19 +61,23 @@ class _FakeServer {
         'cursor': 'c0',
       });
     }
-    if (path.endsWith('/events') && request.method == 'POST') {
-      final events = (jsonDecode(request.body) as Map)['events'] as List;
-      final out = [
-        for (final event in events)
-          _envelope(Map<String, Object?>.from(event as Map), ++sequence),
-      ];
-      appended.addAll(out);
+    if (path.endsWith('/turns') && request.method == 'POST') {
+      if (turnError != null) {
+        return _json({
+          'schemaVersion': 1,
+          'code': turnError,
+          'message': 'The collaboration service is temporarily unavailable',
+        }, 503);
+      }
       return _json({
         'schemaVersion': 1,
-        'events': out,
-        'nextCursor': 'c$sequence',
-        'hasMore': false,
-      });
+        'turnId': 'turn-1',
+        'runId': 'run-1',
+        'userMessageId': 'message-1',
+        'userEventId': 'message:message-1',
+        'status': 'queued',
+        'model': (jsonDecode(request.body) as Map)['model'] ?? 'auto',
+      }, 201);
     }
     if (path.endsWith('/members') && request.method == 'POST') {
       final body = jsonDecode(request.body) as Map;
@@ -181,7 +184,7 @@ void main() {
     var state = CollaborationState.bootstrap(
       session: CollaborationSession.fromWire({
         'schemaVersion': 1,
-        'sessionId': 'session-id',
+        'sessionId': '00000000-0000-4000-8000-000000000001',
         'ownerParticipantId': 'p-alice',
         'lifecycle': 'active',
       }),
@@ -221,9 +224,7 @@ void main() {
   group('production', () {
     late Directory root;
     late _FakeServer server;
-    final runnerCalls = <({String providerId, String model, List<Map<String, dynamic>> messages})>[];
-
-    CollaborationProduction make({CollaborationTurnRunner? runner}) => CollaborationProduction(
+    CollaborationProduction make() => CollaborationProduction(
       endpoint: 'https://api.example.test',
       publicOrigin: 'https://share.example.test',
       rootDirectory: () async => root,
@@ -232,38 +233,34 @@ void main() {
       accessToken: () async => 'id-token',
       appCheckToken: () async => 'app-check',
       httpClientFactory: () => MockClient(server.handle),
-      turnRunner: runner ??
-          ({required providerId, required model, required messages}) async {
-            runnerCalls.add((providerId: providerId, model: model, messages: messages));
-            return 'Here is my answer.';
-          },
     );
 
     setUp(() async {
       root = await Directory.systemTemp.createTemp('collab-link-');
       server = _FakeServer();
-      runnerCalls.clear();
     });
     tearDown(() => root.delete(recursive: true));
 
-    test('owner starts Collab from a chat: seed, presence and a 50-use link', () async {
+    test('owner adopts canonical history and mints a 50-use link without a seed', () async {
       final owner = make();
       await owner.bind('alice', 1);
       await owner.startFromConversation(
-        sourceSessionId: 'local-chat',
+        sourceSessionId: '00000000-0000-4000-8000-000000000001',
         seed: const [
-          CollaborationSeedMessage(MessageRole.user, 'What is 2+2?'),
-          CollaborationSeedMessage(MessageRole.assistant, '4'),
+          CollaborationSeedMessage(MessageRole.user, 'never upload local history'),
         ],
       );
       expect(owner.shareLink, 'https://share.example.test/s/$_token/$_code');
-      expect(owner.sourceSessionId, 'local-chat');
+      expect(owner.sourceSessionId, '00000000-0000-4000-8000-000000000001');
       final invite = server.requests.firstWhere(
         (r) => r.url.path.endsWith('/members'),
       );
       expect(jsonDecode(invite.body), containsPair('maxUses', maxCollaborationInviteUses));
-      expect(server.appended.map((e) => e['kind']), ['presence', 'message', 'message']);
-      expect(owner.state!.messages.map((m) => m.role), [MessageRole.user, MessageRole.assistant]);
+      expect(jsonDecode(server.requests.first.body)['sessionId'],
+          '00000000-0000-4000-8000-000000000001');
+      expect(server.requests.any((r) => r.method == 'POST' && r.url.path.endsWith('/events')),
+          isFalse);
+      expect(owner.state!.messages, isEmpty);
 
       await owner.revokeLink();
       expect(owner.shareLink, isNull);
@@ -274,55 +271,45 @@ void main() {
       await owner.release();
     });
 
-    test('a turn publishes the prompt, runs the LOCAL model, then publishes the reply', () async {
+    test('a turn is server admission only and renders no local prompt or reply', () async {
       final owner = make();
       await owner.bind('alice', 1);
-      await owner.startFromConversation(sourceSessionId: 'c', seed: const []);
+      await owner.startFromConversation(
+          sourceSessionId: '00000000-0000-4000-8000-000000000001');
       await owner.sendTurn(
         'Plan a trip',
-        providerId: 'ovid-cloud',
+        providerId: 'legacy-unused-provider',
         model: 'auto',
-        modelLabel: 'auto',
+        modelLabel: 'legacy-unused-label',
       );
-      final kinds = server.appended.map((e) => e['kind']).toList();
-      expect(kinds, ['presence', 'message', 'modelStatus', 'message', 'modelStatus']);
-      final prompt = server.appended[1]['payload'] as Map;
-      final reply = server.appended[3]['payload'] as Map;
-      expect(prompt, {'text': 'Plan a trip', 'role': 'user'});
-      expect(reply['role'], 'assistant');
-      expect(reply['model'], 'auto');
-      expect(reply['replyTo'], server.appended[1]['eventId']);
-      expect((server.appended[2]['payload'] as Map)['status'], 'running');
-      expect((server.appended[4]['payload'] as Map)['status'], 'completed');
-      // Own provider/model only; context attributes the prompt by name.
-      expect(runnerCalls.single.providerId, 'ovid-cloud');
-      expect(runnerCalls.single.messages.last, {
-        'role': 'user',
-        'content': 'Alice Example: Plan a trip',
-      });
-      expect(runnerCalls.single.messages.first['role'], 'system');
-      // No request ever carries a provider key.
-      for (final request in server.requests) {
-        expect(request.body, isNot(contains('apiKey')));
-        expect(request.headers['Authorization'], 'Bearer id-token');
-      }
-      expect(owner.state!.messages.last.isAssistant, isTrue);
+      final turn = server.requests.singleWhere((r) => r.url.path.endsWith('/turns'));
+      final body = jsonDecode(turn.body) as Map<String, dynamic>;
+      expect(body['text'], 'Plan a trip');
+      expect(body['model'], 'auto');
+      expect(body.containsKey('providerId'), isFalse);
+      expect(body.containsKey('modelLabel'), isFalse);
+      expect(body.containsKey('role'), isFalse);
+      expect(body.containsKey('usage'), isFalse);
+      expect(server.requests.any((r) => r.method == 'POST' && r.url.path.endsWith('/events')),
+          isFalse);
+      expect(owner.state!.messages, isEmpty);
       expect(owner.turnRunning, isFalse);
       await owner.release();
     });
 
-    test('a failed model call publishes a failed status and surfaces the reason', () async {
-      final owner = make(
-        runner: ({required providerId, required model, required messages}) async =>
-            throw StateError('Choose a model with a connected provider to reply.'),
-      );
+    test('failed admission publishes no failed status and surfaces a safe reason', () async {
+      server.turnError = 'temporarily_unavailable';
+      final owner = make();
       await owner.bind('alice', 1);
-      await owner.startFromConversation(sourceSessionId: 'c', seed: const []);
+      await owner.startFromConversation(
+          sourceSessionId: '00000000-0000-4000-8000-000000000001');
       await expectLater(
-        owner.sendTurn('hi', providerId: 'p', model: 'm', modelLabel: 'm'),
-        throwsStateError,
+        owner.sendTurn('hi', model: 'm'),
+        throwsA(isA<CollaborationClientException>()),
       );
-      expect((server.appended.last['payload'] as Map)['status'], 'failed');
+      expect(server.requests.any((r) => r.method == 'POST' && r.url.path.endsWith('/events')),
+          isFalse);
+      expect(owner.state!.messages, isEmpty);
       expect(owner.turnRunning, isFalse);
       await owner.release();
     });

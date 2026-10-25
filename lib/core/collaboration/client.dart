@@ -16,6 +16,36 @@ const maxCollaborationInviteUses = 50;
 /// Longest server-side long-poll hold for replay (seconds).
 const maxCollaborationLongPollSeconds = 25;
 
+const _maxCollaborationCursorBytes = 4096;
+final _sessionIdPattern = RegExp(
+  r'^[0-9a-f]{8}-[0-9a-f-]{27}$',
+  caseSensitive: false,
+);
+final _attachmentIdPattern = RegExp(
+  r'^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+  caseSensitive: false,
+);
+final _headerName = RegExp(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$");
+final _contentTypePattern = RegExp(
+  r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+/[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+);
+final _modelSecretPattern = RegExp(
+  r'secret|password|api[_-]?key|byok|bearer|sk-',
+  caseSensitive: false,
+);
+
+bool _validContentType(String value) =>
+    value.length <= 255 &&
+    !value.contains('*') &&
+    _contentTypePattern.hasMatch(value);
+
+bool _validModel(String value) =>
+    value.isNotEmpty &&
+    value.trim().isNotEmpty &&
+    value.length <= 160 &&
+    !value.contains(RegExp(r'[\x00-\x1f\x7f]')) &&
+    !_modelSecretPattern.hasMatch(value);
+
 const _errorMessages = <String, String>{
   'unauthenticated': 'Authentication required',
   'invalid_request': 'Invalid request',
@@ -41,9 +71,32 @@ const _errorMessages = <String, String>{
   'quota_exhausted': 'Collaboration quota exceeded',
   'payload_too_large': 'Collaboration payload is too large',
   'temporarily_unavailable': 'The collaboration service is temporarily unavailable',
+  'storage_quota_exceeded': 'The storage allowance for this plan is exhausted.',
+  'upload_limit_reached': 'The upload allowance for this plan is exhausted.',
+  'target_not_found': 'Report target not found',
+  'report_limit_reached': 'Report limit reached',
+  'object_not_found': 'This file is no longer available.',
+  'object_cleanup_required': 'The failed upload needs cleanup before it can be retried.',
+  'attachment_too_large': 'Attachments are limited to 25000000 bytes.',
+  'attachment_not_uploaded': 'The attachment object has not reached storage.',
+  'attachment_size_mismatch': 'The uploaded object size does not match the attachment declaration.',
+  'attachment_type_mismatch': 'The uploaded object Content-Type does not match the attachment declaration.',
+  'attachment_changed': 'The attachment upload is no longer active.',
+  'artifact_unavailable': 'This file is no longer available in Ovid Cloud.',
+  'artifact_incomplete': 'This file did not finish uploading. Remove and re-attach it.',
+  'model_unavailable': 'The requested model is unavailable',
   // The gateway answered "no such route": the collaboration surface is not
   // deployed. Never confuse this with a failure of this room.
   'collab_unavailable': 'Live sessions are unavailable',
+};
+
+const _errorMessageAliases = <String, Set<String>>{
+  'temporarily_unavailable': {
+    'The collaboration object service is temporarily unavailable',
+  },
+  'attachment_not_uploaded': {
+    'The attachment object is not available in storage.',
+  },
 };
 
 class CollaborationClientException implements Exception {
@@ -93,6 +146,7 @@ class CollaborationState {
     required this.cursor,
     this.initialMembers,
     this.replayThroughSequence = 0,
+    this.turn,
   });
 
   final CollaborationSession session;
@@ -101,6 +155,9 @@ class CollaborationState {
   final CollaborationCursor cursor;
   final List<Member>? initialMembers;
   final int replayThroughSequence;
+
+  /// Authoritative full-run lease from the top-level state DTO.
+  final CollaborationTurn? turn;
 }
 
 class CollaborationJoinResult {
@@ -132,6 +189,45 @@ class CollaborationEventPage {
   final bool hasMore;
 }
 
+class CollaborationAttachmentTicket {
+  const CollaborationAttachmentTicket({
+    required this.attachmentId,
+    required this.uploadUrl,
+    required this.path,
+    required this.expiresAt,
+    required this.contentType,
+    required this.requiredHeaders,
+    required this.declaredBytes,
+  });
+
+  final String attachmentId;
+  final Uri uploadUrl;
+  final String path;
+  final DateTime expiresAt;
+  final String contentType;
+  final Map<String, String> requiredHeaders;
+  final int declaredBytes;
+}
+
+class CollaborationFinalizedAttachment {
+  const CollaborationFinalizedAttachment({
+    required this.attachmentId,
+    required this.size,
+    required this.contentType,
+  });
+
+  final String attachmentId;
+  final int size;
+  final String contentType;
+}
+
+class CollaborationObjectUrl {
+  const CollaborationObjectUrl({required this.url, required this.expiresAt});
+
+  final Uri url;
+  final DateTime expiresAt;
+}
+
 class CollaborationClient {
   CollaborationClient({
     required this.baseUri,
@@ -149,7 +245,13 @@ class CollaborationClient {
   final http.Client _httpClient;
   final Duration requestTimeout;
 
-  Future<CollaborationCreateResult> create({required String requestId}) async {
+  Future<CollaborationCreateResult> create({
+    required String requestId,
+    String? sessionId,
+  }) async {
+    if (sessionId != null && !_sessionIdPattern.hasMatch(sessionId)) {
+      _invalidRequest();
+    }
     final data = await _request(
       'POST',
       '/chat',
@@ -157,6 +259,7 @@ class CollaborationClient {
         'schemaVersion': collaborationSchemaVersion,
         'requestId': requestId,
         'idempotencyKey': requestId,
+        if (sessionId != null) 'sessionId': sessionId,
       },
     );
     _exact(data, const {
@@ -208,7 +311,39 @@ class CollaborationClient {
       cursor: _cursor(data, 'cursor'),
       initialMembers: initial == null ? null : [for (final value in initial) _wire(() => Member.fromWire(_asMap(value)))],
       replayThroughSequence: through,
+      turn: data['turn'] == null
+          ? null
+          : _wire(() => CollaborationTurn.fromWire(data['turn'])),
     );
+  }
+
+  Future<CollaborationTurnResult> turn(
+    String sessionToken, {
+    required String idempotencyKey,
+    required String text,
+    String? model,
+    List<String> attachmentIds = const [],
+  }) async {
+    _segment(sessionToken);
+    if (!RegExp(r'^[A-Za-z0-9_-]{1,64}$').hasMatch(idempotencyKey) ||
+        text.trim().isEmpty) {
+      _invalidRequest();
+    }
+    if (model != null && !_validModel(model)) _invalidRequest();
+    final ids = <String>{};
+    for (final id in attachmentIds) {
+      if (!_attachmentIdPattern.hasMatch(id) || !ids.add(id)) {
+        _invalidRequest();
+      }
+    }
+    final data = await _request('POST', '/chat/$sessionToken/turns', body: {
+      'schemaVersion': collaborationSchemaVersion,
+      'idempotencyKey': idempotencyKey,
+      'text': text,
+      if (model != null) 'model': model,
+      if (attachmentIds.isNotEmpty) 'attachmentIds': attachmentIds,
+    });
+    return _wire(() => CollaborationTurnResult.fromWire(data));
   }
 
   Future<CollaborationJoinResult> join(
@@ -309,7 +444,9 @@ class CollaborationClient {
     int waitSeconds = 0,
   }) async {
     _segment(sessionToken);
-    if (cursor != null && (cursor.value.isEmpty || utf8.encode(cursor.value).length > 512)) {
+    if (cursor != null &&
+        (cursor.value.isEmpty ||
+            utf8.encode(cursor.value).length > _maxCollaborationCursorBytes)) {
       _invalidRequest();
     }
     if (waitSeconds < 0 || waitSeconds > maxCollaborationLongPollSeconds) {
@@ -335,45 +472,248 @@ class CollaborationClient {
     );
   }
 
-  Future<CollaborationEventPage> appendEvents(
+  Future<CollaborationAttachmentTicket> createAttachment(
     String sessionToken, {
-    required List<Map<String, Object?>> events,
     required String idempotencyKey,
+    required String name,
+    required int size,
+    required String contentType,
   }) async {
     _segment(sessionToken);
-    if (events.isEmpty || events.length > maxCollaborationEvents) _invalidRequest();
-    final ids = <Object?>{};
-    for (final event in events) {
-      if (event.length != 4 || !event.keys.toSet().containsAll(
-          const {'schemaVersion', 'eventId', 'kind', 'payload'}) ||
-          !const {'message', 'modelStatus', 'usage', 'presence'}.contains(event['kind']) ||
-          !ids.add(event['eventId'])) {
-        _invalidRequest();
-      }
-      try {
-        CollaborationEvent.fromWire({...event, 'sessionId': 'validation',
-          'senderParticipantId': 'validation', 'eventSequence': 1,
-          'createdAt': '2000-01-01T00:00:00.000Z'});
-      } on CollaborationWireException {
-        _invalidRequest();
+    if (name.isEmpty ||
+        name.length > 255 ||
+        size <= 0 ||
+        size > 25000000 ||
+        !_validContentType(contentType)) {
+      _invalidRequest();
+    }
+    final data = await _request('POST', '/chat/$sessionToken/attachments', body: {
+      'schemaVersion': collaborationSchemaVersion,
+      'idempotencyKey': idempotencyKey,
+      'name': name,
+      'size': size,
+      'contentType': contentType,
+    });
+    _exact(data, const {
+      'schemaVersion',
+      'attachmentId',
+      'uploadUrl',
+      'path',
+      'expiresAt',
+      'contentType',
+      'requiredHeaders',
+      'uploadHeaders',
+    });
+    _version(data);
+    final attachmentId = _id(data, 'attachmentId');
+    if (!_attachmentIdPattern.hasMatch(attachmentId)) _invalidResponse();
+    final path = _string(data, 'path');
+    final segment = path.startsWith('uploads/') ? path.substring(8) : '';
+    if (!RegExp(r'^[A-Za-z0-9._-]{1,80}$').hasMatch(segment) ||
+        segment.startsWith('.') ||
+        segment.contains('..')) {
+      _invalidResponse();
+    }
+    final requiredHeaders = _stringMap(data['requiredHeaders']);
+    final uploadHeaders = _stringMap(data['uploadHeaders']);
+    if (requiredHeaders.length != uploadHeaders.length ||
+        requiredHeaders.entries.any((entry) => uploadHeaders[entry.key] != entry.value)) {
+      _invalidResponse();
+    }
+    for (final entry in requiredHeaders.entries) {
+      if (!_headerName.hasMatch(entry.key) ||
+          entry.value.contains(RegExp(r'[\r\n]')) ||
+          const {'authorization', 'cookie', 'x-firebase-appcheck'}
+              .contains(entry.key.toLowerCase())) {
+        _invalidResponse();
       }
     }
+    return CollaborationAttachmentTicket(
+      attachmentId: attachmentId,
+      uploadUrl: _url(data, 'uploadUrl'),
+      path: path,
+      expiresAt: _timestamp(data, 'expiresAt'),
+      contentType: _contentType(data, 'contentType'),
+      requiredHeaders: Map.unmodifiable(requiredHeaders),
+      declaredBytes: size,
+    );
+  }
+
+  /// Uploads actual bytes directly to the server-issued signed URL. No account
+  /// credential, App Check, or extra header is added to the signed request.
+  Future<void> uploadAttachment(
+    CollaborationAttachmentTicket ticket,
+    List<int> bytes,
+  ) async {
+    if (bytes.isEmpty || bytes.length != ticket.declaredBytes) _invalidRequest();
+    final abort = Completer<void>();
+    final request = http.AbortableRequest('PUT', ticket.uploadUrl,
+        abortTrigger: abort.future)
+      ..followRedirects = false
+      ..headers.addAll(ticket.requiredHeaders)
+      ..bodyBytes = bytes;
+    try {
+      final response = await _httpClient.send(request).timeout(requestTimeout,
+          onTimeout: () {
+        if (!abort.isCompleted) abort.complete();
+        throw const CollaborationClientException(
+          'Collaboration request timed out.',
+          code: 'request_timeout',
+        );
+      });
+      await _readBody(response, abort);
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw const CollaborationClientException('Collaboration upload failed.');
+      }
+    } on CollaborationClientException {
+      rethrow;
+    } catch (_) {
+      throw const CollaborationClientException('Collaboration upload failed.');
+    } finally {
+      if (!abort.isCompleted) abort.complete();
+    }
+  }
+
+  Future<CollaborationFinalizedAttachment> finalizeAttachment(
+    String sessionToken, {
+    required String attachmentId,
+  }) async {
+    _segment(sessionToken);
+    if (!_attachmentIdPattern.hasMatch(attachmentId)) _invalidRequest();
     final data = await _request(
       'POST',
-      '/chat/$sessionToken/events',
-      body: {
-        'schemaVersion': collaborationSchemaVersion,
-        'idempotencyKey': idempotencyKey,
-        'events': events,
-      },
+      '/chat/$sessionToken/attachments/$attachmentId/finalize',
+      body: {'schemaVersion': collaborationSchemaVersion},
     );
-    _exact(data, const {'schemaVersion', 'events', 'nextCursor', 'hasMore'});
+    _exact(data, const {
+      'schemaVersion',
+      'attachmentId',
+      'status',
+      'size',
+      'contentType',
+    });
     _version(data);
-    return CollaborationEventPage(
-      events: _events(data, maxBytes: maxCollaborationBatchBytes + 128 * 1024),
-      nextCursor: _cursor(data, 'nextCursor'),
-      hasMore: _bool(data, 'hasMore'),
+    final size = data['size'];
+    if (_string(data, 'attachmentId') != attachmentId ||
+        data['status'] != 'ready' ||
+        size is! int ||
+        size <= 0) {
+      _invalidResponse();
+    }
+    return CollaborationFinalizedAttachment(
+      attachmentId: attachmentId,
+      size: size,
+      contentType: _contentType(data, 'contentType'),
     );
+  }
+
+  Future<CollaborationObjectUrl> objectUrl(
+    String sessionToken, {
+    String? artifactId,
+    String? attachmentId,
+  }) async {
+    _segment(sessionToken);
+    if ((artifactId == null) == (attachmentId == null) ||
+        (artifactId != null && !_attachmentIdPattern.hasMatch(artifactId)) ||
+        (attachmentId != null && !_attachmentIdPattern.hasMatch(attachmentId))) {
+      _invalidRequest();
+    }
+    final kind = artifactId != null ? 'artifacts' : 'attachments';
+    final id = artifactId ?? attachmentId!;
+    final data = await _request(
+      'GET',
+      '/chat/$sessionToken/$kind/$id/url',
+    );
+    _exact(data, const {'schemaVersion', 'url', 'expiresAt'});
+    _version(data);
+    return CollaborationObjectUrl(
+      url: _url(data, 'url'),
+      expiresAt: _timestamp(data, 'expiresAt'),
+    );
+  }
+
+  Future<String> report(
+    String sessionToken, {
+    required String requestId,
+    required String kind,
+    required String targetId,
+    required String reason,
+    String? details,
+  }) async {
+    _segment(sessionToken);
+    if (!RegExp(r'^[A-Za-z0-9_-]{16,64}$').hasMatch(requestId) ||
+        !const {'collab_message', 'collab_participant'}.contains(kind) ||
+        targetId.isEmpty ||
+        targetId.length > 128 ||
+        !const {
+          'sexual',
+          'child_safety',
+          'hate',
+          'violence',
+          'self_harm',
+          'illegal',
+          'misleading',
+          'privacy',
+          'spam',
+          'other',
+        }.contains(reason) ||
+        (details != null && details.runes.length > 1000)) {
+      _invalidRequest();
+    }
+    final data = await _request('POST', '/chat/$sessionToken/reports', body: {
+      'schemaVersion': collaborationSchemaVersion,
+      'requestId': requestId,
+      'kind': kind,
+      'targetId': targetId,
+      'reason': reason,
+      if (details != null) 'details': details,
+    });
+    _exact(data, const {'schemaVersion', 'reportId'});
+    _version(data);
+    return _id(data, 'reportId');
+  }
+
+  Future<void> block(String sessionToken, {required String participantId}) =>
+      _setBlock(sessionToken, participantId, true);
+
+  Future<void> unblock(String sessionToken, {required String participantId}) =>
+      _setBlock(sessionToken, participantId, false);
+
+  Future<void> _setBlock(
+    String sessionToken,
+    String participantId,
+    bool blocked,
+  ) async {
+    _segment(sessionToken);
+    _segment(participantId);
+    if (participantId == 'me') _invalidRequest();
+    final data = await _request(
+      blocked ? 'PUT' : 'DELETE',
+      '/chat/$sessionToken/blocks/$participantId',
+      body: blocked ? {'schemaVersion': collaborationSchemaVersion} : null,
+    );
+    _exact(data, const {'schemaVersion', 'participantId', 'blocked'});
+    _version(data);
+    if (data['participantId'] != participantId || data['blocked'] != blocked) {
+      _invalidResponse();
+    }
+  }
+
+  Future<void> removeMessage(
+    String sessionToken, {
+    required String messageId,
+  }) async {
+    _segment(sessionToken);
+    _segment(messageId);
+    final data = await _request(
+      'DELETE',
+      '/chat/$sessionToken/messages/$messageId',
+    );
+    _exact(data, const {'schemaVersion', 'messageId', 'removed'});
+    _version(data);
+    if (data['messageId'] != messageId || data['removed'] != true) {
+      _invalidResponse();
+    }
   }
 
   Future<CollaborationSession> close(
@@ -421,7 +761,10 @@ class CollaborationClient {
     var encoded = '';
     if (body != null) {
       final key = body['idempotencyKey'];
-      if (key is! String || !RegExp(r'^[A-Za-z0-9_-]{1,128}$').hasMatch(key)) _invalidRequest();
+      if (body.containsKey('idempotencyKey') &&
+          (key is! String || !RegExp(r'^[A-Za-z0-9_-]{1,128}$').hasMatch(key))) {
+        _invalidRequest();
+      }
       try {
         encoded = jsonEncode(body);
       } catch (_) {
@@ -466,12 +809,18 @@ class CollaborationClient {
     try {
       final response = await _httpClient.send(
         http.AbortableRequest(method, uri, abortTrigger: abort.future)
+          ..followRedirects = false
           ..headers.addAll(headers)
           ..body = encoded,
       );
       final bytes = await _readBody(response, abort);
       final text = utf8.decode(bytes);
-      if (response.headers['cache-control']?.toLowerCase() != 'no-store') {
+      final cacheDirectives = (response.headers['cache-control'] ?? '')
+          .toLowerCase()
+          .split(',')
+          .map((value) => value.trim())
+          .toSet();
+      if (!cacheDirectives.contains('no-store')) {
         throw const CollaborationClientException('Invalid collaboration response.');
       }
       if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -481,17 +830,20 @@ class CollaborationClient {
         // collaboration routes are not deployed yet, so report that instead
         // of "invalid response" — a real missing room still arrives inside
         // the collaboration envelope with `session_not_found`.
-        if (response.statusCode == 404 && parsed['schemaVersion'] == null) {
-          throw const CollaborationClientException(
+        if (const {404, 405, 501}.contains(response.statusCode) &&
+            parsed['schemaVersion'] == null) {
+          throw CollaborationClientException(
             'Live sessions are unavailable',
-            statusCode: 404,
+            statusCode: response.statusCode,
             code: 'collab_unavailable',
           );
         }
         _exact(parsed, const {'schemaVersion', 'code', 'message'});
         final code = parsed['code'];
         if (parsed['schemaVersion'] != collaborationSchemaVersion ||
-            code is! String || _errorMessages[code] != parsed['message']) {
+            code is! String ||
+            (_errorMessages[code] != parsed['message'] &&
+                !(_errorMessageAliases[code]?.contains(parsed['message']) ?? false))) {
           throw const CollaborationClientException('Invalid collaboration response.');
         }
         throw CollaborationClientException(_errorMessages[code]!,
@@ -643,12 +995,59 @@ class CollaborationClient {
     return result;
   }
 
+  static String _id(Map<String, Object?> data, String key) {
+    final value = _string(data, key);
+    if (!RegExp(r'^[A-Za-z0-9._:-]{1,128}$').hasMatch(value)) {
+      _invalidResponse();
+    }
+    return value;
+  }
+
+  static Map<String, String> _stringMap(Object? raw) {
+    if (raw is! Map) _invalidResponse();
+    final result = <String, String>{};
+    for (final entry in raw.entries) {
+      if (entry.key is! String || entry.value is! String) _invalidResponse();
+      result[entry.key as String] = entry.value as String;
+    }
+    return result;
+  }
+
+  static Uri _url(Map<String, Object?> data, String key) {
+    final value = _string(data, key);
+    final uri = Uri.tryParse(value);
+    if (uri == null ||
+        uri.scheme != 'https' ||
+        uri.host.isEmpty ||
+        uri.userInfo.isNotEmpty ||
+        uri.hasFragment ||
+        utf8.encode(value).length > 16384) {
+      _invalidResponse();
+    }
+    return uri;
+  }
+
+  static DateTime _timestamp(Map<String, Object?> data, String key) {
+    final value = _string(data, key);
+    final parsed = DateTime.tryParse(value);
+    if (parsed == null || !value.endsWith('Z')) _invalidResponse();
+    return parsed;
+  }
+
+  static String _contentType(Map<String, Object?> data, String key) {
+    final value = _string(data, key);
+    if (!_validContentType(value)) _invalidResponse();
+    return value;
+  }
+
   static CollaborationCursor _cursor(
     Map<String, Object?> data, [
     String key = 'cursor',
   ]) {
     final value = _string(data, key);
-    if (utf8.encode(value).length > 512) _invalidResponse();
+    if (utf8.encode(value).length > _maxCollaborationCursorBytes) {
+      _invalidResponse();
+    }
     return CollaborationCursor(value);
   }
 }
