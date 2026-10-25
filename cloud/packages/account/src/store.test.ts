@@ -52,6 +52,20 @@ describe.skipIf(!TEST_DATABASE_URL)("createPostgresDeletionStore (real postgres)
     await db?.$client.end({ timeout: 5 });
   });
 
+  // UNEXECUTED fix-round-1 regression: the exposed session must stay on one PID.
+  it("exposes the UID lock's reserved DB session for the entire admission callback", async () => {
+    const store = createPostgresDeletionStore(db);
+    const uid = "store-reserved-session";
+    await store.locked(uid, async (s) => {
+      expect(s.db).toBeDefined();
+      const [first] = await s.db!.$client`SELECT pg_backend_pid() AS pid`;
+      await s.save(row({ uid }));
+      expect((await s.get(uid))?.uid).toBe(uid);
+      const [second] = await s.db!.$client`SELECT pg_backend_pid() AS pid`;
+      expect(second?.pid).toBe(first?.pid);
+    });
+  });
+
   it("round-trips the Python record shape through the jsonb column", async () => {
     const store = createPostgresDeletionStore(db);
     const saved = row({ uid: "store-roundtrip", request_aliases: ["alias-1"] });

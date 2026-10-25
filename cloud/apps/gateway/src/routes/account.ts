@@ -15,9 +15,14 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   AccountError,
   type Claims,
+  type CleanupContext,
+  type DataAdapter,
+  type DeletionSession,
   type Lifecycle,
   type PublicState,
 } from "@ovid/account";
+import type { Db } from "@ovid/db";
+import type { CollabLifecycle } from "../collab/lifecycle.js";
 
 export type AccountClaimsVerifier = (
   token: string,
@@ -28,6 +33,33 @@ export type AccountClaimsVerifier = (
 export interface AccountRouteDeps {
   lifecycle: Lifecycle;
   verify: AccountClaimsVerifier;
+  collabLifecycle?: Pick<CollabLifecycle, "onDeletionPending">;
+}
+
+/** Keep the existing cleanup sequence and re-assert collab fencing after data. */
+export function withCollabDeletionFence(
+  data: DataAdapter,
+  fence: (uid: string, connection?: Db) => Promise<void>,
+): DataAdapter {
+  const initial = {
+    name: "collab_fencing",
+    run: async (uid: string, _ctx: CleanupContext, session?: DeletionSession) => {
+      await fence(uid, session?.db);
+    },
+  };
+  // Checkpoint names must differ: required steps skip names already completed
+  // by the ordinary deletion pass, so reusing collab_fencing would skip final.
+  const final = {
+    name: "collab_fencing_final",
+    run: async (uid: string, _ctx: CleanupContext, session?: DeletionSession) => {
+      await fence(uid, session?.db);
+    },
+  };
+  return {
+    ...data,
+    deletionSteps: () => [initial, ...data.deletionSteps()],
+    requiredDeletionSteps: [final, ...(data.requiredDeletionSteps ?? [])],
+  };
 }
 
 class BodyError extends Error {
@@ -139,7 +171,11 @@ function registerAccountRoutesIn(app: FastifyInstance, deps: AccountRouteDeps): 
       const requestId = parseDeleteRequest(request.body);
       return reply
         .code(200)
-        .send(await run(request, (claims) => deps.lifecycle.request(claims, requestId), false));
+        .send(await run(request, async (claims) => {
+          const state = await deps.lifecycle.request(claims, requestId);
+          if (state.state === "pending") await deps.collabLifecycle?.onDeletionPending(String(claims.uid));
+          return state;
+        }, false));
     } catch (err) {
       return sendError(reply, err);
     }

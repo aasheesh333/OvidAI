@@ -7,6 +7,8 @@
  * checkpoint commits; a worker never trusts a stale due-list item.
  */
 
+import type { Db } from "@ovid/db";
+
 export const GRACE_SECONDS = 24 * 60 * 60;
 export const RECENT_AUTH_SECONDS = 5 * 60;
 export const FENCE_SETTLE_SECONDS = 60;
@@ -134,6 +136,8 @@ export function publicState(row: DeletionRow | null | undefined): PublicState {
 }
 
 export interface DeletionSession {
+  /** The same reserved connection holding the UID advisory lock, when backed by Postgres. */
+  readonly db?: Db;
   get(uid: string): Promise<DeletionRow | null>;
   save(row: DeletionRow): Promise<void>;
 }
@@ -159,7 +163,8 @@ export interface AdminAdapter {
 
 export interface CleanupStep {
   name: string;
-  run(uid: string, ctx: CleanupContext): Promise<void>;
+  /** Postgres cleanup receives the same reserved session holding the UID lock. */
+  run(uid: string, ctx: CleanupContext, session?: DeletionSession): Promise<void>;
 }
 
 export interface DataAdapter {
@@ -176,7 +181,7 @@ export interface Lifecycle {
   status(claims: Claims): Promise<PublicState>;
   login(claims: Claims): Promise<PublicState>;
   cancel(claims: Claims): Promise<PublicState>;
-  access<T>(claims: Claims, fn: (uid: string) => Promise<T>): Promise<T>;
+  access<T>(claims: Claims, fn: (uid: string, session?: DeletionSession) => Promise<T>): Promise<T>;
   finalize(uid: string, opts?: { scheduled?: boolean }): Promise<PublicState>;
 }
 
@@ -360,7 +365,7 @@ class DeletionLifecycle implements Lifecycle {
     });
   }
 
-  async access<T>(claims: Claims, fn: (uid: string) => Promise<T>): Promise<T> {
+  async access<T>(claims: Claims, fn: (uid: string, session?: DeletionSession) => Promise<T>): Promise<T> {
     // Quota/mint integration: hold the lock across the ENTIRE uid-owned
     // mutation. Background usage/token refresh must never cancel deletion.
     const uid = identity(claims);
@@ -373,7 +378,7 @@ class DeletionLifecycle implements Lifecycle {
       ) {
         throw new AccountError("account_deletion_pending", 403);
       }
-      return fn(uid);
+      return fn(uid, db);
     });
   }
 
@@ -437,7 +442,7 @@ class DeletionLifecycle implements Lifecycle {
     for (const step of actions) {
       const checkpoint = `data:${step.name}`;
       if (!asArray(row.completed).includes(checkpoint)) {
-        await step.run(row.uid, row.cleanup_context ?? {});
+        await step.run(row.uid, row.cleanup_context ?? {}, db);
         row.completed = [...asArray(row.completed), checkpoint];
         await db.save(row);
       }

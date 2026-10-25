@@ -3,10 +3,16 @@ import Fastify, { type FastifyInstance } from "fastify";
 import {
   AccountError,
   type Claims,
+  type DataAdapter,
+  type DeletionSession,
   type Lifecycle,
   type PublicState,
 } from "@ovid/account";
-import { registerAccountRoutes, type AccountRouteDeps } from "./account.js";
+import {
+  registerAccountRoutes,
+  withCollabDeletionFence,
+  type AccountRouteDeps,
+} from "./account.js";
 
 // ---------------------------------------------------------------------------
 // Port of server/account/tests/test_api.py — the legacy /account/* contract:
@@ -54,10 +60,12 @@ describe("legacy /account routes", () => {
   let lifecycle: FakeLifecycle;
   let verifyCalls: Array<{ token: string; attestation: string; allowDisabled: boolean }>;
   let verifyResult: Claims | AccountError;
+  let deletionFences: string[];
 
   beforeEach(async () => {
     lifecycle = new FakeLifecycle();
     verifyCalls = [];
+    deletionFences = [];
     verifyResult = {
       uid: "alice",
       auth_time: 1000,
@@ -69,6 +77,9 @@ describe("legacy /account routes", () => {
         verifyCalls.push({ token, attestation, allowDisabled: opts.allowDisabled });
         if (verifyResult instanceof AccountError) throw verifyResult;
         return verifyResult;
+      },
+      collabLifecycle: {
+        onDeletionPending: async (uid) => { deletionFences.push(uid); },
       },
     };
     app = Fastify({ logger: false });
@@ -178,6 +189,70 @@ describe("legacy /account routes", () => {
       payload: { request_id: "request-0001" },
     });
     expect(verifyCalls.map((c) => c.allowDisabled)).toEqual([true, false, false]);
+  });
+
+  it("fences collaboration with the verified UID immediately after deletion becomes pending", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/account/deletion",
+      headers,
+      payload: { request_id: "request-0001", uid: "bob" },
+    });
+    expect(res.statusCode).toBe(422);
+    expect(deletionFences).toEqual([]);
+
+    const ok = await app.inject({
+      method: "POST",
+      url: "/account/deletion",
+      headers,
+      payload: { request_id: "request-0001" },
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(deletionFences).toEqual(["alice"]);
+  });
+
+  it("repeats collaboration fencing at final cleanup while preserving every existing cleanup stage", async () => {
+    const calls: string[] = [];
+    const original: DataAdapter = {
+      prepare: async () => ({}),
+      revokeKeys: async () => { calls.push("keys"); },
+      deletionSteps: () => [
+        { name: "sessions", run: async (uid) => { calls.push(`sessions:${uid}`); } },
+        { name: "sql", run: async (uid) => { calls.push(`sql:${uid}`); } },
+      ],
+      requiredDeletionSteps: [
+        { name: "late-sql", run: async (uid) => { calls.push(`late-sql:${uid}`); } },
+      ],
+    };
+    const fenced = withCollabDeletionFence(original, async (uid) => { calls.push(`collab:${uid}`); });
+    const initial = fenced.deletionSteps();
+    expect(initial.map((step) => step.name)).toEqual(["collab_fencing", "sessions", "sql"]);
+    for (const step of initial) await step.run("alice", {});
+    const required = fenced.requiredDeletionSteps ?? [];
+    expect(required.map((step) => step.name)).toEqual(["collab_fencing_final", "late-sql"]);
+    expect(new Set([...initial, ...required].map((step) => step.name)).size)
+      .toBe(initial.length + required.length);
+    for (const step of required) await step.run("alice", {});
+    expect(calls).toEqual([
+      "collab:alice", "sessions:alice", "sql:alice", "collab:alice", "late-sql:alice",
+    ]);
+  });
+
+  // UNEXECUTED fix-round-1 regression: final cleanup reuses its reserved session.
+  it("forwards the cleanup reserved session to final collaboration fencing", async () => {
+    const original: DataAdapter = {
+      prepare: async () => ({}),
+      revokeKeys: async () => {},
+      deletionSteps: () => [],
+    };
+    const calls: Array<{ uid: string; connection: unknown }> = [];
+    const fenced = withCollabDeletionFence(original, async (uid, connection) => {
+      calls.push({ uid, connection });
+    });
+    const reserved = { db: { reserved: true } } as unknown as DeletionSession;
+    const final = fenced.requiredDeletionSteps![0]!;
+    await final.run("alice", {}, reserved);
+    expect(calls).toEqual([{ uid: "alice", connection: reserved.db }]);
   });
 
   it("exposes no public finalize route", async () => {
