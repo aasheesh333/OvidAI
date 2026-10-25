@@ -22,6 +22,14 @@ export {
   type PinnedDispatcherOptions,
   type ProviderEgress,
 } from "./egress/providerEgress.js";
+export {
+  createPublicWebFetch,
+  PUBLIC_WEB_FETCH_LIMITS,
+  PUBLIC_WEB_FETCH_REQUEST,
+  PublicWebFetchError,
+  type CreatePublicWebFetchOptions,
+  type PublicWebFetchRequestInit,
+} from "./egress/publicWebFetch.js";
 export * from "./transports/http.js"; // incl. McpAuthRequiredError / McpSessionExpiredError
 export * from "./transports/sse.js";
 export * from "./transports/stdio.js";

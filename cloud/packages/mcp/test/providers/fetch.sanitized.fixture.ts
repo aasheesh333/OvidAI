@@ -15,7 +15,7 @@ export const FETCH_SANITIZED_FIXTURE = {
   successBody:
     `<script>authorization: Bearer ${CANARY}</script>` +
     "<h1>Public fixture</h1><p>abcdefghijklmnopqrstuvwxyz</p>",
-  expectedText: "# Public fixture\n\nabcdef\n\n... [truncated]",
+  expectedText: "# Publi\n\n... [truncated]",
   canary: CANARY,
   failureStatus: 503,
   failureBody: `upstream authorization: Bearer ${CANARY}`,
