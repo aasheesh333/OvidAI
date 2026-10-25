@@ -18,6 +18,11 @@ import { randomBytes } from "node:crypto";
 import type { Page } from "playwright-core";
 import { z } from "zod";
 
+import {
+  BrowserOperationRefusal,
+  CREDENTIAL_OPERATION_REFUSAL,
+  type BrowserOperationCoordinator,
+} from "../browserOperations.js";
 import type { BrowserEngineConfig } from "../config.js";
 import { BrowserPoolBusyError, type BrowserPool } from "../pool.js";
 import type { BrowserSessionRegistry } from "../sessions.js";
@@ -37,6 +42,10 @@ export interface BrowserToolContext {
    * ⇒ `sessionId` (the pre-Wave-5 one-browser-per-session layout).
    */
   workspaceSessionId?: string;
+  /** Internal coordinator identity used only for broker reentrancy; ordinary callers leave it absent. */
+  browserOperationId?: string;
+  /** Run cancellation forwarded by the worker adapter. */
+  signal?: AbortSignal;
 }
 
 /** Workspace session for artifacts (see BrowserToolContext.workspaceSessionId). */
@@ -156,6 +165,8 @@ export interface BrowserToolsDeps {
   credentials?: BrowserCredentialsPort;
   /** Wave 6 W4: workspace ↔ Artifact Vault bridge; absent ⇒ workspace-only transfers. */
   artifactVault?: BrowserArtifactVaultPort;
+  /** One coordinator per engine, keyed by the same per-user browser key as the registry and pool. */
+  browserOperations?: BrowserOperationCoordinator;
 }
 
 /** Every failure content starts with this (except takeover/URL refusals). */
@@ -244,21 +255,58 @@ export function defineBrowserTool(deps: BrowserToolsDeps, spec: BrowserToolSpec)
       }
       const refusal = deps.registry.refuseReasonIfTakeover(ctx.sessionId);
       if (refusal !== null) return { content: refusal };
-      // Page-initiated downloads (Task 13) are wired per live context. Wire
-      // before the body for an existing session and after it for the call
-      // that just created one (browser_open), so a subsequent click/link
-      // download is always captured.
-      const existing = deps.registry.get(ctx.sessionId);
-      if (existing !== null) wireDownloads(deps, existing, artifactSessionId(ctx));
+      const executeBody = async (): Promise<BrowserToolResult> => {
+        // Page-initiated downloads (Task 13) are wired per live context. Wire
+        // before the body for an existing session and after it for the call
+        // that just created one (browser_open), so a subsequent click/link
+        // download is always captured. Both reads stay INSIDE the shared gate.
+        const existing = deps.registry.get(ctx.sessionId);
+        if (existing !== null) wireDownloads(deps, existing, artifactSessionId(ctx));
+        try {
+          const result = await spec.execute(parsed.data, ctx, deps);
+          const current = deps.registry.get(ctx.sessionId);
+          if (current !== null) wireDownloads(deps, current, artifactSessionId(ctx));
+          return result;
+        } catch (err) {
+          if (err instanceof BrowserToolFailure) return { content: err.content };
+          if (err instanceof BrowserOperationRefusal) {
+            return {
+              content:
+                err.code === "credential_operation_in_progress"
+                  ? CREDENTIAL_OPERATION_REFUSAL
+                  : `${TOOL_ERROR_PREFIX}${err.code}`,
+            };
+          }
+          if (err instanceof BrowserPoolBusyError) return { content: err.message };
+          return { content: TOOL_ERROR_PREFIX + messageOf(err) };
+        }
+      };
+      // The broker owns its exclusive operation; wrapping it in shared work
+      // would self-refuse. The same-named legacy executor remains side-effect
+      // free and default-denied. Every other roster tool is a shared consumer.
+      if (deps.browserOperations === undefined || spec.name === "browser_login_with_credential") {
+        return await executeBody();
+      }
       try {
-        const result = await spec.execute(parsed.data, ctx, deps);
-        const current = deps.registry.get(ctx.sessionId);
-        if (current !== null) wireDownloads(deps, current, artifactSessionId(ctx));
-        return result;
+        return await deps.browserOperations.withOperation(
+          ctx.sessionId,
+          {
+            kind: "shared",
+            operationId: ctx.browserOperationId ?? `tool:${spec.name}:${randomSuffix()}`,
+            ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+          },
+          executeBody,
+        );
       } catch (err) {
-        if (err instanceof BrowserToolFailure) return { content: err.content };
-        if (err instanceof BrowserPoolBusyError) return { content: err.message };
-        return { content: TOOL_ERROR_PREFIX + messageOf(err) };
+        if (err instanceof BrowserOperationRefusal) {
+          return {
+            content:
+              err.code === "credential_operation_in_progress"
+                ? CREDENTIAL_OPERATION_REFUSAL
+                : `${TOOL_ERROR_PREFIX}${err.code}`,
+          };
+        }
+        throw err;
       }
     },
   };

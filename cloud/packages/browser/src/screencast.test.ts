@@ -116,6 +116,112 @@ describe("screencast failure paths (unit — stubbed CDP)", () => {
     expect(cdp.detach).toHaveBeenCalledTimes(1);
   });
 
+  it("drops credential-period frames and refresh captures without replaying them later", async () => {
+    const { page, cdp } = stubCdpPage();
+    let credentialActive = true;
+    const forwarded: Buffer[] = [];
+    cdp.send.mockImplementation(async (method: string) => {
+      if (method === "Page.captureScreenshot") return { data: Buffer.from([0xff, 0xd8, 9]).toString("base64") };
+      return {};
+    });
+    const handle = await startScreencast(page, cfg, (frame) => forwarded.push(frame.data), {
+      isCredentialOperationActive: () => credentialActive,
+    } as never);
+    const listener = cdp.on.mock.calls.find((call) => call[0] === "Page.screencastFrame")![1] as (event: {
+      data: string;
+      sessionId: number;
+    }) => void;
+    listener({ data: Buffer.from([0xff, 0xd8, 1]).toString("base64"), sessionId: 1 });
+    await handle.refresh();
+    expect(forwarded).toEqual([]);
+    expect(cdp.send).toHaveBeenCalledWith("Page.screencastFrameAck", { sessionId: 1 });
+    expect(cdp.send).not.toHaveBeenCalledWith("Page.captureScreenshot", expect.anything());
+    credentialActive = false;
+    await handle.refresh();
+    listener({ data: Buffer.from([0xff, 0xd8, 2]).toString("base64"), sessionId: 2 });
+    expect(forwarded.map((frame) => frame[2])).toEqual([9, 2]);
+    await handle.stop();
+  });
+
+  it("UNEXECUTED review C2: an old cast epoch cannot forward a delayed frame after unlock", async () => {
+    const { page, cdp } = stubCdpPage();
+    let epoch = 0;
+    let credentialActive = false;
+    const forwarded: Buffer[] = [];
+    const gate = {
+      credentialEpoch: () => epoch,
+      isCredentialOperationActive: () => credentialActive,
+    };
+    const oldHandle = await startScreencast(page, cfg, (frame) => forwarded.push(frame.data), gate as never);
+    const oldListener = cdp.on.mock.calls.find((call) => call[0] === "Page.screencastFrame")![1] as (event: {
+      data: string;
+      sessionId: number;
+    }) => void;
+    credentialActive = true;
+    epoch += 1;
+    credentialActive = false;
+    oldListener({ data: Buffer.from([0xff, 0xd8, 1]).toString("base64"), sessionId: 1 });
+    expect(forwarded).toEqual([]);
+    await oldHandle.stop();
+
+    const freshHandle = await startScreencast(page, cfg, (frame) => forwarded.push(frame.data), gate as never);
+    const freshListener = cdp.on.mock.calls.filter((call) => call[0] === "Page.screencastFrame").at(-1)![1] as (event: {
+      data: string;
+      sessionId: number;
+    }) => void;
+    freshListener({ data: Buffer.from([0xff, 0xd8, 2]).toString("base64"), sessionId: 2 });
+    expect(forwarded.map((frame) => frame[2])).toEqual([2]);
+    await freshHandle.stop();
+  });
+
+  it("UNEXECUTED review C2: a delayed refresh captured in an old epoch is discarded after unlock", async () => {
+    const { page, cdp } = stubCdpPage();
+    let epoch = 0;
+    let credentialActive = false;
+    let markCaptureStarted!: () => void;
+    const captureStarted = new Promise<void>((resolve) => {
+      markCaptureStarted = resolve;
+    });
+    let finishCapture!: () => void;
+    const capture = new Promise<void>((resolve) => {
+      finishCapture = resolve;
+    });
+    const forwarded: Buffer[] = [];
+    cdp.send.mockImplementation(async (method: string) => {
+      if (method === "Page.captureScreenshot") {
+        markCaptureStarted();
+        await capture;
+        return { data: Buffer.from([0xff, 0xd8, 9]).toString("base64") };
+      }
+      return {};
+    });
+    const handle = await startScreencast(page, cfg, (frame) => forwarded.push(frame.data), {
+      credentialEpoch: () => epoch,
+      isCredentialOperationActive: () => credentialActive,
+    } as never);
+    const refreshing = handle.refresh();
+    await captureStarted;
+    credentialActive = true;
+    epoch += 1;
+    credentialActive = false;
+    finishCapture();
+    await refreshing;
+    expect(forwarded).toEqual([]);
+    await handle.stop();
+  });
+
+  it("refuses a direct screenshot before calling page.screenshot during credential work", async () => {
+    const screenshot = vi.fn(async () => Buffer.from("ordinary"));
+    const page = { screenshot } as unknown as Page;
+    await expect(
+      captureScreenshot(page, {
+        type: "png",
+        isCredentialOperationActive: () => true,
+      } as never),
+    ).rejects.toMatchObject({ code: "credential_operation_in_progress" });
+    expect(screenshot).not.toHaveBeenCalled();
+  });
+
   it("adjust() restart failure marks the handle stopped before rethrowing — no live-flagged dead cast (M-2)", async () => {
     const { page, cdp } = stubCdpPage();
     const handle = await startScreencast(page, cfg, () => {});

@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi, type Mock } from "vitest";
 import type { Page } from "playwright-core";
 
+import { BrowserOperationCoordinator } from "./browserOperations.js";
 import type { BrowserEngineConfig } from "./config.js";
 import {
   CONSOLE_BUFFER_CAP,
@@ -367,6 +368,78 @@ describe("BrowserSessionRegistry (unit — no chromium)", () => {
     instrumentPage(s as SessionBrowser, extra as unknown as Page);
     fire(extra, "console", { type: () => "warning", text: () => "extra", location: () => null });
     expect(s.console.map((e) => e.text)).toEqual(["extra"]);
+  });
+});
+
+describe("credential-period registry and listener fencing", () => {
+  it("refuses outside direct registry consumers while preserving the active broker owner", async () => {
+    const operations = new BrowserOperationCoordinator();
+    const registry = createBrowserSessionRegistry({ browserOperations: operations });
+    const page = stubPage();
+    const session = registry.open({ sessionId: "user-u1", userId: "u1", handle: stubHandle(page) });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const pending = operations.withOperation(
+      "user-u1",
+      { kind: "credential", operationId: "login" },
+      async () => {
+        expect(registry.get("user-u1")).toBe(session);
+        expect(registry.activePage("user-u1")).toBe(session.handle.page);
+        await gate;
+      },
+    );
+    expect(registry.get("user-u1")).toBeNull();
+    expect(registry.activePage("user-u1")).toBeNull();
+    expect(registry.ids()).toEqual([]);
+    expect(registry.addTab("user-u1", stubPage() as unknown as Page)).toBe(-1);
+    expect(registry.switchTab("user-u1", 0)).toBe(false);
+    expect(registry.setTakeover("user-u1", true)).toBe(false);
+    expect(registry.close("user-u1")).toBeNull();
+    release();
+    await pending;
+    expect(registry.get("user-u1")).toBe(session);
+    expect(registry.ids()).toEqual(["user-u1"]);
+  });
+
+  it("drops console/network/dialog/popup observations before reading them and never replays them", async () => {
+    const operations = new BrowserOperationCoordinator();
+    const registry = createBrowserSessionRegistry({ browserOperations: operations });
+    const page = stubPage();
+    const session = registry.open({ sessionId: "user-u1", userId: "u1", handle: stubHandle(page) });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const pending = operations.withOperation("user-u1", { kind: "credential", operationId: "login" }, () => gate);
+    const text = vi.fn(() => "credential-period console");
+    const responseUrl = vi.fn(() => "https://fixture.invalid/credential-period");
+    const dialog = fakeDialog();
+    const popup = { url: vi.fn(() => "https://fixture.invalid/popup"), close: vi.fn(async () => {}) };
+    fire(page, "console", { type: () => "log", text, location: () => null });
+    fire(page, "response", {
+      url: responseUrl,
+      status: () => 200,
+      request: () => ({ method: () => "GET" }),
+    });
+    fire(page, "dialog", dialog);
+    fire(page, "popup", popup);
+    expect(session.console).toEqual([]);
+    expect(session.network).toEqual([]);
+    expect(session.dialogs).toEqual([]);
+    expect(session.popups).toEqual([]);
+    expect(text).not.toHaveBeenCalled();
+    expect(responseUrl).not.toHaveBeenCalled();
+    expect(popup.url).not.toHaveBeenCalled();
+    expect(dialog.dismiss).toHaveBeenCalledTimes(1);
+    expect(popup.close).toHaveBeenCalledTimes(1);
+    release();
+    await pending;
+    expect(session.console).toEqual([]);
+    expect(session.network).toEqual([]);
+    fire(page, "console", { type: () => "log", text: () => "ordinary", location: () => null });
+    expect(session.console.map((entry) => entry.text)).toEqual(["ordinary"]);
   });
 });
 

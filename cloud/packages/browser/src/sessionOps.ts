@@ -14,7 +14,7 @@
 
 import type { Page } from "playwright-core";
 
-import type { BrowserOperationCoordinator } from "./browserOperations.js";
+import { BrowserOperationRefusal, type BrowserOperationCoordinator } from "./browserOperations.js";
 import type { BrowserEngineConfig } from "./config.js";
 import type { BrowserPool } from "./pool.js";
 import type { BrowserSessionRegistry, SessionBrowser } from "./sessions.js";
@@ -35,7 +35,7 @@ export interface SessionOps {
   persistence: StorageStatePersistence | null;
   cfg: BrowserEngineConfig;
   /** Structural additive seam; Task 10 uses the same coordinator for all entry points. */
-  browserOperations?: Pick<BrowserOperationCoordinator, "isCredentialOperationActive">;
+  browserOperations?: BrowserOperationCoordinator;
   notifyState?(sessionId: string): void;
   /**
    * Diagnostic sink for swallowed release-time capture/flush failures.
@@ -80,6 +80,12 @@ const opening = new Map<string, Promise<SessionBrowser>>();
  * Entries are tiny (one string per session) and are overwritten on each step.
  */
 const lastUrls = new Map<string, string>();
+let operationSequence = 0;
+
+function nextOperationId(prefix: string): string {
+  operationSequence += 1;
+  return `${prefix}:${operationSequence}`;
+}
 
 function credentialOperationActive(ops: SessionOps, sessionId: string): boolean {
   return ops.browserOperations?.isCredentialOperationActive(sessionId) === true;
@@ -101,7 +107,7 @@ function rememberUrl(ops: SessionOps, sessionId: string, url: string): void {
   }
 }
 
-export async function ensureSession(ops: SessionOps, ctx: BrowserToolContext): Promise<SessionBrowser> {
+async function ensureSessionUngated(ops: SessionOps, ctx: BrowserToolContext): Promise<SessionBrowser> {
   const existing = ops.registry.get(ctx.sessionId);
   if (existing) {
     ops.registry.touch(ctx.sessionId);
@@ -113,7 +119,10 @@ export async function ensureSession(ops: SessionOps, ctx: BrowserToolContext): P
 
   const promise = (async (): Promise<SessionBrowser> => {
     const storageState = ops.persistence ? await ops.persistence.restore(ctx.userId) : null;
-    const handle = await ops.pool.acquireLive(ctx.sessionId, { storageState });
+    const handle = await ops.pool.acquireLive(ctx.sessionId, {
+      storageState,
+      ...(ctx.browserOperationId === undefined ? {} : { operationId: ctx.browserOperationId }),
+    });
 
     // Another path may have registered the session while acquireLive was
     // awaiting; reuse that entry rather than re-opening over it.
@@ -153,6 +162,19 @@ export async function ensureSession(ops: SessionOps, ctx: BrowserToolContext): P
   }
 }
 
+export async function ensureSession(ops: SessionOps, ctx: BrowserToolContext): Promise<SessionBrowser> {
+  if (ops.browserOperations === undefined) return await ensureSessionUngated(ops, ctx);
+  return await ops.browserOperations.withOperation(
+    ctx.sessionId,
+    {
+      kind: "shared",
+      operationId: ctx.browserOperationId ?? nextOperationId("ensure"),
+      ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+    },
+    async () => await ensureSessionUngated(ops, ctx),
+  );
+}
+
 /**
  * Capture the session's storageState, flush it through persistence, then let
  * the pool close the context. Idempotent: an unknown session is a no-op.
@@ -161,7 +183,11 @@ export async function ensureSession(ops: SessionOps, ctx: BrowserToolContext): P
  * context or a pool slot alive) but logged: auth-persistence failures are
  * otherwise invisible.
  */
-export async function releaseSession(ops: SessionOps, sessionId: string): Promise<void> {
+async function releaseSessionUngated(ops: SessionOps, sessionId: string, operationId?: string): Promise<void> {
+  if (credentialOperationActive(ops, sessionId)) {
+    purgeSessionUrlMemory(sessionId);
+    throw new BrowserOperationRefusal("credential_operation_in_progress");
+  }
   const session = ops.registry.get(sessionId);
   if (!session) return;
 
@@ -178,10 +204,20 @@ export async function releaseSession(ops: SessionOps, sessionId: string): Promis
 
   ops.registry.close(sessionId);
   try {
-    await ops.pool.releaseLive(sessionId);
+    await ops.pool.releaseLive(sessionId, { operationId });
   } finally {
     ops.notifyState?.(sessionId);
   }
+}
+
+export async function releaseSession(ops: SessionOps, sessionId: string): Promise<void> {
+  if (ops.browserOperations === undefined) return await releaseSessionUngated(ops, sessionId);
+  const operationId = nextOperationId("release");
+  return await ops.browserOperations.withOperation(
+    sessionId,
+    { kind: "shared", operationId, allowAfterClose: true },
+    async () => await releaseSessionUngated(ops, sessionId, operationId),
+  );
 }
 
 /**
@@ -194,18 +230,30 @@ export async function withSession<T>(
   ctx: BrowserToolContext,
   fn: (session: SessionBrowser, page: Page) => Promise<T>,
 ): Promise<T> {
-  const refusal = deps.registry.refuseReasonIfTakeover(ctx.sessionId);
-  if (refusal !== null) throw new BrowserToolFailure(refusal);
+  const run = async (): Promise<T> => {
+    const refusal = deps.registry.refuseReasonIfTakeover(ctx.sessionId);
+    if (refusal !== null) throw new BrowserToolFailure(refusal);
 
-  const session = await ensureSession(deps, ctx);
-  deps.registry.touch(ctx.sessionId);
-  const page = session.tabs[session.activeIndex] ?? session.handle.page;
-  try {
-    return await fn(session, page);
-  } finally {
-    // Remember where the step left the tab so an idle freeze can restore it.
-    rememberUrl(deps, ctx.sessionId, page.url());
-  }
+    const session = await ensureSessionUngated(deps, ctx);
+    deps.registry.touch(ctx.sessionId);
+    const page = session.tabs[session.activeIndex] ?? session.handle.page;
+    try {
+      return await fn(session, page);
+    } finally {
+      // Remember where the step left the tab so an idle freeze can restore it.
+      rememberUrl(deps, ctx.sessionId, page.url());
+    }
+  };
+  if (deps.browserOperations === undefined) return await run();
+  return await deps.browserOperations.withOperation(
+    ctx.sessionId,
+    {
+      kind: "shared",
+      operationId: ctx.browserOperationId ?? nextOperationId("session"),
+      ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+    },
+    run,
+  );
 }
 
 /**

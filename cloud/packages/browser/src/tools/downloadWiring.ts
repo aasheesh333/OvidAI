@@ -14,6 +14,7 @@
 import { mkdir, stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 
+import { BrowserOperationRefusal } from "../browserOperations.js";
 import { NETWORK_BUFFER_CAP, type SessionBrowser } from "../sessions.js";
 import type { BrowserToolsDeps } from "./types.js";
 
@@ -29,6 +30,7 @@ const wired = new WeakSet<object>();
  * listener is context-wide, not per tool call).
  */
 const workspaceSession = new WeakMap<object, string>();
+let downloadOperationSequence = 0;
 
 /**
  * Reject anything that is not a single plain filename. `..`, absolute paths
@@ -57,7 +59,7 @@ export function wireDownloads(
   workspaceSession.set(context, chatSessionId ?? session.sessionId);
 
   context.on("download", (download) => {
-    void (async () => {
+    const save = async (): Promise<void> => {
       try {
         const url = download.url();
         const name = sanitizeFilename(download.suggestedFilename()) ?? `download-${deps.now?.() ?? Date.now()}`;
@@ -121,6 +123,24 @@ export function wireDownloads(
         // auto-save simply leaves no artifact (the model can retry with
         // browser_download and the explicit URL).
       }
-    })();
+    };
+    if (deps.browserOperations?.isCredentialOperationActive(session.sessionId) === true) {
+      void download.delete().catch(() => {});
+      return;
+    }
+    if (deps.browserOperations === undefined) {
+      void save();
+      return;
+    }
+    downloadOperationSequence += 1;
+    void deps.browserOperations
+      .withOperation(
+        session.sessionId,
+        { kind: "shared", operationId: `download:${downloadOperationSequence}` },
+        save,
+      )
+      .catch(async (error: unknown) => {
+        if (error instanceof BrowserOperationRefusal) await download.delete().catch(() => {});
+      });
   });
 }

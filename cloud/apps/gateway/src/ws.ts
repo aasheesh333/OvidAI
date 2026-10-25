@@ -13,6 +13,9 @@ import {
   type WsServerMsg,
   USER_BROWSER_ALIAS,
   userBrowserKey,
+  browserStateChannel,
+  browserStateDtoSchema,
+  type BrowserStateDto,
 } from "@ovid/shared";
 import { isUuid } from "./routes/http.js";
 import type { TicketStore } from "./tickets.js";
@@ -350,6 +353,10 @@ export async function handleWsConnection(
   // on browser_state and matched by browser_input/takeover/detach. The redis
   // key is always the USER's browser (Wave 5 R2).
   let browserEchoId: string | null = null;
+  // Additive worker state: while locked, neither queued frames nor queued
+  // viewer control may cross this gateway. Updated from the raw state before
+  // browserChannel's schema-validating consumer (which strips unknown fields).
+  let browserCredentialLock: boolean | null = null;
   // System channel detach (P5 Task 10): declared HERE (same teardown
   // bookkeeping block as session subs) but only SET after the ticket verify
   // proves the uid — a close that fires during the verify finds it null and
@@ -375,6 +382,7 @@ export async function handleWsConnection(
     ptySubs.clear();
     const browser = browserAttach;
     browserAttach = null;
+    browserCredentialLock = null;
     // Snapshot + null BEFORE the awaits: a close that races the async bus
     // subscribe leaves the placeholder entry nulled here, and the handler's
     // post-await identity check unsubscribes the freshly created listener.
@@ -766,6 +774,17 @@ export async function handleWsConnection(
     return attach;
   }
 
+  function refuseBrowserCredentialOperation(sessionId: string): boolean {
+    if (browserCredentialLock !== true) return false;
+    send(socket, {
+      op: "error",
+      code: "credential_operation_in_progress",
+      message: "Browser viewers are paused while credential use is isolated.",
+      sessionId,
+    });
+    return true;
+  }
+
   async function handleBrowserAttach(sessionId: string): Promise<void> {
     // Loud fallback for pre-P6 compositions (no browser deps wired).
     if (deps.browser === undefined) {
@@ -804,21 +823,52 @@ export async function handleWsConnection(
     const previous = browserAttach;
     browserAttach = null;
     browserEchoId = null;
+    // No state has arrived for this attach yet. Unknown is legacy ordinary
+    // behavior; only an explicit worker lock closes the viewer boundary.
+    browserCredentialLock = null;
     if (previous !== null) await previous.detach().catch(() => {});
+
+    const key = userBrowserKey(uid);
+    const stateChannel = browserStateChannel(key);
+    const redisFactory = (): Redis => {
+      const connection = deps.browser!.redisFactory();
+      connection.on("messageBuffer", (channel: Buffer, message: Buffer) => {
+        if (channel.toString("utf8") !== stateChannel) return;
+        try {
+          const parsed: unknown = JSON.parse(message.toString("utf8"));
+          if (!browserStateDtoSchema.safeParse(parsed).success) return;
+          const lock = (parsed as { credentialLock?: unknown }).credentialLock;
+          if (lock === undefined) browserCredentialLock = null;
+          else if (typeof lock === "boolean") browserCredentialLock = lock;
+        } catch {
+          // Keep the previous lock on malformed input: fail closed, never log raw state.
+        }
+      });
+      return connection;
+    };
 
     let attach: BrowserAttach | null = null;
     try {
       attach = await createBrowserAttach({
-        redisFactory: deps.browser.redisFactory,
-        sessionId: userBrowserKey(uid),
+        redisFactory,
+        sessionId: key,
         heartbeatMs: opts.browserHeartbeatMs ?? BROWSER_VIEWER_HEARTBEAT_MS,
         handlers: {
-          onState: (state) => {
+          onState: (state: BrowserStateDto) => {
             if (browserAttach !== attach || attach === null) return; // replaced or torn down: ignore
-            send(socket, { op: "browser_state", sessionId, state, viewerId: attach.viewerId });
+            send(socket, {
+              op: "browser_state",
+              sessionId,
+              state: {
+                ...state,
+                ...(browserCredentialLock === null ? {} : { credentialLock: browserCredentialLock }),
+              },
+              viewerId: attach.viewerId,
+            } as WsServerMsg);
           },
           onFrame: (image) => {
             if (browserAttach !== attach) return; // replaced or torn down: ignore
+            if (browserCredentialLock === true) return;
             if (closed || socket.readyState !== socket.OPEN) return;
             // Review Focus #3 (slow client): never queue unbounded image
             // bytes behind a stuck socket — anything still buffered above
@@ -856,6 +906,7 @@ export async function handleWsConnection(
     if (attach === null || browserEchoId !== sessionId) return; // idempotent no-op
     browserAttach = null;
     browserEchoId = null;
+    browserCredentialLock = null;
     await attach.detach().catch(() => {});
   }
 
@@ -1073,7 +1124,7 @@ export async function handleWsConnection(
         // `input` was zod-validated by the shared wsClientMsg parse above —
         // an off-schema event never gets this far (it answered bad_message).
         const attach = requireBrowserAttach(msg.sessionId);
-        if (attach === null) return;
+        if (attach === null || refuseBrowserCredentialOperation(msg.sessionId)) return;
         // FE-026: while ANOTHER viewer (device) holds takeover, this one is
         // read-only — refused here, never published to the worker.
         if (!attach.mayInput()) {
@@ -1092,7 +1143,7 @@ export async function handleWsConnection(
         const attach = requireBrowserAttach(msg.sessionId);
         // The controller's viewer id rides the ctl msg (FE-026): the worker
         // records it and releases takeover when THAT viewer leaves.
-        if (attach !== null) {
+        if (attach !== null && !refuseBrowserCredentialOperation(msg.sessionId)) {
           attach.publishCtl({ type: "takeover", enabled: msg.enabled, viewerId: attach.viewerId });
         }
         return;
@@ -1102,7 +1153,7 @@ export async function handleWsConnection(
         // client op that creates one — agent-first is enforced at the
         // protocol boundary, not just in the UI.
         const attach = requireBrowserAttach(msg.sessionId);
-        if (attach !== null) {
+        if (attach !== null && !refuseBrowserCredentialOperation(msg.sessionId)) {
           attach.publishCtl({ type: "switch_tab", index: msg.index, viewerId: attach.viewerId });
         }
         return;

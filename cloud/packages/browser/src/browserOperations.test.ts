@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { BrowserOperationCoordinator } from "./browserOperations.js";
+import { releaseSession } from "./sessionOps.js";
 
 function deferred<T = void>(): {
   promise: Promise<T>;
@@ -116,6 +117,15 @@ describe("BrowserOperationCoordinator", () => {
     expect(coordinator.isCredentialOperationActive("user-u1")).toBe(false);
   });
 
+  it("allows distinct shared tool and pool operations nested inside one ordinary tool", async () => {
+    const coordinator = new BrowserOperationCoordinator();
+    const result = await coordinator.withOperation("user-u1", shared("tool-open"), async () =>
+      coordinator.withOperation("user-u1", shared("pool-acquire"), async () => "ordinary"),
+    );
+    expect(result).toBe("ordinary");
+    expect(coordinator.isCredentialOperationActive("user-u1")).toBe(false);
+  });
+
   it("does not run a queued credential operation after its signal aborts", async () => {
     const coordinator = new BrowserOperationCoordinator();
     const release = deferred();
@@ -169,6 +179,133 @@ describe("BrowserOperationCoordinator", () => {
       await expect(detached).rejects.toMatchObject({ code: "credential_operation_in_progress" });
     });
     expect(detachedRuns).toBe(0);
+  });
+
+  it("distinguishes the active credential owner from outside direct registry consumers and reports lock transitions", async () => {
+    const coordinator = new BrowserOperationCoordinator();
+    const transitions: Array<{ key: string; active: boolean }> = [];
+    const remove = coordinator.addCredentialOperationListener((key, active) => {
+      transitions.push({ key, active });
+    });
+    const release = deferred();
+    const pending = coordinator.withOperation("user-u1", credential("owner"), async () => {
+      expect(coordinator.isCredentialOperationOwner("user-u1")).toBe(true);
+      await release.promise;
+    });
+    expect(coordinator.isCredentialOperationOwner("user-u1")).toBe(false);
+    expect(coordinator.isCredentialOperationActive("user-u1")).toBe(true);
+    release.resolve();
+    await pending;
+    expect(coordinator.isCredentialOperationActive("user-u1")).toBe(false);
+    expect(transitions).toEqual([
+      { key: "user-u1", active: true },
+      { key: "user-u1", active: false },
+    ]);
+    remove();
+  });
+
+  it("UNEXECUTED review C2/I2: credential epochs remain monotonic across unlock/prune and are isolated per key", async () => {
+    const coordinator = new BrowserOperationCoordinator();
+    const initial = coordinator.credentialEpoch("user-u1");
+    const release = deferred();
+    const pending = coordinator.withOperation("user-u1", credential("login"), async () => {
+      expect(coordinator.credentialEpoch("user-u1")).toBe(initial + 1);
+      expect(coordinator.credentialEpoch("user-u2")).toBe(0);
+      await release.promise;
+    });
+    expect(coordinator.credentialEpoch("user-u1")).toBe(initial + 1);
+    release.resolve();
+    await pending;
+    expect(coordinator.credentialEpoch("user-u1")).toBe(initial + 1);
+    await coordinator.withOperation("user-u1", shared("ordinary"), async () => {
+      expect(coordinator.credentialEpoch("user-u1")).toBe(initial + 1);
+    });
+    expect(coordinator.credentialEpoch("user-u1")).toBe(initial + 1);
+  });
+
+  it("close aborts credential work, awaits its cleanup, and refuses every later operation", async () => {
+    const coordinator = new BrowserOperationCoordinator();
+    const controller = new AbortController();
+    const started = deferred();
+    const cleanupStarted = deferred();
+    const cleanupRelease = deferred();
+    let cleaned = false;
+    const pending = coordinator.withOperation(
+      "user-u1",
+      { ...credential("owner", controller.signal), abortController: controller },
+      async () => {
+        started.resolve();
+        try {
+          await new Promise<void>((resolve) => {
+            controller.signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+          return "aborted";
+        } finally {
+          cleanupStarted.resolve();
+          await cleanupRelease.promise;
+          cleaned = true;
+        }
+      },
+    );
+    await started.promise;
+    const closing = coordinator.close();
+    let closeSettled = false;
+    void closing.then(() => {
+      closeSettled = true;
+    });
+    await cleanupStarted.promise;
+    expect(closeSettled).toBe(false);
+    cleanupRelease.resolve();
+    expect(await pending).toBe("aborted");
+    await closing;
+    expect(cleaned).toBe(true);
+    await expect(coordinator.withOperation("user-u1", shared("late"), async () => "late")).rejects.toMatchObject({
+      code: "operation_aborted",
+    });
+  });
+
+  it("drains an already-running persistence release before exclusive work instead of capturing during credentials", async () => {
+    const coordinator = new BrowserOperationCoordinator();
+    const captureStarted = deferred();
+    const captureRelease = deferred();
+    let credentialStarted = false;
+    const session = {
+      userId: "u1",
+      handle: {
+        context: {
+          storageState: async () => {
+            captureStarted.resolve();
+            await captureRelease.promise;
+            return { cookies: [], origins: [] };
+          },
+        },
+      },
+    };
+    const releasing = releaseSession(
+      {
+        browserOperations: coordinator,
+        registry: {
+          get: () => session,
+          close: () => session,
+        },
+        pool: { releaseLive: async () => {} },
+        persistence: null,
+        cfg: {},
+      } as never,
+      "user-u1",
+    );
+    await captureStarted.promise;
+    const exclusive = coordinator.withOperation("user-u1", credential("login"), async () => {
+      credentialStarted = true;
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(credentialStarted).toBe(false);
+    } finally {
+      captureRelease.resolve();
+      await Promise.all([releasing, exclusive]);
+    }
+    expect(credentialStarted).toBe(true);
   });
 
   it("refuses already-aborted shared and credential entry before running the callback", async () => {

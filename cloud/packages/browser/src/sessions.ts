@@ -27,7 +27,24 @@
 
 import type { Page } from "playwright-core";
 
+import {
+  BrowserOperationRefusal,
+  CREDENTIAL_OPERATION_REFUSAL,
+  type BrowserOperationCoordinator,
+} from "./browserOperations.js";
 import type { LiveContextHandle } from "./pool.js";
+
+export type BrowserOperationFence = Pick<
+  BrowserOperationCoordinator,
+  "isCredentialOperationActive" | "isCredentialOperationOwner"
+>;
+
+function outsideCredential(sessionId: string, operations: BrowserOperationFence | undefined): boolean {
+  return (
+    operations?.isCredentialOperationActive(sessionId) === true &&
+    operations.isCredentialOperationOwner(sessionId) !== true
+  );
+}
 
 export const TAKEOVER_REFUSAL =
   "The user is currently controlling the browser live (takeover). Browser tools are paused — wait for the user to release control, then retry.";
@@ -78,6 +95,8 @@ export interface SessionBrowser {
   network: NetworkEntry[];
   dialogs: DialogEntry[];
   popups: PopupEntry[];
+  /** Additive production fence; absent in legacy isolated fixtures, which retain redaction-only behavior. */
+  browserOperations?: BrowserOperationFence;
 }
 
 export interface BrowserSessionRegistry {
@@ -111,6 +130,7 @@ export interface BrowserSessionRegistry {
 export interface SessionRegistryOptions {
   now?(): number;
   onDialogTimeout?(d: DialogEntry): void;
+  browserOperations?: BrowserOperationFence;
 }
 
 /**
@@ -135,6 +155,9 @@ export function createBrowserSessionRegistry(opts: SessionRegistryOptions = {}):
   }
 
   function open(entry: { sessionId: string; userId: string; handle: LiveContextHandle }): SessionBrowser {
+    if (outsideCredential(entry.sessionId, opts.browserOperations)) {
+      throw new BrowserOperationRefusal("credential_operation_in_progress");
+    }
     // Re-opening an existing session replaces the stale entry — its hold
     // timers must not fire into the new one.
     const stale = sessions.get(entry.sessionId);
@@ -153,6 +176,7 @@ export function createBrowserSessionRegistry(opts: SessionRegistryOptions = {}):
       network: [],
       dialogs: [],
       popups: [],
+      ...(opts.browserOperations === undefined ? {} : { browserOperations: opts.browserOperations }),
       now,
       onDialogTimeout: opts.onDialogTimeout,
       dialogSeq: 0,
@@ -165,10 +189,12 @@ export function createBrowserSessionRegistry(opts: SessionRegistryOptions = {}):
   }
 
   function get(sessionId: string): SessionBrowser | null {
+    if (outsideCredential(sessionId, opts.browserOperations)) return null;
     return sessions.get(sessionId) ?? null;
   }
 
   function close(sessionId: string): SessionBrowser | null {
+    if (outsideCredential(sessionId, opts.browserOperations)) return null;
     const s = sessions.get(sessionId);
     if (!s) return null;
     sessions.delete(sessionId);
@@ -179,11 +205,13 @@ export function createBrowserSessionRegistry(opts: SessionRegistryOptions = {}):
   }
 
   function activePage(sessionId: string): Page | null {
+    if (outsideCredential(sessionId, opts.browserOperations)) return null;
     const s = sessions.get(sessionId);
     return s ? s.tabs[s.activeIndex] ?? null : null;
   }
 
   function addTab(sessionId: string, page: Page): number {
+    if (outsideCredential(sessionId, opts.browserOperations)) return -1;
     const s = sessions.get(sessionId);
     if (!s) return -1;
     s.tabs.push(page);
@@ -194,6 +222,7 @@ export function createBrowserSessionRegistry(opts: SessionRegistryOptions = {}):
   }
 
   function closeTab(sessionId: string, index: number): boolean {
+    if (outsideCredential(sessionId, opts.browserOperations)) return false;
     const s = sessions.get(sessionId);
     if (!s) return false;
     if (index < 0 || index >= s.tabs.length) return false;
@@ -209,6 +238,7 @@ export function createBrowserSessionRegistry(opts: SessionRegistryOptions = {}):
   }
 
   function switchTab(sessionId: string, index: number): boolean {
+    if (outsideCredential(sessionId, opts.browserOperations)) return false;
     const s = sessions.get(sessionId);
     if (!s) return false;
     if (index < 0 || index >= s.tabs.length) return false;
@@ -217,6 +247,7 @@ export function createBrowserSessionRegistry(opts: SessionRegistryOptions = {}):
   }
 
   function setTakeover(sessionId: string, enabled: boolean, viewerId?: string | null): boolean {
+    if (outsideCredential(sessionId, opts.browserOperations)) return false;
     const s = sessions.get(sessionId);
     if (!s) return false;
     s.takeover = enabled;
@@ -225,11 +256,13 @@ export function createBrowserSessionRegistry(opts: SessionRegistryOptions = {}):
   }
 
   function refuseReasonIfTakeover(sessionId: string): string | null {
+    if (outsideCredential(sessionId, opts.browserOperations)) return CREDENTIAL_OPERATION_REFUSAL;
     const s = sessions.get(sessionId);
     return s?.takeover ? TAKEOVER_REFUSAL : null;
   }
 
   function touch(sessionId: string): void {
+    if (outsideCredential(sessionId, opts.browserOperations)) return;
     const s = sessions.get(sessionId);
     if (!s) return;
     s.lastActivityAt = now();
@@ -239,7 +272,7 @@ export function createBrowserSessionRegistry(opts: SessionRegistryOptions = {}):
   return {
     open,
     get,
-    ids: () => [...sessions.keys()],
+    ids: () => [...sessions.keys()].filter((sessionId) => !outsideCredential(sessionId, opts.browserOperations)),
     close,
     activePage,
     addTab,
@@ -261,8 +294,10 @@ export function createBrowserSessionRegistry(opts: SessionRegistryOptions = {}):
 export function instrumentPage(session: SessionBrowser, page: Page): void {
   const s = session as SessionInternal;
   const now = (): number => (typeof s.now === "function" ? s.now() : Date.now());
+  const credentialPeriod = (): boolean => s.browserOperations?.isCredentialOperationActive(s.sessionId) === true;
 
   page.on("console", (msg) => {
+    if (credentialPeriod()) return;
     const loc = msg.location();
     s.console.push({
       ts: now(),
@@ -274,11 +309,13 @@ export function instrumentPage(session: SessionBrowser, page: Page): void {
   });
 
   const pushNetwork = (entry: NetworkEntry): void => {
+    if (credentialPeriod()) return;
     s.network.push(entry);
     if (s.network.length > NETWORK_BUFFER_CAP) s.network.splice(0, s.network.length - NETWORK_BUFFER_CAP);
   };
 
   page.on("response", (res) => {
+    if (credentialPeriod()) return;
     pushNetwork({
       ts: now(),
       url: res.url(),
@@ -289,6 +326,7 @@ export function instrumentPage(session: SessionBrowser, page: Page): void {
   });
 
   page.on("requestfailed", (req) => {
+    if (credentialPeriod()) return;
     pushNetwork({
       ts: now(),
       url: req.url(),
@@ -299,6 +337,10 @@ export function instrumentPage(session: SessionBrowser, page: Page): void {
   });
 
   page.on("dialog", (dialog) => {
+    if (credentialPeriod()) {
+      void dialog.dismiss().catch(() => {});
+      return;
+    }
     const id = `d${++s.dialogSeq}`;
     const entry: DialogEntry = {
       id,
@@ -332,6 +374,10 @@ export function instrumentPage(session: SessionBrowser, page: Page): void {
   });
 
   page.on("popup", (popup) => {
+    if (credentialPeriod()) {
+      void popup.close().catch(() => {});
+      return;
+    }
     s.popups.push({ url: popup.url(), openedAt: now() });
     // Server-side popups never render — close the page; `browser_popups open`
     // re-opens the recorded URL as a real tab.

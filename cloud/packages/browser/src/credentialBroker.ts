@@ -1156,9 +1156,15 @@ export class BrowserCredentialBroker {
   }
 
   async login(input: BrowserCredentialLoginInput): Promise<BrowserCredentialLoginResult> {
-    const { ctx, credentialId, approver, signal } = input;
+    const { ctx, credentialId, approver } = input;
     purgeSessionUrlMemory(ctx.sessionId);
+    const operationController = new AbortController();
+    const forwardAbort = (): void => operationController.abort();
+    if (input.signal.aborted) operationController.abort();
+    else input.signal.addEventListener("abort", forwardAbort, { once: true });
+    const signal = operationController.signal;
     const operationId = `credential:${ctx.runId ?? "unscoped"}:${randomUUID()}`;
+    const options = { kind: "credential" as const, operationId, signal, abortController: operationController };
     const token = randomUUID();
     const handles: ElementHandle<HTMLInputElement>[] = [];
     let credential: BrowserCredentialSecret | null = null;
@@ -1178,8 +1184,9 @@ export class BrowserCredentialBroker {
       this.deps.log?.(redactor.text(message), redactor.value(error));
     };
 
-    try {
-      if (typeof ctx.runId !== "string" || ctx.runId === "") {
+    const execute = async (): Promise<BrowserCredentialLoginResult> => {
+      try {
+        if (typeof ctx.runId !== "string" || ctx.runId === "") {
         control(refused("credential_context_required", "Credential approval requires a run and chat session context."));
       }
       const entries = await this.deps.credentials.list(ctx.userId);
@@ -1191,11 +1198,13 @@ export class BrowserCredentialBroker {
       if (origin === null) {
         control(refused("credential_origin_invalid", "The saved credential is not bound to a valid exact HTTPS origin."));
       }
-      const options = { kind: "credential" as const, operationId, signal };
       outcome = await this.deps.operations.withOperation(ctx.sessionId, options, async () =>
         // Reentrant by design: Task 10's withSession wrapper uses this same fence.
         await this.deps.operations.withOperation(ctx.sessionId, options, async () =>
-          await withSession({ ...this.deps, browserOperations: this.deps.operations }, ctx, async (liveSession, livePage) => {
+          await withSession(
+            { ...this.deps, browserOperations: this.deps.operations },
+            { ...ctx, browserOperationId: operationId },
+            async (liveSession, livePage) => {
             session = liveSession;
             page = livePage;
             let proof = await proveLiveForm(livePage, liveSession, origin, token, null);
@@ -1411,6 +1420,18 @@ export class BrowserCredentialBroker {
       void secret;
       void credential;
     }
-    return outcome;
+      return outcome;
+    };
+    try {
+      return await this.deps.operations.withOperation(ctx.sessionId, options, execute);
+    } catch (error) {
+      if (error instanceof BrowserOperationRefusal || signal.aborted) {
+        return refused("credential_aborted", "Credential login was aborted before submission.");
+      }
+      log("credential broker operation failed", error);
+      return refused("credential_operation_failed", "Credential login was refused without a verified submission.");
+    } finally {
+      input.signal.removeEventListener("abort", forwardAbort);
+    }
   }
 }

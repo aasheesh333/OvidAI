@@ -19,7 +19,14 @@
 import type { BrowserFrameFormat } from "@ovid/shared";
 import type { CDPSession, Page } from "playwright-core";
 
+import { BrowserOperationRefusal } from "./browserOperations.js";
 import type { ScreencastConfig } from "./config.js";
+
+export interface CredentialObservationGate {
+  isCredentialOperationActive?(): boolean;
+  /** Monotonic per-user epoch. A completion from an older epoch is stale even after unlock. */
+  credentialEpoch?(): number;
+}
 
 export interface ScreencastFrame {
   format: BrowserFrameFormat;
@@ -121,9 +128,14 @@ export async function startScreencast(
   page: Page,
   cfg: ScreencastConfig,
   onFrame: (f: ScreencastFrame) => void,
-  opts?: { format?: BrowserFrameFormat },
+  opts?: { format?: BrowserFrameFormat } & CredentialObservationGate,
 ): Promise<ScreencastHandle> {
   const format: BrowserFrameFormat = opts?.format ?? "jpeg";
+  const sourceEpoch = opts?.credentialEpoch?.();
+  const credentialActive = (): boolean => opts?.isCredentialOperationActive?.() === true;
+  const observationInvalid = (): boolean =>
+    credentialActive() ||
+    (sourceEpoch !== undefined && sourceEpoch !== opts?.credentialEpoch?.());
   const cdp: CDPSession = await page.context().newCDPSession(page);
 
   let frames = 0;
@@ -148,6 +160,10 @@ export async function startScreencast(
   };
 
   const forward = (data: Buffer, sessionId: number): void => {
+    if (observationInvalid()) {
+      ack(sessionId);
+      return;
+    }
     lastForwardAt = Date.now();
     frames++;
     onFrame({ format, data });
@@ -159,6 +175,11 @@ export async function startScreencast(
   const flushHeld = (): void => {
     flushTimer = null;
     if (stopped || held === null) return;
+    if (observationInvalid()) {
+      ack(held.sessionId);
+      held = null;
+      return;
+    }
     const next = held;
     held = null;
     forward(next.data, next.sessionId);
@@ -166,6 +187,14 @@ export async function startScreencast(
 
   const onFrameEvent = (ev: ScreencastFrameEvent): void => {
     if (stopped) return;
+    if (observationInvalid()) {
+      if (held !== null) {
+        ack(held.sessionId);
+        held = null;
+      }
+      ack(ev.sessionId);
+      return;
+    }
     const data = Buffer.from(ev.data, "base64");
     const wait = lastForwardAt + minIntervalMs - Date.now();
     if (wait <= 0 && held === null) {
@@ -223,12 +252,12 @@ export async function startScreencast(
   }
 
   async function refresh(): Promise<void> {
-    if (stopped) return;
+    if (stopped || observationInvalid()) return;
     const shot = (await cdp.send("Page.captureScreenshot", {
       format: format as "jpeg" | "png", // see startScreencastParams: runtime accepts webp
       quality: currentStep.quality,
     })) as { data: string };
-    if (stopped) return;
+    if (stopped || observationInvalid()) return;
     lastForwardAt = Date.now();
     frames++;
     onFrame({ format, data: Buffer.from(shot.data, "base64") });
@@ -335,12 +364,22 @@ export async function probeWebpSupport(page: Page, cfg: ScreencastConfig): Promi
  */
 export async function captureScreenshot(
   page: Page,
-  opts?: { type?: "jpeg" | "png"; quality?: number },
+  opts?: { type?: "jpeg" | "png"; quality?: number } & CredentialObservationGate,
 ): Promise<Buffer> {
+  const sourceEpoch = opts?.credentialEpoch?.();
+  const observationInvalid = (): boolean =>
+    opts?.isCredentialOperationActive?.() === true ||
+    (sourceEpoch !== undefined && sourceEpoch !== opts?.credentialEpoch?.());
+  if (observationInvalid()) {
+    throw new BrowserOperationRefusal("credential_operation_in_progress");
+  }
   const type = opts?.type ?? "jpeg";
   const buf =
     type === "jpeg"
       ? await page.screenshot({ type: "jpeg", quality: opts?.quality ?? 70 })
       : await page.screenshot({ type: "png" });
+  if (observationInvalid()) {
+    throw new BrowserOperationRefusal("credential_operation_in_progress");
+  }
   return buf as Buffer;
 }

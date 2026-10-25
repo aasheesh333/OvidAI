@@ -2,6 +2,7 @@ import { chromium } from "playwright-core";
 import type { Browser } from "playwright-core";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { BrowserOperationCoordinator } from "./browserOperations.js";
 import type { BrowserEngineConfig } from "./config.js";
 import {
   BrowserPoolBusyError,
@@ -12,6 +13,8 @@ import {
 } from "./pool.js";
 import type { StorageState } from "./storageState.js";
 import { startTestPageServer, type TestPageServer } from "./test/testServer.js";
+import { createBrowserSessionRegistry } from "./sessions.js";
+import { ensureSession } from "./sessionOps.js";
 import type { BrowserUidDrop } from "./uidDrop.js";
 
 // Real-browser tests: every one is gated on the playwright-core registry
@@ -252,6 +255,99 @@ describe.skipIf(!chromiumExecutableExists())("BrowserPool", () => {
     expect(pool.peekLive("s1")).toBe(null);
     expect(pool.peekLive("s2")).not.toBe(null);
     expect(pool.liveCount()).toBe(1);
+  });
+
+  it("pins exclusive work against idle eviction and refuses direct pool acquire/release during credentials", async () => {
+    let fakeNow = 100_000;
+    const operations = new BrowserOperationCoordinator();
+    const pool = makePool(makeCfg(), {
+      now: () => fakeNow,
+      sweepIntervalMs: 0,
+      isCredentialOperationActive: (key) => operations.isCredentialOperationActive(key),
+    });
+    await pool.acquireLive("user-u1");
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const pending = operations.withOperation("user-u1", { kind: "credential", operationId: "login" }, () => gate);
+    try {
+      fakeNow += 1_000;
+      await expect(pool.acquireLive("user-u1")).rejects.toMatchObject({ code: "credential_operation_in_progress" });
+      await expect(pool.releaseLive("user-u1")).rejects.toMatchObject({ code: "credential_operation_in_progress" });
+      expect(await pool.evictIdle()).toEqual([]);
+      expect(pool.peekLive("user-u1")).toBeNull(); // direct observation is refused too
+      expect(pool.liveCount()).toBe(1); // the pinned handle itself was not evicted
+    } finally {
+      release();
+      await pending;
+    }
+    await pool.releaseLive("user-u1");
+    expect(pool.peekLive("user-u1")).toBeNull();
+  });
+
+  it("allows the admitted broker owner to create its first session and live context reentrantly", async () => {
+    const operations = new BrowserOperationCoordinator();
+    const cfg = makeCfg();
+    const pool = makePool(cfg, {
+      browserOperations: operations,
+      isCredentialOperationActive: (key) => operations.isCredentialOperationActive(key),
+    });
+    const registry = createBrowserSessionRegistry({ browserOperations: operations });
+    const deps = { pool, registry, persistence: null, cfg, browserOperations: operations };
+    const created = await operations.withOperation(
+      "user-u1",
+      { kind: "credential", operationId: "login" },
+      async () =>
+        await ensureSession(deps, {
+          sessionId: "user-u1",
+          userId: "u1",
+          browserOperationId: "login",
+        }),
+    );
+    expect(created.sessionId).toBe("user-u1");
+    expect(pool.liveCount()).toBe(1);
+    await created.handle.page.goto(server.url("/"));
+    expect(await created.handle.page.title()).toBe("Static article");
+  });
+
+  it("drains an in-flight idle eviction before a credential operation can start", async () => {
+    let fakeNow = 100_000;
+    const operations = new BrowserOperationCoordinator();
+    let captureStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      captureStarted = resolve;
+    });
+    let finishCapture!: () => void;
+    const capture = new Promise<void>((resolve) => {
+      finishCapture = resolve;
+    });
+    const pool = makePool(makeCfg(), {
+      now: () => fakeNow,
+      sweepIntervalMs: 0,
+      browserOperations: operations,
+      onIdleEvict: async () => {
+        captureStarted();
+        await capture;
+      },
+    } as never);
+    await pool.acquireLive("user-u1");
+    fakeNow += 1_000;
+    const eviction = pool.evictIdle();
+    await started;
+    let credentialStarted = false;
+    const credential = operations.withOperation("user-u1", { kind: "credential", operationId: "login" }, async () => {
+      credentialStarted = true;
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(credentialStarted).toBe(false);
+    } finally {
+      finishCapture();
+      await Promise.all([eviction, credential]);
+    }
+    expect(credentialStarted).toBe(true);
+    expect(pool.liveCount()).toBe(0);
   });
 
   it("the sweep timer evicts idle contexts in the background (unref'd)", async () => {

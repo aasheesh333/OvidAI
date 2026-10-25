@@ -39,7 +39,7 @@ import type { BrowserContext, Page } from "playwright-core";
 import type { BrowserInputEvent, BrowserStateDto } from "@ovid/shared";
 
 import { createRedisBrowserBridge } from "./bridge.js";
-import { BrowserOperationCoordinator } from "./browserOperations.js";
+import { BrowserOperationCoordinator, BrowserOperationRefusal } from "./browserOperations.js";
 import type { BrowserEngineConfig } from "./config.js";
 import { BrowserCredentialBroker, type CredentialUseApprover } from "./credentialBroker.js";
 
@@ -174,7 +174,8 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
   // Core services (Tasks 4-13)
   // -------------------------------------------------------------------------
 
-  const registry = createBrowserSessionRegistry({ now });
+  const browserOperations = deps.browserOperations ?? new BrowserOperationCoordinator();
+  const registry = createBrowserSessionRegistry({ now, browserOperations });
 
   // Wave 6 W4: after the last viewer leaves, keep rendering for the
   // configured window before converting to headless. While pending, the
@@ -188,12 +189,17 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
   const pool = createBrowserPool(cfg, {
     now,
     uidDrop,
+    browserOperations,
     onIdleEvict: (sessionId: string, context: BrowserContext) => onPoolIdleEvict(sessionId, context),
     // Wave 5 R3: a browser someone is watching is never idle-evicted; once
     // the last viewer leaves it idles headless until the normal lease ends.
     // Wave 6 W4: the detach grace window pins it too.
     isPinned: (sessionId: string) =>
-      bridge.viewerCount(sessionId) > 0 || detachGrace.pending(sessionId),
+      browserOperations.isCredentialOperationActive(sessionId) ||
+      bridge.viewerCount(sessionId) > 0 ||
+      detachGrace.pending(sessionId),
+    isCredentialOperationActive: (sessionId: string) =>
+      browserOperations.isCredentialOperationActive(sessionId),
   });
 
   const bridge = createRedisBrowserBridge({
@@ -236,11 +242,11 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     registry,
     persistence,
     cfg,
+    browserOperations,
     notifyState: (sessionId: string) => publishState(sessionId),
     log,
   };
 
-  const browserOperations = deps.browserOperations ?? new BrowserOperationCoordinator();
   const credentialBroker =
     cfg.credentialBrokerEnabled && deps.credentials !== undefined && deps.credentialApprover !== undefined
       ? deps.credentialBroker ??
@@ -288,6 +294,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
   const casts = new Map<string, CastEntry>();
   /** In-flight starts/restarts — the dedup guard against double casts. */
   const starting = new Set<string>();
+  let screencastOperationSequence = 0;
   /** Probed once per engine lifetime; null = not probed yet. Failure ⇒ jpeg forever. */
   let webpSupport: boolean | null = null;
 
@@ -297,10 +304,29 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
 
   /** Wave 6 W4: keep casting for viewers OR a pending detach grace window. */
   function shouldCast(sessionId: string): boolean {
-    return bridge.viewerCount(sessionId) > 0 || detachGrace.pending(sessionId);
+    return (
+      !browserOperations.isCredentialOperationActive(sessionId) &&
+      (bridge.viewerCount(sessionId) > 0 || detachGrace.pending(sessionId))
+    );
   }
 
   async function startScreencastFor(sessionId: string): Promise<void> {
+    screencastOperationSequence += 1;
+    try {
+      await browserOperations.withOperation(
+        sessionId,
+        { kind: "shared", operationId: `screencast-start:${screencastOperationSequence}` },
+        async () => await startScreencastForShared(sessionId),
+      );
+    } catch (error) {
+      if (error instanceof BrowserOperationRefusal) return;
+      throw error;
+    }
+  }
+
+  async function startScreencastForShared(sessionId: string): Promise<void> {
+    const startEpoch = browserOperations.credentialEpoch(sessionId);
+    if (browserOperations.isCredentialOperationActive(sessionId)) return;
     if (casts.has(sessionId) || starting.has(sessionId)) return;
     if (casts.size + starting.size >= cfg.maxActiveScreencasts) return; // overflow: stay off
     const page = registry.activePage(sessionId);
@@ -331,9 +357,27 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
       const handle = await startScreencast(
         page,
         cfg.screencast,
-        (frame) => bridge.publishFrame(sessionId, frame),
-        { format: currentFormat() },
+        (frame) => {
+          if (
+            !browserOperations.isCredentialOperationActive(sessionId) &&
+            browserOperations.credentialEpoch(sessionId) === startEpoch
+          ) {
+            bridge.publishFrame(sessionId, frame);
+          }
+        },
+        {
+          format: currentFormat(),
+          isCredentialOperationActive: () => browserOperations.isCredentialOperationActive(sessionId),
+          credentialEpoch: () => browserOperations.credentialEpoch(sessionId),
+        },
       );
+      if (
+        browserOperations.isCredentialOperationActive(sessionId) ||
+        browserOperations.credentialEpoch(sessionId) !== startEpoch
+      ) {
+        await handle.stop().catch(() => {});
+        return;
+      }
       if (!shouldCast(sessionId)) {
         await handle.stop().catch(() => {});
         return;
@@ -342,10 +386,21 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
       publishState(sessionId);
       // Wave 5: a static page emits no damage frame after start — capture one
       // so the viewer leaves its loading state at once.
-      void handle.refresh().catch((err: unknown) => log(`initial frame failed for session ${sessionId}`, err));
+      void refreshScreencast(sessionId, handle).catch((err: unknown) =>
+        log(`initial frame failed for session ${sessionId}`, err),
+      );
     } finally {
       starting.delete(sessionId);
     }
+  }
+
+  async function refreshScreencast(sessionId: string, handle: ScreencastHandle): Promise<void> {
+    screencastOperationSequence += 1;
+    await browserOperations.withOperation(
+      sessionId,
+      { kind: "shared", operationId: `screencast-refresh:${screencastOperationSequence}` },
+      async () => await handle.refresh(),
+    );
   }
 
   async function stopScreencast(sessionId: string): Promise<void> {
@@ -361,6 +416,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
   }
 
   async function stepDown(sessionId: string): Promise<void> {
+    if (browserOperations.isCredentialOperationActive(sessionId)) return;
     const entry = casts.get(sessionId);
     if (entry === undefined) return;
     entry.stepIndex = Math.min(entry.stepIndex + 1, SCREENCAST_LADDER.length - 1);
@@ -381,6 +437,10 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     const load = loadavg()[0];
     for (const [sessionId, entry] of [...casts]) {
       try {
+        if (browserOperations.isCredentialOperationActive(sessionId)) {
+          await stopScreencast(sessionId);
+          continue;
+        }
         const active = registry.activePage(sessionId);
         if (active === null || active !== entry.page || entry.page.isClosed()) {
           // The screencast follows the active tab: restart it on the new page.
@@ -410,14 +470,18 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
 
   /** page.title() is async — the cache backs the sync publishState. */
   const titleCache = new Map<string, string>();
+  const titleCacheEpoch = new Map<string, number>();
   /** Per-page tab titles (Wave 6 W4); pruned whenever a session publishes. */
   const tabTitleCache = new Map<Page, string>();
+  const tabTitleCacheEpoch = new WeakMap<Page, number>();
   const refreshingTabTitles = new Set<string>();
+  let stateOperationSequence = 0;
 
-  function deadState(sessionId: string): BrowserStateDto {
+  function deadState(sessionId: string): BrowserStateDto & { credentialLock: boolean } {
     return {
       sessionId,
       live: false,
+      credentialLock: false,
       url: null,
       title: null,
       takeover: false,
@@ -430,16 +494,40 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     };
   }
 
+  function lockedState(sessionId: string): BrowserStateDto & { credentialLock: boolean } {
+    return {
+      ...deadState(sessionId),
+      live: true,
+      credentialLock: true,
+    };
+  }
+
   async function refreshTitle(sessionId: string, page: Page): Promise<void> {
+    stateOperationSequence += 1;
     try {
-      const title = await page.title();
-      if (registry.get(sessionId) === null) return;
-      if (titleCache.get(sessionId) !== title) {
-        titleCache.set(sessionId, title);
-        publishState(sessionId); // terminates: the refreshed title no longer differs
-      }
+      await browserOperations.withOperation(
+        sessionId,
+        { kind: "shared", operationId: `active-title:${stateOperationSequence}` },
+        async () => {
+          const readEpoch = browserOperations.credentialEpoch(sessionId);
+          if (browserOperations.isCredentialOperationActive(sessionId)) return;
+          const title = await page.title();
+          if (
+            browserOperations.isCredentialOperationActive(sessionId) ||
+            browserOperations.credentialEpoch(sessionId) !== readEpoch
+          ) {
+            return;
+          }
+          if (registry.get(sessionId) === null) return;
+          if (titleCache.get(sessionId) !== title || titleCacheEpoch.get(sessionId) !== readEpoch) {
+            titleCache.set(sessionId, title);
+            titleCacheEpoch.set(sessionId, readEpoch);
+            publishState(sessionId); // terminates: the refreshed title no longer differs
+          }
+        },
+      );
     } catch {
-      // page/context gone — the next publish builds a dead state anyway
+      // Page/context gone or credential admission refused: no stale publish.
     }
   }
 
@@ -472,29 +560,43 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
   }
 
   function publishState(sessionId: string): void {
+    if (browserOperations.isCredentialOperationActive(sessionId)) {
+      bridge.publishState(sessionId, lockedState(sessionId));
+      return;
+    }
     const session = registry.get(sessionId);
     if (session === null) {
       titleCache.delete(sessionId);
+      titleCacheEpoch.delete(sessionId);
       bridge.publishState(sessionId, deadState(sessionId));
       return;
     }
     ensureWatched(sessionId);
     const page = session.tabs[session.activeIndex] ?? session.handle.page;
     const viewport = page.viewportSize() ?? { width: cfg.screencast.width, height: cfg.screencast.height };
+    const stateEpoch = browserOperations.credentialEpoch(sessionId);
+    const currentTitle =
+      titleCacheEpoch.get(sessionId) === stateEpoch ? (titleCache.get(sessionId) ?? null) : null;
     // Wave 6 W4: the tab strip is agent-owned. The list only ever contains
     // pages the agent opened; a viewer has no "new tab" path.
     const activeIndex = session.tabs.indexOf(page) === -1 ? session.activeIndex : session.tabs.indexOf(page);
     const tabs = session.tabs.map((tab, index) => ({
       index,
       url: tab.url() || null,
-      title: tabTitleCache.get(tab) ?? (index === activeIndex ? titleCache.get(sessionId) ?? null : null),
+      title:
+        tabTitleCacheEpoch.get(tab) === stateEpoch
+          ? (tabTitleCache.get(tab) ?? null)
+          : index === activeIndex
+            ? currentTitle
+            : null,
       active: index === activeIndex,
     }));
     bridge.publishState(sessionId, {
       sessionId,
       live: true,
+      credentialLock: false,
       url: page.url(),
-      title: titleCache.get(sessionId) ?? null,
+      title: currentTitle,
       takeover: session.takeover,
       takeoverViewerId: session.takeover ? session.takeoverViewerId : null,
       screencast: casts.has(sessionId),
@@ -502,7 +604,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
       viewport,
       tabs,
       activeTabIndex: activeIndex,
-    });
+    } as BrowserStateDto & { credentialLock: boolean });
     // The first publish after a navigation carries the previous title; the
     // refresh republishes with the fresh one. The gateway keeps the latest.
     void refreshTitle(sessionId, page);
@@ -515,29 +617,53 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
    * republish cannot recurse.
    */
   async function refreshTabTitles(sessionId: string): Promise<void> {
+    if (browserOperations.isCredentialOperationActive(sessionId)) return;
     if (refreshingTabTitles.has(sessionId)) return;
-    const session = registry.get(sessionId);
-    if (session === null) return;
     refreshingTabTitles.add(sessionId);
+    stateOperationSequence += 1;
     try {
-      let changed = false;
-      const live = new Set(session.tabs);
-      for (const tab of session.tabs) {
-        try {
-          const title = await tab.title();
-          if (tabTitleCache.get(tab) !== title) {
-            tabTitleCache.set(tab, title);
-            changed = true;
+      await browserOperations.withOperation(
+        sessionId,
+        { kind: "shared", operationId: `tab-titles:${stateOperationSequence}` },
+        async () => {
+          const readEpoch = browserOperations.credentialEpoch(sessionId);
+          const session = registry.get(sessionId);
+          if (session === null || browserOperations.isCredentialOperationActive(sessionId)) return;
+          let changed = false;
+          const live = new Set(session.tabs);
+          for (const tab of session.tabs) {
+            try {
+              const title = await tab.title();
+              if (
+                browserOperations.isCredentialOperationActive(sessionId) ||
+                browserOperations.credentialEpoch(sessionId) !== readEpoch
+              ) {
+                return;
+              }
+              if (tabTitleCache.get(tab) !== title || tabTitleCacheEpoch.get(tab) !== readEpoch) {
+                tabTitleCache.set(tab, title);
+                tabTitleCacheEpoch.set(tab, readEpoch);
+                changed = true;
+              }
+            } catch {
+              // Page/context gone — the next publish drops it from `tabs`.
+            }
           }
-        } catch {
-          // Page/context gone — the next publish drops it from `tabs`.
-        }
-      }
-      // Drop cache entries for pages no longer in this session's strip.
-      for (const cached of [...tabTitleCache.keys()]) {
-        if (!live.has(cached)) tabTitleCache.delete(cached);
-      }
-      if (changed && registry.get(sessionId) !== null) publishState(sessionId);
+          if (
+            browserOperations.isCredentialOperationActive(sessionId) ||
+            browserOperations.credentialEpoch(sessionId) !== readEpoch
+          ) {
+            return;
+          }
+          // Drop cache entries for pages no longer in this session's strip.
+          for (const cached of [...tabTitleCache.keys()]) {
+            if (!live.has(cached)) tabTitleCache.delete(cached);
+          }
+          if (changed && registry.get(sessionId) !== null) publishState(sessionId);
+        },
+      );
+    } catch {
+      // Page/context gone or credential admission refused: no stale publish.
     } finally {
       refreshingTabTitles.delete(sessionId);
     }
@@ -554,6 +680,10 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     const previous = viewerCounts.get(sessionId) ?? 0;
     if (viewers === 0) viewerCounts.delete(sessionId);
     else viewerCounts.set(sessionId, viewers);
+    if (browserOperations.isCredentialOperationActive(sessionId)) {
+      publishState(sessionId);
+      return;
+    }
     if (viewers === 0) {
       // Takeover is void without a viewer: its owner is gone, and a flag
       // left set would brick every browser_* tool until idle eviction
@@ -599,7 +729,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
       // state nor a frame yet. Republish the state and restart the cast so
       // chromium emits a fresh frame even on a static page.
       publishState(sessionId);
-      void cast.handle.refresh().catch(async (err: unknown) => {
+      void refreshScreencast(sessionId, cast.handle).catch(async (err: unknown) => {
         log(`screencast refresh failed for session ${sessionId} — stopping`, err);
         await stopScreencast(sessionId);
       });
@@ -621,6 +751,24 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
    */
   const inputQueues = new Map<string, BrowserInputEvent[]>();
   const inputPumping = new Set<string>();
+  let inputOperationSequence = 0;
+
+  const removeCredentialListener = browserOperations.addCredentialOperationListener((sessionId, active) => {
+    if (active) {
+      inputQueues.delete(sessionId);
+      publishState(sessionId);
+      void stopScreencast(sessionId).catch((err: unknown) =>
+        log(`screencast stop at credential lock failed for session ${sessionId}`, err),
+      );
+      return;
+    }
+    publishState(sessionId);
+    if (closePromise === null && shouldCast(sessionId)) {
+      void startScreencastFor(sessionId).catch((err: unknown) =>
+        log(`screencast restart after credential lock failed for session ${sessionId}`, err),
+      );
+    }
+  });
 
   function pruneInputQueue(sessionId: string): void {
     const queue = inputQueues.get(sessionId);
@@ -632,6 +780,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
   }
 
   function onInput(sessionId: string, event: BrowserInputEvent): void {
+    if (browserOperations.isCredentialOperationActive(sessionId)) return;
     let queue = inputQueues.get(sessionId);
     if (queue === undefined) {
       queue = [];
@@ -643,8 +792,13 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     void (async () => {
       try {
         for (;;) {
+          if (browserOperations.isCredentialOperationActive(sessionId)) {
+            inputQueues.delete(sessionId);
+            break;
+          }
           const next = inputQueues.get(sessionId)?.shift();
           if (next === undefined) break;
+          if (browserOperations.isCredentialOperationActive(sessionId)) continue;
           const page = registry.activePage(sessionId);
           if (page === null) continue; // session gone — drop the event
           if (registry.get(sessionId)?.takeover !== true) {
@@ -659,11 +813,22 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
             continue;
           }
           try {
-            // Viewer input is activity: reset the idle-eviction clock so an
-            // interacting user never has the tab evicted mid-interaction.
-            registry.touch(sessionId);
-            await applyInputEvent(page, next);
+            inputOperationSequence += 1;
+            await browserOperations.withOperation(
+              sessionId,
+              { kind: "shared", operationId: `viewer-input:${inputOperationSequence}` },
+              async () => {
+                if (registry.get(sessionId)?.takeover !== true) return;
+                // Viewer input is activity: reset the idle-eviction clock so an
+                // interacting user never has the tab evicted mid-interaction.
+                registry.touch(sessionId);
+                // The COMPLETE dispatch (including long-press sleeps and every
+                // swipe move/up) is shared work, so exclusive entry drains it.
+                await applyInputEvent(page, next);
+              },
+            );
           } catch (err) {
+            if (err instanceof BrowserOperationRefusal) continue;
             log(`input event failed on session ${sessionId}`, err);
           }
         }
@@ -675,6 +840,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
   }
 
   function onTakeover(sessionId: string, enabled: boolean, viewerId?: string): void {
+    if (browserOperations.isCredentialOperationActive(sessionId)) return;
     registry.setTakeover(sessionId, enabled, viewerId ?? null);
     publishState(sessionId);
   }
@@ -685,6 +851,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
    * active tab immediately rather than waiting for the 10 s monitor.
    */
   function onSwitchTab(sessionId: string, index: number, _viewerId?: string): void {
+    if (browserOperations.isCredentialOperationActive(sessionId)) return;
     const session = registry.get(sessionId);
     if (session === null) return;
     const previous = session.tabs[session.activeIndex] ?? null;
@@ -707,6 +874,9 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
   // -------------------------------------------------------------------------
 
   async function openSession(sessionId: string, userId: string): Promise<SessionBrowser> {
+    if (browserOperations.isCredentialOperationActive(sessionId)) {
+      throw new BrowserOperationRefusal("credential_operation_in_progress");
+    }
     // Watch FIRST: a viewer joining while the context is being acquired must
     // not be missed — the join handler would find no session yet, and the
     // viewerCount re-check below starts the cast for exactly that race.
@@ -721,6 +891,10 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
   }
 
   async function releaseSession(sessionId: string): Promise<void> {
+    if (browserOperations.isCredentialOperationActive(sessionId)) {
+      publishState(sessionId);
+      throw new BrowserOperationRefusal("credential_operation_in_progress");
+    }
     detachGrace.cancel(sessionId);
     await stopScreencast(sessionId);
     // capture → flush → registry.close → pool.releaseLive → notify {live:false}
@@ -737,6 +911,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
    * teardown, then the {live:false} publish — the exact pinned ordering.
    */
   async function onPoolIdleEvict(sessionId: string, context: BrowserContext): Promise<void> {
+    if (browserOperations.isCredentialOperationActive(sessionId)) return;
     detachGrace.cancel(sessionId);
     await stopScreencast(sessionId);
     const session = registry.get(sessionId);
@@ -750,6 +925,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
       registry.close(sessionId);
     }
     titleCache.delete(sessionId);
+    titleCacheEpoch.delete(sessionId);
     pruneInputQueue(sessionId);
     await bridge.unwatch(sessionId);
     publishState(sessionId);
@@ -766,6 +942,11 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     closePromise = (async () => {
       clearInterval(monitorTimer);
       detachGrace.clear();
+      inputQueues.clear();
+      // Abort brokers first and await their fenced field cleanup BEFORE any
+      // registry/pool persistence or context close can observe the page.
+      await browserOperations.close();
+      removeCredentialListener();
       // Flush BEFORE any process dies (Review Focus #2): every live session
       // goes through the full capture→flush→close path first. The REGISTRY
       // is the enumeration source (the "context alive" set) — the engine's

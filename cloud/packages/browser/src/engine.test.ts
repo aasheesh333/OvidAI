@@ -52,7 +52,7 @@ import {
 } from "@ovid/shared";
 
 import type { BrowserEngineConfig } from "./config.js";
-import { createBrowserEngine, type BrowserEngine } from "./engine.js";
+import { BrowserOperationCoordinator, createBrowserEngine, type BrowserEngine } from "./engine.js";
 import { chromiumExecutableExists } from "./pool.js";
 import { frameMagicFormat } from "./screencast.js";
 import { TAKEOVER_REFUSAL } from "./sessions.js";
@@ -729,6 +729,385 @@ describe.skipIf(!GATED)("BrowserEngine facade (real redis + chromium, harness pl
     await tap.waitForState((s) => s.live === false);
   }, 30_000);
 });
+
+describe("BrowserEngine credential lifecycle and state (no external services)", () => {
+  it("publishes an additive credential-lock state without reading page state", async () => {
+    const operations = new BrowserOperationCoordinator();
+    const published: string[] = [];
+    const engine = await createBrowserEngine({
+      cfg: makeCfg(),
+      browserOperations: operations,
+      redisFactory: () =>
+        ({
+          on() {},
+          async subscribe() { return 1; },
+          async unsubscribe() { return 1; },
+          async quit() {},
+          async publish(_channel: string, payload: Buffer | string) {
+            published.push(typeof payload === "string" ? payload : payload.toString("utf8"));
+            return 1;
+          },
+        }) as unknown as Redis,
+      persistence: null,
+    });
+    const key = "user-u1";
+    const page = {
+      on() {},
+      url: vi.fn(() => "https://credential.invalid/"),
+      viewportSize: () => ({ width: 1280, height: 800 }),
+    };
+    engine.registry.open({
+      sessionId: key,
+      userId: "u1",
+      handle: {
+        sessionId: key,
+        context: { storageState: async () => ({ cookies: [], origins: [] }) } as never,
+        page: page as never,
+        createdAt: Date.now(),
+        touch() {},
+      },
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const pending = operations.withOperation(key, { kind: "credential", operationId: "login" }, () => gate);
+    try {
+      published.length = 0;
+      engine.publishState(key);
+      const state = published.map((raw) => JSON.parse(raw) as Record<string, unknown>).find((value) => value.live === true);
+      expect({
+        credentialLock: state?.credentialLock,
+        url: state?.url,
+        title: state?.title,
+        tabs: state?.tabs,
+        screencast: state?.screencast,
+        pageUrlReads: page.url.mock.calls.length,
+      }).toEqual({ credentialLock: true, url: null, title: null, tabs: [], screencast: false, pageUrlReads: 0 });
+    } finally {
+      release();
+      await pending;
+      await engine.close();
+    }
+  });
+
+  it("UNEXECUTED review C2: an in-flight screencast start drains before exclusive work and cannot replay after unlock", async () => {
+    const operations = new BrowserOperationCoordinator();
+    const key = "user-u1";
+    const published: Array<{ channel: string; payload: Buffer | string }> = [];
+    const connections: Redis[] = [];
+    const engine = await createBrowserEngine({
+      cfg: makeCfg(),
+      browserOperations: operations,
+      redisFactory: () => {
+        const connection = stubEngineRedis(published);
+        connections.push(connection);
+        return connection;
+      },
+      persistence: null,
+    });
+    const startAllowed = deferredEngine();
+    const startStarted = deferredEngine();
+    const frameListeners: Array<(event: { data: string; sessionId: number }) => void> = [];
+    let starts = 0;
+    let currentUrl = "https://ordinary.invalid/login";
+    const cdp = {
+      on(event: string, listener: (event: { data: string; sessionId: number }) => void) {
+        if (event === "Page.screencastFrame") frameListeners.push(listener);
+      },
+      off() {},
+      async detach() {},
+      async send(method: string) {
+        if (method === "Page.startScreencast") {
+          starts += 1;
+          if (starts === 1) {
+            // Complete the one-time WebP probe before holding the real cast.
+            setTimeout(() => {
+              frameListeners.at(-1)?.({
+                data: Buffer.from([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50]).toString("base64"),
+                sessionId: 1,
+              });
+            }, 0);
+            return {};
+          }
+          startStarted.resolve();
+          await startAllowed.promise;
+        }
+        if (method === "Page.captureScreenshot") {
+          return { data: Buffer.from([0xff, 0xd8, 9]).toString("base64") };
+        }
+        return {};
+      },
+    };
+    const page = {
+      on() {},
+      url: () => currentUrl,
+      viewportSize: () => ({ width: 1280, height: 800 }),
+      goto: async (url: string) => {
+        currentUrl = url;
+      },
+      context: () => ({
+        newCDPSession: async () => cdp,
+        pages: () => [page],
+        storageState: async () => ({ cookies: [], origins: [] }),
+      }),
+    };
+    engine.registry.open({
+      sessionId: key,
+      userId: "u1",
+      handle: {
+        sessionId: key,
+        context: page.context() as never,
+        page: page as never,
+        createdAt: Date.now(),
+        touch() {},
+      },
+    });
+    await engine.openSession(key, "u1");
+    await connections[0]!.publish(
+      browserCtlChannel(key),
+      JSON.stringify({ type: "viewer_join", viewerId: "viewer-start" }),
+    );
+    await startStarted.promise;
+    // This is the listener attached by the cast whose CDP start is paused.
+    // Retain it BEFORE any credential operation or automatic fresh restart.
+    const oldFrameListener = frameListeners.at(-1);
+    expect(oldFrameListener).toBeDefined();
+    // No fresh cast may restart after unlock, so both drops below are measured
+    // against this exact old closure rather than frameListeners.at(-1).
+    await connections[0]!.publish(
+      browserCtlChannel(key),
+      JSON.stringify({ type: "viewer_leave", viewerId: "viewer-start" }),
+    );
+    await vi.waitFor(() => expect(engine.viewerCount(key)).toBe(0));
+
+    const credentialRelease = deferredEngine();
+    let credentialStarted = false;
+    const pending = operations.withOperation(key, { kind: "credential", operationId: "login" }, async () => {
+      credentialStarted = true;
+      await credentialRelease.promise;
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(credentialStarted).toBe(false);
+    } finally {
+      startAllowed.resolve();
+    }
+    await vi.waitFor(() => expect(credentialStarted).toBe(true));
+
+    const framesBefore = published.filter((entry) => entry.channel === browserFramesChannel(key)).length;
+    try {
+      oldFrameListener!({
+        data: Buffer.from([0xff, 0xd8, 7]).toString("base64"),
+        sessionId: 7,
+      });
+      expect(published.filter((entry) => entry.channel === browserFramesChannel(key))).toHaveLength(framesBefore);
+    } finally {
+      credentialRelease.resolve();
+      await pending;
+    }
+
+    const framesAfterUnlock = published.filter((entry) => entry.channel === browserFramesChannel(key)).length;
+    oldFrameListener!({
+      data: Buffer.from([0xff, 0xd8, 8]).toString("base64"),
+      sessionId: 8,
+    });
+    expect(published.filter((entry) => entry.channel === browserFramesChannel(key))).toHaveLength(framesAfterUnlock);
+    await engine.close();
+  });
+
+  it("UNEXECUTED review I2: delayed active-title completion from before a lock is dropped after unlock", async () => {
+    const operations = new BrowserOperationCoordinator();
+    const key = "user-u1";
+    const published: Array<{ channel: string; payload: Buffer | string }> = [];
+    const engine = await createBrowserEngine({
+      cfg: makeCfg(),
+      browserOperations: operations,
+      redisFactory: () => stubEngineRedis(published),
+      persistence: null,
+    });
+    const delayed = deferredEngine();
+    let reads = 0;
+    const page = {
+      on() {},
+      url: () => "https://ordinary.invalid/",
+      viewportSize: () => ({ width: 1280, height: 800 }),
+      title: vi.fn(() => {
+        reads += 1;
+        return reads === 1 ? delayed.promise.then(() => "credential-derived-title") : Promise.resolve("fresh-title");
+      }),
+    };
+    engine.registry.open({
+      sessionId: key,
+      userId: "u1",
+      handle: {
+        sessionId: key,
+        context: { storageState: async () => ({ cookies: [], origins: [] }) } as never,
+        page: page as never,
+        createdAt: Date.now(),
+        touch() {},
+      },
+    });
+    engine.publishState(key);
+    await vi.waitFor(() => expect(reads).toBeGreaterThan(0));
+    const pending = operations.withOperation(key, { kind: "credential", operationId: "login" }, async () => {});
+    delayed.resolve();
+    await pending;
+    await vi.waitFor(() => {
+      const states = published
+        .filter((entry) => entry.channel === browserStateChannel(key))
+        .map((entry) => JSON.parse(entry.payload.toString()) as { title?: string | null });
+      expect(states.at(-1)?.title).toBe("fresh-title");
+    });
+    expect(JSON.stringify(published)).not.toContain("credential-derived-title");
+    await engine.close();
+  });
+
+  it("UNEXECUTED review I2: delayed per-tab-title completion from before a lock is dropped after unlock", async () => {
+    const operations = new BrowserOperationCoordinator();
+    const key = "user-u1";
+    const published: Array<{ channel: string; payload: Buffer | string }> = [];
+    const engine = await createBrowserEngine({
+      cfg: makeCfg(),
+      browserOperations: operations,
+      redisFactory: () => stubEngineRedis(published),
+      persistence: null,
+    });
+    const delayed = deferredEngine();
+    let reads = 0;
+    const page = {
+      on() {},
+      url: () => "https://ordinary.invalid/",
+      viewportSize: () => ({ width: 1280, height: 800 }),
+      title: vi.fn(() => {
+        reads += 1;
+        if (reads === 1) return Promise.resolve("active-title");
+        return reads === 2 ? delayed.promise.then(() => "credential-derived-tab-title") : Promise.resolve("fresh-tab-title");
+      }),
+    };
+    engine.registry.open({
+      sessionId: key,
+      userId: "u1",
+      handle: {
+        sessionId: key,
+        context: { storageState: async () => ({ cookies: [], origins: [] }) } as never,
+        page: page as never,
+        createdAt: Date.now(),
+        touch() {},
+      },
+    });
+    engine.publishState(key);
+    await vi.waitFor(() => expect(reads).toBeGreaterThanOrEqual(2));
+    const pending = operations.withOperation(key, { kind: "credential", operationId: "login" }, async () => {});
+    delayed.resolve();
+    await pending;
+    await vi.waitFor(() => {
+      const states = published
+        .filter((entry) => entry.channel === browserStateChannel(key))
+        .map((entry) => JSON.parse(entry.payload.toString()) as { tabs?: Array<{ title?: string | null }> });
+      expect(states.at(-1)?.tabs?.[0]?.title).toBe("fresh-tab-title");
+    });
+    expect(JSON.stringify(published)).not.toContain("credential-derived-tab-title");
+    await engine.close();
+  });
+
+  it("close aborts exclusive work and awaits broker cleanup before finishing", async () => {
+    const operations = new BrowserOperationCoordinator();
+    const controller = new AbortController();
+    const engine = await createBrowserEngine({
+      cfg: makeCfg(),
+      browserOperations: operations,
+      redisFactory: () =>
+        ({
+          on() {},
+          async subscribe() { return 1; },
+          async unsubscribe() { return 1; },
+          async quit() {},
+          async publish() { return 1; },
+        }) as unknown as Redis,
+      persistence: null,
+    });
+    const started = deferredEngine();
+    const cleanupStarted = deferredEngine();
+    const cleanupRelease = deferredEngine();
+    let cleanupBegan = false;
+    let cleaned = false;
+    const pending = operations.withOperation(
+      "user-u1",
+      { kind: "credential", operationId: "login", signal: controller.signal, abortController: controller },
+      async () => {
+        started.resolve();
+        try {
+          await new Promise<void>((resolve) => controller.signal.addEventListener("abort", () => resolve(), { once: true }));
+        } finally {
+          cleanupBegan = true;
+          cleanupStarted.resolve();
+          await cleanupRelease.promise;
+          cleaned = true;
+        }
+      },
+    );
+    await started.promise;
+    const closing = engine.close();
+    let closeSettled = false;
+    void closing.then(() => {
+      closeSettled = true;
+    });
+    try {
+      await vi.waitFor(() => {
+        expect(closeSettled || cleanupBegan).toBe(true);
+      });
+      expect({ closeSettled, aborted: controller.signal.aborted }).toEqual({ closeSettled: false, aborted: true });
+    } finally {
+      controller.abort();
+      cleanupRelease.resolve();
+      await Promise.all([pending, closing]);
+    }
+    expect(cleaned).toBe(true);
+  });
+});
+
+function stubEngineRedis(published: Array<{ channel: string; payload: Buffer | string }>): Redis {
+  const listeners = new Map<string, Set<(channel: Buffer, message: Buffer) => void>>();
+  const channels = new Set<string>();
+  return {
+    on(event: string, listener: (channel: Buffer, message: Buffer) => void) {
+      const entries = listeners.get(event) ?? new Set<(channel: Buffer, message: Buffer) => void>();
+      entries.add(listener);
+      listeners.set(event, entries);
+    },
+    async subscribe(...names: string[]) {
+      for (const name of names) channels.add(name);
+      return names.length;
+    },
+    async unsubscribe(...names: string[]) {
+      if (names.length === 0) channels.clear();
+      else for (const name of names) channels.delete(name);
+      return names.length;
+    },
+    async quit() {
+      channels.clear();
+      return "OK";
+    },
+    async publish(channel: string, payload: Buffer | string) {
+      published.push({ channel, payload });
+      if (!channels.has(channel)) return 0;
+      const message = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
+      for (const listener of listeners.get("messageBuffer") ?? []) {
+        listener(Buffer.from(channel), message);
+      }
+      return 1;
+    },
+  } as unknown as Redis;
+}
+
+function deferredEngine(): { promise: Promise<void>; resolve(): void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
 
 // ---------------------------------------------------------------------------
 // Dedicated-uid boot contract (ungated — no redis/chromium needed)

@@ -23,6 +23,7 @@
 import { existsSync } from "node:fs";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
 
+import { BrowserOperationRefusal, type BrowserOperationCoordinator } from "./browserOperations.js";
 import type { BrowserEngineConfig } from "./config.js";
 import type { StorageState } from "./storageState.js";
 import { prepareBrowserUidDrop, type BrowserUidDrop } from "./uidDrop.js";
@@ -63,6 +64,10 @@ export interface BrowserPoolOptions {
    * browser while someone is watching it). Evaluated at sweep time.
    */
   isPinned?(sessionId: string): boolean;
+  /** Exclusive credential work pins the same per-user live handle against every pool consumer. */
+  isCredentialOperationActive?(sessionId: string): boolean;
+  /** Production engine seam: wraps the entire acquire/release/evict lifecycle in shared operations. */
+  browserOperations?: BrowserOperationCoordinator;
   /** Per-waiter queue timeout, default 30_000. */
   queueTimeoutMs?: number;
   /**
@@ -84,12 +89,15 @@ export interface BrowserPoolOptions {
 
 export interface BrowserPool {
   /** Same sessionId ⇒ existing handle (touch); FIFO beyond cfg.maxLiveBrowsers. */
-  acquireLive(sessionId: string, opts?: { storageState?: StorageState | null }): Promise<LiveContextHandle>;
+  acquireLive(
+    sessionId: string,
+    opts?: { storageState?: StorageState | null; operationId?: string },
+  ): Promise<LiveContextHandle>;
   /** FIFO beyond cfg.tier1FallbackContexts; lease.release closes the context. */
   acquireTier1(): Promise<Tier1Lease>;
   peekLive(sessionId: string): LiveContextHandle | null;
   /** Closes + removes the context (caller flushes state BEFORE — onIdleEvict is NOT called). */
-  releaseLive(sessionId: string): Promise<void>;
+  releaseLive(sessionId: string, opts?: { operationId?: string }): Promise<void>;
   /** Handles untouched > cfg.idleEvictMs: onIdleEvict → close; returns evicted sessionIds. */
   evictIdle(): Promise<string[]>;
   liveCount(): number;
@@ -131,6 +139,22 @@ export function createBrowserPool(cfg: BrowserEngineConfig, opts: BrowserPoolOpt
   const queueTimeoutMs = opts.queueTimeoutMs ?? 30_000;
   const sweepIntervalMs = opts.sweepIntervalMs ?? 30_000;
   const now = (): number => (opts.now ? opts.now() : Date.now());
+  let operationSequence = 0;
+  const nextOperationId = (prefix: string): string => `${prefix}:${++operationSequence}`;
+
+  async function withShared<T>(
+    sessionId: string,
+    operationId: string,
+    fn: () => Promise<T>,
+    allowAfterClose = false,
+  ): Promise<T> {
+    if (opts.browserOperations === undefined) return await fn();
+    return await opts.browserOperations.withOperation(
+      sessionId,
+      { kind: "shared", operationId, allowAfterClose },
+      fn,
+    );
+  }
 
   let browser: Browser | null = null;
   let browserAlive = false;
@@ -399,6 +423,13 @@ export function createBrowserPool(cfg: BrowserEngineConfig, opts: BrowserPoolOpt
     clearTimeout(w.timer);
     try {
       if (w.kind === "live") {
+        if (
+          opts.browserOperations === undefined &&
+          w.sessionId !== undefined &&
+          opts.isCredentialOperationActive?.(w.sessionId) === true
+        ) {
+          throw new BrowserOperationRefusal("credential_operation_in_progress");
+        }
         // The session may already have a live handle by admission time (a
         // duplicate waiter raced an existing acquire) — reuse it, no slot used.
         const existing = w.sessionId !== undefined ? live.get(w.sessionId) : undefined;
@@ -418,18 +449,24 @@ export function createBrowserPool(cfg: BrowserEngineConfig, opts: BrowserPoolOpt
 
   async function acquireLive(
     sessionId: string,
-    acquireOpts?: { storageState?: StorageState | null },
+    acquireOpts?: { storageState?: StorageState | null; operationId?: string },
   ): Promise<LiveContextHandle> {
     if (closed) throw new BrowserPoolBusyError("The browser pool is closed.");
-    const existing = live.get(sessionId);
-    if (existing) {
-      existing.touch();
-      return existing;
-    }
-    if (liveHasCapacity()) {
-      return createLiveHandle(sessionId, acquireOpts?.storageState ?? null);
-    }
-    return enqueueWaiter("live", sessionId, acquireOpts?.storageState ?? null) as Promise<LiveContextHandle>;
+    const operationId = acquireOpts?.operationId ?? nextOperationId("pool-acquire");
+    return await withShared(sessionId, operationId, async () => {
+      if (opts.browserOperations === undefined && opts.isCredentialOperationActive?.(sessionId) === true) {
+        throw new BrowserOperationRefusal("credential_operation_in_progress");
+      }
+      const existing = live.get(sessionId);
+      if (existing) {
+        existing.touch();
+        return existing;
+      }
+      if (liveHasCapacity()) {
+        return await createLiveHandle(sessionId, acquireOpts?.storageState ?? null);
+      }
+      return await enqueueWaiter("live", sessionId, acquireOpts?.storageState ?? null) as LiveContextHandle;
+    });
   }
 
   async function acquireTier1(): Promise<Tier1Lease> {
@@ -440,15 +477,26 @@ export function createBrowserPool(cfg: BrowserEngineConfig, opts: BrowserPoolOpt
     return enqueueWaiter("tier1", undefined, null) as Promise<Tier1Lease>;
   }
 
-  async function releaseLive(sessionId: string): Promise<void> {
-    const handle = live.get(sessionId);
-    if (!handle) return;
-    live.delete(sessionId);
-    try {
-      await handle.context.close();
-    } finally {
-      pump();
-    }
+  async function releaseLive(sessionId: string, releaseOpts?: { operationId?: string }): Promise<void> {
+    const operationId = releaseOpts?.operationId ?? nextOperationId("pool-release");
+    await withShared(
+      sessionId,
+      operationId,
+      async () => {
+        if (opts.browserOperations === undefined && opts.isCredentialOperationActive?.(sessionId) === true) {
+          throw new BrowserOperationRefusal("credential_operation_in_progress");
+        }
+        const handle = live.get(sessionId);
+        if (!handle) return;
+        live.delete(sessionId);
+        try {
+          await handle.context.close();
+        } finally {
+          pump();
+        }
+      },
+      true,
+    );
   }
 
   async function evictIdle(): Promise<string[]> {
@@ -456,11 +504,20 @@ export function createBrowserPool(cfg: BrowserEngineConfig, opts: BrowserPoolOpt
     const evicted: string[] = [];
     for (const [sessionId, handle] of [...live]) {
       if (t - handle.lastTouch <= cfg.idleEvictMs) continue;
-      if (opts.isPinned?.(sessionId) === true) continue;
-      live.delete(sessionId);
-      evicted.push(sessionId);
-      if (opts.onIdleEvict) await opts.onIdleEvict(sessionId, handle.context);
-      await handle.context.close();
+      try {
+        await withShared(sessionId, nextOperationId("pool-evict"), async () => {
+          if (opts.browserOperations === undefined && opts.isCredentialOperationActive?.(sessionId) === true) return;
+          if (opts.isPinned?.(sessionId) === true) return;
+          if (live.get(sessionId) !== handle) return;
+          live.delete(sessionId);
+          evicted.push(sessionId);
+          if (opts.onIdleEvict) await opts.onIdleEvict(sessionId, handle.context);
+          await handle.context.close();
+        });
+      } catch (error) {
+        if (error instanceof BrowserOperationRefusal) continue;
+        throw error;
+      }
     }
     pump();
     return evicted;
@@ -481,8 +538,17 @@ export function createBrowserPool(cfg: BrowserEngineConfig, opts: BrowserPoolOpt
 
   function close(): Promise<void> {
     if (closePromise) return closePromise;
+    if (
+      opts.browserOperations === undefined &&
+      [...live.keys()].some((sessionId) => opts.isCredentialOperationActive?.(sessionId) === true)
+    ) {
+      return Promise.reject(new BrowserOperationRefusal("credential_operation_in_progress"));
+    }
     closed = true;
     closePromise = (async () => {
+      // Production shutdown uses the same abort-then-await path as the engine;
+      // no context is touched until broker field cleanup has finished.
+      await opts.browserOperations?.close();
       if (sweepTimer) {
         clearInterval(sweepTimer);
         sweepTimer = null;
@@ -516,7 +582,8 @@ export function createBrowserPool(cfg: BrowserEngineConfig, opts: BrowserPoolOpt
   return {
     acquireLive,
     acquireTier1,
-    peekLive: (sessionId: string) => live.get(sessionId) ?? null,
+    peekLive: (sessionId: string) =>
+      opts.isCredentialOperationActive?.(sessionId) === true ? null : (live.get(sessionId) ?? null),
     releaseLive,
     evictIdle,
     liveCount: () => live.size,
