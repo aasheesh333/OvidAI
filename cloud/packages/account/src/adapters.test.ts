@@ -467,6 +467,87 @@ describe("createCloudCleanup deletion SQL", () => {
       }
     }
   });
+
+  it("UNEXECUTED: invokes the optional preview hook before session/FK work on both session-scope retries", async () => {
+    const events: string[] = [];
+    const sql = (strings: TemplateStringsArray, ..._values: unknown[]) => {
+      events.push(strings.join("$").replace(/\s+/g, " ").trim());
+      return Promise.resolve([]);
+    };
+    const studioPreviews = {
+      deleteAccount: vi.fn(async (_uid: string) => {
+        events.push("preview-cleanup");
+      }),
+    };
+    const cleanup = createCloudCleanup({
+      db: { $client: sql } as unknown as Db,
+      redisDb2: new FakeRedis() as unknown as Redis,
+      litellm: new FakeKeyAdmin(),
+      r2: new FakeR2(),
+      images: { deleteAccount: async () => {} },
+      shares: { deleteAccount: async () => {} },
+      byok: { deleteAccount: async () => {} },
+      studioPreviews,
+    });
+    const steps = cleanup.deletionSteps();
+    const sessionsStep = steps.find((step) => step.name === "sessions")!;
+    const terminalStep = steps.find((step) => step.name === "sql")!;
+
+    await sessionsStep.run("scope-owner", { tokens: [], session_ids: [] });
+    await terminalStep.run("scope-owner", { tokens: [], session_ids: [] });
+
+    expect(studioPreviews.deleteAccount).toHaveBeenCalledTimes(2);
+    expect(studioPreviews.deleteAccount).toHaveBeenNthCalledWith(1, "scope-owner");
+    expect(studioPreviews.deleteAccount).toHaveBeenNthCalledWith(2, "scope-owner");
+    const hookIndices = events.flatMap((event, index) =>
+      event === "preview-cleanup" ? [index] : []
+    );
+    expect(hookIndices).toHaveLength(2);
+    expect(hookIndices[0]).toBe(0);
+    for (const index of hookIndices) {
+      expect(events[index + 1]).toMatch(/^SELECT id FROM sessions WHERE user_id =/);
+    }
+    const parentDeletes = events.flatMap((event, index) =>
+      event.startsWith("DELETE FROM sessions ") ? [index] : []
+    );
+    expect(parentDeletes).toHaveLength(2);
+    expect(parentDeletes[0]).toBeGreaterThan(hookIndices[0]!);
+    expect(parentDeletes[1]).toBeGreaterThan(hookIndices[1]!);
+  });
+
+  it("UNEXECUTED: preview cleanup failure aborts before SQL and is retried, never skipped", async () => {
+    const statements: string[] = [];
+    const sql = (strings: TemplateStringsArray, ..._values: unknown[]) => {
+      statements.push(strings.join("$").replace(/\s+/g, " ").trim());
+      return Promise.resolve([]);
+    };
+    const studioPreviews = {
+      deleteAccount: vi.fn()
+        .mockRejectedValueOnce(new Error("preview cleanup unproven"))
+        .mockResolvedValue(undefined),
+    };
+    const cleanup = createCloudCleanup({
+      db: { $client: sql } as unknown as Db,
+      redisDb2: new FakeRedis() as unknown as Redis,
+      litellm: new FakeKeyAdmin(),
+      r2: new FakeR2(),
+      images: { deleteAccount: async () => {} },
+      shares: { deleteAccount: async () => {} },
+      byok: { deleteAccount: async () => {} },
+      studioPreviews,
+    });
+    const sessionsStep = cleanup.deletionSteps().find((step) => step.name === "sessions")!;
+
+    await expect(sessionsStep.run("scope-owner", { tokens: [], session_ids: [] }))
+      .rejects.toThrow("preview cleanup unproven");
+    expect(statements).toEqual([]);
+
+    await expect(sessionsStep.run("scope-owner", { tokens: [], session_ids: [] }))
+      .resolves.toBeUndefined();
+    expect(studioPreviews.deleteAccount).toHaveBeenCalledTimes(2);
+    expect(statements[0]).toMatch(/^SELECT id FROM sessions WHERE user_id =/);
+    expect(statements.some((text) => text.startsWith("DELETE FROM sessions "))).toBe(true);
+  });
 });
 
 const UID = "acct-cleanup-user";

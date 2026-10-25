@@ -399,6 +399,8 @@ export interface CloudCleanupDeps {
   images: AccountDataDeleter;
   shares: AccountDataDeleter;
   byok: AccountDataDeleter;
+  /** Account-owned stop/terminal-evidence purge; never a generic live-row delete port. */
+  studioPreviews?: AccountDataDeleter;
 }
 
 export type CloudCleanup = DataAdapter & {
@@ -468,6 +470,10 @@ export function createCloudCleanup(deps: CloudCleanupDeps): CloudCleanup {
    * created after prepare() is removed too.
    */
   async function deleteSessionScope(uid: string, ctx: CleanupContext): Promise<void> {
+    // Both the sessions stage and terminal sql retry enter here. Preview stop
+    // and terminal-evidence purge must finish before ANY parent/FK deletion;
+    // a live/unknown state or cleanup error rejects the whole account attempt.
+    await deps.studioPreviews?.deleteAccount(uid);
     const live = (await db.$client`
       SELECT id FROM sessions WHERE user_id = ${uid}`) as Array<{ id: string }>;
     await db.$client`DELETE FROM schedule_runs WHERE schedule_id IN (SELECT id FROM schedules WHERE user_id = ${uid})`;

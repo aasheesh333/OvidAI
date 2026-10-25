@@ -1,7 +1,8 @@
 import { pathToFileURL } from "node:url";
+import { hostname } from "node:os";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { Redis } from "ioredis";
-import { assertSessionFileCapacity, createDb, createStorageQuotaRepos, dbPoolOptionsFromEnv, byokKeysRepo, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, imagesRepo, mcpOauthFlows, mcpServers as mcpServersRepo, messages as messagesRepo, runs as runsRepo, sharesRepo, users, workspaceObjects as workspaceObjectsRepo } from "@ovid/db";
+import { assertSessionFileCapacity, createDb, createStorageQuotaRepos, createStudioPreviewPostgresStore, createStudioPreviewStore, dbPoolOptionsFromEnv, byokKeysRepo, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, imagesRepo, mcpOauthFlows, mcpServers as mcpServersRepo, messages as messagesRepo, runs as runsRepo, sharesRepo, users, workspaceObjects as workspaceObjectsRepo, type Db } from "@ovid/db";
 import {
   createCloudCleanup,
   createFirebaseAdmin,
@@ -78,6 +79,12 @@ import { buildFileService } from "./fileService.js";
 import { createStudioGitService, parseStudioGitAllowedHosts } from "./studioGitRoutes.js";
 import { createMcpRuntime } from "./mcpRuntime.js";
 import { createFetchEgressPolicy } from "./fetchEgressPolicy.js";
+import {
+  createJailedStudioPreviewProcessRunner,
+  createStudioPreviewManager,
+  type StudioPreviewManager,
+} from "./studioPreview.js";
+import { StudioRunBinding } from "./studioRunBinding.js";
 import { createNotifier, createFcmPushSender } from "./notify.js";
 import { createWebPushSender } from "./webPush.js";
 import { createPluginInstallProcessor } from "./pluginInstallProcessor.js";
@@ -429,6 +436,132 @@ export function createProductionAgentRunProcessor(
 
 /**
  * Composition root — intentionally untested-thin (Task 10's e2e exercises the
+const STUDIO_PREVIEW_SWEEP_INTERVAL_MS = 30_000;
+const STUDIO_PREVIEW_TERMINAL_STATUSES = new Set(["stopped", "failed", "expired"]);
+
+async function studioPreviewTableExists(db: Db): Promise<boolean> {
+  const [row] = await db.$client`
+    SELECT to_regclass('studio_previews') AS table_name`;
+  return row?.table_name !== null && row?.table_name !== undefined;
+}
+
+/**
+ * Account-owned cleanup, not a general preview delete API. Every attempt
+ * re-enumerates current sessions, stops their previews, then locks and checks
+ * the complete account scope before deleting terminal evidence only. The
+ * terminal predicate and post-delete check keep live/unknown rows authoritative
+ * even if a concurrent admission races this cleanup; parent FKs then force the
+ * durable account lifecycle to retry rather than silently cascading evidence.
+ */
+export function createStudioPreviewAccountCleanup(deps: {
+  db: Db;
+  previews: Pick<StudioPreviewManager, "stopSession"> | null;
+}): AccountDataDeleter {
+  return {
+    async deleteAccount(uid) {
+      // Pre-0041 schemas retain the legacy account deletion behavior. This is
+      // checked on every retry: installing the table after worker boot must
+      // fail closed when this process has no preview manager, never bypass it.
+      if (!(await studioPreviewTableExists(deps.db))) return;
+      if (deps.previews === null) {
+        throw new Error("Studio previews are unavailable; account cleanup cannot prove terminal state");
+      }
+      const sessions = (await deps.db.$client`
+        SELECT id FROM sessions WHERE user_id = ${uid}`) as Array<{ id: string }>;
+      for (const session of sessions) {
+        await deps.previews.stopSession({
+          userId: uid,
+          sessionId: session.id,
+          reason: "delete",
+        });
+      }
+      await deps.db.$client.begin(async (tx) => {
+        const registered = (await tx`
+          SELECT id, status FROM studio_previews WHERE user_id = ${uid} FOR UPDATE`) as Array<{
+            id: string;
+            status: string;
+          }>;
+        if (registered.some((row) => !STUDIO_PREVIEW_TERMINAL_STATUSES.has(row.status))) {
+          throw new Error("Studio preview cleanup is not terminal; account deletion must retry");
+        }
+        await tx`
+          DELETE FROM studio_previews
+           WHERE user_id = ${uid}
+             AND status IN ('stopped', 'failed', 'expired')`;
+        const remaining = (await tx`
+          SELECT id, status FROM studio_previews WHERE user_id = ${uid}`) as Array<{
+            id: string;
+            status: string;
+          }>;
+        if (remaining.length > 0) {
+          throw new Error("Studio preview terminal evidence is incomplete; account deletion must retry");
+        }
+      });
+    },
+  };
+}
+
+export interface StudioPreviewSweeper {
+  /** The already-started boot pass; interval passes join it rather than overlap. */
+  boot: Promise<void>;
+  /** Clears the interval and awaits the currently active pass, if any. */
+  stop(): Promise<void>;
+}
+
+export function startStudioPreviewSweeper(
+  previews: Pick<StudioPreviewManager, "sweep">,
+): StudioPreviewSweeper {
+  let stopped = false;
+  let active: Promise<void> | null = null;
+  const run = (label: string): Promise<void> => {
+    if (stopped) return Promise.resolve();
+    if (active !== null) return active;
+    const current = (async () => {
+      try {
+        const swept = await previews.sweep();
+        if (swept > 0) {
+          console.log(`[worker] Studio preview sweep (${label}): terminalized ${swept} preview(s)`);
+        }
+      } catch (err) {
+        console.error(`[worker] Studio preview sweep (${label}) failed`, err);
+      }
+    })();
+    active = current;
+    const clear = (): void => {
+      if (active === current) active = null;
+    };
+    void current.then(clear, clear);
+    return current;
+  };
+
+  const boot = run("boot");
+  const timer = setInterval(() => {
+    void run("interval");
+  }, STUDIO_PREVIEW_SWEEP_INTERVAL_MS);
+  timer.unref();
+  return {
+    boot,
+    async stop() {
+      stopped = true;
+      clearInterval(timer);
+      await (active ?? boot);
+    },
+  };
+}
+
+/** The preview-specific segment of worker shutdown; DB stays open above it. */
+export async function closeStudioPreviewResources(deps: {
+  previewSweepStopped: Promise<void> | null;
+  fileService: { close(): Promise<unknown> };
+  previews: Pick<StudioPreviewManager, "close"> | null;
+  closeManager: () => Promise<unknown>;
+}): Promise<void> {
+  await deps.previewSweepStopped;
+  await deps.fileService.close();
+  await deps.previews?.close();
+  await deps.closeManager();
+}
+
  * wiring): env → real deps → BullMQ worker on "agent-runs" → graceful
  * shutdown. Not invoked at import; `node dist/main.js` invokes it.
  */
@@ -626,6 +759,33 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
 
   const studioGit = createStudioGitService({
     manager,
+  // 0041 is an explicit deployment gate, never an implicit migration. Routes,
+  // hibernation cleanup and the preview sweeper all share this one manager; an
+  // absent table disables only previews and leaves the rest of the worker up.
+  const previews = (await studioPreviewTableExists(db))
+    ? createStudioPreviewManager({
+        store: createStudioPreviewStore(createStudioPreviewPostgresStore(db)),
+        manager,
+        binding: new StudioRunBinding(db),
+        redact: createSecretRedactor().text,
+        // A process-random epoch would orphan every cgroup recovery row on
+        // restart. Configuration may distinguish hosts; hostname is stable.
+        workerEpoch: env.OVID_WORKER_EPOCH?.trim() || hostname(),
+        processes: createJailedStudioPreviewProcessRunner({
+          manager,
+          cgroups,
+          launcher,
+          config: sandboxConfig,
+          rootfs,
+        }),
+      })
+    : null;
+  if (previews === null) {
+    console.warn(
+      "[worker] Studio previews disabled — studio_previews is absent (apply migration 0041 explicitly)",
+    );
+  }
+
     masterKey: studioMasterKey,
     listServers: (userId) => mcpServersRepo.list(db, userId),
     allowedHosts: parseStudioGitAllowedHosts(env.OVID_GIT_ALLOWED_HOSTS),
@@ -850,9 +1010,19 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
 
   // Validate the wire payload with the queue schema before the engine sees it
   // (a malformed job must fail loudly, not half-hibernate a workspace).
-  const hibernateWorker = createHibernateWorker({ url: cfg.redisQUrl }, async (job) =>
-    hibernateWorkspace(hibernateDeps, hibernateJobSchema.parse(job.data)),
-  );
+  const hibernateWorker = createHibernateWorker({ url: cfg.redisQUrl }, async (job) => {
+    const input = hibernateJobSchema.parse(job.data);
+    // Stop and durably terminalize previews BEFORE archive/eviction can remove
+    // their cwd/logs. A cleanup error rejects the job for BullMQ retry.
+    if (previews !== null) {
+      await previews.stopSession({
+        userId: input.userId,
+        sessionId: input.sessionId,
+        reason: "hibernate",
+      });
+    }
+    return hibernateWorkspace(hibernateDeps, input);
+  });
   hibernateWorker.on("error", (err) => {
     console.error("[worker] hibernate worker error", err);
   });
@@ -878,6 +1048,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     studioGit,
     connectionHealthInvocations: mcpRuntime?.connectionHealthInvocations,
     inlineMaxBytes: cfg.inlineMaxBytes,
+    ...(previews !== null ? { studioPreviews: previews } : {}),
     port: cfg.workerFilePort,
     host: "0.0.0.0",
     fileManifests: fileManifestsRepo,
@@ -894,6 +1065,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
 
   // P7 Task 11: the run hook — hydrate before any tool touches the
   // workspace. T9-review I3: pass the repo so awaitWarm does not need the
+  const previewSweeper = previews === null ? null : startStudioPreviewSweeper(previews);
+  await previewSweeper?.boot;
+
   // raw `$client.unsafe` path.
   const ensureWarm = async (sessionId: string, userId: string): Promise<void> => {
     await awaitWarm(
@@ -1214,6 +1388,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
         r2: r2Deleter ?? createNoopR2Deleter(),
         images: {
           deleteAccount: async (uid) => {
+        studioPreviews: createStudioPreviewAccountCleanup({ db, previews }),
             await db.transaction(async (tx) => {
               await imagesRepo.insertDeleted(tx, uid, Math.floor(Date.now() / 1000));
               await imagesRepo.clearAccount(tx, uid);
@@ -1275,6 +1450,15 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       // — close() releases every live session (capture → persistence.flush →
       // context close) so logins survive the restart, then tears down the
       // bridge, research and pool in order.
+      // Stop new internal requests, drain the preview sweep, and confirm every
+      // owned preview terminal BEFORE generic sandbox teardown. DB remains open
+      // for those durable CAS writes; fileService.close() has no later caller.
+      await closeStudioPreviewResources({
+        previewSweepStopped,
+        fileService,
+        previews,
+        closeManager: () => manager.close(),
+      });
       await browser.close();
       // Drains in-flight jobs and stops fetching new ones (force=false).
       await worker.close();

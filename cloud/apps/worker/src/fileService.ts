@@ -32,6 +32,8 @@ import type { UiManifest } from "@ovid/shared";
 import { createInternalServiceAuth } from "./internalServiceAuth.js";
 import { registerConnectionHealthRoutes } from "./connectionHealthRoutes.js";
 import { registerStudioGitRoutes, type StudioGitRoutesDeps } from "./studioGitRoutes.js";
+import { registerStudioPreviewRoutes } from "./studioPreviewRoutes.js";
+import type { StudioPreviewManager } from "./studioPreview.js";
 import type { ConnectionHealthInvocations } from "@ovid/mcp";
 import {
   FileNotInArchiveError,
@@ -102,6 +104,8 @@ export interface FileServiceDeps {
   cdn?: CdnConfig;
   /** Production-composed Studio git surface; optional only for legacy file-service tests. */
   studioGit?: StudioGitRoutesDeps;
+  /** Present only after the worker proves the studio_previews table exists. */
+  studioPreviews?: StudioPreviewManager;
   /** Worker-owned health projection/refresh/disconnect lifecycle. */
   connectionHealthInvocations?: ConnectionHealthInvocations;
 }
@@ -207,6 +211,12 @@ export function buildFileService(deps: FileServiceDeps): FastifyInstance {
   app.addHook("preHandler", createInternalServiceAuth(deps.internalToken));
 
   if (deps.studioGit !== undefined) registerStudioGitRoutes(app, deps.studioGit);
+  if (deps.studioPreviews !== undefined) {
+    registerStudioPreviewRoutes(app, {
+      internalToken: deps.internalToken,
+      previews: deps.studioPreviews,
+    });
+  }
   registerConnectionHealthRoutes(app, { invocations: deps.connectionHealthInvocations });
 
   // -- GET /internal/sessions/:sid/tree[?path=sub] ------------------------

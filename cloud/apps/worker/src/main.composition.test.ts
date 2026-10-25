@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { FileServiceDeps } from "./fileService.js";
 import type { FullRunDeps } from "./runProcessor.js";
 import type { StudioGitServiceConfig } from "./studioGitRoutes.js";
+import type { Db } from "@ovid/db";
 
 const h = vi.hoisted(() => {
   const marker = { studio: "real-service-from-factory" };
@@ -41,6 +42,8 @@ vi.mock("@ovid/db", () => ({
   messages: {},
   runs: {},
   sharesRepo: {},
+  sessions: {},
+  studioRepos: {},
   users: {},
   workspaceObjects: {},
 }));
@@ -190,6 +193,17 @@ const baseEnv = (overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
   ...overrides,
 });
 
+function mainDb(studioPreviewTablePresent = false): Db {
+  const query = vi.fn(async (strings: TemplateStringsArray, ..._values: unknown[]) => {
+    const text = strings.join("$").replace(/\s+/g, " ").trim();
+    if (text.includes("to_regclass('studio_previews')")) {
+      return [{ table_name: studioPreviewTablePresent ? "studio_previews" : null }];
+    }
+    return [];
+  });
+  const client = Object.assign(query, { end: vi.fn(async () => undefined) });
+  return { $client: client } as unknown as Db;
+}
 beforeEach(() => {
   vi.clearAllMocks();
   h.createStudioGitService.mockReturnValue(h.marker);
@@ -220,7 +234,7 @@ describe("worker Studio production composition", () => {
       connectionHealthInvocations,
     };
     h.createMcpRuntime.mockReturnValue(mcpRuntime);
-    const db = { $client: {} };
+    const db = mainDb();
     h.createDb.mockReturnValue(db);
     const { main } = await import("./main.js");
 
