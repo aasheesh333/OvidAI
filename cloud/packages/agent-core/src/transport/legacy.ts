@@ -48,6 +48,7 @@ export interface LegacyModelTransport {
       model: string;
       messages: LegacyChatMessage[];
       tools?: LegacyModelToolSpec[];
+      maxTokens?: number;
     },
     h: LegacyStreamHandlers,
     signal: AbortSignal,
@@ -92,7 +93,14 @@ export function adaptLegacyTransport(t: LegacyModelTransport): AgentTransport {
           : undefined;
       let content = "";
       const result = await t.stream(
-        { baseUrl: req.baseUrl, apiKey: req.apiKey, model: req.model, messages, tools },
+        {
+          baseUrl: req.baseUrl,
+          apiKey: req.apiKey,
+          model: req.model,
+          messages,
+          tools,
+          ...(req.maxTokens !== undefined ? { maxTokens: req.maxTokens } : {}),
+        },
         {
           onDelta: (text) => {
             content += text;
@@ -150,6 +158,7 @@ export function createLegacyOpenAiTransport(fetchImpl: typeof fetch = fetch): Le
           return { role: m.role, content: m.content, ...(m.role === "tool" ? { toolCallId: m.toolCallId } : {}) };
         }),
         tools: req.tools !== undefined ? req.tools.map((t) => t.function) : [],
+        ...(req.maxTokens !== undefined ? { maxTokens: req.maxTokens } : {}),
         cacheMode: "none",
       };
       let content = "";

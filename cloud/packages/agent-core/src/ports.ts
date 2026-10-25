@@ -18,6 +18,17 @@ export interface SandboxPort {            // adapter over the P2 SandboxManager 
   jobKill(userId: string, jobId: string): Promise<void>;
 }
 
+/** A bounded model-call reservation refused by the canonical quota authority. */
+export class ModelQuotaExceededError extends Error {
+  readonly name = "ModelQuotaExceededError";
+  constructor(
+    readonly window: "day" | "month",
+    readonly resetsAt: Date,
+  ) {
+    super("Model allowance exhausted.");
+  }
+}
+
 /**
  * Sandbox availability failures that are RUN-level, not tool-level (P3 Task
  * 15 / T9-I1 carry). The worker's SandboxPort adapter rethrows the sandbox

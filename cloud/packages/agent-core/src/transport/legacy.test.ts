@@ -134,6 +134,23 @@ it("adaptLegacyTransport omits the legacy tools key when the agent request carri
   expect(captured!.tools).toBeUndefined();
 });
 
+it("adaptLegacyTransport forwards an explicit maxTokens bound and preserves the omitted default", async () => {
+  const captured: Array<Parameters<LegacyModelTransport["stream"]>[0]> = [];
+  const legacy: LegacyModelTransport = {
+    async stream(req, _h, _signal) {
+      captured.push(req);
+      return { finishReason: "stop", toolCalls: [] };
+    },
+  };
+  const transport = adaptLegacyTransport(legacy);
+
+  await transport.stream(agentReq({ maxTokens: 37 }), { onTextDelta: () => {} }, new AbortController().signal);
+  await transport.stream(agentReq(), { onTextDelta: () => {} }, new AbortController().signal);
+
+  expect(captured[0]?.maxTokens).toBe(37);
+  expect(captured[1]).not.toHaveProperty("maxTokens");
+});
+
 it("createLegacyOpenAiTransport satisfies the exact P2 ModelTransport signature (tools in the request, raw-arguments toolCalls in the result) against the SSE mock", async () => {
   server = createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -196,6 +213,31 @@ it("createLegacyOpenAiTransport satisfies the exact P2 ModelTransport signature 
     finishReason: "tool_calls",
     toolCalls: [{ id: "call_1", name: "run_shell", arguments: '{"cmd":"ls"}' }],
   });
+});
+
+it("createLegacyOpenAiTransport sends an explicit maxTokens bound and omits max_tokens by default", async () => {
+  const bodies: Array<Record<string, unknown>> = [];
+  const fetchImpl: typeof fetch = async (_input, init) => {
+    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return new Response(
+      'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  };
+  const transport = createLegacyOpenAiTransport(fetchImpl);
+  const request = {
+    baseUrl: "http://legacy.example",
+    apiKey: "sk-test",
+    model: "ovid-test-model",
+    messages: [{ role: "user" as const, content: "hi" }],
+  };
+
+  await transport.stream(request, { onDelta: () => {} }, new AbortController().signal);
+  await transport.stream({ ...request, maxTokens: 37 }, { onDelta: () => {} }, new AbortController().signal);
+
+  expect(bodies).toHaveLength(2);
+  expect(bodies[0]).not.toHaveProperty("max_tokens");
+  expect(bodies[1]).toMatchObject({ max_tokens: 37 });
 });
 
 it("createLegacyOpenAiTransport rethrows the model error taxonomy unwrapped (429 → TransientModelError)", async () => {
