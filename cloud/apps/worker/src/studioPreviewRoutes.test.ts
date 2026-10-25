@@ -19,6 +19,8 @@ const OTHER_SID = "00000000-0000-4000-8000-000000000019";
 const PID = "0199aaaa-0000-7000-8000-000000000018";
 const BASE = `/internal/sessions/${SID}/previews`;
 const T0 = Date.parse("2026-10-24T12:00:00.000Z");
+const LIVE_EXPIRY = "2099-10-24T12:15:00.000Z";
+const TOUCH_NOW = "2026-10-24T12:00:01.000Z";
 const cleanup: Array<() => Promise<void> | void> = [];
 
 afterEach(async () => {
@@ -59,6 +61,7 @@ interface Harness {
   start: ReturnType<typeof vi.fn>;
   stopSession: ReturnType<typeof vi.fn>;
   touch: ReturnType<typeof vi.fn>;
+  touchDetailed: ReturnType<typeof vi.fn>;
   touchWrites: () => number;
   afterNextTouch: (patch: Partial<StudioPreviewRecord>) => void;
 }
@@ -70,8 +73,8 @@ async function harness(current: StudioPreviewRecord = record()): Promise<Harness
   const stopSession = vi.fn(async () => 0);
   let touchWrites = 0;
   let afterTouch: (() => void) | null = null;
-  // The DB primitive is boolean. The manager-facing fake below never treats
-  // false as a record and always revalidates before returning Record | null.
+  // The DB primitive is boolean. The detailed fake keeps that verdict separate
+  // from the authoritative record; legacy touch projects only `.record`.
   const storeTouch = async (input: { id: string; generation: number; now: string }): Promise<boolean> => {
     const at = Date.parse(input.now);
     if (
@@ -84,7 +87,7 @@ async function harness(current: StudioPreviewRecord = record()): Promise<Harness
     touchWrites += 1;
     return true;
   };
-  const touch = vi.fn(async (req: {
+  const touchDetailed = vi.fn(async (req: {
     userId: string;
     sessionId: string;
     id: string;
@@ -96,8 +99,8 @@ async function harness(current: StudioPreviewRecord = record()): Promise<Harness
       req.userId !== current.userId || req.sessionId !== current.sessionId ||
       req.id !== current.id || req.generation !== current.generation ||
       (req.kind !== undefined && req.kind !== current.kind) || current.status !== "running"
-    ) return null;
-    await storeTouch({
+    ) return { touched: false, record: null };
+    const touched = await storeTouch({
       id: req.id,
       generation: req.generation,
       now: (req.now ?? new Date(T0)).toISOString(),
@@ -111,12 +114,21 @@ async function harness(current: StudioPreviewRecord = record()): Promise<Harness
       current.generation !== req.generation || current.status !== "running" ||
       (req.kind !== undefined && current.kind !== req.kind) ||
       Date.parse(current.expiresAt) <= (req.now?.getTime() ?? T0)
-    ) return null;
-    return current;
+    ) return { touched, record: null };
+    return { touched, record: current };
   });
+  const touch = vi.fn(async (req: {
+    userId: string;
+    sessionId: string;
+    id: string;
+    generation: number;
+    kind?: "static" | "dev_server";
+    now?: Date;
+  }) => (await touchDetailed(req)).record);
   const previews = {
     start,
     touch,
+    touchDetailed,
     stop: vi.fn(async (req: { userId: string; sessionId: string; id: string }) =>
       req.userId === current.userId && req.sessionId === current.sessionId && req.id === current.id
         ? { ...current, status: "stopped", endedAt: "2026-10-24T12:01:00.000Z" }
@@ -145,6 +157,7 @@ async function harness(current: StudioPreviewRecord = record()): Promise<Harness
     start,
     stopSession,
     touch,
+    touchDetailed,
     touchWrites: () => touchWrites,
     afterNextTouch: (patch) => { afterTouch = () => { current = { ...current, ...patch }; }; },
   };
@@ -183,6 +196,12 @@ describe("Studio preview internal routes", () => {
         { method: "GET" as const, url: BASE },
         { method: "POST" as const, url: BASE, payload: { kind: "static", workspacePath: "site" } },
         { method: "GET" as const, url: `${BASE}/${PID}/logs` },
+        { method: "GET" as const, url: `${BASE}/${PID}/registration` },
+        {
+          method: "POST" as const,
+          url: `${BASE}/${PID}/touch`,
+          payload: { generation: 4, now: "2026-10-24T12:00:01.000Z" },
+        },
         { method: "GET" as const, url: `${BASE}/${PID}/static/` },
       ]) {
         const response = await h.app.inject({ ...request, headers: test.headers });
@@ -349,6 +368,315 @@ describe("Studio preview internal routes", () => {
     expect(failed.json()).toEqual({
       error: { code: "internal", message: "Internal server error." },
     });
+  });
+
+  it("UNEXECUTED: registration returns the exact dev DTO with the real private bind only", async () => {
+    const h = await harness(record({ expiresAt: LIVE_EXPIRY }));
+    const response = await h.app.inject({
+      method: "GET",
+      url: `${BASE}/${PID}/registration`,
+      headers: headers(),
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      id: PID,
+      userId: UID,
+      sessionId: SID,
+      generation: 4,
+      kind: "dev_server",
+      status: "running",
+      expiresAt: LIVE_EXPIRY,
+      lastAccessAt: null,
+      bindHost: "127.0.0.1",
+      port: 20123,
+    });
+    for (const key of [
+      "workspacePath", "projectDir", "startScript", "processId", "processGroupId",
+      "workerEpoch", "command", "url", "ticket", "cookie", "secret",
+    ]) expect(response.json()).not.toHaveProperty(key);
+    expect(h.previews.get).toHaveBeenCalledWith({ userId: UID, sessionId: SID, id: PID });
+  });
+
+  it("UNEXECUTED: registration returns the exact static DTO with null bind fields", async () => {
+    const h = await harness(record({
+      kind: "static",
+      projectDir: null,
+      startScript: null,
+      processId: null,
+      processGroupId: null,
+      workerEpoch: null,
+      bindHost: null,
+      port: null,
+      logBytes: null,
+      expiresAt: LIVE_EXPIRY,
+    }));
+    const response = await h.app.inject({
+      method: "GET",
+      url: `${BASE}/${PID}/registration`,
+      headers: headers(),
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      id: PID,
+      userId: UID,
+      sessionId: SID,
+      generation: 4,
+      kind: "static",
+      status: "running",
+      expiresAt: LIVE_EXPIRY,
+      lastAccessAt: null,
+      bindHost: null,
+      port: null,
+    });
+  });
+
+  it("UNEXECUTED: registration refuses missing or invalid dev bind data instead of inventing it", async () => {
+    for (const patch of [
+      { bindHost: null },
+      { port: null },
+      { port: 19_999 },
+      { port: 30_000 },
+    ]) {
+      const h = await harness(record({ ...patch, expiresAt: LIVE_EXPIRY }));
+      const response = await h.app.inject({
+        method: "GET",
+        url: `${BASE}/${PID}/registration`,
+        headers: headers(),
+      });
+      expect(response.statusCode).toBe(404);
+      expect(response.json()).not.toHaveProperty("bindHost");
+      expect(response.json()).not.toHaveProperty("port");
+    }
+  });
+
+  it("UNEXECUTED: registration and touch non-enumerate foreign/missing previews without a write", async () => {
+    const h = await harness(record({ expiresAt: LIVE_EXPIRY }));
+    for (const test of [
+      { uid: OTHER_UID, sid: SID },
+      { uid: UID, sid: OTHER_SID },
+      { uid: OTHER_UID, sid: OTHER_SID },
+    ]) {
+      const base = `/internal/sessions/${test.sid}/previews/${PID}`;
+      const registration = await h.app.inject({
+        method: "GET",
+        url: `${base}/registration`,
+        headers: headers(test.uid),
+      });
+      expect(registration.statusCode).toBe(404);
+      expect(registration.json()).toEqual({
+        error: { code: "not_found", message: "Preview not found." },
+      });
+
+      const touched = await h.app.inject({
+        method: "POST",
+        url: `${base}/touch`,
+        headers: headers(test.uid),
+        payload: { generation: 4, now: TOUCH_NOW },
+      });
+      expect(touched.statusCode).toBe(200);
+      expect(touched.json()).toEqual({ touched: false });
+    }
+    const missing = await h.app.inject({
+      method: "GET",
+      url: `${BASE}/00000000-0000-4000-8000-000000000099/registration`,
+      headers: headers(),
+    });
+    expect(missing.statusCode).toBe(404);
+    const missingTouch = await h.app.inject({
+      method: "POST",
+      url: `${BASE}/00000000-0000-4000-8000-000000000099/touch`,
+      headers: headers(),
+      payload: { generation: 4, now: TOUCH_NOW },
+    });
+    expect(missingTouch.statusCode).toBe(200);
+    expect(missingTouch.json()).toEqual({ touched: false });
+    expect(h.touchDetailed).not.toHaveBeenCalled();
+    expect(h.touchWrites()).toBe(0);
+  });
+
+  it.each(["stopped", "failed", "expired"])(
+    "UNEXECUTED: registration and touch deny terminal %s previews",
+    async (status) => {
+      const h = await harness(record({
+        status: status as StudioPreviewRecord["status"],
+        expiresAt: LIVE_EXPIRY,
+      }));
+      const registration = await h.app.inject({
+        method: "GET",
+        url: `${BASE}/${PID}/registration`,
+        headers: headers(),
+      });
+      expect(registration.statusCode).toBe(404);
+
+      const touched = await h.app.inject({
+        method: "POST",
+        url: `${BASE}/${PID}/touch`,
+        headers: headers(),
+        payload: { generation: 4, now: TOUCH_NOW },
+      });
+      expect(touched.statusCode).toBe(200);
+      expect(touched.json()).toEqual({ touched: false });
+      expect(h.touchWrites()).toBe(0);
+    },
+  );
+
+  it("UNEXECUTED: registration and touch deny an expired preview", async () => {
+    const h = await harness(record({
+      expiresAt: "2026-10-24T11:59:59.000Z",
+    }));
+    const registration = await h.app.inject({
+      method: "GET",
+      url: `${BASE}/${PID}/registration`,
+      headers: headers(),
+    });
+    expect(registration.statusCode).toBe(404);
+
+    const touched = await h.app.inject({
+      method: "POST",
+      url: `${BASE}/${PID}/touch`,
+      headers: headers(),
+      payload: { generation: 4, now: TOUCH_NOW },
+    });
+    expect(touched.statusCode).toBe(200);
+    expect(touched.json()).toEqual({ touched: false });
+    expect(h.touchWrites()).toBe(0);
+  });
+
+  it("UNEXECUTED: touch rejects invalid, stale, oversized, or extra JSON fields before the manager", async () => {
+    const h = await harness(record({ expiresAt: LIVE_EXPIRY }));
+    const invalidBodies: unknown[] = [
+      null,
+      [],
+      {},
+      { generation: 4 },
+      { now: TOUCH_NOW },
+      { generation: 0, now: TOUCH_NOW },
+      { generation: -1, now: TOUCH_NOW },
+      { generation: 1.5, now: TOUCH_NOW },
+      { generation: Number.MAX_SAFE_INTEGER + 1, now: TOUCH_NOW },
+      { generation: "4", now: TOUCH_NOW },
+      { generation: 4, now: "not-a-timestamp" },
+      { generation: 4, now: "2026-10-24" },
+      { generation: 4, now: "2026-10-24T12:00:00.000+24:00" },
+      { generation: 4, now: "2026-10-24T12:00:00.000+23:60" },
+      { generation: 4, now: "2026-10-24T12:00:00.000+99:99" },
+      { generation: 4, now: "2026-10-24T12:00:00.000-24:00" },
+      { generation: 4, now: "2026-10-24T12:00:00.000-23:60" },
+      { generation: 4, now: "2026-10-24T12:00:00.000-99:99" },
+      { generation: 4, now: 0 },
+      { generation: 4, now: TOUCH_NOW, ticket: "secret" },
+      { generation: 4, now: "x".repeat(65) },
+    ];
+    for (const payload of invalidBodies) {
+      const response = await h.app.inject({
+        method: "POST",
+        url: `${BASE}/${PID}/touch`,
+        headers: headers(),
+        payload: payload as never,
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error.code).toBe("bad_request");
+    }
+    expect(h.previews.get).not.toHaveBeenCalled();
+    expect(h.touchDetailed).not.toHaveBeenCalled();
+    expect(h.touchWrites()).toBe(0);
+
+    // An ordinary numeric offset remains valid and is converted from the
+    // supplied gateway timestamp, never from worker wall time.
+    const validOffset = "2026-10-24T13:00:01.000+01:00";
+    const accepted = await h.app.inject({
+      method: "POST",
+      url: `${BASE}/${PID}/touch`,
+      headers: headers(),
+      payload: { generation: 4, now: validOffset },
+    });
+    expect(accepted.statusCode).toBe(200);
+    expect(accepted.json()).toEqual({ touched: true });
+    expect(h.previews.get).toHaveBeenCalledWith({ userId: UID, sessionId: SID, id: PID });
+    expect(h.touchDetailed).toHaveBeenCalledWith({
+      userId: UID,
+      sessionId: SID,
+      id: PID,
+      generation: 4,
+      kind: "dev_server",
+      now: new Date(validOffset),
+    });
+    expect(h.touchWrites()).toBe(1);
+  });
+
+  it("UNEXECUTED: touch returns actual write true and throttle false with exact owner, kind, and gateway time", async () => {
+    const h = await harness(record({ expiresAt: LIVE_EXPIRY }));
+    const request = {
+      method: "POST" as const,
+      url: `${BASE}/${PID}/touch`,
+      headers: headers(),
+      payload: { generation: 4, now: TOUCH_NOW },
+    };
+
+    const written = await h.app.inject(request);
+    expect(written.statusCode).toBe(200);
+    expect(written.json()).toEqual({ touched: true });
+    expect(written.headers["cache-control"]).toBe("private, no-store");
+
+    const throttled = await h.app.inject(request);
+    expect(throttled.statusCode).toBe(200);
+    expect(throttled.json()).toEqual({ touched: false });
+    expect(h.touchDetailed).toHaveBeenCalledTimes(2);
+    for (const call of h.touchDetailed.mock.calls) {
+      expect(call[0]).toEqual({
+        userId: UID,
+        sessionId: SID,
+        id: PID,
+        generation: 4,
+        kind: "dev_server",
+        now: new Date(TOUCH_NOW),
+      });
+    }
+    expect(h.touch).not.toHaveBeenCalled();
+    expect(h.touchWrites()).toBe(1);
+  });
+
+  it("UNEXECUTED: touch denies a stale generation without an atomic write", async () => {
+    const h = await harness(record({ expiresAt: LIVE_EXPIRY }));
+    const response = await h.app.inject({
+      method: "POST",
+      url: `${BASE}/${PID}/touch`,
+      headers: headers(),
+      payload: { generation: 5, now: TOUCH_NOW },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ touched: false });
+    expect(h.touchDetailed).toHaveBeenCalledWith({
+      userId: UID,
+      sessionId: SID,
+      id: PID,
+      generation: 5,
+      kind: "dev_server",
+      now: new Date(TOUCH_NOW),
+    });
+    expect(h.touchWrites()).toBe(0);
+  });
+
+  it.each([
+    ["status", { status: "stopped" } as const],
+    ["generation", { generation: 5 } as const],
+  ])("UNEXECUTED: touch denies a post-touch %s change", async (_name, patch) => {
+    const h = await harness(record({ expiresAt: LIVE_EXPIRY }));
+    h.afterNextTouch(patch);
+    const response = await h.app.inject({
+      method: "POST",
+      url: `${BASE}/${PID}/touch`,
+      headers: headers(),
+      payload: { generation: 4, now: TOUCH_NOW },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ touched: false });
+    expect(h.touchDetailed).toHaveBeenCalledTimes(1);
+    expect(h.touchWrites()).toBe(1);
   });
 
   it("serves only real static bytes below the registered root with no-store", async () => {

@@ -10,6 +10,7 @@ import {
 } from "./studioPreview.js";
 
 const BODY_LIMIT = 16 * 1024;
+const TOUCH_BODY_LIMIT = 1024;
 const PATH = z.string().min(1).max(4096);
 const createBody = z.discriminatedUnion("kind", [
   z.object({
@@ -22,6 +23,15 @@ const createBody = z.discriminatedUnion("kind", [
     script: z.enum(["dev", "start", "preview"]),
   }).strict(),
 ]);
+const touchBody = z.object({
+  generation: z.number().refine(
+    (value) => Number.isSafeInteger(value) && value > 0,
+  ),
+  now: z.string().max(64).datetime({ offset: true }).refine(
+    (value) => Number.isFinite(Date.parse(value)),
+    "Invalid Studio preview timestamp",
+  ),
+}).strict();
 
 export interface StudioPreviewRoutesDeps {
   internalToken: string;
@@ -36,6 +46,56 @@ export interface StudioPreviewDto {
   expiresAt: string;
   lastAccessAt: string | null;
   logAvailable: boolean;
+}
+
+interface StudioPreviewRegistrationCommon {
+  id: string;
+  userId: string;
+  sessionId: string;
+  generation: number;
+  status: StudioPreviewRecord["status"];
+  expiresAt: string;
+  lastAccessAt: string | null;
+}
+
+/** Private worker-to-gateway registration; never exposed as a management DTO. */
+export type StudioPreviewRegistration = StudioPreviewRegistrationCommon & (
+  | { kind: "static"; bindHost: null; port: null }
+  | { kind: "dev_server"; bindHost: string; port: number }
+);
+
+function toStudioPreviewRegistration(
+  record: StudioPreviewRecord,
+  now = Date.now(),
+): StudioPreviewRegistration | null {
+  if (
+    (record.status !== "starting" && record.status !== "running" && record.status !== "stopping") ||
+    !Number.isFinite(Date.parse(record.expiresAt)) ||
+    Date.parse(record.expiresAt) <= now
+  ) return null;
+  const common: StudioPreviewRegistrationCommon = {
+    id: record.id,
+    userId: record.userId,
+    sessionId: record.sessionId,
+    generation: record.generation,
+    status: record.status,
+    expiresAt: record.expiresAt,
+    lastAccessAt: record.lastAccessAt,
+  };
+  if (record.kind === "static") {
+    if (record.bindHost !== null || record.port !== null) return null;
+    return { ...common, kind: "static", bindHost: null, port: null };
+  }
+  if (
+    record.bindHost === null || record.port === null ||
+    !Number.isInteger(record.port) || record.port < 20_000 || record.port > 29_999
+  ) return null;
+  return {
+    ...common,
+    kind: "dev_server",
+    bindHost: record.bindHost,
+    port: record.port,
+  };
 }
 
 /** Internal management DTOs never disclose process or network addressing. */
@@ -166,6 +226,58 @@ export function registerStudioPreviewRoutes(
           });
           if (record === null) return notFound(reply);
           return toStudioPreviewDto(record);
+        } catch (err) {
+          return sendError(reply, err);
+        }
+      },
+    );
+
+    scoped.get<{ Params: { sid: string; pid: string } }>(
+      "/internal/sessions/:sid/previews/:pid/registration",
+      async (req, reply) => {
+        try {
+          const record = await deps.previews.get({
+            userId: String(req.headers["x-ovid-user-id"]),
+            sessionId: req.params.sid,
+            id: req.params.pid,
+          });
+          if (record === null) return notFound(reply);
+          const registration = toStudioPreviewRegistration(record);
+          if (registration === null) return notFound(reply);
+          return registration;
+        } catch (err) {
+          return sendError(reply, err);
+        }
+      },
+    );
+
+    scoped.post<{ Params: { sid: string; pid: string } }>(
+      "/internal/sessions/:sid/previews/:pid/touch",
+      { bodyLimit: TOUCH_BODY_LIMIT },
+      async (req, reply) => {
+        const parsed = touchBody.safeParse(req.body);
+        if (!parsed.success) {
+          return fail(reply, 400, "bad_request", "Invalid Studio preview touch.");
+        }
+        try {
+          const owner = {
+            userId: String(req.headers["x-ovid-user-id"]),
+            sessionId: req.params.sid,
+            id: req.params.pid,
+          };
+          const record = await deps.previews.get(owner);
+          if (record === null) return { touched: false };
+          const result = await deps.previews.touchDetailed({
+            ...owner,
+            generation: parsed.data.generation,
+            kind: record.kind,
+            now: new Date(parsed.data.now),
+          });
+          // False covers throttling AND stale/terminal/expired/foreign denial;
+          // only a valid authoritative record can carry the actual write verdict.
+          // The gateway always re-reads registration before granting content.
+          if (result.record === null) return { touched: false };
+          return { touched: result.touched };
         } catch (err) {
           return sendError(reply, err);
         }

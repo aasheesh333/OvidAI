@@ -208,6 +208,12 @@ export interface StudioPreviewLogs {
   truncated: boolean;
 }
 
+/** Actual atomic write verdict plus the independent post-touch registration. */
+export interface StudioPreviewTouchResult {
+  touched: boolean;
+  record: StudioPreviewRecord | null;
+}
+
 export interface StudioPreviewManager {
   start(request: StudioPreviewStartRequest): Promise<StudioPreviewRecord>;
   stop(request: StudioPreviewRef): Promise<StudioPreviewRecord | null>;
@@ -215,6 +221,8 @@ export interface StudioPreviewManager {
   get(request: StudioPreviewRef): Promise<StudioPreviewRecord | null>;
   /** Explicit authorized content/HMR access; ordinary management reads never touch. */
   touch(request: StudioPreviewTouchRequest): Promise<StudioPreviewRecord | null>;
+  /** Private gateway access also needs the DB boolean; false may be only throttling. */
+  touchDetailed(request: StudioPreviewTouchRequest): Promise<StudioPreviewTouchResult>;
   logs(request: StudioPreviewRef): Promise<StudioPreviewLogs | null>;
   sweep(limit?: number): Promise<number>;
   stopSession(request: StudioPreviewOwner & {
@@ -562,7 +570,7 @@ export function createStudioPreviewManager(config: StudioPreviewManagerConfig): 
   async function touch(
     request: StudioPreviewTouchRequest,
     record: StudioPreviewRecord,
-  ): Promise<StudioPreviewRecord | null> {
+  ): Promise<StudioPreviewTouchResult> {
     const at = request.now?.getTime() ?? now();
     const expectedKind = request.kind ?? record.kind;
     if (
@@ -571,19 +579,20 @@ export function createStudioPreviewManager(config: StudioPreviewManagerConfig): 
       record.kind !== expectedKind ||
       record.status !== "running" ||
       Date.parse(accessExpiresAt(record)) <= at
-    ) return null;
+    ) return { touched: false, record: null };
 
-    // This is the DB-boolean → Record|null composition boundary. Always call
-    // the atomic operation, even when the persisted row is inside its throttle
-    // window; false is never cast to a record or assumed to mean denial.
-    await config.store.touch({
+    // Always call the atomic operation, even inside the throttle window. Keep
+    // its actual verdict separate from the independent authoritative record:
+    // false may be throttling, and record presence is never a write proxy.
+    const touched = await config.store.touch({
       id: record.id,
       generation: request.generation,
       now: new Date(at).toISOString(),
     });
 
     // A throttle no-op and a real write both require a fresh authoritative
-    // registration. Content/lifecycle changes after the pre-touch read deny.
+    // registration. Content/lifecycle changes after the pre-touch read deny,
+    // while the detailed result still reports whether the write really happened.
     const authoritative = await owned(request.userId, request.sessionId, request.id);
     if (
       authoritative === null ||
@@ -591,13 +600,13 @@ export function createStudioPreviewManager(config: StudioPreviewManagerConfig): 
       authoritative.kind !== expectedKind ||
       authoritative.status !== "running" ||
       Date.parse(accessExpiresAt(authoritative)) <= at
-    ) return null;
+    ) return { touched, record: null };
     const result = withAccessExpiry(authoritative);
     const runtime = runtimes.get(record.id);
     if (runtime !== undefined && runtime.record.generation === result.generation) {
       runtime.record = result;
     }
-    return result;
+    return { touched, record: result };
   }
 
   async function closeLog(runtime: Runtime): Promise<void> {
@@ -1172,13 +1181,19 @@ export function createStudioPreviewManager(config: StudioPreviewManagerConfig): 
     return (await config.store.getForUser(request.userId, request.sessionId)).map(withAccessExpiry);
   }
 
+  async function touchAuthorizedDetailed(
+    request: StudioPreviewTouchRequest,
+  ): Promise<StudioPreviewTouchResult> {
+    if (closed) return { touched: false, record: null };
+    const record = await owned(request.userId, request.sessionId, request.id);
+    if (record === null) return { touched: false, record: null };
+    return touch(request, record);
+  }
+
   async function touchAuthorized(
     request: StudioPreviewTouchRequest,
   ): Promise<StudioPreviewRecord | null> {
-    if (closed) return null;
-    const record = await owned(request.userId, request.sessionId, request.id);
-    if (record === null) return null;
-    return touch(request, record);
+    return (await touchAuthorizedDetailed(request)).record;
   }
 
   async function logs(request: StudioPreviewRef): Promise<StudioPreviewLogs | null> {
@@ -1394,7 +1409,17 @@ export function createStudioPreviewManager(config: StudioPreviewManagerConfig): 
     }
   }
 
-  return { start, stop, get, touch: touchAuthorized, logs, sweep, stopSession, close };
+  return {
+    start,
+    stop,
+    get,
+    touch: touchAuthorized,
+    touchDetailed: touchAuthorizedDetailed,
+    logs,
+    sweep,
+    stopSession,
+    close,
+  };
 }
 
 // ---------------------------------------------------------------------------

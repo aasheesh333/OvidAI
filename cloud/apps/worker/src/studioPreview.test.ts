@@ -781,6 +781,74 @@ describe("Studio preview lifecycle", () => {
     expect(h.store.touchWrites).toBe(1);
   });
 
+  it("UNEXECUTED: detailed touch preserves actual write and throttle booleans with one atomic call each", async () => {
+    const h = await harness();
+    const started = await h.manager.start(devRequest());
+    h.advance(1_000);
+    const request = () => ({
+      userId: UID,
+      sessionId: SID,
+      id: started.id,
+      generation: started.generation,
+      kind: "dev_server" as const,
+      now: new Date(h.now()),
+    });
+
+    const written = await h.manager.touchDetailed(request());
+    expect(written.touched).toBe(true);
+    expect(written.record).toMatchObject({
+      id: started.id,
+      generation: started.generation,
+      status: "running",
+      lastAccessAt: new Date(h.now()).toISOString(),
+    });
+    expect(h.store.touchCalls).toHaveLength(1);
+    expect(h.store.touchWrites).toBe(1);
+    expect(await h.manager.touch(request())).toMatchObject({
+      lastAccessAt: written.record?.lastAccessAt,
+    });
+
+    const throttled = await h.manager.touchDetailed(request());
+    expect(throttled.touched).toBe(false);
+    expect(throttled.record).toMatchObject({
+      id: started.id,
+      generation: started.generation,
+      status: "running",
+      lastAccessAt: written.record?.lastAccessAt,
+    });
+    expect(h.store.touchCalls).toHaveLength(3);
+    expect(h.store.touchWrites).toBe(1);
+    expect(await h.store.get(started.id)).toMatchObject({
+      lastAccessAt: written.record?.lastAccessAt,
+    });
+  });
+
+  it("UNEXECUTED: detailed touch preserves the DB verdict but denies a post-touch generation/status change", async () => {
+    const h = await harness();
+    const started = await h.manager.start(devRequest());
+    h.advance(1_000);
+    const request = {
+      userId: UID,
+      sessionId: SID,
+      id: started.id,
+      generation: started.generation,
+      kind: "dev_server" as const,
+      now: new Date(h.now()),
+    };
+    h.store.afterTouch = async () => {
+      const current = await h.store.get(started.id);
+      await h.store.facade().update(current.id, current.generation, { status: "stopped" });
+    };
+
+    const denied = await h.manager.touchDetailed(request);
+    expect(denied.touched).toBe(true);
+    expect(denied.record).toBeNull();
+    expect(h.store.touchCalls).toHaveLength(1);
+    expect(h.store.touchWrites).toBe(1);
+    expect(await h.manager.touch(request)).toBeNull();
+    expect(h.store.touchCalls).toHaveLength(1);
+  });
+
   it("UNEXECUTED: active access still writes after the initial idle window", async () => {
     const h = await harness();
     const started = await h.manager.start(devRequest());
