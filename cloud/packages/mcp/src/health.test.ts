@@ -8,6 +8,7 @@ import {
   projectConnectionHealth,
   type ConnectionHealthStore,
   type HealthConnection,
+  type HealthConnectionRecord,
   type HealthOperationOutcome,
   type HealthOperationSession,
   type HealthRefreshInput,
@@ -38,7 +39,7 @@ function deferred<T>(): {
   return { promise, resolve, reject };
 }
 
-function connection(overrides: Partial<HealthConnection> = {}): HealthConnection {
+function connection(overrides: Partial<HealthConnectionRecord> = {}): HealthConnectionRecord {
   return {
     connectionId: CONNECTION_ID,
     userId: UID,
@@ -77,6 +78,40 @@ function operation(overrides: Partial<ProviderOperation> = {}): ProviderOperatio
   };
 }
 
+function fetchHealthOperation(): ProviderOperation {
+  return operation({
+    name: "fetch",
+    description: "Fetch credential-free public-web content",
+    requiredScopes: [],
+    request: { originKey: "public-web", method: "GET", pathTemplate: "/fetch" },
+  });
+}
+
+function reviewedFetchConnectionSchema(
+  url: Record<string, unknown> = {
+    type: "string",
+    minLength: 1,
+    maxLength: 2_048,
+    title: "Health check URL",
+    description: "Non-secret credential-free HTTPS URL on port 443 used only for an explicit fetch health check.",
+  },
+): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: { url },
+    required: ["url"],
+    additionalProperties: false,
+    minProperties: 1,
+    maxProperties: 1,
+  };
+}
+
+function withoutKey(schema: Record<string, unknown>, key: string): Record<string, unknown> {
+  const result = { ...schema };
+  delete result[key];
+  return result;
+}
+
 function success(): HealthOperationOutcome {
   return { status: "succeeded" };
 }
@@ -92,18 +127,18 @@ async function refreshed(input: HealthRefreshInput, token: unknown): Promise<Hea
 }
 
 class FakeHealthStore implements ConnectionHealthStore {
-  row: HealthConnection | null;
+  row: HealthConnectionRecord | null;
   readonly writes: HealthWrite[] = [];
   token: unknown = null;
   tokenWriteAttempts = 0;
   disconnectAttempts = 0;
   beforeTokenWrite: (() => Promise<void>) | undefined;
 
-  constructor(row: HealthConnection | null) {
+  constructor(row: HealthConnectionRecord | null) {
     this.row = row === null ? null : structuredClone(row);
   }
 
-  async get(connectionId: string, uid: string): Promise<HealthConnection | null> {
+  async get(connectionId: string, uid: string): Promise<HealthConnectionRecord | null> {
     if (this.row === null || this.row.connectionId !== connectionId || this.row.userId !== uid) return null;
     return structuredClone(this.row);
   }
@@ -220,6 +255,8 @@ function harness(
   store: FakeHealthStore,
   sessions: SessionDouble[],
   options: {
+    providerId?: string;
+    connectionSchema?: Record<string, unknown>;
     operations?: ProviderOperation[];
     times?: string[];
     runtimeTtlMs?: number;
@@ -232,9 +269,10 @@ function harness(
   const lifecycle = createConnectionHealthLifecycle({
     store,
     providers: [{
-      providerId: "github",
+      providerId: options.providerId ?? "github",
       readiness: "supported",
       operations: options.operations ?? [operation()],
+      ...(options.connectionSchema === undefined ? {} : { connectionSchema: options.connectionSchema }),
     }],
     async open(input) {
       const selected = sessions[Math.min(openCalls, sessions.length - 1)];
@@ -439,6 +477,125 @@ describe("connection health lifecycle", () => {
     const transition = await check(unauthorized.lifecycle);
     expect(transition).toMatchObject({ to: "needs_auth", reason: "unauthorized", lastCheckedAt: T2 });
     expect(selected.executeCalls()).toBe(1);
+  });
+
+  it("admits only the canonical reviewed Fetch schema to the worker session boundary", async () => {
+    const store = new FakeHealthStore(connection({
+      providerId: "fetch",
+      authState: "missing",
+      hasSecrets: false,
+      legacyUnknownAuthWithoutConfig: true,
+    }));
+    const selected = sessionDouble({ execute: async () => failure("unavailable") });
+    const { lifecycle, openCalls } = harness(store, [selected], {
+      providerId: "fetch",
+      connectionSchema: reviewedFetchConnectionSchema(),
+      operations: [fetchHealthOperation()],
+      times: [T1],
+    });
+
+    const transition = await lifecycle.checkConnectionHealth(CONNECTION_ID, UID, "fetch");
+
+    expect(transition).toMatchObject({ to: "unavailable", reason: "unavailable" });
+    expect(transition.connection).toMatchObject({ authState: "missing" });
+    expect(transition.connection).not.toHaveProperty("legacyUnknownAuthWithoutConfig");
+    expect(openCalls()).toBe(1);
+    expect(selected.executeCalls()).toBe(1);
+  });
+
+  it.each([
+    ["optional url", { ...reviewedFetchConnectionSchema(), required: [] }],
+    ["non-string url", reviewedFetchConnectionSchema({ type: "number", minimum: 0, maximum: 2_048 })],
+    ["nested credential url", reviewedFetchConnectionSchema({
+      type: "object",
+      properties: {
+        access_token: { type: "string", minLength: 1, maxLength: 16_384 },
+      },
+      required: ["access_token"],
+      additionalProperties: false,
+      minProperties: 1,
+      maxProperties: 1,
+    })],
+    ["array/items url", reviewedFetchConnectionSchema({
+      type: "array",
+      items: { type: "string", maxLength: 32 },
+      maxItems: 1,
+    })],
+    ["missing root type", withoutKey(reviewedFetchConnectionSchema(), "type")],
+    ["missing required", withoutKey(reviewedFetchConnectionSchema(), "required")],
+    ["missing minProperties", withoutKey(reviewedFetchConnectionSchema(), "minProperties")],
+    ["extra root credential schema field", {
+      ...reviewedFetchConnectionSchema(),
+      client_secret: { type: "string", maxLength: 16_384 },
+    }],
+    ["credential-bearing url default", reviewedFetchConnectionSchema({
+      type: "string",
+      minLength: 1,
+      maxLength: 2_048,
+      default: "Bearer credential-canary",
+    })],
+    ["empty url permitted", reviewedFetchConnectionSchema({
+      type: "string",
+      minLength: 0,
+      maxLength: 2_048,
+    })],
+    ["overlong url permitted", reviewedFetchConnectionSchema({
+      type: "string",
+      minLength: 1,
+      maxLength: 4_096,
+    })],
+  ] as Array<[string, Record<string, unknown>]>)(
+    "rejects %s for the legacy exception without opening a session",
+    async (_label, connectionSchema) => {
+      const store = new FakeHealthStore(connection({
+        providerId: "fetch",
+        authState: "missing",
+        hasSecrets: false,
+        legacyUnknownAuthWithoutConfig: true,
+      }));
+      const selected = sessionDouble({ execute: async () => failure("unavailable") });
+      const { lifecycle, openCalls } = harness(store, [selected], {
+        providerId: "fetch",
+        connectionSchema,
+        operations: [fetchHealthOperation()],
+        times: [T1],
+      });
+
+      const transition = await lifecycle.checkConnectionHealth(CONNECTION_ID, UID, "fetch");
+
+      expect(transition).toMatchObject({ to: "needs_auth", reason: "missing_auth", persisted: true });
+      expect(transition.connection).not.toHaveProperty("legacyUnknownAuthWithoutConfig");
+      expect(openCalls()).toBe(0);
+      expect(selected.executeCalls()).toBe(0);
+      expect(store.tokenWriteAttempts).toBe(0);
+      expect(store.writes.map((write) => write.state)).toEqual(["checking", "needs_auth"]);
+    },
+  );
+
+  it("does not extend the legacy null-config exception to a credentialed provider", async () => {
+    for (const authState of ["missing", "needs_auth"] as const) {
+      const store = new FakeHealthStore(connection({
+        authState,
+        hasSecrets: false,
+        legacyUnknownAuthWithoutConfig: true,
+      }));
+      const { lifecycle, openCalls } = harness(store, [], {
+        connectionSchema: {
+          type: "object",
+          properties: { GITHUB_TOKEN: { type: "string", minLength: 1, maxLength: 16_384 } },
+          required: ["GITHUB_TOKEN"],
+          additionalProperties: false,
+          maxProperties: 1,
+        },
+        times: [T1],
+      });
+
+      const transition = await check(lifecycle);
+
+      expect(transition).toMatchObject({ to: "needs_auth", reason: "missing_auth" });
+      expect(transition.connection).not.toHaveProperty("legacyUnknownAuthWithoutConfig");
+      expect(openCalls()).toBe(0);
+    }
   });
 
   it("never executes a mutation as a health probe and preserves previous success evidence", async () => {

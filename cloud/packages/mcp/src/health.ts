@@ -24,6 +24,12 @@ export interface HealthConnection {
   hasSecrets: boolean;
 }
 
+/** Internal store facts that must never be added to the public health DTO. */
+export interface HealthConnectionRecord extends HealthConnection {
+  /** Exact persisted legacy auth_state="unknown" plus config=null evidence. */
+  legacyUnknownAuthWithoutConfig?: true;
+}
+
 export interface HealthConnectionExpected {
   configVersion: number;
   disconnectGeneration: number;
@@ -66,7 +72,7 @@ export interface HealthTokenWrite {
  * the same transaction, matching providerConnections.disconnectConnection.
  */
 export interface ConnectionHealthStore {
-  get(connectionId: string, uid: string): Promise<HealthConnection | null>;
+  get(connectionId: string, uid: string): Promise<HealthConnectionRecord | null>;
   writeHealth(write: HealthWrite): Promise<HealthConnection | null>;
   writeRefreshedToken(write: HealthTokenWrite): Promise<boolean>;
   disconnect(
@@ -357,6 +363,58 @@ function supportsHealthOperation(operation: ProviderOperation): boolean {
   }
 }
 
+function hasOnlySchemaKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): boolean {
+  const allowed = new Set([...required, ...optional]);
+  return required.every((key) => Object.prototype.hasOwnProperty.call(value, key)) &&
+    Object.keys(value).every((key) => allowed.has(key));
+}
+
+function legacyCredentialFreeConfigCheck(
+  connection: HealthConnectionRecord,
+  provider: HealthProvider | undefined,
+): boolean {
+  if (connection.authState !== "missing" ||
+      connection.legacyUnknownAuthWithoutConfig !== true ||
+      provider?.providerId !== "fetch") return false;
+  const schema = provider.connectionSchema;
+  if (schema === undefined) return false;
+  try {
+    assertClosedProviderSchema(schema);
+  } catch {
+    return false;
+  }
+  if (!hasOnlySchemaKeys(schema, [
+    "type",
+    "properties",
+    "required",
+    "additionalProperties",
+    "minProperties",
+    "maxProperties",
+  ]) || schema.type !== "object" || schema.additionalProperties !== false ||
+      schema.minProperties !== 1 || schema.maxProperties !== 1 ||
+      !Array.isArray(schema.required) || schema.required.length !== 1 || schema.required[0] !== "url") {
+    return false;
+  }
+  const properties = schema.properties;
+  if (typeof properties !== "object" || properties === null || Array.isArray(properties) ||
+      Object.keys(properties).length !== 1 ||
+      !Object.prototype.hasOwnProperty.call(properties, "url")) return false;
+  const url = (properties as Record<string, unknown>).url;
+  if (typeof url !== "object" || url === null || Array.isArray(url)) return false;
+  const leaf = url as Record<string, unknown>;
+  // Only the canonical primitive URL leaf and its non-secret metadata qualify.
+  // In particular, properties/items/default/examples and every other extension
+  // are rejected rather than being trusted not to carry credentials.
+  return hasOnlySchemaKeys(leaf, ["type", "minLength", "maxLength"], ["title", "description"]) &&
+    leaf.type === "string" && leaf.minLength === 1 && leaf.maxLength === 2_048 &&
+    (leaf.title === undefined || typeof leaf.title === "string") &&
+    (leaf.description === undefined || typeof leaf.description === "string");
+}
+
 export function createConnectionHealthLifecycle(
   deps: ConnectionHealthLifecycleDeps,
 ): ConnectionHealthLifecycle {
@@ -435,10 +493,15 @@ export function createConnectionHealthLifecycle(
     return runtime.attempts.size > 0 ? "checking" : undefined;
   }
 
-  async function requiredConnection(connectionId: string, uid: string): Promise<HealthConnection> {
+  async function requiredConnection(connectionId: string, uid: string): Promise<HealthConnectionRecord> {
     const row = await deps.store.get(connectionId, uid);
     if (row === null) throw new ConnectionHealthError("not_found");
-    return nonSecretFacts(row);
+    return {
+      ...nonSecretFacts(row),
+      ...(row.legacyUnknownAuthWithoutConfig === true
+        ? { legacyUnknownAuthWithoutConfig: true as const }
+        : {}),
+    };
   }
 
   async function currentProjection(connectionId: string, uid: string): Promise<HealthConnection> {
@@ -730,11 +793,12 @@ export function createConnectionHealthLifecycle(
       if (checking === null) throw new HealthFence("connection_changed");
       if (locallyFenced(runtime, attempt)) throw new HealthFence("disconnected");
 
-      if (initial.authState === "missing" || initial.authState === "needs_auth") {
+      const provider = providers.get(initial.providerId);
+      if ((initial.authState === "missing" || initial.authState === "needs_auth") &&
+          !legacyCredentialFreeConfigCheck(initial, provider)) {
         return await finalEvidence(runtime, attempt, from, "needs_auth", "missing_auth");
       }
 
-      const provider = providers.get(initial.providerId);
       const selected = provider?.operations.find((candidate) => candidate.name === operationId);
       if (provider === undefined || selected === undefined) {
         return await finalEvidence(

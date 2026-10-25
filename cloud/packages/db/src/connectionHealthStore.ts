@@ -14,7 +14,7 @@ import {
   type SealedEnvelope,
 } from "./schema.js";
 
-/** Structural counterpart of @ovid/mcp's HealthConnection; DB does not depend on MCP. */
+/** Structural counterpart of @ovid/mcp's HealthConnectionRecord; DB does not depend on MCP. */
 export interface StoredConnectionHealth {
   connectionId: string;
   userId: string;
@@ -28,6 +28,8 @@ export interface StoredConnectionHealth {
   configVersion: number;
   disconnectGeneration: number;
   hasSecrets: boolean;
+  /** Internal health input only; never project this legacy marker into a DTO. */
+  legacyUnknownAuthWithoutConfig?: true;
 }
 
 export type StoredConnectionHealthWriteState =
@@ -83,6 +85,9 @@ function project(row: NonNullable<Awaited<ReturnType<typeof serverRepo.get>>>): 
     configVersion: connection.configVersion,
     disconnectGeneration: connection.disconnectGeneration,
     hasSecrets: row.secretsSealed !== null,
+    ...(row.authState === "unknown" && row.config === null
+      ? { legacyUnknownAuthWithoutConfig: true as const }
+      : {}),
   };
 }
 
