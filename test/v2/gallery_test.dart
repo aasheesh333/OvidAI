@@ -74,7 +74,7 @@ void main() {
   testWidgets('empty registry offers a refresh action', (tester) async {
     v2Screens = const <V2ScreenEntry>[];
     await tester.pumpWidget(app());
-    expect(find.text('Screens are still landing'), findsOneWidget);
+    expect(find.text('No screens'), findsOneWidget);
     expect(find.text('Refresh'), findsOneWidget);
   });
 }

@@ -635,7 +635,7 @@ void main() {
 
     expect(find.text('No presets yet'), findsOneWidget);
     expect(
-      find.text('Make a preset to change how Ovid works.'),
+      find.text('Presets change how Ovid works.'),
       findsOneWidget,
     );
     await tester.tap(find.widgetWithText(OButton, 'New preset'));

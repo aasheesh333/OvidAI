@@ -275,7 +275,7 @@ class _SettingsSearchPageState extends State<SettingsSearchPage> {
     return OEmptyState(
       icon: Icons.tune_rounded,
       title: 'No settings to search',
-      message: 'Settings appear when your account is ready.',
+      message: 'Settings appear.',
       action: widget.onRetry == null
           ? null
           : OButton(

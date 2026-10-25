@@ -309,7 +309,7 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
     return OEmptyState(
       icon: Icons.auto_awesome_rounded,
       title: 'No artifacts yet',
-      message: 'Ask Ovid for a file in a chat and it appears here.',
+      message: 'Ask Ovid for files; they appear here.',
     );
   }
 
@@ -409,14 +409,14 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
         compact: true,
         icon: Icons.auto_awesome_rounded,
         title: 'No artifacts yet',
-        message: 'Ask Ovid for a file in a chat and it appears here.',
+        message: 'Ask Ovid for files; they appear here.',
       );
     }
     return OEmptyState(
       compact: true,
       icon: Icons.search_off_rounded,
       title: 'No matches',
-      message: 'Try another search, or clear the filters.',
+      message: 'Search again.',
       action: OButton(
         label: 'Clear filters',
         variant: OButtonVariant.secondary,

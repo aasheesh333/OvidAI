@@ -49,7 +49,7 @@ class _V2GalleryPageState extends State<V2GalleryPage> {
     return OScaffold(
       appBar: const OAppBar(
         title: 'UI v2',
-        subtitle: 'Every screen · light and dark',
+        subtitle: 'Every screen · both themes',
         showBack: false,
       ),
       body: SafeArea(
@@ -64,7 +64,7 @@ class _V2GalleryPageState extends State<V2GalleryPage> {
               ),
               child: OSearchField(
                 controller: _search,
-                hint: 'Find a screen',
+                hint: 'Search',
                 onChanged: (v) => setState(() => _query = v),
                 trailing: _query.isEmpty
                     ? null
@@ -83,9 +83,8 @@ class _V2GalleryPageState extends State<V2GalleryPage> {
               child: all.isEmpty
                   ? OEmptyState(
                       icon: Icons.grid_view_rounded,
-                      title: 'Screens are still landing',
-                      message:
-                          'Screen groups build in parallel. Pull to refresh.',
+                      title: 'No screens',
+                      message: 'Groups build in parallel. Refresh.',
                       action: OButton(
                         label: 'Refresh',
                         onPressed: () => setState(() {}),
@@ -94,8 +93,8 @@ class _V2GalleryPageState extends State<V2GalleryPage> {
                   : filtered.isEmpty
                   ? OEmptyState(
                       icon: Icons.search_off_rounded,
-                      title: 'No screen matches "$_query"',
-                      message: 'Try "settings", "studio", "chat" or "share".',
+                      title: 'No matches',
+                      message: 'Search again.',
                       action: OButton(
                         label: 'Clear search',
                         onPressed: () {

@@ -199,7 +199,7 @@ class RunTimeline extends StatelessWidget {
     return OEmptyState(
       icon: Icons.history_rounded,
       title: 'No runs yet',
-      message: 'Results and files appear here after a run.',
+      message: 'Run results and files appear here.',
       action: OButton(
         label: 'Back to schedule',
         icon: Icons.arrow_back_rounded,

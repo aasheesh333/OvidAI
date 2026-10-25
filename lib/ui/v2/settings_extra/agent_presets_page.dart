@@ -597,7 +597,7 @@ class _AgentPresetsPageState extends State<AgentPresetsPage> {
       errorMessage: data.errorMessage,
       onRetry: data.onRetry,
       emptyTitle: 'No presets yet',
-      emptyBody: 'Make a preset to change how Ovid works.',
+      emptyBody: 'Presets change how Ovid works.',
       emptyActionLabel: _canCreate ? 'New preset' : null,
       onEmptyAction: _canCreate ? () => unawaited(_create()) : null,
       skeletonRows: 6,

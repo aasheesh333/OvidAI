@@ -226,7 +226,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('No schedules yet'), findsOneWidget);
-    expect(find.text('Create a schedule to run a task automatically.'), findsOneWidget);
+    expect(find.text('Create schedules to automate tasks.'), findsOneWidget);
     await tester.tap(find.text('New schedule').last);
     expect(created, 1);
   });

@@ -358,7 +358,7 @@ class _MemoryFilesViewState extends State<_MemoryFilesView> {
       return OEmptyState(
         icon: Icons.folder_open_rounded,
         title: 'No memory files yet',
-        message: 'Ovid saves notes here as you chat.',
+        message: 'Ovid saves chat notes here.',
         action: data.onRetry == null
             ? null
             : OButton(

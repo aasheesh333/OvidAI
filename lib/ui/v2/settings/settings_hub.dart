@@ -450,7 +450,7 @@ class _SettingsHubPageState extends State<SettingsHubPage> {
     return OEmptyState(
       icon: Icons.tune_rounded,
       title: 'No settings yet',
-      message: 'Settings appear when your account is ready.',
+      message: 'Settings appear.',
       // No retry callback means there is nothing to retry: do not offer a
       // button that cannot do anything.
       action: data.onRetry == null

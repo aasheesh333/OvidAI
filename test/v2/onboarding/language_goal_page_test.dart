@@ -76,7 +76,7 @@ void main() {
     expect(find.text('Build something'), findsOneWidget);
     expect(find.text('Research'), findsOneWidget);
     expect(find.text('Write'), findsOneWidget);
-    expect(find.text('Automate my work'), findsOneWidget);
+    expect(find.text('Automate work'), findsOneWidget);
     expect(find.text('Explore'), findsOneWidget);
     expect(find.text('STEP 2 OF 4'), findsOneWidget);
     expect(find.byKey(const Key('language-goal-continue')), findsOneWidget);

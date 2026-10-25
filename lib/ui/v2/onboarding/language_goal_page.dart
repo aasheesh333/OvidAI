@@ -56,7 +56,7 @@ class V2LanguageGoalData {
       V2GoalOption(id: 'write', title: 'Write', icon: Icons.edit_note_rounded),
       V2GoalOption(
         id: 'automate',
-        title: 'Automate my work',
+        title: 'Automate work',
         icon: Icons.bolt_rounded,
       ),
       V2GoalOption(
@@ -200,7 +200,7 @@ class _LanguageGoalPageState extends State<LanguageGoalPage> {
           ? OEmptyState(
               icon: Icons.language_rounded,
               title: 'No voice languages yet',
-              message: 'Check your connection and try again.',
+              message: 'Check connection; retry.',
               action: widget.onRetry == null
                   ? null
                   : OButton(label: 'Try again', onPressed: widget.onRetry),
