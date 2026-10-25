@@ -56,6 +56,9 @@ import {
   shouldPresign,
   writeWorkspaceFile,
   type ActivityTracker,
+  type ArtifactGrantFactory,
+  type ArtifactProjectCapacity,
+  type ArtifactQuota,
   type ArtifactWorkspaceObjectsRepo,
   type HydrateEventMirror,
   type HydrateFileManifestsRepo,
@@ -94,6 +97,9 @@ export interface FileServiceDeps {
   runs: HydrateRunsRepo;
   eventMirror: HydrateEventMirror;
   workspaceObjects: ArtifactWorkspaceObjectsRepo;
+  quota: ArtifactQuota;
+  grantFactory?: ArtifactGrantFactory;
+  assertProjectFileCapacity: ArtifactProjectCapacity;
   /** Default DEFAULT_PRESIGN_TTL_SECONDS (3600) inside registerArtifact. */
   presignTtlSeconds?: number;
   /**
@@ -181,6 +187,14 @@ function sendEngineError(reply: FastifyReply, err: unknown): FastifyReply {
     return fail(reply, 409, err.code, err.message);
   }
   if (err instanceof StorageError) {
+    if (err.code === "storage_quota_not_configured" ||
+        err.code === "cdn_grant_not_configured" ||
+        err.code === "cdn_grant_unavailable") {
+      return fail(reply, 503, err.code, "Artifact storage is temporarily unavailable.");
+    }
+    if (err.code === "storage_quota_exceeded" || err.code === "upload_limit_reached") {
+      return fail(reply, 409, err.code, "The storage allowance for this plan is exhausted.");
+    }
     return fail(reply, 500, "internal", err.message);
   }
   const message = err instanceof Error ? err.message : String(err);
@@ -362,6 +376,9 @@ export function buildFileService(deps: FileServiceDeps): FastifyInstance {
             storage: deps.storage,
             workspaceObjects: deps.workspaceObjects,
             eventMirror: deps.eventMirror,
+            quota: deps.quota,
+            grantFactory: deps.grantFactory,
+            assertProjectFileCapacity: deps.assertProjectFileCapacity,
             ...(deps.presignTtlSeconds !== undefined
               ? { presignTtlSeconds: deps.presignTtlSeconds }
               : {}),

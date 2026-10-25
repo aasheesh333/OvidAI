@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { verifyInternalRequest } from "@ovid/shared";
 
 import { mintCdnUrl, type CdnConfig } from "./cdn.js";
 import {
@@ -16,6 +17,9 @@ const CONFIG: CdnConfig = { baseUrl: "https://cdn.ovidsi.test", secret: SECRET, 
 const ARTIFACT_KEY =
   "users/u1/artifacts/s1/0192c0de-0000-7000-8000-000000000001-aaaaaaaaaaaaaaaa-shot.png";
 const UPLOAD_KEY = "users/u1/sessions/s1/uploads/a1";
+const GRANT_ID = "grant-worker-1";
+const VERSION_HASH = "a".repeat(64);
+const GRANT_SECRET = "worker-grant-internal-secret-32-bytes!!";
 
 interface StoredObject {
   bytes: Uint8Array;
@@ -106,13 +110,21 @@ function mint(overrides: Partial<Parameters<typeof mintCdnUrl>[1]> = {}): string
     key: ARTIFACT_KEY,
     filename: "shot.png",
     contentType: "image/png",
+    grantId: GRANT_ID,
+    versionHash: VERSION_HASH,
     now: new Date(NOW * 1000),
     ...overrides,
   }).url;
 }
 
 function env(bucket: FakeBucket, extra: Partial<CdnEnv> = {}): CdnEnv {
-  return { BUCKET: bucket, OVID_CDN_SIGNING_SECRET: SECRET, ...extra };
+  return {
+    BUCKET: bucket,
+    OVID_CDN_SIGNING_SECRET: SECRET,
+    OVID_CDN_GRANT_CHECK_URL: "http://gateway.internal/internal/cdn-grants/assert-active",
+    OVID_CDN_GRANT_INTERNAL_SECRET: GRANT_SECRET,
+    ...extra,
+  } as CdnEnv;
 }
 
 async function run(
@@ -124,15 +136,22 @@ async function run(
     cache?: FakeCache;
     nowSeconds?: number;
     env?: Partial<CdnEnv>;
+    grantActive?: boolean;
+    fetchImpl?: typeof fetch;
   } = {},
 ): Promise<Response> {
+  const fetchImpl = opts.fetchImpl ?? (async () => new Response(
+    JSON.stringify({ active: opts.grantActive ?? true }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  ));
   return handleRequest(
     new Request(url, { method: opts.method ?? "GET", headers: opts.headers }),
     env(bucket, opts.env),
     {
       nowSeconds: opts.nowSeconds ?? NOW,
+      fetchImpl: fetchImpl as typeof fetch,
       ...(opts.cache !== undefined ? { cache: opts.cache } : {}),
-    },
+    } as Parameters<typeof handleRequest>[2],
   );
 }
 
@@ -151,13 +170,19 @@ describe("CDN Worker handler", () => {
     expect(res.headers.get("etag")).toBe('"etag-1"');
   });
 
-  it("uses a short edge TTL for uploads and the signed content type (no extension in key)", async () => {
+  it("refuses mutable uploads instead of permitting a CDN cache-class upgrade", async () => {
     const bucket = new FakeBucket();
     bucket.seed(UPLOAD_KEY, "photo-bytes", "application/octet-stream");
-    const res = await run(mint({ key: UPLOAD_KEY, filename: "photo.png", contentType: "image/png" }), bucket);
-    expect(res.status).toBe(200);
-    expect(res.headers.get("cache-control")).toContain("max-age=60");
-    expect(res.headers.get("content-type")).toBe("image/png");
+    const cache = new FakeCache();
+    const res = await run(
+      mint({ key: UPLOAD_KEY, filename: "photo.png", contentType: "image/png" }),
+      bucket,
+      { cache },
+    );
+    expect(res.status).toBe(403);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(bucket.gets).toBe(0);
+    expect(cache.matches).toBe(0);
   });
 
   it("sets Content-Disposition attachment with a sanitized filename", async () => {
@@ -206,7 +231,7 @@ describe("CDN Worker handler", () => {
       ).status,
     ).toBe(403);
 
-    const missing = await run(mint({ key: "users/u1/sessions/s1/uploads/missing" }), bucket);
+    const missing = await run(mint({ key: ARTIFACT_KEY.replace("shot.png", "missing.png") }), bucket);
     expect(missing.status).toBe(404);
     expect(missing.headers.get("cache-control")).toBe("no-store");
   });
@@ -284,6 +309,103 @@ describe("CDN Worker handler", () => {
     expect(cache.matches).toBe(before);
   });
 
+  it("rechecks the grant before a warm cache hit, 304, HEAD and R2 after revocation", async () => {
+    const bucket = new FakeBucket();
+    bucket.seed(ARTIFACT_KEY, "cached-secret", "image/png");
+    const cache = new FakeCache();
+    const url = mint();
+    expect((await run(url, bucket, { cache })).status).toBe(200);
+    expect((await run(url, bucket, { cache })).status).toBe(200);
+    expect(bucket.gets).toBe(1);
+    const matches = cache.matches;
+
+    const deniedReads: Array<{
+      cache: FakeCache;
+      method?: string;
+      headers?: Record<string, string>;
+    }> = [
+      { cache },
+      { cache, headers: { "if-none-match": '"etag-1"' } },
+      { cache, method: "HEAD" },
+      { cache, headers: { range: "bytes=0-1" } },
+    ];
+    for (const options of deniedReads) {
+      expect((await run(url, bucket, { ...options, grantActive: false })).status).toBe(403);
+    }
+    expect(cache.matches).toBe(matches);
+    expect(bucket.gets).toBe(1);
+    expect(bucket.heads).toBe(0);
+
+    let active = false;
+    expect((await run(url, bucket, { cache, grantActive: active })).status).toBe(403);
+    active = true;
+    expect((await run(url, bucket, { cache, grantActive: active })).status).toBe(200);
+  });
+
+  it("denies legacy grantless v1 URLs before any cache or storage access", async () => {
+    const bucket = new FakeBucket();
+    bucket.seed(ARTIFACT_KEY, "legacy", "image/png");
+    const cache = new FakeCache();
+    const legacy = mintCdnUrl(CONFIG, {
+      key: ARTIFACT_KEY,
+      contentType: "image/png",
+      now: new Date(NOW * 1000),
+    }).url;
+    expect((await run(legacy, bucket, { cache })).status).toBe(403);
+    expect(cache.matches).toBe(0);
+    expect(bucket.gets).toBe(0);
+  });
+
+  it("fails closed when the grant service is absent or unavailable", async () => {
+    const bucket = new FakeBucket();
+    bucket.seed(ARTIFACT_KEY, "private", "image/png");
+    const cache = new FakeCache();
+    expect((await run(mint(), bucket, {
+      cache,
+      env: { OVID_CDN_GRANT_CHECK_URL: "" } as Partial<CdnEnv>,
+    })).status).toBe(503);
+    expect((await run(mint(), bucket, {
+      cache,
+      fetchImpl: async () => { throw new Error("grant service down"); },
+    })).status).toBe(503);
+    expect(cache.matches).toBe(0);
+    expect(bucket.gets).toBe(0);
+  });
+
+  // UNEXECUTED under the 2026-10-25 heavy-verification pause.
+  it("signs the internal check with both grant and frozen version", async () => {
+    const bucket = new FakeBucket();
+    bucket.seed(ARTIFACT_KEY, "signed-grant", "image/png");
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ active: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    const res = await run(mint(), bucket, { fetchImpl: fetchImpl as unknown as typeof fetch });
+    expect(res.status).toBe(200);
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("http://gateway.internal/internal/cdn-grants/assert-active");
+    expect(JSON.parse(String(init.body))).toEqual({ grantId: GRANT_ID, versionHash: VERSION_HASH });
+    const headers = init.headers as Record<string, string>;
+    expect(verifyInternalRequest(
+      GRANT_SECRET,
+      "POST",
+      "/internal/cdn-grants/assert-active",
+      `${GRANT_ID}:${VERSION_HASH}`,
+      headers["X-Ovid-Timestamp"]!,
+      headers["X-Ovid-Signature"]!,
+      NOW,
+    )).toBe(true);
+    expect(verifyInternalRequest(
+      GRANT_SECRET,
+      "POST",
+      "/internal/cdn-grants/assert-active",
+      GRANT_ID,
+      headers["X-Ovid-Timestamp"]!,
+      headers["X-Ovid-Signature"]!,
+      NOW,
+    )).toBe(false);
+  });
+
   it("still serves the object when the cache write fails", async () => {
     const bucket = new FakeBucket();
     bucket.seed(ARTIFACT_KEY, "survives-cache-failure", "image/png");
@@ -316,6 +438,7 @@ describe("CDN Worker handler", () => {
     bucket.seed(ARTIFACT_KEY, "<h1>x</h1>", "text/html");
     const res = await run(mint({ contentType: "text/html" }), bucket);
     expect(res.headers.get("content-security-policy")).toContain("sandbox");
+    expect(res.headers.get("content-disposition")).toContain("attachment");
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
   });
 

@@ -28,10 +28,14 @@ interface Harness {
   vaultFetches: Array<Record<string, unknown>>;
   vaultRegisters: Array<Record<string, unknown>>;
   fireDownload(download: unknown): Promise<void>;
+  network: SessionBrowser["network"];
   root: string;
 }
 
-async function harness(root: string): Promise<Harness> {
+async function harness(
+  root: string,
+  options: { registerFromWorkspace?: BrowserArtifactVaultPort["registerFromWorkspace"] } = {},
+): Promise<Harness> {
   const uploaded: string[] = [];
   const vaultFetches: Array<Record<string, unknown>> = [];
   const vaultRegisters: Array<Record<string, unknown>> = [];
@@ -82,6 +86,9 @@ async function harness(root: string): Promise<Harness> {
     },
     async registerFromWorkspace(input) {
       vaultRegisters.push({ ...input });
+      if (options.registerFromWorkspace !== undefined) {
+        return options.registerFromWorkspace(input);
+      }
       return { id: "artifact-1" };
     },
   };
@@ -123,6 +130,7 @@ async function harness(root: string): Promise<Harness> {
       // Let the async listener finish (it awaits path/stat/saveAs).
       await new Promise((r) => setTimeout(r, 20));
     },
+    network: session.network,
     root,
   };
 }
@@ -210,6 +218,48 @@ describe("browser file bridge (W4)", () => {
     expect(result.content).toContain("saved 16 bytes to browser/downloads/report.txt");
     expect(result.content).toContain("Artifact Vault");
     expect(result.artifacts?.[0]?.path).toBe("browser/downloads/report.txt");
+  });
+
+  // UNEXECUTED round-3: publication refusal is not an ordinary tool success.
+  it("browser_download returns typed project refusal instead of artifact success", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("bytes", {
+      status: 200,
+      headers: { "content-type": "text/plain", "content-length": "5" },
+    })));
+    const h = await harness(root, {
+      registerFromWorkspace: async () => {
+        throw Object.assign(new Error("project full"), { code: "project_file_limit" });
+      },
+    });
+    const result = await exec(h, "browser_download", {
+      url: "http://127.0.0.1:1/report.txt",
+      filename: "report.txt",
+    });
+    expect(result.content).toBe("error: project_file_limit: The project file allowance is exhausted.");
+    expect(result.isError).toBe(true);
+    expect(result.artifacts).toBeUndefined();
+    expect(result.content).not.toContain("saved");
+  });
+
+  it("a page-initiated download records a typed publication failure, not a normal success", async () => {
+    const h = await harness(root, {
+      registerFromWorkspace: async () => {
+        throw Object.assign(new Error("quota unavailable"), { code: "storage_quota_not_configured" });
+      },
+    });
+    await exec(h, "browser_list_tabs", {});
+    const temp = join(root, "tmp-refusal");
+    await writeFile(temp, "page bytes");
+    await h.fireDownload({
+      url: () => "https://example.test/refusal.csv",
+      suggestedFilename: () => "refusal.csv",
+      path: async () => temp,
+      saveAs: async (dest: string) => writeFile(dest, "page bytes"),
+      delete: async () => {},
+    });
+    expect(h.network).toHaveLength(1);
+    expect(h.network[0]!.failure).toContain("storage_quota_not_configured");
+    expect(h.network[0]!.status).toBeNull();
   });
 
   it("a page-initiated download lands in the chat workspace and the vault", async () => {

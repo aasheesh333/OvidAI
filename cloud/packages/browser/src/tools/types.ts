@@ -63,6 +63,8 @@ export interface BrowserArtifactRef {
 
 export interface BrowserToolResult {
   content: string;
+  /** Explicit refusal; absent means success. Never infer this from content. */
+  isError?: boolean;
   artifacts?: BrowserArtifactRef[];
 }
 

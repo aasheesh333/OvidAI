@@ -2,14 +2,30 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { FileServiceDeps } from "./fileService.js";
 import type { FullRunDeps } from "./runProcessor.js";
 import type { StudioGitServiceConfig } from "./studioGitRoutes.js";
+import {
+  createHttpArtifactGrantFactory,
+  loadCdnConfig,
+  registerArtifact,
+} from "@ovid/storage";
 import type { Db } from "@ovid/db";
+import { createBrowserArtifactVaultPort } from "./browserCredentials.js";
+import { createImageTools } from "./tools/imageTools.js";
 
 const h = vi.hoisted(() => {
   const marker = { studio: "real-service-from-factory" };
-  const manager = { recover: vi.fn(async () => undefined) };
+  const artifactQuota = { storage: "real-db-quota" };
+  const artifactGrantFactory = async () => ({ grantId: "grant", key: "frozen" });
+  const manager = {
+    recover: vi.fn(async () => undefined),
+    close: vi.fn(async () => undefined),
+  };
   const queue = () => ({ add: vi.fn(), close: vi.fn(async () => undefined) });
   return {
     marker,
+    artifactQuota,
+    artifactGrantFactory,
+    createStorageQuotaRepos: vi.fn(() => artifactQuota),
+    createHttpArtifactGrantFactory: vi.fn(() => artifactGrantFactory),
     manager,
     createDb: vi.fn(),
     redisConstructor: vi.fn(),
@@ -32,6 +48,8 @@ const h = vi.hoisted(() => {
 
 vi.mock("@ovid/db", () => ({
   createDb: h.createDb,
+  createStorageQuotaRepos: h.createStorageQuotaRepos,
+  assertSessionFileCapacity: vi.fn(),
   dbPoolOptionsFromEnv: vi.fn(() => ({})),
   byokKeysRepo: {},
   eventMirror: {},
@@ -89,6 +107,7 @@ vi.mock("@ovid/storage", () => ({
   createR2PrefixDeleterFromEnv: vi.fn(() => null),
   createSandboxManagerEviction: vi.fn(() => ({})),
   createStorage: vi.fn(() => ({})),
+  createHttpArtifactGrantFactory: h.createHttpArtifactGrantFactory,
   diskAlertFractionFromEnv: vi.fn(() => 0.8),
   hibernateWorkspace: vi.fn(),
   hydrateWorkspace: vi.fn(),
@@ -272,5 +291,63 @@ describe("worker Studio production composition", () => {
       sessionId: "session",
       runId: "run",
     });
+  });
+  // UNEXECUTED round-2 real worker composition regression.
+  it("wires real quota, CDN, and signed grant factory into every artifact publisher", async () => {
+    h.createDb.mockReturnValue(mainDb());
+    const cdn = { baseUrl: "https://cdn.test", secret: "s".repeat(32), ttlSeconds: 900 };
+    vi.mocked(loadCdnConfig).mockReturnValue(cdn);
+    const { main } = await import("./main.js");
+    await expect(main(baseEnv({
+      OVID_MASTER_KEY: MASTER_KEY,
+      OVID_GATEWAY_INTERNAL_URL: "http://gateway.internal",
+    }))).rejects.toThrow("composition-stop-after-processor");
+
+    expect(createHttpArtifactGrantFactory).toHaveBeenCalledWith({
+      baseUrl: "http://gateway.internal",
+      secret: "test-internal-secret-0123456789abcdef",
+    });
+    const fileDeps = h.buildFileService.mock.calls[0]![0];
+    expect(fileDeps).toMatchObject({
+      quota: h.artifactQuota,
+      grantFactory: h.artifactGrantFactory,
+    });
+    expect(fileDeps.assertProjectFileCapacity).toBeTypeOf("function");
+    expect(fileDeps.cdn).toEqual(cdn);
+
+    const browserDeps = vi.mocked(createBrowserArtifactVaultPort).mock.calls[0]![0];
+    expect(browserDeps).toMatchObject({
+      quota: h.artifactQuota,
+      grantFactory: h.artifactGrantFactory,
+      cdn,
+    });
+    expect(browserDeps.assertProjectFileCapacity).toBeTypeOf("function");
+
+    const processor = h.createFullAgentRunProcessor.mock.calls[0]![0];
+    processor.images.createTools({ capabilities: null });
+    const imageDeps = vi.mocked(createImageTools).mock.calls[0]![0];
+    vi.mocked(registerArtifact).mockResolvedValue({
+      id: "artifact-1",
+      key: "frozen",
+      sizeBytes: 1,
+      sha256Hex: "a".repeat(64),
+      contentType: "image/png",
+      url: "https://cdn.test/frozen",
+      expiresAt: "2026-10-25T00:00:00.000Z",
+    });
+    await imageDeps.publishArtifact({
+      userId: "user-1",
+      sessionId: "session-1",
+      name: "generated/image.png",
+      contentType: "image/png",
+      content: Buffer.from("x"),
+    });
+    const artifactDeps = vi.mocked(registerArtifact).mock.calls[0]![0];
+    expect(artifactDeps).toMatchObject({
+      quota: h.artifactQuota,
+      grantFactory: h.artifactGrantFactory,
+    });
+    expect(artifactDeps.assertProjectFileCapacity).toBeTypeOf("function");
+    expect(artifactDeps.cdn).toEqual(cdn);
   });
 });

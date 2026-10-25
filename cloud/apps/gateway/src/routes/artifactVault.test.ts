@@ -1,29 +1,39 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { attachments, newId, schema, sessions, users, workspaceObjects, type Db } from "@ovid/db";
+import { attachments, createDb, migrate, newId, schema, sessions, users, workspaceObjects, type Db } from "@ovid/db";
 import { createStorage, type StorageAdapter } from "@ovid/storage";
 import { buildGateway } from "../app.js";
-import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
+import { StorageQuota } from "../storageQuota.js";
+import { createMigrationScratch, type MigrationScratch } from "../../../../packages/db/src/migrationTestKit.js";
+import { TEST_DATABASE_URL, testUid } from "../test/db.js";
 import { authHeaders, noopEvents, stubKeys, stubMint, stubQueues, stubTickets, stubVerifier, stubSystemBus } from "../test/stubs.js";
 
 type Item = { id: string; origin: string; category: string; name: string; sessionId: string; availability: string };
 type Page = { items: Item[]; nextCursor: string | null };
 
 describe.skipIf(!TEST_DATABASE_URL)("account Artifact Vault (real postgres + storage)", () => {
+  let scratch: MigrationScratch;
   let db: Db;
   let root: string;
   let storage: StorageAdapter;
   const apps: FastifyInstance[] = [];
   beforeAll(async () => {
-    db = await openTestDb();
+    scratch = await createMigrationScratch(TEST_DATABASE_URL!, "gateway_artifact_vault");
+    await migrate(scratch.url);
+    db = createDb(scratch.url, { max: 8 });
     root = await mkdtemp(join(tmpdir(), "ovid-vault-"));
     storage = createStorage({ backend: "fs", fsRoot: root });
-  }, 60_000);
+  }, 180_000);
   afterEach(async () => { while (apps.length) await apps.pop()!.close(); });
-  afterAll(async () => { await closeDb(db); await rm(root, { recursive: true, force: true }); });
+  afterAll(async () => {
+    await db?.$client.end({ timeout: 5 });
+    await scratch?.close();
+    if (root !== undefined) await rm(root, { recursive: true, force: true });
+  }, 30_000);
   function app(adapter: StorageAdapter = storage) {
     const a = buildGateway({ db, system: stubSystemBus(), queues: stubQueues().queues, verifier: stubVerifier(), tickets: stubTickets(), keys: stubKeys(), mint: stubMint(), events: noopEvents, storage: adapter });
     apps.push(a);
@@ -36,15 +46,31 @@ describe.skipIf(!TEST_DATABASE_URL)("account Artifact Vault (real postgres + sto
     const second = await sessions.create(db, uid, "Second chat");
     return { uid, first: first.id, second: second.id };
   }
-  async function generated(uid: string, sid: string, name: string, id = newId()) {
+  async function generated(uid: string, sid: string, name: string, id = newId(), contentType = "application/octet-stream") {
     const key = `users/${uid}/artifacts/${sid}/${id}-${name}`;
-    await storage.put(key, Buffer.from("data"));
-    return workspaceObjects.registerArtifact(db, { id, userId: uid, sessionId: sid, r2Key: key, bytes: 4, sha256: "a".repeat(64), contentType: "application/octet-stream", meta: { name } });
+    await storage.put(key, Buffer.from("data"), { contentType });
+    const sha256 = createHash("sha256").update("data").digest("hex");
+    return workspaceObjects.registerArtifact(db, { id, userId: uid, sessionId: sid, r2Key: key, bytes: 4, sha256, contentType, meta: { name } });
   }
-  async function uploaded(uid: string, sid: string, name: string, id = newId(), put = true) {
+  async function uploaded(uid: string, sid: string, name: string, id = newId(), put = true, ready = true) {
     const key = `users/${uid}/sessions/${sid}/uploads/${id}`;
     if (put) await storage.put(key, Buffer.from("data"));
-    return attachments.create(db, { id, userId: uid, sessionId: sid, name, size: 4, r2Key: key });
+    const row = await attachments.create(db, { id, userId: uid, sessionId: sid, name, size: 4, r2Key: key });
+    if (ready) {
+      const quota = new StorageQuota({ db, storage });
+      const reserved = await quota.reserveUpload({
+        actorUserId: uid, ownerUserId: uid, sessionId: sid,
+        attachmentId: id, declaredBytes: 4,
+      });
+      if (!reserved.ok) throw new Error("unexpected test quota exhaustion");
+      await quota.finalizeUpload({
+        reservationId: id, actualBytes: 4, actualContentType: null, etag: null,
+      });
+      await attachments.finalizeUpload(db, {
+        id, sessionId: sid, userId: uid, actualBytes: 4, actualContentType: null,
+      });
+    }
+    return row;
   }
   async function list(a: FastifyInstance, uid: string, query = "") {
     const res = await a.inject({ method: "GET", url: `/cloud/v1/artifacts${query}`, headers: authHeaders(uid) });
@@ -154,6 +180,130 @@ describe.skipIf(!TEST_DATABASE_URL)("account Artifact Vault (real postgres + sto
     expect(failed.statusCode).toBe(503);
     expect(failed.json().error.code).toBe("artifact_storage_unavailable");
   });
+  it("never serves active content inline through the canonical Ovid/R2 mint", async () => {
+    const { uid, first } = await fixture();
+    const g = await generated(uid, first, "active.html", newId(), "text/html");
+    const presign = vi.spyOn(storage, "presignGet");
+    const res = await app().inject({
+      method: "GET",
+      url: `/cloud/v1/artifacts/${g.id}/url?source=generated`,
+      headers: authHeaders(uid),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(presign).toHaveBeenCalledWith(g.r2Key, 3600, {
+      disposition: "attachment",
+      filename: "active.html",
+      contentType: "text/html",
+    });
+  });
+
+  // UNEXECUTED N3: non-active canonical downloads preserve attachment intent.
+  it("forces attachment disposition for a non-active canonical download=1", async () => {
+    const { uid, first } = await fixture();
+    const g = await generated(uid, first, "report.pdf", newId(), "application/pdf");
+    const presign = vi.spyOn(storage, "presignGet");
+    const res = await app().inject({
+      method: "GET",
+      url: `/cloud/v1/artifacts/${g.id}/url?source=generated&download=1`,
+      headers: authHeaders(uid),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(presign).toHaveBeenCalledWith(g.r2Key, 3600, {
+      disposition: "attachment",
+      filename: "report.pdf",
+      contentType: "application/pdf",
+    });
+  });
+
+  // UNEXECUTED round-1 regression for the legacy session mint.
+  it("forces actual active content to attachment on the legacy session URL", async () => {
+    const { uid, first } = await fixture();
+    const g = await generated(uid, first, "innocent.txt", newId(), "text/html");
+    const presign = vi.spyOn(storage, "presignGet");
+    const res = await app().inject({
+      method: "GET",
+      url: `/cloud/v1/sessions/${first}/artifacts/${g.id}/url`,
+      headers: authHeaders(uid),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(presign).toHaveBeenCalledWith(g.r2Key, 3600, {
+      disposition: "attachment",
+      filename: "innocent.txt",
+      contentType: "text/html",
+    });
+  });
+
+  it("deletion revokes dependent grants, frees the copy once, and removes bytes only after transition", async () => {
+    const { uid, first } = await fixture();
+    const g = await generated(uid, first, "shared.txt");
+    const quota = new StorageQuota({ db, storage });
+    const reserved = await quota.reserveArtifact({
+      actorUserId: uid,
+      ownerUserId: uid,
+      sessionId: first,
+      artifactId: g.id,
+      declaredBytes: 4,
+    });
+    if (!reserved.ok) throw new Error("unexpected quota exhaustion");
+    await quota.finalizeUpload({
+      reservationId: g.id,
+      actualBytes: 4,
+      actualContentType: "application/octet-stream",
+      etag: "source-etag",
+    });
+    const share = await quota.createImmutableShare({
+      actorUserId: uid,
+      artifactId: g.id,
+      displayName: "shared.txt",
+    });
+    expect(await quota.assertActive(share.grantId, share.versionHash)).toBe(true);
+    expect(await quota.storageUsage(uid)).toEqual({ usedBytes: 8, reservedBytes: 0 });
+    const remove = vi.spyOn(storage, "delete");
+    const a = app();
+    const deleted = await a.inject({
+      method: "DELETE",
+      url: `/cloud/v1/artifacts/${g.id}?source=generated`,
+      headers: authHeaders(uid),
+    });
+    expect(deleted.statusCode).toBe(200);
+    expect(deleted.json()).toMatchObject({ id: g.id, freedBytes: 4 });
+    expect(await quota.assertActive(share.grantId, share.versionHash)).toBe(false);
+    expect(await quota.storageUsage(uid)).toEqual({ usedBytes: 0, reservedBytes: 0 });
+    expect(await storage.head(share.key)).toBeNull();
+    expect(await storage.head(g.r2Key)).toBeNull();
+    expect(remove).toHaveBeenCalledTimes(2);
+    expect((await a.inject({
+      method: "DELETE",
+      url: `/cloud/v1/artifacts/${g.id}?source=generated`,
+      headers: authHeaders(uid),
+    })).statusCode).toBe(404);
+    expect(remove).toHaveBeenCalledTimes(2);
+    expect(await quota.storageUsage(uid)).toEqual({ usedBytes: 0, reservedBytes: 0 });
+  });
+
+  it("deleting a pending upload releases its reservation without inventing used bytes", async () => {
+    const { uid, first } = await fixture();
+    const u = await uploaded(uid, first, "pending-delete.txt", newId(), false, false);
+    const quota = new StorageQuota({ db, storage });
+    const reserved = await quota.reserveUpload({
+      actorUserId: uid,
+      ownerUserId: uid,
+      sessionId: first,
+      attachmentId: u.id,
+      declaredBytes: 4,
+    });
+    if (!reserved.ok) throw new Error("unexpected quota exhaustion");
+    const deleted = await app().inject({
+      method: "DELETE",
+      url: `/cloud/v1/artifacts/${u.id}?source=uploaded`,
+      headers: authHeaders(uid),
+    });
+    expect(deleted.statusCode).toBe(200);
+    expect(await quota.storageUsage(uid)).toEqual({ usedBytes: 0, reservedBytes: 0 });
+    expect(await db.$client`SELECT state FROM storage_reservations WHERE id = ${u.id}`)
+      .toEqual([{ state: "released" }]);
+  });
+
   it("legacy URL route rejects a different owned session, deleted objects and non-artifact kinds", async () => {
     const { uid, first, second } = await fixture();
     const g = await generated(uid, first, "safe.txt");

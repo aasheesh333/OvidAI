@@ -6,6 +6,7 @@ import {
   type ArtifactUrlResponse,
   type Page,
 } from "@ovid/shared";
+import { isActiveCdnContentType, sanitizeCdnContentType } from "@ovid/storage";
 import type { GatewayDeps } from "../app.js";
 import { isUuid, notFound, parsePageLimit, queryValue, sendError } from "./http.js";
 
@@ -102,9 +103,30 @@ export function registerArtifactRoutes(app: FastifyInstance, deps: GatewayDeps):
       );
     }
 
+    let head;
+    try {
+      head = await deps.storage.head(row.r2Key);
+    } catch {
+      return sendError(reply, 503, "artifact_storage_unavailable", "Ovid Cloud storage could not be reached. Try again shortly.");
+    }
+    if (head === null) {
+      return sendError(reply, 404, "artifact_unavailable", "This file is no longer available in Ovid Cloud.");
+    }
+    if (head.bytes !== row.bytes) {
+      return sendError(reply, 409, "artifact_incomplete", "This file did not finish uploading. Remove and re-attach it.");
+    }
+
     const ttlSeconds = deps.presignTtlSeconds ?? DEFAULT_PRESIGN_TTL_SECONDS;
-    // NEVER log the URL — it is a bearer capability until expiresAt.
-    const url = await deps.storage.presignGet(row.r2Key, ttlSeconds);
+    // NEVER log the URL — it is a bearer capability until expiresAt. Active
+    // content is always an attachment, even on this legacy short-URL route.
+    const contentType = sanitizeCdnContentType(head.contentType ?? row.contentType) ?? "application/octet-stream";
+    const url = await deps.storage.presignGet(
+      row.r2Key,
+      ttlSeconds,
+      isActiveCdnContentType(contentType)
+        ? { disposition: "attachment", filename: toArtifactDto(row, sessionId).name, contentType }
+        : undefined,
+    );
     const now = deps.clock?.() ?? new Date();
     const body: ArtifactUrlResponse = {
       url,

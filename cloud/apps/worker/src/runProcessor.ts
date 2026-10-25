@@ -3,12 +3,16 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { join } from "node:path";
 import {
   AttachmentFinalizeError,
+  attachmentDeclarationMismatch,
   attachments,
+  cleanupStorageObject,
+  createStorageQuotaRepos,
   createPrivateMemoryStore,
   eventMirror,
   grantsRepo,
   messages,
   projectsRepo,
+  QuotaContractError,
   runs,
   sessions,
   userPreferences,
@@ -213,21 +217,129 @@ export interface RunAttachmentStorage {
   head(key: string): Promise<HeadResult | null>;
   /** null = object missing (the client never completed the upload). */
   getBuffer(key: string): Promise<Buffer | null>;
+  /** Best-effort quarantine for a refused/late object. */
+  delete?(key: string): Promise<void>;
+}
+
+async function releaseRunAttachmentFailure(
+  db: Db,
+  storage: RunAttachmentStorage,
+  row: AttachmentRow,
+): Promise<void> {
+  await cleanupStorageObject(db, { reservationId: row.id }, {
+    // Preserve worker best-effort object quarantine. The helper still reaches
+    // the host-row delete if this callback or a DB operation fails.
+    deleteObject: async () => {
+      await storage.delete?.(row.r2Key).catch(() => {});
+    },
+    // Failed ordinary uploads do not retain project-file slots. The storage
+    // reservation itself remains as a released tombstone, denying late PUTs.
+    deleteRow: async () => {
+      await db.$client`DELETE FROM attachments WHERE id = ${row.id} AND user_id = ${row.userId}`;
+    },
+  });
 }
 
 /**
  * The legacy send route deliberately accepts a pending row. Before either
- * worker path materializes it, HEAD must prove the same size/type contract as
- * the HTTP finalize route. A later linked run repeats this check idempotently.
+ * worker path materializes it, HEAD proves size/type, the reservation settles
+ * those actual bytes, and only then may the canonical ready guard accept it.
+ * Missing/mismatched/refused uploads release allowance and their project row.
  */
 async function fenceRunAttachment(
   db: Db,
   storage: RunAttachmentStorage,
   row: AttachmentRow,
 ): Promise<string | null> {
+  const quota = createStorageQuotaRepos(db);
   const head = await storage.head(row.r2Key);
-  if (head === null) return `attachment object not found: ${row.r2Key}`;
+  if (head === null) {
+    let quotaRefusal: string | null = null;
+    try {
+      const missing = await quota.reserveUpload({
+        actorUserId: row.userId,
+        ownerUserId: row.userId,
+        sessionId: row.sessionId,
+        attachmentId: row.id,
+        declaredBytes: row.size,
+        head: null,
+      });
+      if (!missing.ok && missing.scope !== "attachment") {
+        quotaRefusal = missing.scope === "upload"
+          ? "The upload allowance for this plan is exhausted."
+          : "The storage allowance for this plan is exhausted.";
+      }
+    } catch (error) {
+      const expectedLifecycle = error instanceof QuotaContractError && (
+        error.code === "attachment_failed" ||
+        error.code === "reservation_released" ||
+        error.code === "reservation_not_found"
+      );
+      if (!expectedLifecycle) {
+        await releaseRunAttachmentFailure(db, storage, row);
+        throw error;
+      }
+    }
+    // The atomic reserve commits failed + released before this cleanup removes
+    // the worker host row. The reservation tombstone itself is retained.
+    await releaseRunAttachmentFailure(db, storage, row);
+    return quotaRefusal ?? `attachment object not found: ${row.r2Key}`;
+  }
+
+  const mismatch = attachmentDeclarationMismatch(row, {
+    actualBytes: head.bytes,
+    actualContentType: head.contentType ?? null,
+  });
+  if (mismatch !== null) {
+    try {
+      // Preserve the canonical typed mismatch result; no usage was settled.
+      await attachments.finalizeUpload(db, {
+        id: row.id,
+        sessionId: row.sessionId,
+        userId: row.userId,
+        actualBytes: head.bytes,
+        actualContentType: head.contentType ?? null,
+      });
+    } catch (error) {
+      await releaseRunAttachmentFailure(db, storage, row);
+      if (error instanceof AttachmentFinalizeError) return error.message;
+      throw error;
+    }
+  }
+
   try {
+    // Idempotent for new uploads and repairs a legacy pending identity. A
+    // released reservation can never be revived by a late PUT.
+    const reserved = await quota.reserveUpload({
+      actorUserId: row.userId,
+      ownerUserId: row.userId,
+      sessionId: row.sessionId,
+      attachmentId: row.id,
+      declaredBytes: row.size,
+      head: { bytes: head.bytes, contentType: head.contentType ?? null, etag: head.etag },
+    });
+    if (!reserved.ok) {
+      await releaseRunAttachmentFailure(db, storage, row);
+      if (reserved.scope === "attachment") {
+        return "attachment upload evidence is no longer valid";
+      }
+      return reserved.scope === "upload"
+        ? "The upload allowance for this plan is exhausted."
+        : "The storage allowance for this plan is exhausted.";
+    }
+    const settled = await quota.finalizeUpload({
+      reservationId: row.id,
+      actualBytes: head.bytes,
+      actualContentType: head.contentType ?? null,
+      etag: head.etag,
+      attachment: true,
+    });
+    if (!settled.ok) {
+      await releaseRunAttachmentFailure(db, storage, row);
+      return settled.scope === "upload"
+        ? "The upload allowance for this plan is exhausted."
+        : "The storage allowance for this plan is exhausted.";
+    }
     await attachments.finalizeUpload(db, {
       id: row.id,
       sessionId: row.sessionId,
@@ -236,10 +348,47 @@ async function fenceRunAttachment(
       actualContentType: head.contentType ?? null,
     });
     return null;
-  } catch (err) {
-    if (err instanceof AttachmentFinalizeError) return err.message;
-    throw err;
+  } catch (error) {
+    // Any post-reservation failure, including canonical-ready or unexpected
+    // storage/repository errors, must reconcile charge/object/row. Only after
+    // that reconciliation may a typed refusal return or an infra error escape.
+    await releaseRunAttachmentFailure(db, storage, row);
+    if (error instanceof AttachmentFinalizeError || error instanceof QuotaContractError) {
+      return error.message;
+    }
+    throw error;
   }
+}
+
+export interface RunAttachmentReadResult {
+  buffer: Buffer | null;
+  error: string | null;
+}
+
+/** Shared by both legacy and full materialization loops. */
+export async function readRunAttachment(
+  db: Db,
+  storage: RunAttachmentStorage,
+  row: AttachmentRow,
+): Promise<RunAttachmentReadResult> {
+  const error = await fenceRunAttachment(db, storage, row);
+  if (error !== null) return { buffer: null, error };
+  let buffer: Buffer | null;
+  try {
+    buffer = await storage.getBuffer(row.r2Key);
+  } catch (error) {
+    // A generic read failure after ready also requires debit/release/row
+    // reconciliation; do not let it bypass the typed fence's cleanup.
+    await releaseRunAttachmentFailure(db, storage, row);
+    throw error;
+  }
+  if (buffer === null) {
+    // HEAD may have succeeded just before a GET/delete race. Do not leave the
+    // ready row, finalized charge, or project slot behind on either run path.
+    await releaseRunAttachmentFailure(db, storage, row);
+    return { buffer: null, error: `attachment object not found: ${row.r2Key}` };
+  }
+  return { buffer, error: null };
 }
 
 export interface RunDeps {
@@ -1238,16 +1387,12 @@ export function createAgentRunProcessor(
         const uploadsDir = join(handle.workspaceDir, "uploads");
         await mkdir(uploadsDir, { recursive: true });
         for (const row of rows) {
-          const fenceFailure = await fenceRunAttachment(deps.db, deps.storage, row);
-          if (fenceFailure !== null) {
-            await failAttachments(fenceFailure);
+          const read = await readRunAttachment(deps.db, deps.storage, row);
+          if (read.error !== null) {
+            await failAttachments(read.error);
             return;
           }
-          const buffer = await deps.storage.getBuffer(row.r2Key);
-          if (buffer === null) {
-            await failAttachments(`attachment object not found: ${row.r2Key}`);
-            return;
-          }
+          const buffer = read.buffer!;
           // An image the model must SEE (owner directive 2026-10-18): the
           // bytes ride the prompt as content parts, and the file also lands in
           // the workspace so tools can still open it by path. Bounded — an
@@ -1996,16 +2141,12 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       const uploadsDir = join(handle.workspaceDir, "uploads");
       await mkdir(uploadsDir, { recursive: true });
       for (const row of rows) {
-        const fenceFailure = await fenceRunAttachment(deps.db, deps.storage, row);
-        if (fenceFailure !== null) {
-          await fail(fenceFailure);
+        const read = await readRunAttachment(deps.db, deps.storage, row);
+        if (read.error !== null) {
+          await fail(read.error);
           return;
         }
-        const buffer = await deps.storage.getBuffer(row.r2Key);
-        if (buffer === null) {
-          await fail(`attachment object not found: ${row.r2Key}`);
-          return;
-        }
+        const buffer = read.buffer!;
         // An image the model must SEE (owner directive 2026-10-18): the
         // bytes ride the prompt as content parts, and the file also lands in
         // the workspace so tools can still open it by path. Bounded — an

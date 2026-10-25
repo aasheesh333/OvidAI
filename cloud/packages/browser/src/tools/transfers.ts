@@ -23,6 +23,7 @@ import type { BrowserContext } from "playwright-core";
 import { z } from "zod";
 
 import { guardUrl, withSession } from "../sessionOps.js";
+import { artifactPublicationFailure } from "./artifactPublication.js";
 import { DOWNLOAD_MAX_BYTES, sanitizeFilename } from "./downloadWiring.js";
 import {
   TOOL_ERROR_PREFIX,
@@ -168,9 +169,9 @@ function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
         await mkdir(dir, { recursive: true });
         await writeFile(join(dir, name), body);
 
-        // Wave 6 W4: mirror the file into the account Artifact Vault. The
-        // workspace copy is authoritative; a vault failure never fails the
-        // download (the model still gets the bytes/path).
+        // Publication is part of the requested vault outcome. A project,
+        // storage, or grant refusal is a typed tool failure, never a fake
+        // successful Artifact Vault publication.
         let vaulted = false;
         if (deps.artifactVault !== undefined) {
           try {
@@ -183,6 +184,7 @@ function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
             vaulted = rec !== null;
           } catch (err) {
             deps.log?.("browser_download: artifact vault registration failed", err);
+            return { content: artifactPublicationFailure(err), isError: true };
           }
         }
 

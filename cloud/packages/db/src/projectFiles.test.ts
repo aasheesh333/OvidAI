@@ -125,6 +125,28 @@ describe.skipIf(!url)("project-scoped file accounting (real postgres)", () => {
     expect(summary!.fileBytes).toBe(305);
   });
 
+  // UNEXECUTED N1: failed ordinary uploads consume neither slots nor bytes.
+  it("excludes failed attachments from project usage consistently", async () => {
+    const { uid, projectId, sessionId } = await fixture();
+    await addAttachment(uid, sessionId, 12);
+    expect((await projectFileUsage(db, uid, projectId)).used).toBe(1);
+    await db.update(attachmentsTable)
+      .set({ uploadStatus: "failed", actualBytes: 12, finalizedAt: null })
+      .where(eq(attachmentsTable.sessionId, sessionId));
+    expect(await projectFileUsage(db, uid, projectId)).toMatchObject({
+      used: 0,
+      attachments: 0,
+      attachmentBytes: 0,
+      bytes: 0,
+    });
+    await addAttachment(uid, sessionId, 3);
+    expect(await projectFileUsage(db, uid, projectId)).toMatchObject({
+      used: 1,
+      attachments: 1,
+      attachmentBytes: 3,
+    });
+  });
+
   it("refuses the write after the last allowed slot; deleting a file frees it", async () => {
     const { uid, projectId, sessionId } = await fixture();
     // One memory file + 78 uploads = 79 used; an artifact takes the last slot.

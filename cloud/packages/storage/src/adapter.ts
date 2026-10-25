@@ -25,6 +25,23 @@ export interface PresignPutInput {
   contentType?: string;
 }
 
+export interface PresignGetOptions {
+  /** Active user content is always downloaded, never rendered in the Ovid origin. */
+  disposition: "attachment";
+  filename?: string;
+  contentType?: string;
+}
+
+export function attachmentContentDisposition(filename: string | undefined): string {
+  const safe = (filename ?? "download")
+    .split(/[\\/]/).pop()!
+    .replace(/[\r\n"]/g, "")
+    .replace(/[^A-Za-z0-9._ -]+/g, "_")
+    .trim()
+    .slice(0, 120) || "download";
+  return `attachment; filename="${safe}"`;
+}
+
 export interface PutOpts {
   contentType?: string;
   sha256Hex?: string;
@@ -44,7 +61,9 @@ export interface StorageAdapter {
   head(key: string): Promise<HeadResult | null>;
   /** Idempotent. */
   delete(key: string): Promise<void>;
-  presignGet(key: string, ttlSeconds: number): Promise<string>;
+  /** Server-side frozen copy; legacy adapters may use the streaming fallback. */
+  copy?(sourceKey: string, destinationKey: string): Promise<PutResult>;
+  presignGet(key: string, ttlSeconds: number, options?: PresignGetOptions): Promise<string>;
   /** Ruling R3: powers P8-T3 attachment uploads (contract 6). */
   presignPut(input: PresignPutInput): Promise<string>;
   /** Range-read handle spec; null = missing. */

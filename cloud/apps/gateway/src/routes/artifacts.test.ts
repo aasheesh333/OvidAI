@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { eventMirror, workspaceObjects, type Db } from "@ovid/db";
+import { assertSessionFileCapacity, createStorageQuotaRepos, eventMirror, workspaceObjects, type Db } from "@ovid/db";
 import type { EventLog } from "@ovid/events";
 import { createStorage, registerArtifact } from "@ovid/storage";
 import {
@@ -123,6 +123,8 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway artifact routes (real postgres)", (
           storage,
           workspaceObjects,
           eventMirror,
+          quota: createStorageQuotaRepos(db),
+          assertProjectFileCapacity: assertSessionFileCapacity,
           presignTtlSeconds: 3600,
         },
         {

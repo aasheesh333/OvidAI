@@ -2,10 +2,20 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 
 import type { BrowserArtifactVaultPort, BrowserCredentialsPort } from "@ovid/browser";
-import { artifactVault, assertSessionFileCapacity, browserCredentialsRepo, type Db } from "@ovid/db";
+import { artifactVault, browserCredentialsRepo, type Db } from "@ovid/db";
 import type { EnvelopeCrypto } from "@ovid/escrow";
 import { browserCredentialRecordId } from "@ovid/shared";
-import { registerArtifact, type ArtifactEventMirror, type ArtifactWorkspaceObjectsRepo, type HydrateEventLog, type StorageAdapter } from "@ovid/storage";
+import {
+  registerArtifact,
+  type ArtifactEventMirror,
+  type ArtifactGrantFactory,
+  type ArtifactProjectCapacity,
+  type ArtifactQuota,
+  type ArtifactWorkspaceObjectsRepo,
+  type CdnConfig,
+  type HydrateEventLog,
+  type StorageAdapter,
+} from "@ovid/storage";
 
 /**
  * Wave 6 W4 production seams for the browser package:
@@ -86,6 +96,10 @@ export function createBrowserArtifactVaultPort(opts: {
   workspaceObjects: ArtifactWorkspaceObjectsRepo;
   eventMirror: BrowserArtifactMirror;
   workspaceDir(userId: string, sessionId: string): Promise<string>;
+  quota: ArtifactQuota;
+  grantFactory?: ArtifactGrantFactory;
+  cdn?: CdnConfig;
+  assertProjectFileCapacity: ArtifactProjectCapacity;
   log?: (msg: string, err?: unknown) => void;
 }): BrowserArtifactVaultPort {
   const log = opts.log ?? ((msg, err) => console.warn(`[browser-artifacts] ${msg}`, err ?? ""));
@@ -114,10 +128,8 @@ export function createBrowserArtifactVaultPort(opts: {
 
     async registerFromWorkspace({ userId, sessionId, path, mimeType }) {
       try {
-        // W1 follow-up (0022): a browser download registered into a project
-        // chat counts against that project's file budget; refuse before the
-        // object is stored. The repo re-checks under the project-file lock.
-        await assertSessionFileCapacity(opts.db, userId, sessionId, 1);
+        // Generic registration enforces project capacity before reservation
+        // and PUT; the canonical row insert rechecks under the project lock.
         const root = await opts.workspaceDir(userId, sessionId);
         const rec = await registerArtifact(
           {
@@ -126,6 +138,10 @@ export function createBrowserArtifactVaultPort(opts: {
             storage: opts.storage,
             workspaceObjects: opts.workspaceObjects,
             eventMirror: opts.eventMirror,
+            quota: opts.quota,
+            grantFactory: opts.grantFactory,
+            assertProjectFileCapacity: opts.assertProjectFileCapacity,
+            ...(opts.cdn !== undefined ? { cdn: opts.cdn } : {}),
           },
           {
             userId,
@@ -137,8 +153,10 @@ export function createBrowserArtifactVaultPort(opts: {
         );
         return { id: rec.id };
       } catch (err) {
+        // Project/quota/grant failures are real publication outcomes. Never
+        // collapse them into a not-found null that looks like a missing input.
         log(`artifact vault registration failed for ${path}`, err);
-        return null;
+        throw err;
       }
     },
   };

@@ -1,6 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { verifyInternalRequest } from "@ovid/shared";
 
 import {
+  CDN_TOKEN_VERSION,
   CDN_TTL_MAX_SECONDS,
   CDN_TTL_MIN_SECONDS,
   DEFAULT_CDN_TTL_SECONDS,
@@ -15,6 +17,7 @@ import {
   sanitizeCdnFilename,
   signCdnToken,
   verifyCdnToken,
+  CdnGrantAuthorizer,
   type CdnConfig,
   type CdnTokenClaims,
 } from "./cdn.js";
@@ -201,10 +204,43 @@ describe("mintCdnUrl", () => {
   it("never allows a caller to upgrade an upload to immutable", () => {
     const key = "users/u1/sessions/s1/uploads/a1";
     expect(mintCdnUrl(CONFIG, { key, now: new Date(NOW * 1000) }).cacheClass).toBe("short");
-    // Explicit override is honored only because the caller is trusted server code.
     expect(
       mintCdnUrl(CONFIG, { key, cacheClass: "immutable", now: new Date(NOW * 1000) }).cacheClass,
-    ).toBe("immutable");
+    ).toBe("short");
+  });
+
+  it("signs grant/version claims as v2 and forces active content to attachment", () => {
+    const minted = mintCdnUrl(CONFIG, {
+      key: KEY,
+      contentType: "text/html",
+      disposition: "inline",
+      grantId: "grant-123",
+      versionHash: "a".repeat(64),
+      now: new Date(NOW * 1000),
+    });
+    const url = new URL(minted.url);
+    expect(CDN_TOKEN_VERSION).toBe("v2");
+    expect(url.searchParams.get("g")).toBe("grant-123");
+    expect(url.searchParams.get("v")).toBe("a".repeat(64));
+    expect(url.searchParams.get("d")).toBe("attachment");
+    const parsed = {
+      key: KEY,
+      expiresAtEpochSeconds: Number(url.searchParams.get("e")),
+      disposition: "attachment" as const,
+      contentType: "text/html",
+      cacheClass: "immutable" as const,
+      grantId: "grant-123",
+      versionHash: "a".repeat(64),
+    };
+    expect(cdnCanonicalString(parsed).split("\n")).toEqual([
+      "v2", KEY, String(NOW + 900), "attachment", "", "text/html", "immutable",
+      "grant-123", "a".repeat(64),
+    ]);
+    expect(verifyCdnToken(url.searchParams.get("t")!, parsed, SECRET, { nowSeconds: NOW })).toBe(true);
+    expect(verifyCdnToken(url.searchParams.get("t")!, {
+      ...parsed,
+      versionHash: "b".repeat(64),
+    }, SECRET, { nowSeconds: NOW })).toBe(false);
   });
 });
 
@@ -221,6 +257,59 @@ describe("sanitizers", () => {
     expect(sanitizeCdnContentType("text/html\r\nx: y")).toBeUndefined();
     expect(sanitizeCdnContentType("nonsense")).toBeUndefined();
     expect(sanitizeCdnContentType(undefined)).toBeUndefined();
+  });
+});
+
+describe("CdnGrantAuthorizer", () => {
+  it("signs every grant/version check and accepts only an explicit active answer", async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ active: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    const authorizer = new CdnGrantAuthorizer({
+      checkUrl: "http://gateway.internal/internal/cdn-grants/assert-active",
+      secret: "grant-internal-secret-at-least-32-bytes",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => NOW * 1000,
+    });
+    const grantId = "grant-abc";
+    const versionHash = "c".repeat(64);
+    await expect(authorizer.assertActive(grantId, versionHash)).resolves.toBe(true);
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("http://gateway.internal/internal/cdn-grants/assert-active");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({ grantId, versionHash });
+    const headers = init.headers as Record<string, string>;
+    expect(verifyInternalRequest(
+      "grant-internal-secret-at-least-32-bytes",
+      "POST",
+      "/internal/cdn-grants/assert-active",
+      `${grantId}:${versionHash}`,
+      headers["X-Ovid-Timestamp"]!,
+      headers["X-Ovid-Signature"]!,
+      NOW,
+    )).toBe(true);
+    expect(verifyInternalRequest(
+      "grant-internal-secret-at-least-32-bytes",
+      "POST",
+      "/internal/cdn-grants/assert-active",
+      grantId,
+      headers["X-Ovid-Timestamp"]!,
+      headers["X-Ovid-Signature"]!,
+      NOW,
+    )).toBe(false);
+
+    for (const response of [
+      new Response(JSON.stringify({ active: false }), { status: 200 }),
+      new Response("revoked", { status: 403 }),
+    ]) {
+      fetchImpl.mockImplementationOnce(async () => response);
+      await expect(authorizer.assertActive(grantId, versionHash)).resolves.toBe(false);
+    }
+    fetchImpl.mockImplementationOnce(async () => new Response("not-json", { status: 200 }));
+    await expect(authorizer.assertActive(grantId, versionHash)).resolves.toBe(false);
+    fetchImpl.mockImplementationOnce(async () => { throw new Error("gateway unavailable"); });
+    await expect(authorizer.assertActive(grantId, versionHash)).resolves.toBe(false);
   });
 });
 
@@ -258,6 +347,14 @@ describe("loadCdnConfig", () => {
     expect(() =>
       loadCdnConfig({ OVID_CDN_BASE_URL: "https://cdn.ovidsi.com", OVID_CDN_SIGNING_SECRET: "short" }),
     ).toThrow(/at least 32 bytes/);
+    // UNEXECUTED: weak independent grant credentials fail closed as well.
+    expect(() =>
+      loadCdnConfig({
+        OVID_CDN_BASE_URL: "https://cdn.ovidsi.com",
+        OVID_CDN_SIGNING_SECRET: SECRET,
+        OVID_CDN_GRANT_INTERNAL_SECRET: "short",
+      }),
+    ).toThrow(/OVID_CDN_GRANT_INTERNAL_SECRET/);
     expect(() =>
       loadCdnConfig({ OVID_CDN_BASE_URL: "not-a-url", OVID_CDN_SIGNING_SECRET: SECRET }),
     ).toThrow(/absolute http/);

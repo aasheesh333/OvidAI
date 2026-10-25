@@ -111,12 +111,14 @@ export async function projectFileUsage(
          from attachments a
          left join sessions s on s.id = a.session_id
         where coalesce(a.project_id, s.project_id) = ${projectId}
-          and s.deleted_at is null) as attachments,
+          and s.deleted_at is null
+          and a.upload_status <> 'failed') as attachments,
       (select coalesce(sum(a.size), 0)::double precision
          from attachments a
          left join sessions s on s.id = a.session_id
         where coalesce(a.project_id, s.project_id) = ${projectId}
-          and s.deleted_at is null) as attachment_bytes,
+          and s.deleted_at is null
+          and a.upload_status <> 'failed') as attachment_bytes,
       (select count(*)::int
          from workspace_objects w
          left join sessions s on s.id = w.session_id

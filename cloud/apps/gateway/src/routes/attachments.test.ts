@@ -1,13 +1,15 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { attachments, newId, type Db } from "@ovid/db";
+import { attachments, createDb, migrate, newId, projectFileUsage, projectsRepo, StorageReservationStore, type Db, type StorageReservationInput } from "@ovid/db";
 import {
   attachmentUploadResponseSchema,
   type AttachmentUploadResponse,
 } from "@ovid/shared";
 import { buildGateway } from "../app.js";
+import type { HeadResult } from "@ovid/storage";
 import type { AttachmentPresigner } from "./attachments.js";
-import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
+import { createMigrationScratch, type MigrationScratch } from "../../../../packages/db/src/migrationTestKit.js";
+import { TEST_DATABASE_URL, testUid } from "../test/db.js";
 import {
   authHeaders,
   noopEvents,
@@ -32,42 +34,66 @@ interface PresignCall {
   contentType?: string;
 }
 
-function stubPresigner(behavior: { fail?: boolean } = {}): AttachmentPresigner & { calls: PresignCall[] } {
+function stubPresigner(behavior: { fail?: boolean; head?: HeadResult | null } = {}): AttachmentPresigner & {
+  calls: PresignCall[];
+  deleted: string[];
+  setHead(head: HeadResult | null): void;
+} {
   const calls: PresignCall[] = [];
+  const deleted: string[] = [];
+  let currentHead = behavior.head;
   return {
     calls,
+    deleted,
+    setHead(head) {
+      currentHead = head;
+    },
     async presignPut(input) {
       calls.push({ ...input });
       if (behavior.fail) throw new Error("presigner unavailable");
       return `https://r2.test/bucket/${encodeURIComponent(input.key)}?X-Signature=stub`;
     },
+    async delete(key) {
+      deleted.push(key);
+    },
+    ...(behavior.head !== undefined
+      ? { head: async () => currentHead ?? null }
+      : {}),
   };
 }
 
 const built: FastifyInstance[] = [];
 
 describe.skipIf(!TEST_DATABASE_URL)("gateway attachment routes (real postgres)", () => {
+  let scratch: MigrationScratch;
   let db: Db;
 
   beforeAll(async () => {
-    db = await openTestDb();
-  }, 60_000);
+    scratch = await createMigrationScratch(TEST_DATABASE_URL!, "gateway_attachments");
+    await migrate(scratch.url);
+    db = createDb(scratch.url, { max: 8 });
+  }, 180_000);
 
   afterEach(async () => {
     while (built.length > 0) await built.pop()!.close();
   });
 
   afterAll(async () => {
-    await closeDb(db);
-  });
+    await db?.$client.end({ timeout: 5 });
+    await scratch?.close();
+  }, 30_000);
 
   /**
    * Fresh gateway per test with the fake presigner injected (or deliberately
    * absent when `noPresigner` — the loud-fallback pin).
    */
-  function makeApp(opts: { noPresigner?: boolean; failPresign?: boolean } = {}):
-    { app: FastifyInstance; presigner: AttachmentPresigner & { calls: PresignCall[] } } {
-    const presigner = stubPresigner({ fail: opts.failPresign });
+  function makeApp(opts: { noPresigner?: boolean; failPresign?: boolean; head?: HeadResult | null } = {}):
+    { app: FastifyInstance; presigner: AttachmentPresigner & {
+      calls: PresignCall[];
+      deleted: string[];
+      setHead(head: HeadResult | null): void;
+    } } {
+    const presigner = stubPresigner({ fail: opts.failPresign, head: opts.head });
     const app = buildGateway({
       system: stubSystemBus(),
       db,
@@ -316,6 +342,469 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway attachment routes (real postgres)",
     expect(res.statusCode).toBe(500);
     expect(res.json().error.code).toBe("internal");
     expect(await attachments.getForSession(db, sid)).toEqual([]);
+  });
+
+  it("reserves before signing, finalizes only actual HEAD bytes, and releases a failed declaration", async () => {
+    const head: HeadResult = {
+      bytes: 11,
+      contentType: "text/plain",
+      sha256Hex: "a".repeat(64),
+      etag: "etag-1",
+      metadata: {},
+    };
+    const { app } = makeApp({ head });
+    const uid = testUid("att-quota");
+    const sid = await createSession(app, uid);
+    const created = await postAttachment(app, uid, sid, { name: "actual.txt", size: 11 });
+    expect(created.statusCode).toBe(201);
+    const attachmentId = created.json().attachmentId as string;
+    expect(await db.$client`
+      SELECT declared_bytes::int AS declared, state FROM storage_reservations WHERE id = ${attachmentId}`)
+      .toEqual([{ declared: 11, state: "reserved" }]);
+
+    const finalized = await app.inject({
+      method: "POST",
+      url: `/cloud/v1/sessions/${sid}/attachments/${attachmentId}/finalize`,
+      headers: authHeaders(uid),
+      payload: {},
+    });
+    expect(finalized.statusCode).toBe(200);
+    expect(finalized.json()).toMatchObject({ status: "ready", size: 11, contentType: "text/plain" });
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 11, reserved: 0 }]);
+
+    const mismatched = await postAttachment(app, uid, sid, { name: "declared.txt", size: 99 });
+    const mismatchId = mismatched.json().attachmentId as string;
+    const mismatch = await app.inject({
+      method: "POST",
+      url: `/cloud/v1/sessions/${sid}/attachments/${mismatchId}/finalize`,
+      headers: authHeaders(uid),
+      payload: {},
+    });
+    expect(mismatch.statusCode).toBe(409);
+    expect(mismatch.json().error.code).toBe("attachment_size_mismatch");
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 11, reserved: 0 }]);
+    expect(await db.$client`
+      SELECT state FROM storage_reservations WHERE id = ${mismatchId}`)
+      .toEqual([{ state: "released" }]);
+    // UNEXECUTED round-1 regression: failed/mismatched rows never mint.
+    for (const url of [
+      `/cloud/v1/sessions/${sid}/attachments/${mismatchId}/cdn-url`,
+      `/cloud/v1/artifacts/${mismatchId}/url?source=uploaded`,
+    ]) {
+      expect((await app.inject({ method: "GET", url, headers: authHeaders(uid) })).statusCode)
+        .toBe(404);
+    }
+  });
+
+  it("releases the reservation when signing fails", async () => {
+    const { app } = makeApp({ failPresign: true });
+    const uid = testUid("att-fail-release");
+    const sid = await createSession(app, uid);
+    const res = await postAttachment(app, uid, sid, { name: "x.txt", size: 7 });
+    expect(res.statusCode).toBe(500);
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 0, reserved: 0 }]);
+    expect(await db.$client`
+      SELECT state FROM storage_reservations WHERE owner_user_id = ${uid}`)
+      .toEqual([{ state: "released" }]);
+  });
+
+  // UNEXECUTED under the 2026-10-25 heavy-verification pause.
+  it("repairs a legacy pending row with a reservation before actual-byte finalization", async () => {
+    const head: HeadResult = {
+      bytes: 11,
+      contentType: "text/plain",
+      sha256Hex: "b".repeat(64),
+      etag: "legacy-etag",
+      metadata: {},
+    };
+    const { app } = makeApp({ head });
+    const uid = testUid("att-legacy-reservation");
+    const sid = await createSession(app, uid);
+    const attachmentId = newId();
+    await attachments.create(db, {
+      id: attachmentId,
+      sessionId: sid,
+      userId: uid,
+      name: "legacy.txt",
+      size: 11,
+      r2Key: `users/${uid}/sessions/${sid}/uploads/${attachmentId}`,
+      contentType: "text/plain",
+    });
+    expect(await db.$client`SELECT id FROM storage_reservations WHERE id = ${attachmentId}`)
+      .toEqual([]);
+    const res = await app.inject({
+      method: "POST",
+      url: `/cloud/v1/sessions/${sid}/attachments/${attachmentId}/finalize`,
+      headers: authHeaders(uid),
+      payload: {},
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ status: "ready", size: 11 });
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 11, reserved: 0 }]);
+  });
+
+  // UNEXECUTED under the 2026-10-25 heavy-verification pause.
+  it("releases a pending reservation when HEAD proves the upload is absent", async () => {
+    const { app } = makeApp({ head: null });
+    const uid = testUid("att-missing-release");
+    const sid = await createSession(app, uid);
+    const created = await postAttachment(app, uid, sid, { name: "missing.txt", size: 9 });
+    expect(created.statusCode).toBe(201);
+    const attachmentId = created.json().attachmentId as string;
+    const res = await app.inject({
+      method: "POST",
+      url: `/cloud/v1/sessions/${sid}/attachments/${attachmentId}/finalize`,
+      headers: authHeaders(uid),
+      payload: {},
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("attachment_not_uploaded");
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 0, reserved: 0 }]);
+    expect(await db.$client`SELECT state FROM storage_reservations WHERE id = ${attachmentId}`)
+      .toEqual([{ state: "released" }]);
+  });
+
+  // UNEXECUTED R6-1: a late object and host row must be compensated when the
+  // post-release missing-HEAD status write fails, including after finalization.
+  it.each([false, true])(
+    "compensates missing-HEAD status-write failure (already finalized: %s)",
+    async (alreadyFinalized) => {
+      const actualHead: HeadResult = {
+        bytes: 4,
+        contentType: "text/plain",
+        sha256Hex: null,
+        etag: "before-missing-head",
+        metadata: {},
+      };
+      const { app, presigner } = makeApp({ head: alreadyFinalized ? actualHead : null });
+      const uid = testUid(`att-missing-status-write-${alreadyFinalized}`);
+      const sid = await createSession(app, uid);
+      const created = await postAttachment(app, uid, sid, {
+        name: "missing-status-write.txt",
+        size: 4,
+        contentType: "text/plain",
+      });
+      expect(created.statusCode).toBe(201);
+      const attachmentId = created.json().attachmentId as string;
+      const r2Key = `users/${uid}/sessions/${sid}/uploads/${attachmentId}`;
+      const finalize = () => app.inject({
+        method: "POST",
+        url: `/cloud/v1/sessions/${sid}/attachments/${attachmentId}/finalize`,
+        headers: authHeaders(uid),
+        payload: {},
+      });
+      if (alreadyFinalized) {
+        expect((await finalize()).statusCode).toBe(200);
+        expect((await attachments.getForSession(db, sid, [attachmentId]))[0]?.uploadStatus)
+          .toBe("ready");
+        expect(await db.$client`
+          SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+            FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+          .toEqual([{ used: 4, reserved: 0 }]);
+      }
+
+      presigner.setHead(null);
+      const originalHead = presigner.head!;
+      let lateObjectInstalled = false;
+      presigner.head = async (key) => {
+        const current = await originalHead.call(presigner, key);
+        if (current === null && !lateObjectInstalled) {
+          // The object becomes visible immediately after the missing HEAD, as
+          // a late PUT can. Full compensation must still delete that key.
+          lateObjectInstalled = true;
+          presigner.setHead({ ...actualHead, etag: "late-after-missing-head" });
+        }
+        return current;
+      };
+
+      const suffix = attachmentId.replaceAll("-", "");
+      const functionName = `fail_status_${suffix}`;
+      const triggerName = `fail_status_row_${suffix}`;
+      try {
+        await db.$client.unsafe(`
+          CREATE FUNCTION ${functionName}() RETURNS trigger AS $status_failure$
+          BEGIN
+            -- Let the reservation's pending → failed update commit. Fail only
+            -- the later route status write (ready/failed → failed).
+            IF NEW.id = '${attachmentId}'::uuid
+               AND NEW.upload_status = 'failed'
+               AND OLD.upload_status IN ('ready', 'failed') THEN
+              RAISE EXCEPTION 'injected missing-HEAD status-write failure';
+            END IF;
+            RETURN NEW;
+          END;
+          $status_failure$ LANGUAGE plpgsql`);
+        await db.$client.unsafe(`
+          CREATE TRIGGER ${triggerName} BEFORE UPDATE ON attachments
+          FOR EACH ROW EXECUTE FUNCTION ${functionName}()`);
+        const response = await finalize();
+        expect(response.statusCode).toBe(500);
+      } finally {
+        presigner.head = originalHead;
+        try {
+          await db.$client.unsafe(`DROP TRIGGER IF EXISTS ${triggerName} ON attachments`);
+        } finally {
+          await db.$client.unsafe(`DROP FUNCTION IF EXISTS ${functionName}()`);
+        }
+      }
+
+      expect(lateObjectInstalled).toBe(true);
+      expect(presigner.deleted).toEqual([r2Key]);
+      expect(await attachments.getForSession(db, sid, [attachmentId])).toEqual([]);
+      expect(await db.$client`SELECT state FROM storage_reservations WHERE id = ${attachmentId}`)
+        .toEqual([{ state: "released" }]);
+      expect(await db.$client`
+        SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+          FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+        .toEqual([{ used: 0, reserved: 0 }]);
+    },
+  );
+
+  // UNEXECUTED round-1 regression: late bytes never revive a released row.
+  it("fences late PUT finalization, worker ready, and both download routes", async () => {
+    const { app, presigner } = makeApp({ head: null });
+    const uid = testUid("att-late-put");
+    const sid = await createSession(app, uid);
+    const created = await postAttachment(app, uid, sid, { name: "late.txt", size: 4 });
+    const attachmentId = created.json().attachmentId as string;
+    const finalize = () => app.inject({
+      method: "POST",
+      url: `/cloud/v1/sessions/${sid}/attachments/${attachmentId}/finalize`,
+      headers: authHeaders(uid),
+      payload: {},
+    });
+    expect((await finalize()).statusCode).toBe(409);
+    expect((await attachments.getForSession(db, sid, [attachmentId]))[0])
+      .toMatchObject({ uploadStatus: "failed", actualBytes: null });
+
+    presigner.setHead({
+      bytes: 4,
+      contentType: "application/octet-stream",
+      sha256Hex: null,
+      etag: "late-etag",
+      metadata: {},
+    });
+    const late = await finalize();
+    expect(late.statusCode).toBe(409);
+    expect(late.json().error.code).toBe("attachment_changed");
+    await expect(attachments.finalizeUpload(db, {
+      id: attachmentId,
+      sessionId: sid,
+      userId: uid,
+      actualBytes: 4,
+      actualContentType: "application/octet-stream",
+    })).rejects.toMatchObject({ code: "attachment_failed" });
+    expect((await attachments.getForSession(db, sid, [attachmentId]))[0]?.uploadStatus)
+      .toBe("failed");
+    expect(await db.$client`SELECT state FROM storage_reservations WHERE id = ${attachmentId}`)
+      .toEqual([{ state: "released" }]);
+    for (const url of [
+      `/cloud/v1/sessions/${sid}/attachments/${attachmentId}/cdn-url`,
+      `/cloud/v1/artifacts/${attachmentId}/url?source=uploaded`,
+    ]) {
+      const response = await app.inject({ method: "GET", url, headers: authHeaders(uid) });
+      expect(response.statusCode).toBe(404);
+    }
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 0, reserved: 0 }]);
+  });
+
+  // UNEXECUTED N1: failed ordinary uploads do not retain project-file slots.
+  it("reclaims the project slot after a missing-HEAD upload failure", async () => {
+    const { app } = makeApp({ head: null });
+    const uid = testUid("att-failed-project-slot");
+    await pinFreeCap(uid);
+    const sid = await createSession(app, uid);
+    const project = await projectsRepo.create(db, uid, "failed-upload-slot");
+    expect(project).not.toBeNull();
+    expect(await projectsRepo.moveSession(db, uid, sid, project!.id)).not.toBeNull();
+    const created = await postAttachment(app, uid, sid, { name: "missing.txt", size: 9 });
+    expect(created.statusCode).toBe(201);
+    const attachmentId = created.json().attachmentId as string;
+    expect((await projectFileUsage(db, uid, project!.id)).used).toBe(1);
+    const res = await app.inject({
+      method: "POST",
+      url: `/cloud/v1/sessions/${sid}/attachments/${attachmentId}/finalize`,
+      headers: authHeaders(uid),
+      payload: {},
+    });
+    expect(res.statusCode).toBe(409);
+    expect((await projectFileUsage(db, uid, project!.id)).used).toBe(0);
+  });
+
+  // UNEXECUTED round-3: reservationless legacy rows cannot revive on late PUT.
+  it("fails a reservationless pending legacy row on missing HEAD and denies late PUT", async () => {
+    const { app, presigner } = makeApp({ head: null });
+    const uid = testUid("att-legacy-missing");
+    const sid = await createSession(app, uid);
+    const attachmentId = newId();
+    await attachments.create(db, {
+      id: attachmentId,
+      sessionId: sid,
+      userId: uid,
+      name: "legacy-pending.txt",
+      size: 4,
+      r2Key: `users/${uid}/sessions/${sid}/uploads/${attachmentId}`,
+    });
+    expect(await db.$client`SELECT id FROM storage_reservations WHERE id = ${attachmentId}`)
+      .toEqual([]);
+    const finalize = () => app.inject({
+      method: "POST",
+      url: `/cloud/v1/sessions/${sid}/attachments/${attachmentId}/finalize`,
+      headers: authHeaders(uid),
+      payload: {},
+    });
+    expect((await finalize()).statusCode).toBe(409);
+    expect((await attachments.getForSession(db, sid, [attachmentId]))[0])
+      .toMatchObject({ uploadStatus: "failed", actualBytes: null });
+    presigner.setHead({
+      bytes: 4,
+      contentType: "application/octet-stream",
+      sha256Hex: null,
+      etag: "late-legacy-etag",
+      metadata: {},
+    });
+    expect((await finalize()).statusCode).toBe(409);
+    expect((await attachments.getForSession(db, sid, [attachmentId]))[0]?.uploadStatus)
+      .toBe("failed");
+    expect((await app.inject({
+      method: "GET",
+      url: `/cloud/v1/sessions/${sid}/attachments/${attachmentId}/cdn-url`,
+      headers: authHeaders(uid),
+    })).statusCode).toBe(404);
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 0, reserved: 0 }]);
+  });
+
+  // UNEXECUTED R4-2: valid stale HEAD cannot beat the missing-HEAD failure.
+  it("serializes legacy valid-HEAD reserve against missing-HEAD failure without ready resurrection", async () => {
+    const { app, presigner } = makeApp({ head: null });
+    const uid = testUid("att-legacy-race");
+    const sid = await createSession(app, uid);
+    const attachmentId = newId();
+    await attachments.create(db, {
+      id: attachmentId,
+      sessionId: sid,
+      userId: uid,
+      name: "legacy-race.txt",
+      size: 4,
+      r2Key: `users/${uid}/sessions/${sid}/uploads/${attachmentId}`,
+    });
+    presigner.setHead({
+      bytes: 4,
+      contentType: "application/octet-stream",
+      sha256Hex: null,
+      etag: "valid-before-delete",
+      metadata: {},
+    });
+    const finalize = () => app.inject({
+      method: "POST",
+      url: `/cloud/v1/sessions/${sid}/attachments/${attachmentId}/finalize`,
+      headers: authHeaders(uid),
+      payload: {},
+    });
+    const originalReserve = StorageReservationStore.prototype.reserve;
+    let entered!: () => void;
+    let proceed!: () => void;
+    let firstValidHeadCall = true;
+    const reserveEntered = new Promise<void>((resolve) => { entered = resolve; });
+    const proceedReserve = new Promise<void>((resolve) => { proceed = resolve; });
+    const reserve = vi.spyOn(StorageReservationStore.prototype, "reserve")
+      .mockImplementation(async function (this: StorageReservationStore, input: StorageReservationInput) {
+        if (firstValidHeadCall && input.head !== undefined && input.head !== null) {
+          firstValidHeadCall = false;
+          entered();
+          await proceedReserve;
+        }
+        return originalReserve.call(this, input);
+      });
+    try {
+      const valid = finalize();
+      await reserveEntered;
+      presigner.setHead(null);
+      expect((await finalize()).statusCode).toBe(409);
+      proceed();
+      // The stale valid request must not turn B's failed row back to ready or
+      // return success after B has reconciled the missing object.
+      expect((await valid).statusCode).toBe(409);
+      // A repeated missing-HEAD request hits the failed/released identity and
+      // must retain the same deterministic refusal rather than escaping 500.
+      expect((await finalize()).statusCode).toBe(409);
+    } finally {
+      proceed();
+      reserve.mockRestore();
+    }
+    expect((await attachments.getForSession(db, sid, [attachmentId]))[0])
+      .toMatchObject({ uploadStatus: "failed", actualBytes: null, finalizedAt: null });
+    expect(await db.$client`SELECT state FROM storage_reservations WHERE id = ${attachmentId}`)
+      .toEqual([{ state: "released" }]);
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 0, reserved: 0 }]);
+  });
+
+  // UNEXECUTED R5-4: generic ready-write failure compensates every transition.
+  it("compensates a generic post-settlement ready-write failure with zero charge and no orphan row", async () => {
+    const { app, presigner } = makeApp({
+      head: {
+        bytes: 4,
+        contentType: "text/plain",
+        sha256Hex: null,
+        etag: "ready-failure",
+        metadata: {},
+      },
+    });
+    const uid = testUid("att-ready-write-failure");
+    const sid = await createSession(app, uid);
+    const created = await postAttachment(app, uid, sid, {
+      name: "ready-failure.txt",
+      size: 4,
+      contentType: "text/plain",
+    });
+    const attachmentId = created.json().attachmentId as string;
+    const readyWrite = vi.spyOn(attachments, "finalizeUpload")
+      .mockRejectedValueOnce(new Error("generic ready-write failure"));
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: `/cloud/v1/sessions/${sid}/attachments/${attachmentId}/finalize`,
+        headers: authHeaders(uid),
+        payload: {},
+      });
+      expect(response.statusCode).toBe(500);
+    } finally {
+      readyWrite.mockRestore();
+    }
+    expect(await attachments.getForSession(db, sid, [attachmentId])).toEqual([]);
+    expect(presigner.deleted).toEqual([
+      `users/${uid}/sessions/${sid}/uploads/${attachmentId}`,
+    ]);
+    expect(await db.$client`SELECT state FROM storage_reservations WHERE id = ${attachmentId}`)
+      .toEqual([{ state: "released" }]);
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 0, reserved: 0 }]);
   });
 
   it("hostile names sanitize into a safe single uploads/ segment for `path`", async () => {

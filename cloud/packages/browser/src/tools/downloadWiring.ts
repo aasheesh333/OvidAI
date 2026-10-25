@@ -16,6 +16,7 @@ import { isAbsolute, join } from "node:path";
 
 import { BrowserOperationRefusal } from "../browserOperations.js";
 import { NETWORK_BUFFER_CAP, type SessionBrowser } from "../sessions.js";
+import { artifactPublicationFailure } from "./artifactPublication.js";
 import type { BrowserToolsDeps } from "./types.js";
 
 /** Hard download ceiling (Dart parity) — shared by explicit and page downloads. */
@@ -93,8 +94,8 @@ export function wireDownloads(
         await mkdir(dir, { recursive: true });
         await download.saveAs(join(dir, name));
 
-        // Wave 6 W4: the page's own download also lands in the account
-        // Artifact Vault. Failure is non-fatal — the workspace copy exists.
+        // A publication refusal must not be reported as a normal successful
+        // vault/network outcome. Preserve its typed code in the network ring.
         if (deps.artifactVault !== undefined) {
           try {
             await deps.artifactVault.registerFromWorkspace({
@@ -105,6 +106,17 @@ export function wireDownloads(
             });
           } catch (err) {
             deps.log?.("page download: artifact vault registration failed", err);
+            session.network.push({
+              ts: deps.now?.() ?? Date.now(),
+              url,
+              method: "GET",
+              status: null,
+              failure: artifactPublicationFailure(err),
+            });
+            if (session.network.length > NETWORK_BUFFER_CAP) {
+              session.network.splice(0, session.network.length - NETWORK_BUFFER_CAP);
+            }
+            return;
           }
         }
 

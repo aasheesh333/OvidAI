@@ -1,5 +1,6 @@
 import { and, desc, eq, ilike, lt, or, sql } from "drizzle-orm";
 import type { Db } from "./client.js";
+import { reconcileStorageUsage } from "./quotaService.js";
 import {
   attachments as attachmentsTable,
   sessions as sessionsTable,
@@ -56,6 +57,9 @@ export interface ArtifactVaultRow {
   createdAt: Date;
   /** NEVER serialized to clients — the mint route's HEAD input only. */
   r2Key: string;
+  /** Uploaded rows expose lifecycle only to server-side download fencing. */
+  uploadStatus?: "pending" | "ready" | "failed";
+  actualBytes?: number | null;
 }
 
 export interface ArtifactVaultPage {
@@ -173,10 +177,15 @@ function toRow(
     createdAt: Date;
     r2Key: string;
     sessionTitle: string | null;
+    uploadStatus?: "pending" | "ready" | "failed";
+    actualBytes?: number | null;
   },
 ): ArtifactVaultRow | null {
   if (found.sessionId === null || found.name === null || found.sizeBytes === null) return null;
   const contentType = found.contentType ?? "application/octet-stream";
+  const sizeBytes = found.uploadStatus === "ready" && found.actualBytes != null
+    ? found.actualBytes
+    : found.sizeBytes;
   return {
     id: found.id,
     origin,
@@ -185,10 +194,13 @@ function toRow(
     sessionId: found.sessionId,
     sessionTitle: found.sessionTitle,
     name: found.name,
-    sizeBytes: found.sizeBytes,
+    sizeBytes,
     contentType,
     createdAt: found.createdAt,
     r2Key: found.r2Key,
+    ...(found.uploadStatus !== undefined
+      ? { uploadStatus: found.uploadStatus, actualBytes: found.actualBytes ?? null }
+      : {}),
   };
 }
 
@@ -208,9 +220,9 @@ const ATTACHMENT_FIELDS = {
   sessionId: attachmentsTable.sessionId,
   name: attachmentsTable.name,
   sizeBytes: attachmentsTable.size,
-  // The attachments table carries no content type column; the mint route's
-  // HEAD never checks it either (size is the integrity check for uploads).
-  contentType: sql<string>`null`,
+  contentType: attachmentsTable.actualContentType,
+  actualBytes: attachmentsTable.actualBytes,
+  uploadStatus: attachmentsTable.uploadStatus,
   createdAt: attachmentsTable.createdAt,
   r2Key: attachmentsTable.r2Key,
   sessionTitle: sessionsTable.title,
@@ -391,42 +403,32 @@ export const artifactVault = {
             .select(ATTACHMENT_FIELDS)
             .from(attachmentsTable)
             .innerJoin(sessionsTable, ownedSessionJoin(attachmentsTable, userId))
-            .where(and(eq(attachmentsTable.id, id), eq(attachmentsTable.userId, userId)))
+            .where(and(
+              eq(attachmentsTable.id, id),
+              eq(attachmentsTable.userId, userId),
+              eq(attachmentsTable.uploadStatus, "ready"),
+              sql`${attachmentsTable.actualBytes} IS NOT NULL`,
+              sql`EXISTS (
+                SELECT 1 FROM storage_reservations r
+                 WHERE r.id = ${attachmentsTable.id}
+                   AND r.object_id = ${attachmentsTable.id}
+                   AND r.owner_user_id = ${userId}
+                   AND r.state = 'finalized'
+                   AND r.actual_bytes = ${attachmentsTable.actualBytes}
+              )`,
+            ))
             .limit(1);
     return row ? toRow(origin, row) : null;
   },
 
   /**
-   * The account's storage ledger, in bytes — the same two sources the
-   * inventory lists, with the same ownership join and the same
-   * `kind='artifact' AND status='active'` filter (a soft-deleted artifact has
-   * freed its space). One row per account, never per session: this is the
-   * number the storage bar divides by the plan quota.
-   *
-   * It deliberately counts only the files the account OWNS (uploads and
-   * generated artifacts). Workspace archives and their manifest sidecars are
-   * internal R2 copies of a chat's working tree, not entries in the library,
-   * so counting them would make the bar disagree with the list beside it.
+   * Public storage usage is the same actual-byte counter used for admission,
+   * after idempotent legacy reconciliation. It includes immutable-share copy
+   * charges exactly once and never substitutes declared upload bytes.
    */
   async usage(db: Db, userId: string): Promise<{ usedBytes: number }> {
-    const rows = (await db.$client`
-      SELECT (
-        (SELECT coalesce(sum(a.size), 0)
-           FROM attachments a
-           JOIN sessions s ON s.id = a.session_id AND s.user_id = a.user_id
-          WHERE a.user_id = ${userId})
-        +
-        (SELECT coalesce(sum(w.bytes), 0)
-           FROM workspace_objects w
-           JOIN sessions s ON s.id = w.session_id AND s.user_id = w.user_id
-          WHERE w.user_id = ${userId}
-            AND w.kind = 'artifact'
-            AND w.status = 'active')
-      ) AS used_bytes
-    `) as Array<{ used_bytes: number | string | null }>;
-    // postgres.js returns sum() of bigint/numeric as a string.
-    const used = Number(rows[0]?.used_bytes ?? 0);
-    return { usedBytes: Number.isFinite(used) && used > 0 ? Math.trunc(used) : 0 };
+    const usage = await reconcileStorageUsage(db, userId);
+    return { usedBytes: usage.usedBytes };
   },
 
   /**
@@ -452,7 +454,20 @@ export const artifactVault = {
     id: string,
     origin: ArtifactVaultOrigin,
   ): Promise<ArtifactVaultRow | null> {
-    const row = await this.get(db, userId, id, origin);
+    // Deletion is also the cleanup path for pending/failed/legacy rows, so it
+    // deliberately does not use the stricter download-facing get() predicate.
+    let row: ArtifactVaultRow | null;
+    if (origin === "uploaded") {
+      const [found] = await db
+        .select(ATTACHMENT_FIELDS)
+        .from(attachmentsTable)
+        .innerJoin(sessionsTable, ownedSessionJoin(attachmentsTable, userId))
+        .where(and(eq(attachmentsTable.id, id), eq(attachmentsTable.userId, userId)))
+        .limit(1);
+      row = found ? toRow(origin, found) : null;
+    } else {
+      row = await this.get(db, userId, id, origin);
+    }
     if (row === null) return null;
     if (origin === "generated") {
       await db

@@ -23,6 +23,7 @@
  */
 
 import {
+  CopyObjectCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
@@ -33,7 +34,15 @@ import { Upload } from "@aws-sdk/lib-storage";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { Transform, type Readable } from "node:stream";
 
-import type { HeadResult, PresignPutInput, PutOpts, PutResult, StorageAdapter } from "./adapter.js";
+import {
+  attachmentContentDisposition,
+  type HeadResult,
+  type PresignGetOptions,
+  type PresignPutInput,
+  type PutOpts,
+  type PutResult,
+  type StorageAdapter,
+} from "./adapter.js";
 import { assertSafeRelPath } from "./keys.js";
 import type { ReaderSpec } from "./rangeReader.js";
 
@@ -236,11 +245,37 @@ export function createR2Storage(
       );
     },
 
-    async presignGet(key: string, ttlSeconds: number): Promise<string> {
+    async copy(sourceKey: string, destinationKey: string): Promise<PutResult> {
+      const source = safeKey(sourceKey);
+      const destination = safeKey(destinationKey);
+      const encodedSource = source.split("/").map(encodeURIComponent).join("/");
+      await client.send(new CopyObjectCommand({
+        Bucket: cfg.bucket,
+        Key: destination,
+        CopySource: `${cfg.bucket}/${encodedSource}`,
+        MetadataDirective: "COPY",
+      }));
+      const copied = await head(destination);
+      if (copied === null) throw new Error("R2 copy completed without a destination object");
+      return { key: destinationKey, bytes: copied.bytes };
+    },
+
+    async presignGet(key: string, ttlSeconds: number, options?: PresignGetOptions): Promise<string> {
       const k = safeKey(key);
       return getSignedUrl(
         client,
-        new GetObjectCommand({ Bucket: cfg.bucket, Key: k }),
+        new GetObjectCommand({
+          Bucket: cfg.bucket,
+          Key: k,
+          ...(options !== undefined
+            ? {
+                ResponseContentDisposition: attachmentContentDisposition(options.filename),
+                ...(options.contentType !== undefined
+                  ? { ResponseContentType: options.contentType }
+                  : {}),
+              }
+            : {}),
+        }),
         { expiresIn: ttlSeconds },
       );
     },

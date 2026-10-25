@@ -5,28 +5,31 @@
  *
  *   GET|HEAD https://cdn.ovidsi.com/o/<base64url(key)>?t=<hmac>&e=<expiry>
  *              [&d=attachment][&fn=<filename>][&ct=<type/subtype>][&c=<class>]
+ *              &g=<grantId>&v=<sha256>
  *
  * The Worker:
- *   1. validates the HMAC over (version, key, expiry, disposition, filename,
- *      content-type, cache-class) — every input that changes the response;
- *   2. rejects expired tokens;
+ *   1. validates v2 HMAC claims including grantId/versionHash and rejects v1;
+ *   2. rejects expired tokens and mutable/cache-class upgrades;
  *   3. decodes the opaque key and refuses traversal/control/absolute keys;
- *   4. streams the object from the R2 binding (never a bucket listing);
+ *   4. synchronously checks the signed internal grant route before R2/cache;
  *   5. supports GET, HEAD, single-range GETs and If-None-Match revalidation;
- *   6. caches ONLY successful object responses, keyed by object identity (not
- *      by the per-mint token), and validates the token BEFORE any cache hit;
+ *   6. caches ONLY successful frozen-object responses, keyed by object identity
+ *      (not token), and rechecks the grant BEFORE every cache hit or 304;
  *   7. returns 403/404/416/405 with `Cache-Control: no-store`.
  *
  * Deploy: bind the bucket as `BUCKET`, set `OVID_CDN_SIGNING_SECRET` to the
- * same value the gateway uses, optionally `OVID_CDN_ALLOWED_ORIGINS`
- * (comma-separated) and `OVID_CDN_MAX_TTL_SECONDS` (default 3600).
+ * same value the gateway uses, `OVID_CDN_GRANT_CHECK_URL` and
+ * `OVID_CDN_GRANT_INTERNAL_SECRET` for mandatory grant checks, optionally
+ * `OVID_CDN_ALLOWED_ORIGINS` and `OVID_CDN_MAX_TTL_SECONDS` (default 3600).
  *
  * This file is deliberately dependency-free (Workers runtime + Web Crypto) and
  * is exercised in Node by cloud/packages/storage/src/cdnWorker.test.ts with a
  * fake R2 binding and cache.
  */
 
-const TOKEN_VERSION = "v1";
+const TOKEN_VERSION = "v2";
+const LEGACY_TOKEN_VERSION = "v1";
+const GRANT_CHECK_TIMEOUT_MS = 2000;
 const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const SHORT_CACHE_CONTROL = "public, max-age=60, s-maxage=60, must-revalidate";
 const DEFAULT_MAX_TTL_SECONDS = 3600;
@@ -92,15 +95,20 @@ export function isSafeKey(key) {
 // ---------------------------------------------------------------------------
 
 export function canonicalString(claims) {
-  return [
-    TOKEN_VERSION,
+  const hasGrant = claims.grantId !== undefined;
+  const hasVersion = claims.versionHash !== undefined;
+  if (hasGrant !== hasVersion) return "invalid-grant-claims";
+  const fields = [
+    hasGrant ? TOKEN_VERSION : LEGACY_TOKEN_VERSION,
     claims.key,
     String(claims.expiresAtEpochSeconds),
     claims.disposition,
     claims.filename ?? "",
     claims.contentType ?? "",
     claims.cacheClass,
-  ].join("\n");
+  ];
+  if (hasGrant) fields.push(claims.grantId, claims.versionHash);
+  return fields.join("\n");
 }
 
 async function hmacBase64Url(secret, message) {
@@ -183,6 +191,12 @@ export function parseCdnUrl(rawUrl) {
     return null;
   }
 
+  const grantId = url.searchParams.get("g") ?? undefined;
+  const versionHash = url.searchParams.get("v") ?? undefined;
+  if (grantId !== undefined && !/^[A-Za-z0-9_-]{1,128}$/.test(grantId)) return null;
+  if (versionHash !== undefined && !/^[a-f0-9]{64}$/i.test(versionHash)) return null;
+  if ((grantId === undefined) !== (versionHash === undefined)) return null;
+
   return {
     opaque,
     key,
@@ -192,6 +206,8 @@ export function parseCdnUrl(rawUrl) {
     filename,
     contentType,
     cacheClass,
+    grantId,
+    versionHash,
   };
 }
 
@@ -348,7 +364,11 @@ function objectHeaders(parsed, request, env, object) {
   headers.set("vary", "Accept-Encoding");
   headers.set(
     "content-disposition",
-    contentDisposition(parsed.disposition, parsed.filename, parsed.key),
+    contentDisposition(
+      isActiveContent(contentType) ? "attachment" : parsed.disposition,
+      parsed.filename,
+      parsed.key,
+    ),
   );
   if (isActiveContent(contentType)) {
     // User HTML/SVG is served from an isolated origin and sandboxed: scripts
@@ -383,6 +403,42 @@ function withEtag(headers, object) {
   const etag = object?.httpEtag ?? (object?.etag ? `"${object.etag}"` : undefined);
   if (typeof etag === "string" && etag !== "") headers.set("etag", etag);
   return etag;
+}
+
+async function grantIsActive(parsed, env, nowSeconds, fetchImpl) {
+  const checkUrlRaw = env.OVID_CDN_GRANT_CHECK_URL;
+  const secret = env.OVID_CDN_GRANT_INTERNAL_SECRET ?? env.OVID_INTERNAL_API_SECRET;
+  if (typeof checkUrlRaw !== "string" || checkUrlRaw === "" ||
+      typeof secret !== "string" || textEncoder.encode(secret).length < 32) return null;
+  try {
+    const checkUrl = new URL(checkUrlRaw);
+    if ((checkUrl.protocol !== "https:" && checkUrl.protocol !== "http:") ||
+        checkUrl.search !== "" || checkUrl.hash !== "") return null;
+    const path = checkUrl.pathname;
+    // The signed identity covers BOTH grant and version. Otherwise a relay
+    // could keep the signature and substitute a different versionHash body.
+    const payload = `POST\n${path}\n${parsed.grantId}:${parsed.versionHash}\n${nowSeconds}`;
+    const signatureUrl = await hmacBase64Url(secret, payload);
+    const signatureBytes = base64UrlDecode(signatureUrl);
+    let binary = "";
+    for (const byte of signatureBytes) binary += String.fromCharCode(byte);
+    const response = await fetchImpl(checkUrl.toString(), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "X-Ovid-Timestamp": btoa(String(nowSeconds)),
+        "X-Ovid-Signature": btoa(binary),
+      },
+      body: JSON.stringify({ grantId: parsed.grantId, versionHash: parsed.versionHash }),
+      signal: AbortSignal.timeout(GRANT_CHECK_TIMEOUT_MS),
+    });
+    if (response.status === 403 || response.status === 404) return false;
+    if (!response.ok) return null;
+    const body = await response.json();
+    return body !== null && typeof body === "object" && body.active === true;
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -427,6 +483,21 @@ export async function handleRequest(request, env, opts = {}) {
   if (!(await verifyToken(parsed, parsed.token, secret, nowSeconds, maxTtlSeconds))) {
     return errorResponse(403, "forbidden");
   }
+
+  // CDN reads are immutable-share reads only. Mutable objects keep the
+  // gateway's short presigned URL path and can never be upgraded by a claim.
+  if (parsed.cacheClass !== "immutable" || parsed.cacheClass !== cacheClassForKey(parsed.key) ||
+      parsed.grantId === undefined || parsed.versionHash === undefined) {
+    return errorResponse(403, "grant_required");
+  }
+  const active = await grantIsActive(
+    parsed,
+    env,
+    nowSeconds,
+    opts.fetchImpl ?? fetch,
+  );
+  if (active === null) return errorResponse(503, "grant_check_unavailable");
+  if (active !== true) return errorResponse(403, "grant_revoked");
 
   const bucket = env.BUCKET;
   if (bucket === undefined || bucket === null) return errorResponse(503, "cdn_not_configured");

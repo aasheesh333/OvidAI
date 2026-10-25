@@ -1166,7 +1166,26 @@ export type AttachmentFinalizeErrorCode =
   | "not_found"
   | "size_mismatch"
   | "type_mismatch"
-  | "object_changed";
+  | "object_changed"
+  | "reservation_required"
+  | "attachment_failed";
+
+export function attachmentDeclarationMismatch(
+  current: Pick<AttachmentRow, "uploadStatus" | "actualBytes" | "actualContentType" | "size" | "contentTypeDeclared" | "contentType">,
+  input: { actualBytes: number; actualContentType: string | null },
+): Exclude<AttachmentFinalizeErrorCode, "not_found" | "reservation_required" | "attachment_failed"> | null {
+  if (current.uploadStatus === "ready" && current.actualBytes !== null) {
+    return current.actualBytes === input.actualBytes &&
+      current.actualContentType === input.actualContentType
+      ? null
+      : "object_changed";
+  }
+  if (current.size !== input.actualBytes) return "size_mismatch";
+  if (current.contentTypeDeclared && current.contentType !== input.actualContentType) {
+    return "type_mismatch";
+  }
+  return null;
+}
 
 /** A typed finalization refusal; the transaction has already preserved a safe row state. */
 export class AttachmentFinalizeError extends Error {
@@ -1269,26 +1288,16 @@ export const attachments = {
       if (current === undefined) {
         throw new AttachmentFinalizeError("not_found", "Attachment not found.");
       }
-
-      if (
-        current.uploadStatus === "ready" &&
-        current.actualBytes === input.actualBytes &&
-        current.actualContentType === input.actualContentType
-      ) {
-        return { row: current };
+      if (current.uploadStatus === "failed") {
+        // Failed is terminal. A finalized reservation from a separate settle
+        // transaction can never resurrect it to ready from stale HEAD.
+        throw new AttachmentFinalizeError(
+          "attachment_failed",
+          "The attachment upload is no longer active.",
+        );
       }
 
-      let code: Exclude<AttachmentFinalizeErrorCode, "not_found"> | null = null;
-      if (current.uploadStatus === "ready") {
-        code = "object_changed";
-      } else if (current.size !== input.actualBytes) {
-        code = "size_mismatch";
-      } else if (
-        current.contentTypeDeclared &&
-        current.contentType !== input.actualContentType
-      ) {
-        code = "type_mismatch";
-      }
+      const code = attachmentDeclarationMismatch(current, input);
 
       if (code !== null) {
         const [failed] = await tx
@@ -1316,6 +1325,30 @@ export const attachments = {
           actualBytes: input.actualBytes,
           actualContentType: input.actualContentType,
           finalizedAt: new Date(),
+      // A matching declaration is necessary but not sufficient: the shared
+      // 0038 reservation must already carry the same actual HEAD bytes. This
+      // fence applies to gateway, worker, and direct repository callers alike.
+      const reservation = (await tx.execute(sql`
+        SELECT state, actual_bytes FROM storage_reservations
+         WHERE id = ${current.id} AND object_id = ${current.id}
+           AND owner_user_id = ${input.userId}
+         FOR UPDATE`)) as unknown as Array<{ state: string; actual_bytes: number | string | null }>;
+      const reservationRow = reservation[0];
+      if (reservationRow === undefined || reservationRow.state !== "finalized" ||
+          Number(reservationRow.actual_bytes) !== input.actualBytes) {
+        throw new AttachmentFinalizeError(
+          "reservation_required",
+          "The attachment storage reservation is not finalized for these actual bytes.",
+        );
+      }
+      if (
+        current.uploadStatus === "ready" &&
+        current.actualBytes === input.actualBytes &&
+        current.actualContentType === input.actualContentType
+      ) {
+        return { row: current };
+      }
+
         })
         .where(eq(attachmentsTable.id, current.id))
         .returning();

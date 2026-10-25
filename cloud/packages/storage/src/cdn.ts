@@ -7,7 +7,7 @@
  *   https://cdn.ovidsi.com/o/<base64url(key)>?t=<hmac>&e=<expiry>&c=<class>
  *
  * The token is an HMAC-SHA256 over a canonical, newline-separated claim set
- * (key, expiry, disposition, filename, cache class). Every input that can
+ * (key, expiry, disposition, filename, type, class, grant and version). Every input that can
  * change what the Worker returns is signed, so a client cannot:
  *   - swap the opaque key for another object,
  *   - extend the expiry,
@@ -19,17 +19,20 @@
  * string with Web Crypto; `cdn.test.ts` cross-checks a gateway-minted URL
  * against the Worker's validator so the two copies cannot drift silently.
  *
- * This module is pure: no network, no DB, no clock reads outside `now`.
+ * Token mint/verify helpers are pure. CdnGrantAuthorizer is the explicit
+ * bounded network seam; no grant answer is cached and every failure is closed.
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { signInternalRequest } from "@ovid/shared";
 
 import { assertSafeRelPath } from "./keys.js";
 
 export type CdnCacheClass = "immutable" | "short";
 export type CdnDisposition = "inline" | "attachment";
 
-export const CDN_TOKEN_VERSION = "v1";
+export const CDN_TOKEN_VERSION = "v2";
+export const LEGACY_CDN_TOKEN_VERSION = "v1";
 /** Default capability lifetime: 15 minutes (matches the Worker's edge TTL). */
 export const DEFAULT_CDN_TTL_SECONDS = 900;
 export const CDN_TTL_MIN_SECONDS = 60;
@@ -44,6 +47,8 @@ export interface CdnConfig {
   secret: string;
   /** Capability lifetime in seconds (60..3600). */
   ttlSeconds: number;
+  /** Optional service credential for the gateway's signed internal grant route. */
+  grantInternalSecret?: string;
 }
 
 export interface CdnTokenClaims {
@@ -54,6 +59,9 @@ export interface CdnTokenClaims {
   /** Bare `type/subtype` served by the Worker (signed, so not spoofable). */
   contentType?: string;
   cacheClass: CdnCacheClass;
+  /** Revocable server-side grant and frozen object version (v2). */
+  grantId?: string;
+  versionHash?: string;
 }
 
 export interface MintCdnUrlInput {
@@ -63,8 +71,10 @@ export interface MintCdnUrlInput {
   /** Object content type; attachments have no extension in their key. */
   contentType?: string;
   disposition?: CdnDisposition;
-  /** Override the key-derived class (tests / future object kinds). */
+  /** Accepted for source compatibility; the key-derived class always wins. */
   cacheClass?: CdnCacheClass;
+  grantId?: string;
+  versionHash?: string;
   /** Injectable clock for deterministic tests. */
   now?: Date;
 }
@@ -129,10 +139,18 @@ export function loadCdnConfig(env: NodeJS.ProcessEnv): CdnConfig | null {
     ttlSeconds = Math.min(CDN_TTL_MAX_SECONDS, Math.max(CDN_TTL_MIN_SECONDS, n));
   }
 
+  const grantInternalSecret =
+    (env.OVID_CDN_GRANT_INTERNAL_SECRET ?? env.OVID_INTERNAL_API_SECRET ?? "").trim();
+  if (grantInternalSecret !== "" && Buffer.byteLength(grantInternalSecret, "utf8") < MIN_CDN_SECRET_BYTES) {
+    throw new Error(
+      `OVID_CDN_GRANT_INTERNAL_SECRET must be at least ${MIN_CDN_SECRET_BYTES} bytes when configured`,
+    );
+  }
   return {
     baseUrl: baseUrlRaw.replace(/\/+$/, ""),
     secret,
     ttlSeconds,
+    ...(grantInternalSecret !== "" ? { grantInternalSecret } : {}),
   };
 }
 
@@ -194,6 +212,14 @@ export function sanitizeCdnContentType(value: string | undefined): string | unde
   return /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(bare) ? bare : undefined;
 }
 
+export function isActiveCdnContentType(value: string | undefined): boolean {
+  return value === "text/html" ||
+    value === "application/xhtml+xml" ||
+    value === "image/svg+xml" ||
+    value === "text/xml" ||
+    value === "application/xml";
+}
+
 /**
  * The URL path segment: base64url of the raw key. Canonical (no padding) and
  * round-trip-checked, so two spellings can never address the same object.
@@ -221,17 +247,28 @@ export function decodeOpaqueKey(opaque: string): string | null {
 // Token
 // ---------------------------------------------------------------------------
 
+function tokenVersionFor(claims: CdnTokenClaims): "v1" | "v2" {
+  const hasGrant = claims.grantId !== undefined;
+  const hasVersion = claims.versionHash !== undefined;
+  if (hasGrant !== hasVersion) throw new Error("cdn token grantId and versionHash are required together");
+  return hasGrant ? CDN_TOKEN_VERSION : LEGACY_CDN_TOKEN_VERSION;
+}
+
 /** The exact string the Worker re-builds. Field order is part of the contract. */
 export function cdnCanonicalString(claims: CdnTokenClaims): string {
-  return [
-    CDN_TOKEN_VERSION,
+  const fields = [
+    tokenVersionFor(claims),
     claims.key,
     String(claims.expiresAtEpochSeconds),
     claims.disposition,
     claims.filename ?? "",
     claims.contentType ?? "",
     claims.cacheClass,
-  ].join("\n");
+  ];
+  if (tokenVersionFor(claims) === CDN_TOKEN_VERSION) {
+    fields.push(claims.grantId!, claims.versionHash!);
+  }
+  return fields.join("\n");
 }
 
 function assertClaimsSignable(claims: CdnTokenClaims): void {
@@ -248,6 +285,15 @@ function assertClaimsSignable(claims: CdnTokenClaims): void {
   }
   if (!Number.isInteger(claims.expiresAtEpochSeconds) || claims.expiresAtEpochSeconds <= 0) {
     throw new Error("cdn token expiry must be a positive integer epoch second");
+  }
+  tokenVersionFor(claims);
+  if (claims.grantId !== undefined) {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(claims.grantId)) {
+      throw new Error("cdn token grantId has an invalid shape");
+    }
+    if (!/^[a-f0-9]{64}$/i.test(claims.versionHash!)) {
+      throw new Error("cdn token versionHash must be a sha256 hex digest");
+    }
   }
 }
 
@@ -310,16 +356,22 @@ export function mintCdnUrl(config: CdnConfig, input: MintCdnUrlInput): MintedCdn
   const key = assertSafeRelPath(input.key);
   const nowSeconds = Math.floor((input.now ?? new Date()).getTime() / 1000);
   const expiresAtEpochSeconds = nowSeconds + config.ttlSeconds;
-  const cacheClass = input.cacheClass ?? cacheClassForKey(key);
+  // A caller can never upgrade a mutable key into a long-lived cache entry.
+  const cacheClass = cacheClassForKey(key);
   const filename = sanitizeCdnFilename(input.filename);
   const contentType = sanitizeCdnContentType(input.contentType);
+  const disposition = isActiveCdnContentType(contentType)
+    ? "attachment"
+    : input.disposition ?? "inline";
   const claims: CdnTokenClaims = {
     key,
     expiresAtEpochSeconds,
-    disposition: input.disposition ?? "inline",
+    disposition,
     ...(filename !== undefined ? { filename } : {}),
     ...(contentType !== undefined ? { contentType } : {}),
     cacheClass,
+    ...(input.grantId !== undefined ? { grantId: input.grantId } : {}),
+    ...(input.versionHash !== undefined ? { versionHash: input.versionHash } : {}),
   };
   const token = signCdnToken(claims, config.secret);
 
@@ -330,6 +382,8 @@ export function mintCdnUrl(config: CdnConfig, input: MintCdnUrlInput): MintedCdn
   if (claims.disposition !== "inline") params.set("d", claims.disposition);
   if (claims.filename !== undefined) params.set("fn", claims.filename);
   if (claims.contentType !== undefined) params.set("ct", claims.contentType);
+  if (claims.grantId !== undefined) params.set("g", claims.grantId);
+  if (claims.versionHash !== undefined) params.set("v", claims.versionHash);
 
   return {
     url: `${config.baseUrl}/o/${encodeOpaqueKey(key)}?${params.toString()}`,
@@ -337,4 +391,65 @@ export function mintCdnUrl(config: CdnConfig, input: MintCdnUrlInput): MintedCdn
     expiresAtEpochSeconds,
     cacheClass,
   };
+}
+
+export interface CdnGrantAuthorizerOptions {
+  checkUrl: string;
+  secret: string;
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+  now?: () => number;
+}
+
+/** Signed, uncached, fail-closed grant checks for the edge Worker and tests. */
+export class CdnGrantAuthorizer {
+  private readonly fetchImpl: typeof fetch;
+  private readonly timeoutMs: number;
+  private readonly now: () => number;
+
+  constructor(private readonly options: CdnGrantAuthorizerOptions) {
+    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.timeoutMs = options.timeoutMs ?? 2_000;
+    this.now = options.now ?? (() => Date.now());
+  }
+
+  async assertActive(grantId: string, versionHash: string): Promise<boolean> {
+    try {
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(grantId) || !/^[a-f0-9]{64}$/i.test(versionHash)) {
+        return false;
+      }
+      if (Buffer.byteLength(this.options.secret, "utf8") < MIN_CDN_SECRET_BYTES ||
+          !Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0) {
+        return false;
+      }
+      const url = new URL(this.options.checkUrl);
+      if ((url.protocol !== "https:" && url.protocol !== "http:") || url.search !== "" || url.hash !== "") {
+        return false;
+      }
+      const timestamp = Math.floor(this.now() / 1000);
+      const path = url.pathname;
+      const response = await this.fetchImpl(url.toString(), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "X-Ovid-Timestamp": Buffer.from(String(timestamp), "utf8").toString("base64"),
+          "X-Ovid-Signature": signInternalRequest(
+            this.options.secret,
+            "POST",
+            path,
+            `${grantId}:${versionHash}`,
+            timestamp,
+          ),
+        },
+        body: JSON.stringify({ grantId, versionHash }),
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+      if (!response.ok) return false;
+      const body = await response.json() as unknown;
+      return typeof body === "object" && body !== null &&
+        (body as { active?: unknown }).active === true;
+    } catch {
+      return false;
+    }
+  }
 }

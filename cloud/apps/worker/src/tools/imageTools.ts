@@ -734,6 +734,19 @@ async function recordImageUsage(
   }
 }
 
+function artifactPublicationFailure(error: unknown): ToolResult {
+  const code = typeof (error as { code?: unknown } | null)?.code === "string"
+    ? String((error as { code: string }).code)
+    : "artifact_unavailable";
+  const safeCode = /^[a-z][a-z0-9_]{2,64}$/.test(code) ? code : "artifact_unavailable";
+  const message = safeCode === "project_file_limit"
+    ? "The project file allowance is exhausted."
+    : safeCode === "storage_quota_exceeded" || safeCode === "upload_limit_reached"
+      ? "The storage allowance for this plan is exhausted."
+      : "Artifact publication is temporarily unavailable.";
+  return { content: `${safeCode}: ${message}`, isError: true };
+}
+
 async function persistImage(
   ctx: ToolContext,
   deps: ImageToolDeps,
@@ -760,8 +773,7 @@ async function persistImage(
   const rel = `generated/${fileName}`;
   await writeFile(join(dir, fileName), buffer);
 
-  let artifact: ImageArtifactRecord | null = null;
-  let artifactError: string | null = null;
+  let artifact: ImageArtifactRecord;
   try {
     artifact = await deps.publishArtifact({
       userId: ctx.userId,
@@ -771,19 +783,17 @@ async function persistImage(
       content: buffer,
     });
   } catch (err) {
-    // The image is already durable in the workspace; losing the vault row
-    // must not turn a successful generation into a failed tool call.
-    artifactError = err instanceof Error ? err.message : String(err);
+    // Publication is part of the requested artifact outcome. Never report a
+    // successful vault publication or hide a project/quota/grant refusal in an
+    // additive artifact_error field on an otherwise successful tool result.
+    return artifactPublicationFailure(err);
   }
 
   const payload = {
     path: rel,
     model: typeof body.model_slug === "string" ? body.model_slug : body.model ?? null,
     receipt: isObject(body.receipt) ? body.receipt : null,
-    ...(artifact === null
-      ? {}
-      : { artifact: { id: artifact.id, expiresAt: artifact.expiresAt, sizeBytes: artifact.sizeBytes } }),
-    ...(artifactError === null ? {} : { artifact_error: artifactError }),
+    artifact: { id: artifact.id, expiresAt: artifact.expiresAt, sizeBytes: artifact.sizeBytes },
   };
   const verb = op === "generate" ? "Generated" : "Edited";
   return {

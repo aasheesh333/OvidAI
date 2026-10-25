@@ -14,15 +14,22 @@
  *   only the R2 adapter signs real GET/PUT URLs (Task 2).
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, open as fsOpen, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, open as fsOpen, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Readable, Transform } from "node:stream";
 
-import type { PutOpts, PutResult, HeadResult, PresignPutInput, StorageAdapter } from "./adapter.js";
-import { KeyLayoutError } from "./errors.js";
+import type {
+  PutOpts,
+  PutResult,
+  HeadResult,
+  PresignGetOptions,
+  PresignPutInput,
+  StorageAdapter,
+} from "./adapter.js";
+import { KeyLayoutError, StorageError } from "./errors.js";
 import { assertSafeRelPath } from "./keys.js";
 import type { ReaderSpec } from "./rangeReader.js";
 
@@ -170,6 +177,60 @@ export function createFsStorage(rootDir: string): StorageAdapter {
       };
     },
 
+    async copy(sourceKey: string, destinationKey: string): Promise<PutResult> {
+      const source = keyToPath(rootDir, sourceKey);
+      const destination = keyToPath(rootDir, destinationKey);
+      if (source === destination) throw new StorageError("copy source and destination must differ", { code: "invalid_arg" });
+      let sourceSize: number;
+      try {
+        sourceSize = (await stat(source)).size;
+      } catch (error) {
+        throw new StorageError("copy source object is missing", { code: "not_found", cause: error });
+      }
+      if (await exists(destination)) {
+        const [sourceHead, destinationHead] = await Promise.all([
+          adapter.head(sourceKey),
+          adapter.head(destinationKey),
+        ]);
+        if (sourceHead !== null && destinationHead !== null &&
+            sourceHead.bytes === destinationHead.bytes &&
+            sourceHead.sha256Hex !== null &&
+            sourceHead.sha256Hex === destinationHead.sha256Hex) {
+          return { key: destinationKey, bytes: destinationHead.bytes };
+        }
+        throw new StorageError("immutable copy destination already contains another version", {
+          code: "immutable_copy_conflict",
+        });
+      }
+      await mkdir(dirname(destination), { recursive: true });
+      const part = `${destination}.copy-${process.pid}-${Date.now()}-${randomBytes(8).toString("hex")}`;
+      const sidecars = [".sha256", ".meta.json", ".content-type"];
+      try {
+        await copyFile(source, part);
+        // Publish all sidecars BEFORE the main key. head() returns null while
+        // the main key is absent, so it can never observe a half-written copy.
+        for (const suffix of sidecars) {
+          try {
+            await copyFile(`${source}${suffix}`, `${part}${suffix}`);
+          } catch {
+            await rm(`${part}${suffix}`, { force: true });
+            await rm(`${destination}${suffix}`, { force: true });
+            continue;
+          }
+          await rename(`${part}${suffix}`, `${destination}${suffix}`);
+        }
+        await rename(part, destination);
+      } finally {
+        await rm(part, { force: true });
+        for (const suffix of sidecars) await rm(`${part}${suffix}`, { force: true });
+      }
+      const copiedSize = (await stat(destination)).size;
+      if (copiedSize !== sourceSize) {
+        throw new StorageError("copy byte count changed during the copy", { code: "copy_length_mismatch" });
+      }
+      return { key: destinationKey, bytes: copiedSize };
+    },
+
     async delete(key: string): Promise<void> {
       const path = keyToPath(rootDir, key);
       await rm(path, { force: true }); // idempotent
@@ -178,7 +239,7 @@ export function createFsStorage(rootDir: string): StorageAdapter {
       await rm(`${path}.content-type`, { force: true });
     },
 
-    async presignGet(key: string, ttlSeconds: number): Promise<string> {
+    async presignGet(key: string, ttlSeconds: number, _options?: PresignGetOptions): Promise<string> {
       const path = keyToPath(rootDir, key);
       const exp = Math.floor(Date.now() / 1000) + ttlSeconds;
       return `file://${path}#ovid-exp=${exp}`;

@@ -62,10 +62,18 @@ function fakeDb(opts: FakeOptions = {}) {
     return Promise.resolve([usageRows.shift() ?? EMPTY_TOTALS]);
   };
 
+  let lockingUser = false;
   const selectChain = {
     from: () => selectChain,
     where: () => selectChain,
-    limit: async () => (opts.deletion ? [opts.deletion] : []),
+    for: () => {
+      lockingUser = true;
+      return selectChain;
+    },
+    limit: async () => {
+      if (lockingUser) return [userRow];
+      return opts.deletion ? [opts.deletion] : [];
+    },
   };
 
   const userRow = {
@@ -85,8 +93,18 @@ function fakeDb(opts: FakeOptions = {}) {
 
   const db = {
     $client: client,
-    select: () => selectChain,
+    select: () => {
+      lockingUser = false;
+      return selectChain;
+    },
     insert: () => insertChain,
+    transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+      select: () => {
+        lockingUser = false;
+        return selectChain;
+      },
+      execute: async () => [{ used_bytes: opts.usedBytes ?? 0, reserved_bytes: 0 }],
+    }),
   } as unknown as Db;
 
   return { db, queries };

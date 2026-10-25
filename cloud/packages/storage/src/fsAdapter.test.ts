@@ -151,6 +151,26 @@ describe("createFsStorage — fs-specific pins", () => {
     expect(p).toMatch(/^file:\/\/\/.*#ovid-exp=\d+$/);
   });
 
+  it("copies a frozen object with bytes and actual metadata, independently of the source", async () => {
+    const adapter = createFsStorage(root);
+    expect(adapter.copy).toBeTypeOf("function");
+    await adapter.put("users/u/source.txt", Buffer.from("frozen"), {
+      contentType: "text/plain",
+      metadata: { version: "v1" },
+    });
+    const copied = await adapter.copy!("users/u/source.txt", "users/u/shares/sha256-frozen.txt");
+    expect(copied.bytes).toBe(6);
+    expect((await adapter.getBuffer("users/u/shares/sha256-frozen.txt"))!.toString()).toBe("frozen");
+    expect(await adapter.head("users/u/shares/sha256-frozen.txt")).toMatchObject({
+      bytes: 6,
+      contentType: "text/plain",
+      metadata: { version: "v1" },
+    });
+    await adapter.put("users/u/source.txt", Buffer.from("changed"));
+    expect((await adapter.getBuffer("users/u/shares/sha256-frozen.txt"))!.toString()).toBe("frozen");
+    await expect(adapter.copy!("users/u/missing", "users/u/shares/missing")).rejects.toThrow();
+  });
+
   it("delete removes the object (and its sidecars)", async () => {
     const adapter = createFsStorage(root);
     await adapter.put("gone.bin", Buffer.from("v"));

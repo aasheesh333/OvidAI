@@ -123,6 +123,26 @@ describe("adaptBrowserTools", () => {
     expect(result.content).toContain("blocked host");
   });
 
+  // UNEXECUTED R4-1: the exact loop/tool_completed success inputs must flip.
+  it("propagates publication refusal as isError:true with safe typed text and no artifacts", async () => {
+    const [tool] = adaptBrowserTools([def("browser_download", {
+      content: "error: project_file_limit: The project file allowance is exhausted.",
+      isError: true,
+    })]);
+
+    const result = await tool!.execute({ url: "https://example.test/file.pdf" }, ctx());
+
+    expect(result).toEqual({
+      content: "error: project_file_limit: The project file allowance is exhausted.",
+      isError: true,
+    });
+    expect(result.artifacts).toBeUndefined();
+    // These are the exact formulas used by agent-core tool_completed/post_tool.
+    expect(result.isError !== true).toBe(false);
+    expect(result.isError === true).toBe(true);
+    expect(result.content).not.toContain("provider");
+  });
+
   it("adapts the whole suite (every definition keeps its name)", () => {
     const names = ["browser_open", "browser_click", "browser_drag", "browser_screenshot"];
     const tools = adaptBrowserTools(names.map((n) => def(n, { content: n })));

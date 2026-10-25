@@ -1,14 +1,18 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import {
   attachments,
   createDb,
   migrate,
   newId,
+  projectFileUsage,
+  projectsRepo,
   runs,
+  StorageReservationStore,
+  type StorageReservationInput,
   type Db,
 } from "@ovid/db";
 import type { EventLog } from "@ovid/events";
@@ -32,7 +36,7 @@ import {
   type MigrationScratch,
 } from "../../../packages/db/src/migrationTestKit.js";
 import type { ModelTransport } from "./liteLlm.js";
-import { createAgentRunProcessor } from "./runProcessor.js";
+import { createAgentRunProcessor, readRunAttachment } from "./runProcessor.js";
 import { createToolRegistry } from "./tools/registry.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -44,6 +48,7 @@ interface StoredObject {
 
 function fakeStorage() {
   const objects = new Map<string, StoredObject>();
+  const missingGet = new Set<string>();
   const headCalls: string[] = [];
   const getBufferCalls: string[] = [];
   const adapter: StorageAdapter = {
@@ -52,7 +57,7 @@ function fakeStorage() {
     async get() { return null; },
     async getBuffer(key) {
       getBufferCalls.push(key);
-      return objects.get(key)?.body ?? null;
+      return missingGet.has(key) ? null : objects.get(key)?.body ?? null;
     },
     async head(key): Promise<HeadResult | null> {
       headCalls.push(key);
@@ -71,7 +76,7 @@ function fakeStorage() {
     async presignPut({ key }) { return `https://r2.test/put/${encodeURIComponent(key)}`; },
     async readerSpec() { return null; },
   };
-  return { adapter, objects, headCalls, getBufferCalls };
+  return { adapter, objects, missingGet, headCalls, getBufferCalls };
 }
 
 function memoryEventLog(): EventLog {
@@ -445,6 +450,12 @@ describe.skipIf(!TEST_DATABASE_URL)("attachment HEAD finalization and legacy lin
       messageId: firstSend.json().userMessageId,
     });
     expect(await runs.get(db, firstSend.json().runId, uid)).toMatchObject({ status: "completed" });
+    expect(await db.$client`SELECT state FROM storage_reservations WHERE id = ${ticket.attachmentId}`)
+      .toEqual([{ state: "finalized" }]);
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 5, reserved: 0 }]);
 
     const secondSend = await harness.app.inject({
       method: "POST",
@@ -465,12 +476,20 @@ describe.skipIf(!TEST_DATABASE_URL)("attachment HEAD finalization and legacy lin
     expect(harness.storage.headCalls).toEqual([key, key]);
     expect(harness.storage.getBufferCalls).toEqual([key, key]);
     expect(await runs.get(db, secondSend.json().runId, uid)).toMatchObject({ status: "completed" });
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 5, reserved: 0 }]);
   });
 
+  // UNEXECUTED N1: mismatch releases quota and the failed project slot.
   it("the legacy worker fence refuses a HEAD size mismatch before download or provider call", async () => {
     const harness = makeHarness();
     const uid = newId();
     const sessionId = await createSession(harness.app, uid);
+    const project = await projectsRepo.create(db, uid, "worker-mismatch");
+    expect(project).not.toBeNull();
+    expect(await projectsRepo.moveSession(db, uid, sessionId, project!.id)).not.toBeNull();
     const ticket = await createTicket(harness.app, uid, sessionId, {
       name: "wrong.bin",
       size: 5,
@@ -488,14 +507,267 @@ describe.skipIf(!TEST_DATABASE_URL)("attachment HEAD finalization and legacy lin
     const result = await processJob(harness.queue.adds[0]!, harness);
     expect(result.providerCalls).toBe(0);
     expect(harness.storage.getBufferCalls).toEqual([]);
-    expect((await attachments.getForSession(db, sessionId))[0]).toMatchObject({
-      uploadStatus: "failed",
-      actualBytes: 2,
-      finalizedAt: null,
-    });
+    expect(await attachments.getForSession(db, sessionId)).toEqual([]);
+    expect(harness.storage.objects.has(key)).toBe(false);
+    expect(await projectFileUsage(db, uid, project!.id)).toMatchObject({ used: 0 });
+    expect(await db.$client`SELECT state FROM storage_reservations WHERE id = ${ticket.attachmentId}`)
+      .toEqual([{ state: "released" }]);
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 0, reserved: 0 }]);
     expect(await runs.get(db, sent.json().runId, uid)).toMatchObject({
       status: "failed",
       lastError: "attachment_unavailable",
     });
+  });
+
+  // UNEXECUTED round-2 worker missing-HEAD lifecycle regression.
+  it("releases missing worker uploads without materializing or charging them", async () => {
+    const harness = makeHarness();
+    const uid = newId();
+    const sessionId = await createSession(harness.app, uid);
+    const ticket = await createTicket(harness.app, uid, sessionId, {
+      name: "missing-worker.bin",
+      size: 5,
+    });
+    const sent = await harness.app.inject({
+      method: "POST",
+      url: `/cloud/v1/sessions/${sessionId}/messages`,
+      headers: authHeaders(uid),
+      payload: { content: "missing upload", attachmentIds: [ticket.attachmentId] },
+    });
+    expect(sent.statusCode).toBe(202);
+    const result = await processJob(harness.queue.adds[0]!, harness);
+    expect(result.providerCalls).toBe(0);
+    expect(harness.storage.getBufferCalls).toEqual([]);
+    expect(await attachments.getForSession(db, sessionId)).toEqual([]);
+    expect(await db.$client`SELECT state FROM storage_reservations WHERE id = ${ticket.attachmentId}`)
+      .toEqual([{ state: "released" }]);
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 0, reserved: 0 }]);
+  });
+
+  // UNEXECUTED round-3: legacy reservationless missing HEAD is not clean.
+  it("fails and removes a reservationless pending legacy upload on missing HEAD", async () => {
+    const harness = makeHarness();
+    const uid = newId();
+    const sessionId = await createSession(harness.app, uid);
+    const attachmentId = newId();
+    await attachments.create(db, {
+      id: attachmentId,
+      sessionId,
+      userId: uid,
+      name: "legacy-worker-missing.bin",
+      size: 5,
+      r2Key: `users/${uid}/sessions/${sessionId}/uploads/${attachmentId}`,
+    });
+    const [row] = await attachments.getForSession(db, sessionId, [attachmentId]);
+    const result = await readRunAttachment(db, harness.storage.adapter, row!);
+    expect(result.buffer).toBeNull();
+    expect(result.error).toContain("attachment object not found");
+    expect(await attachments.getForSession(db, sessionId)).toEqual([]);
+    expect(await db.$client`SELECT state FROM storage_reservations WHERE id = ${attachmentId}`)
+      .toEqual([{ state: "released" }]);
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 0, reserved: 0 }]);
+  });
+
+  // UNEXECUTED R4-2: row deletion cannot strand a stale finalized charge.
+  it("serializes worker valid-HEAD reservation against missing-HEAD row deletion", async () => {
+    const harness = makeHarness();
+    const uid = newId();
+    const sessionId = await createSession(harness.app, uid);
+    const attachmentId = newId();
+    const key = `users/${uid}/sessions/${sessionId}/uploads/${attachmentId}`;
+    await attachments.create(db, {
+      id: attachmentId,
+      sessionId,
+      userId: uid,
+      name: "legacy-worker-race.bin",
+      size: 5,
+      r2Key: key,
+    });
+    harness.storage.objects.set(key, { body: Buffer.from("hello"), contentType: null });
+    const [row] = await attachments.getForSession(db, sessionId, [attachmentId]);
+    const originalReserve = StorageReservationStore.prototype.reserve;
+    let firstValidHeadCall = true;
+    let entered!: () => void;
+    let proceed!: () => void;
+    const reserveEntered = new Promise<void>((resolve) => { entered = resolve; });
+    const proceedReserve = new Promise<void>((resolve) => { proceed = resolve; });
+    const reserve = vi.spyOn(StorageReservationStore.prototype, "reserve")
+      .mockImplementation(async function (this: StorageReservationStore, input: StorageReservationInput) {
+        if (firstValidHeadCall && input.head !== undefined && input.head !== null) {
+          firstValidHeadCall = false;
+          entered();
+          await proceedReserve;
+        }
+        return originalReserve.call(this, input);
+      });
+    try {
+      const valid = readRunAttachment(db, harness.storage.adapter, row!);
+      await reserveEntered;
+      harness.storage.objects.delete(key);
+      const missing = await readRunAttachment(db, harness.storage.adapter, row!);
+      expect(missing.error).toContain("attachment object not found");
+      proceed();
+      expect((await valid).error).not.toBeNull();
+    } finally {
+      proceed();
+      reserve.mockRestore();
+    }
+    expect(await attachments.getForSession(db, sessionId)).toEqual([]);
+    expect(harness.storage.objects.has(key)).toBe(false);
+    expect(await db.$client`SELECT state FROM storage_reservations WHERE id = ${attachmentId}`)
+      .toEqual([{ state: "released" }]);
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 0, reserved: 0 }]);
+  });
+
+  it("retries debit when cleanup observes reserved and release observes finalized", async () => {
+    const harness = makeHarness();
+    const uid = newId();
+    const sessionId = await createSession(harness.app, uid);
+    const ticket = await createTicket(harness.app, uid, sessionId, {
+      name: "reserved-finalized-cleanup-race.bin",
+      size: 5,
+    });
+    const key = `users/${uid}/sessions/${sessionId}/uploads/${ticket.attachmentId}`;
+    harness.storage.objects.set(key, { body: Buffer.from("hello"), contentType: null });
+    const [row] = await attachments.getForSession(db, sessionId, [ticket.attachmentId]);
+    const originalFinalize = StorageReservationStore.prototype.finalize;
+    const originalRelease = StorageReservationStore.prototype.release;
+    let firstFinalize = true;
+    let interveningRelease = false;
+    const finalize = vi.spyOn(StorageReservationStore.prototype, "finalize")
+      .mockImplementation(async function (this: StorageReservationStore, input: Parameters<StorageReservationStore["finalize"]>[0]) {
+        if (firstFinalize && input.reservationId === ticket.attachmentId) {
+          firstFinalize = false;
+          throw new Error("injected settle failure");
+        }
+        return originalFinalize.call(this, input);
+      });
+    const release = vi.spyOn(StorageReservationStore.prototype, "release")
+      .mockImplementation(async function (this: StorageReservationStore, input: Parameters<StorageReservationStore["release"]>[0]) {
+        if (!interveningRelease && input.reservationId === ticket.attachmentId) {
+          interveningRelease = true;
+          await originalFinalize.call(this, {
+            reservationId: ticket.attachmentId,
+            actualBytes: 5,
+            actualContentType: null,
+            etag: null,
+            attachment: true,
+          });
+        }
+        return originalRelease.call(this, input);
+      });
+    try {
+      await expect(readRunAttachment(db, harness.storage.adapter, row!))
+        .rejects.toThrow("injected settle failure");
+    } finally {
+      finalize.mockRestore();
+      release.mockRestore();
+    }
+    expect(interveningRelease).toBe(true);
+    expect(await attachments.getForSession(db, sessionId)).toEqual([]);
+    expect(harness.storage.objects.has(key)).toBe(false);
+    expect(await db.$client`SELECT state FROM storage_reservations WHERE id = ${ticket.attachmentId}`)
+      .toEqual([{ state: "released" }]);
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 0, reserved: 0 }]);
+  });
+
+  // UNEXECUTED R3-1: the shared read used by both materialization loops.
+  it("debits/releases ready state and the project row when GET is null after HEAD", async () => {
+    const harness = makeHarness();
+    const uid = newId();
+    const sessionId = await createSession(harness.app, uid);
+    const ticket = await createTicket(harness.app, uid, sessionId, {
+      name: "get-null-after-ready.bin",
+      size: 5,
+    });
+    const key = `users/${uid}/sessions/${sessionId}/uploads/${ticket.attachmentId}`;
+    harness.storage.objects.set(key, { body: Buffer.from("hello"), contentType: null });
+    harness.storage.missingGet.add(key);
+    const [row] = await attachments.getForSession(db, sessionId, [ticket.attachmentId]);
+    const result = await readRunAttachment(db, harness.storage.adapter, row!);
+    expect(result.buffer).toBeNull();
+    expect(result.error).toContain("attachment object not found");
+    expect(await attachments.getForSession(db, sessionId)).toEqual([]);
+    expect(harness.storage.objects.has(key)).toBe(false);
+    expect(await db.$client`SELECT state FROM storage_reservations WHERE id = ${ticket.attachmentId}`)
+      .toEqual([{ state: "released" }]);
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 0, reserved: 0 }]);
+  });
+
+  // UNEXECUTED R4-2: cleanup still releases a reservation after the row is gone.
+  it("debits an existing finalized reservation when the attachment row disappears", async () => {
+    const harness = makeHarness();
+    const uid = newId();
+    const sessionId = await createSession(harness.app, uid);
+    const ticket = await createTicket(harness.app, uid, sessionId, {
+      name: "deleted-after-ready.bin",
+      size: 5,
+    });
+    const key = `users/${uid}/sessions/${sessionId}/uploads/${ticket.attachmentId}`;
+    harness.storage.objects.set(key, { body: Buffer.from("hello"), contentType: null });
+    const [row] = await attachments.getForSession(db, sessionId, [ticket.attachmentId]);
+    expect((await readRunAttachment(db, harness.storage.adapter, row!)).error).toBeNull();
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 5, reserved: 0 }]);
+    await db.$client`DELETE FROM attachments WHERE id = ${ticket.attachmentId}`;
+    const result = await readRunAttachment(db, harness.storage.adapter, row!);
+    expect(result.error).not.toBeNull();
+    expect(harness.storage.objects.has(key)).toBe(false);
+    expect(await db.$client`SELECT state FROM storage_reservations WHERE id = ${ticket.attachmentId}`)
+      .toEqual([{ state: "released" }]);
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 0, reserved: 0 }]);
+  });
+
+  // UNEXECUTED R3-1: generic failure after actual-byte settlement but during ready.
+  it("reconciles a generic post-reservation ready-write failure", async () => {
+    const harness = makeHarness();
+    const uid = newId();
+    const sessionId = await createSession(harness.app, uid);
+    const ticket = await createTicket(harness.app, uid, sessionId, {
+      name: "generic-ready-failure.bin",
+      size: 5,
+    });
+    const key = `users/${uid}/sessions/${sessionId}/uploads/${ticket.attachmentId}`;
+    harness.storage.objects.set(key, { body: Buffer.from("hello"), contentType: null });
+    const [row] = await attachments.getForSession(db, sessionId, [ticket.attachmentId]);
+    const readyWrite = vi.spyOn(attachments, "finalizeUpload")
+      .mockRejectedValue(new Error("ready-write failed"));
+    try {
+      await expect(readRunAttachment(db, harness.storage.adapter, row!))
+        .rejects.toThrow("ready-write failed");
+    } finally {
+      readyWrite.mockRestore();
+    }
+    expect(await attachments.getForSession(db, sessionId)).toEqual([]);
+    expect(harness.storage.objects.has(key)).toBe(false);
+    expect(await db.$client`SELECT state FROM storage_reservations WHERE id = ${ticket.attachmentId}`)
+      .toEqual([{ state: "released" }]);
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 0, reserved: 0 }]);
   });
 });

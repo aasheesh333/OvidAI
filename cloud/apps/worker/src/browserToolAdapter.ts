@@ -90,6 +90,7 @@ export function adaptBrowserTools(defs: readonly BrowserToolDef[], leases?: User
       const result = await def.execute(args, browserContext);
       return {
         content: result.content,
+        ...(result.isError !== undefined ? { isError: result.isError } : {}),
         ...(result.artifacts !== undefined && result.artifacts.length > 0
           ? { artifacts: result.artifacts }
           : {}),

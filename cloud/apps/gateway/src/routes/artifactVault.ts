@@ -3,12 +3,15 @@ import {
   artifactVault,
   decodeArtifactVaultCursor,
   encodeArtifactVaultCursor,
+  QuotaContractError,
   sessions,
   type ArtifactVaultCategory,
   type ArtifactVaultOrigin,
 } from "@ovid/db";
 import { DEFAULT_PRESIGN_TTL_SECONDS } from "@ovid/shared";
+import { isActiveCdnContentType, sanitizeCdnContentType } from "@ovid/storage";
 import type { GatewayDeps } from "../app.js";
+import { StorageQuota } from "../storageQuota.js";
 import { isUuid, notFound, parsePageLimit, queryValue, sendError } from "./http.js";
 
 /**
@@ -29,6 +32,11 @@ const SOURCES: readonly ArtifactVaultOrigin[] = ["generated", "uploaded"];
 const CATEGORIES: readonly ArtifactVaultCategory[] = ["image", "html", "code", "document", "other"];
 const MAX_QUERY_CHARS = 128;
 
+function wantsDownload(query: Record<string, string | string[] | undefined>): boolean {
+  const raw = queryValue(query.download) ?? queryValue(query.disposition);
+  return raw === "1" || raw === "true" || raw === "attachment";
+}
+
 function vaultError(
   reply: Parameters<typeof sendError>[0],
   status: number,
@@ -43,6 +51,7 @@ function vaultError(
 }
 
 export function registerArtifactVaultRoutes(app: FastifyInstance, deps: GatewayDeps): void {
+  const quota = new StorageQuota({ db: deps.db, storage: deps.storage, now: deps.clock });
   app.get("/artifacts", async (request, reply) => {
     const { uid } = request.principal;
     const query = request.query as Record<string, string | string[] | undefined>;
@@ -165,8 +174,26 @@ export function registerArtifactVaultRoutes(app: FastifyInstance, deps: GatewayD
     }
 
     const row = await artifactVault.remove(deps.db, uid, id, origin);
+    if (origin === "generated") {
+      // Fence new grants with the source tombstone FIRST, then synchronously
+      // close all dependent grants. Repeating delete also reconciles grants
+      // left by an earlier cleanup failure.
+      await quota.revokeArtifactShares(uid, id);
+    }
     if (row === null) {
       return vaultError(reply, 404, "not_found", "Artifact not found.");
+    }
+
+    // The row's real transition authorizes exactly one quota debit. Pending
+    // uploads release a reservation; legacy rows without one simply delete.
+    try {
+      await quota.removeObject({ reservationId: id });
+    } catch (error) {
+      if (error instanceof QuotaContractError && error.code === "invalid_reservation_state") {
+        await quota.releaseUpload({ reservationId: id });
+      } else if (!(error instanceof QuotaContractError) || error.code !== "reservation_not_found") {
+        throw error;
+      }
     }
 
     if (deps.storage !== undefined) {
@@ -262,7 +289,17 @@ export function registerArtifactVaultRoutes(app: FastifyInstance, deps: GatewayD
 
     const ttlSeconds = deps.presignTtlSeconds ?? DEFAULT_PRESIGN_TTL_SECONDS;
     // NEVER log the URL — it is a bearer capability until expiresAt.
-    const url = await deps.storage.presignGet(row.r2Key, ttlSeconds);
+    const contentType = sanitizeCdnContentType(head.contentType ?? row.contentType) ?? "application/octet-stream";
+    const disposition = isActiveCdnContentType(contentType) || wantsDownload(query)
+      ? "attachment"
+      : "inline";
+    const url = await deps.storage.presignGet(
+      row.r2Key,
+      ttlSeconds,
+      disposition === "attachment"
+        ? { disposition, filename: row.name, contentType }
+        : undefined,
+    );
     const now = deps.clock?.() ?? new Date();
     return (
       reply

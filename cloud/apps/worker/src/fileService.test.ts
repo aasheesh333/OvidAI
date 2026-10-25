@@ -16,7 +16,9 @@ import { Redis } from "ioredis";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   attachments as attachmentsRepo,
+  assertSessionFileCapacity,
   createDb,
+  createStorageQuotaRepos,
   eventMirror as eventMirrorRepo,
   fileManifests as fileManifestsRepo,
   migrate,
@@ -174,6 +176,8 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         runs: runsRepo,
         eventMirror: eventMirrorRepo,
         workspaceObjects: workspaceObjectsRepo,
+        quota: createStorageQuotaRepos(db),
+        assertProjectFileCapacity: assertSessionFileCapacity,
         ...overrides,
       };
     }

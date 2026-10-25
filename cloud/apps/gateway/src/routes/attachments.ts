@@ -3,9 +3,13 @@ import { z } from "zod";
 import {
   assertProjectFileCapacity,
   AttachmentFinalizeError,
+  attachmentDeclarationMismatch,
   attachments,
+  cleanupStorageObject,
+  cleanupStorageObjectRace,
   newId,
   ProjectFileLimitError,
+  QuotaContractError,
   sessions,
   users,
 } from "@ovid/db";
@@ -16,6 +20,7 @@ import {
 } from "@ovid/shared";
 import type { HeadResult } from "@ovid/storage";
 import type { GatewayDeps } from "../app.js";
+import { StorageQuota } from "../storageQuota.js";
 import { isUuid, notFound, sendError, zodBadRequest } from "./http.js";
 
 // Attachment routes (P8 Task 3) — mounted inside the authenticated /cloud/v1
@@ -33,6 +38,8 @@ export interface AttachmentPresigner {
   presignPut(input: { key: string; ttlSeconds: number; contentType?: string }): Promise<string>;
   /** Optional only for legacy create-only test fakes; finalize refuses without it. */
   head?(key: string): Promise<HeadResult | null>;
+  /** Optional quarantine seam for failed/cap-denied objects. */
+  delete?(key: string): Promise<void>;
 }
 
 export interface AttachmentFinalizeResponse {
@@ -76,7 +83,51 @@ const createAttachmentBody = z
   .strict();
 const finalizeAttachmentBody = z.object({}).strict();
 
+function quotaError(
+  reply: Parameters<typeof sendError>[0],
+  result: { scope: "upload" | "storage"; resetsAt: Date | null },
+) {
+  if (result.resetsAt !== null) {
+    reply.header("retry-after", Math.max(1, Math.ceil((result.resetsAt.getTime() - Date.now()) / 1000)));
+  }
+  return result.scope === "upload"
+    ? sendError(reply, 429, "upload_limit_reached", "The upload allowance for this plan is exhausted.")
+    : sendError(reply, 409, "storage_quota_exceeded", "The storage allowance for this plan is exhausted.");
+}
+
+async function releaseReservation(quota: StorageQuota, reservationId: string): Promise<void> {
+  await cleanupStorageObjectRace({
+    removeObject: () => quota.removeObject({ reservationId }),
+    releaseUpload: () => quota.releaseUpload({ reservationId }),
+    deleteObject: async () => {},
+    deleteRow: async () => {},
+  });
+}
+
 export function registerAttachmentRoutes(app: FastifyInstance, deps: GatewayDeps): void {
+  const quota = new StorageQuota({ db: deps.db, storage: deps.storage, now: deps.clock });
+  const compensate = async (attachmentId: string, uid: string, r2Key: string) => {
+    await cleanupStorageObject(deps.db, { reservationId: attachmentId }, {
+      now: deps.clock,
+      deleteObject: async () => {
+        const storage = deps.presigner ?? deps.storage;
+        await storage?.delete?.(r2Key).catch(() => {});
+      },
+      deleteRow: async () => {
+        await deps.db.$client`DELETE FROM attachments WHERE id = ${attachmentId} AND user_id = ${uid}`;
+      },
+    });
+  };
+  const releaseForRefusal = async (attachmentId: string, uid: string, r2Key: string) => {
+    try {
+      await releaseReservation(quota, attachmentId);
+    } catch (error) {
+      // A failed typed-refusal cleanup is still a post-reservation failure.
+      // Escalate to full object/row compensation before infrastructure escapes.
+      await compensate(attachmentId, uid, r2Key);
+      throw error;
+    }
+  };
   // Loud fallback (same mindset as the WS pty bridge): a gateway composed
   // without a presigner must never silently swallow attachment uploads — one
   // server-side warning per composition, every request answers 503.
@@ -147,15 +198,30 @@ export function registerAttachmentRoutes(app: FastifyInstance, deps: GatewayDeps
     }
     const attachmentId = newId();
     const r2Key = attachmentObjectKey(uid, sessionId, attachmentId);
-    const uploadUrl = await presigner.presignPut({
-      key: r2Key,
-      ttlSeconds: ATTACHMENT_UPLOAD_TTL_SECONDS,
-      ...(declaredContentType !== undefined ? { contentType: declaredContentType } : {}),
-    });
-
-    // 5. Provision the users row (FK target) and persist the attachment.
     await users.ensure(deps.db, uid, email);
+    const reservation = await quota.reserveUpload({
+      actorUserId: uid,
+      ownerUserId: uid,
+      sessionId,
+      attachmentId,
+      declaredBytes: size,
+    });
+    if (!reservation.ok) {
+      if (reservation.scope === "attachment") {
+        return sendError(reply, 409, "attachment_changed", "The attachment upload is no longer active.");
+      }
+      return quotaError(reply, reservation);
+    }
+
+    // Reserve before signing. A signer/row failure releases only the pending
+    // reservation; the response shape and signed Content-Type stay unchanged.
+    let uploadUrl: string;
     try {
+      uploadUrl = await presigner.presignPut({
+        key: r2Key,
+        ttlSeconds: ATTACHMENT_UPLOAD_TTL_SECONDS,
+        ...(declaredContentType !== undefined ? { contentType: declaredContentType } : {}),
+      });
       await attachments.create(deps.db, {
         id: attachmentId,
         sessionId,
@@ -163,13 +229,12 @@ export function registerAttachmentRoutes(app: FastifyInstance, deps: GatewayDeps
         name,
         size,
         r2Key,
-        // Stamp from the session the route already loaded (authoritative at
-        // creation time); the repo also re-checks the cap under its lock.
         projectId: session.projectId,
         contentType: storedContentType,
         contentTypeDeclared: declaredContentType !== undefined,
       });
     } catch (err) {
+      await releaseForRefusal(attachmentId, uid, r2Key);
       if (err instanceof ProjectFileLimitError) {
         return sendError(reply, 409, err.code, err.message);
       }
@@ -226,6 +291,55 @@ export function registerAttachmentRoutes(app: FastifyInstance, deps: GatewayDeps
     }
     const head = await storage.head(owned.r2Key);
     if (head === null) {
+      // Missing HEAD enters the same users → attachment → reservation fence
+      // as valid legacy HEAD. A committed failure tombstone denies late PUT.
+      try {
+        const failed = await quota.reserveUpload({
+          actorUserId: uid,
+          ownerUserId: uid,
+          sessionId,
+          attachmentId,
+          declaredBytes: owned.size,
+          head: null,
+        });
+        if (!failed.ok) {
+          if (failed.scope === "attachment") {
+            await storage.delete?.(owned.r2Key).catch(() => {});
+            return sendError(
+              reply,
+              409,
+              "attachment_not_uploaded",
+              "The attachment object has not reached storage.",
+            );
+          }
+          return quotaError(reply, failed);
+        }
+        await releaseForRefusal(attachmentId, uid, owned.r2Key);
+      } catch (err) {
+        if (err instanceof QuotaContractError && err.code === "reservation_not_found") {
+          return sendError(reply, 409, "attachment_not_uploaded", "The attachment object has not reached storage.");
+        }
+        if (err instanceof QuotaContractError &&
+            (err.code === "attachment_failed" || err.code === "reservation_released")) {
+          // A retry may encounter failed status with an older finalized charge.
+          // Reconcile that charge before the same deterministic 409.
+          await releaseForRefusal(attachmentId, uid, owned.r2Key);
+        } else {
+          throw err;
+        }
+      }
+      try {
+        await deps.db.$client`
+          UPDATE attachments SET upload_status = 'failed', actual_bytes = NULL,
+            actual_content_type = NULL, finalized_at = NULL
+           WHERE id = ${attachmentId} AND user_id = ${uid}`;
+      } catch (error) {
+        // Release may already have debited a finalized charge. A later status
+        // write failure still owes real object/host-row cleanup; released
+        // reservations make the repeated remove a no-op, never a second debit.
+        await compensate(attachmentId, uid, owned.r2Key);
+        throw error;
+      }
       return sendError(
         reply,
         409,
@@ -235,6 +349,63 @@ export function registerAttachmentRoutes(app: FastifyInstance, deps: GatewayDeps
     }
 
     try {
+      // Idempotent for new uploads; repairs a pre-reservation legacy row with
+      // the same canonical attachment identity before the existing HEAD checks.
+      const reservation = await quota.reserveUpload({
+        actorUserId: uid,
+        ownerUserId: uid,
+        sessionId,
+        attachmentId,
+        declaredBytes: owned.size,
+        head: { bytes: head.bytes, contentType: head.contentType ?? null, etag: head.etag },
+      });
+      if (!reservation.ok) {
+        if (reservation.scope === "attachment") {
+          await storage.delete?.(owned.r2Key).catch(() => {});
+          return sendError(reply, 409, "attachment_changed", "The attachment upload is no longer active.");
+        }
+        return quotaError(reply, reservation);
+      }
+
+      // Reject declaration mismatches before any used-byte transition. The
+      // repository records the failed row; its guard does not require a
+      // finalized reservation for this failure path.
+      const mismatch = attachmentDeclarationMismatch(owned, {
+        actualBytes: head.bytes,
+        actualContentType: head.contentType ?? null,
+      });
+      if (mismatch !== null) {
+        await attachments.finalizeUpload(deps.db, {
+          id: attachmentId,
+          sessionId,
+          userId: uid,
+          actualBytes: head.bytes,
+          actualContentType: head.contentType ?? null,
+        });
+        throw new Error("unreachable: mismatch finalization did not refuse");
+      }
+
+      // The successful ready transition happens only after actual bytes are
+      // settled. The repository independently requires this finalized proof,
+      // which also fences direct worker finalization.
+      const settled = await quota.finalizeUpload({
+        reservationId: attachmentId,
+        actualBytes: head.bytes,
+        actualContentType: head.contentType ?? null,
+        etag: head.etag,
+        attachment: true,
+      });
+      if (!settled.ok) {
+        // The declaration/HEAD checks passed, but the real bytes would cross
+        // the owner's cap. Never leave a ready row or a pending reservation.
+        await releaseForRefusal(attachmentId, uid, owned.r2Key);
+        await deps.db.$client`
+          UPDATE attachments SET upload_status = 'failed', finalized_at = NULL,
+            actual_bytes = NULL, actual_content_type = NULL
+           WHERE id = ${attachmentId} AND user_id = ${uid}`;
+        await storage.delete?.(owned.r2Key).catch(() => {});
+        return quotaError(reply, settled);
+      }
       const row = await attachments.finalizeUpload(deps.db, {
         id: attachmentId,
         sessionId,
@@ -250,8 +421,27 @@ export function registerAttachmentRoutes(app: FastifyInstance, deps: GatewayDeps
       };
       return reply.send(body);
     } catch (err) {
-      if (!(err instanceof AttachmentFinalizeError)) throw err;
-      if (err.code === "not_found") return notFound(reply, "Attachment not found.");
+      if (err instanceof QuotaContractError) {
+        if (err.code === "reservation_released" || err.code === "attachment_failed") {
+          await releaseForRefusal(attachmentId, uid, owned.r2Key);
+          await storage.delete?.(owned.r2Key).catch(() => {});
+          return sendError(reply, 409, "attachment_changed", "The attachment upload reservation is no longer active.");
+        }
+        // Every post-reservation exception gets bounded compensation before
+        // an infrastructure error can escape with a charged/orphaned row.
+        await compensate(attachmentId, uid, owned.r2Key);
+        throw err;
+      }
+      if (!(err instanceof AttachmentFinalizeError)) {
+        await compensate(attachmentId, uid, owned.r2Key);
+        throw err;
+      }
+      if (err.code === "not_found") {
+        await compensate(attachmentId, uid, owned.r2Key);
+        return notFound(reply, "Attachment not found.");
+      }
+      await releaseForRefusal(attachmentId, uid, owned.r2Key);
+      await storage.delete?.(owned.r2Key).catch(() => {});
       const code = err.code === "size_mismatch"
         ? "attachment_size_mismatch"
         : err.code === "type_mismatch"

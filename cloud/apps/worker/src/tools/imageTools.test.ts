@@ -280,6 +280,27 @@ describe("generate_image / edit_image", () => {
     ]);
   });
 
+  // UNEXECUTED N2: publication refusal is a typed failed tool result, not
+  // success with an artifact_error appendix or a hidden null.
+  it.each(["project_file_limit", "storage_quota_not_configured", "cdn_grant_not_configured"])(
+    "generate: preserves %s as an artifact publication failure",
+    async (code) => {
+      const h = harness({ ok: true, body: successBody() });
+      h.publishArtifact = async () => {
+        throw Object.assign(new Error("publication refused"), { code });
+      };
+      const [generate] = createImageTools({
+        call: h.call,
+        capabilities: caps(),
+        publishArtifact: h.publishArtifact,
+      });
+      const result = await generate!.execute({ prompt: "a cube" }, context(root));
+      expect(result.isError).toBe(true);
+      expect(result.content.startsWith(`${code}:`)).toBe(true);
+      expect(result.content).not.toContain("artifact_error");
+    },
+  );
+
   it("generate: rejects a size/model the cards do not advertise, without a call", async () => {
     const h = harness({ ok: true, body: successBody() });
     const [generate] = createImageTools({

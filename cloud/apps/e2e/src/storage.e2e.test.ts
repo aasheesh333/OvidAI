@@ -8,7 +8,9 @@ import { Redis } from "ioredis";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
+  assertSessionFileCapacity,
   createDb,
+  createStorageQuotaRepos,
   eventMirror,
   fileManifests,
   migrate,
@@ -456,6 +458,8 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         runs,
         eventMirror,
         workspaceObjects,
+        quota: createStorageQuotaRepos(db),
+        assertProjectFileCapacity: assertSessionFileCapacity,
       });
       await fileService.listen({ host: "127.0.0.1", port: 0 });
       fileBaseUrl = `http://127.0.0.1:${
@@ -682,7 +686,15 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
     it("(f) registerArtifact → artifact_created event, list, presigned URL", async () => {
       const content = Buffer.from("artifact bytes from the worker\n", "utf8");
       const rec = await registerArtifact(
-        { db, events, storage, workspaceObjects, eventMirror },
+        {
+          db,
+          events,
+          storage,
+          workspaceObjects,
+          eventMirror,
+          quota: createStorageQuotaRepos(db),
+          assertProjectFileCapacity: assertSessionFileCapacity,
+        },
         {
           userId: uid,
           sessionId: sid,

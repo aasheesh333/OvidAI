@@ -11,6 +11,9 @@ export interface CdnClaims {
   filename?: string;
   contentType?: string;
   cacheClass: "immutable" | "short";
+  /** v2 grant claims; absent only for legacy v1 signature-compatibility tests. */
+  grantId?: string;
+  versionHash?: string;
 }
 
 export interface CdnParsedUrl extends CdnClaims {
@@ -46,26 +49,24 @@ export interface CdnEnv {
   OVID_CDN_ALLOWED_ORIGINS?: string;
   OVID_CDN_MAX_TTL_SECONDS?: string;
   OVID_CDN_CACHE?: string;
+  OVID_CDN_GRANT_CHECK_URL?: string;
+  OVID_CDN_GRANT_INTERNAL_SECRET?: string;
+  OVID_INTERNAL_API_SECRET?: string;
 }
 
 export interface CdnHandlerOptions {
   nowSeconds?: number;
   cache?: CdnCache;
   waitUntil?: (promise: Promise<unknown>) => void;
+  /** Test/service transport seam; production uses the platform global fetch. */
+  fetchImpl?: typeof fetch;
 }
 
 export function base64UrlEncode(bytes: Uint8Array): string;
 export function base64UrlDecode(value: string): Uint8Array | null;
 export function decodeOpaqueKey(opaque: string): string | null;
 export function isSafeKey(key: string): boolean;
-export function canonicalString(claims: {
-  key: string;
-  expiresAtEpochSeconds: number;
-  disposition: "inline" | "attachment";
-  filename?: string;
-  contentType?: string;
-  cacheClass: "immutable" | "short";
-}): string;
+export function canonicalString(claims: CdnClaims): string;
 export function verifyToken(
   claims: CdnClaims,
   token: string,

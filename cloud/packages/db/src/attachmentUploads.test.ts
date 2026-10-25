@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDb, migrate, type Db } from "./client.js";
 import { createMigrationScratch, type MigrationScratch } from "./migrationTestKit.js";
 import { attachments, newId, sessions, users } from "./repos.js";
+import { StorageReservationStore } from "./quotaService.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 
@@ -46,6 +47,30 @@ describe.skipIf(!TEST_DATABASE_URL)("attachment upload finalization (real Postgr
     return rows[0]!;
   }
 
+  async function finalizeWithReservation(
+    a: { id: string; sessionId: string; userId: string },
+    input: { id: string; sessionId: string; userId: string; actualBytes: number; actualContentType: string | null },
+  ) {
+    const store = new StorageReservationStore(db);
+    const reserved = await store.reserve({
+      reservationId: a.id,
+      ownerUserId: a.userId,
+      uploaderUserId: a.userId,
+      sessionId: a.sessionId,
+      objectId: a.id,
+      declaredBytes: input.actualBytes,
+    });
+    if (!reserved.ok) throw new Error("unexpected quota exhaustion");
+    const settled = await store.finalize({
+      reservationId: a.id,
+      actualBytes: input.actualBytes,
+      contentType: input.actualContentType,
+      etag: null,
+    });
+    if (!settled.ok) throw new Error("unexpected finalization exhaustion");
+    return attachments.finalizeUpload(db, input);
+  }
+
   it("finalizes actual HEAD bytes/type once and repeats identical HEAD idempotently", async () => {
     const a = await seedAttachment({ contentType: "text/plain" });
     const input = {
@@ -56,7 +81,7 @@ describe.skipIf(!TEST_DATABASE_URL)("attachment upload finalization (real Postgr
       actualContentType: "text/plain",
     };
 
-    const first = await attachments.finalizeUpload(db, input);
+    const first = await finalizeWithReservation(a, input);
     expect(first).toMatchObject({
       id: a.id,
       uploadStatus: "ready",
@@ -75,7 +100,7 @@ describe.skipIf(!TEST_DATABASE_URL)("attachment upload finalization (real Postgr
 
   it("records legacy unsigned HEAD metadata without treating octet-stream as a declared MIME", async () => {
     const a = await seedAttachment();
-    const ready = await attachments.finalizeUpload(db, {
+    const ready = await finalizeWithReservation(a, {
       id: a.id,
       sessionId: a.sessionId,
       userId: a.userId,
@@ -94,7 +119,7 @@ describe.skipIf(!TEST_DATABASE_URL)("attachment upload finalization (real Postgr
 
   it("accepts an absent legacy HEAD type while keeping the declared type unknown", async () => {
     const a = await seedAttachment();
-    const ready = await attachments.finalizeUpload(db, {
+    const ready = await finalizeWithReservation(a, {
       id: a.id,
       sessionId: a.sessionId,
       userId: a.userId,
@@ -111,7 +136,7 @@ describe.skipIf(!TEST_DATABASE_URL)("attachment upload finalization (real Postgr
 
   it("requires exact HEAD type equality for an explicitly declared octet-stream", async () => {
     const a = await seedAttachment({ contentType: "application/octet-stream" });
-    const ready = await attachments.finalizeUpload(db, {
+    const ready = await finalizeWithReservation(a, {
       id: a.id,
       sessionId: a.sessionId,
       userId: a.userId,
@@ -194,7 +219,7 @@ describe.skipIf(!TEST_DATABASE_URL)("attachment upload finalization (real Postgr
       actualBytes: 4,
       actualContentType: "text/plain",
     };
-    await attachments.finalizeUpload(db, input);
+    await finalizeWithReservation(a, input);
 
     await expect(attachments.finalizeUpload(db, {
       ...input,
@@ -206,6 +231,19 @@ describe.skipIf(!TEST_DATABASE_URL)("attachment upload finalization (real Postgr
       actualContentType: "text/plain",
       finalizedAt: null,
     });
+  });
+
+  // UNEXECUTED round-1 regression: direct workers cannot self-mark ready.
+  it("refuses a matching HEAD without a finalized storage reservation", async () => {
+    const a = await seedAttachment({ contentType: "text/plain" });
+    await expect(attachments.finalizeUpload(db, {
+      id: a.id,
+      sessionId: a.sessionId,
+      userId: a.userId,
+      actualBytes: 4,
+      actualContentType: "text/plain",
+    })).rejects.toMatchObject({ code: "reservation_required" });
+    expect((await stored(a.id, a.sessionId)).uploadStatus).toBe("pending");
   });
 
   it("fails closed for a missing attachment, wrong owner, or wrong session", async () => {

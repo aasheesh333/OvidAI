@@ -14,7 +14,7 @@ import type { ApiError } from "@ovid/shared";
 import type { ActivityTracker, CdnConfig, StorageAdapter } from "@ovid/storage";
 import { authHook, type Verifier } from "./auth.js";
 import { registerAccountRoutes, type AccountRouteDeps } from "./routes/account.js";
-import { registerArtifactCdnRoutes } from "./routes/artifactCdn.js";
+import { registerArtifactCdnRoutes, registerCdnGrantRoutes } from "./routes/artifactCdn.js";
 import { registerArtifactRoutes } from "./routes/artifacts.js";
 import { registerArtifactVaultRoutes } from "./routes/artifactVault.js";
 import { registerAttachmentRoutes } from "./routes/attachments.js";
@@ -506,6 +506,27 @@ function studioPreviewLogger(logger: GatewayLogger): GatewayLogger {
       registerSessionRoutes(scope, deps);
       registerProjectRoutes(scope, deps);
       registerMessageRoutes(scope, deps);
+
+  // The CDN Worker is a service principal, not a Firebase user. Mount its
+  // grant check on the root instance, before the authenticated /cloud/v1
+  // scope, only with a real >=32-byte credential. A partial configuration is
+  // never replaced by a public/grantless v2 route.
+  const cdnGrantSecret = (deps.cdn?.grantInternalSecret ?? "").trim();
+  if (Buffer.byteLength(cdnGrantSecret, "utf8") >= 32) {
+    registerCdnGrantRoutes(app, {
+      db: deps.db,
+      cdnGrantSecret,
+      storage: deps.storage,
+      clock: deps.clock,
+    });
+  }
+
+  // Dedicated preview origin routes are a separate ROOT composition. They
+  // never inherit the authenticated /cloud/v1 authHook or forward its cookies.
+  if (deps.studioPreview !== undefined) {
+    registerStudioPreviewOriginRoot(app, deps.studioPreview);
+  }
+
       registerPreferenceRoutes(scope, deps);
       // The model catalog + the account's tier, so a client can offer a real
       // model picker instead of a static "Auto" pill.

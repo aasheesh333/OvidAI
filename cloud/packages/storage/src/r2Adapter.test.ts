@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { PutObjectCommand } from "@aws-sdk/client-s3";
+import { GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -137,6 +137,25 @@ describe("createR2Storage — offline pins", () => {
     expect(u.searchParams.get("X-Amz-Expires")).toBe("60");
   });
 
+  it("presignGet binds attachment disposition and actual active content type into the R2 response", async () => {
+    const adapter = createR2Storage(FAKE_CFG);
+    const url = await adapter.presignGet("users/u/active.html", 60, {
+      disposition: "attachment",
+      filename: "active.html",
+      contentType: "text/html",
+    });
+    const command = getSignedUrlSpy.mock.calls[0]![1];
+    expect(command).toBeInstanceOf(GetObjectCommand);
+    expect(command.input).toMatchObject({
+      Bucket: "b",
+      Key: "users/u/active.html",
+      ResponseContentDisposition: 'attachment; filename="active.html"',
+      ResponseContentType: "text/html",
+    });
+    expect(new URL(url).searchParams.get("response-content-disposition")).toContain("attachment");
+    expect(new URL(url).searchParams.get("response-content-type")).toBe("text/html");
+  });
+
   it("presignPut signs OFFLINE with the same shape — the P8-T3 upload seam (ruling R3)", async () => {
     const adapter = createR2Storage(FAKE_CFG);
     const url = await adapter.presignPut({ key: "users/u/x.bin", ttlSeconds: 60 });
@@ -210,6 +229,48 @@ describe("createR2Storage — offline pins", () => {
         etag: '"head-etag"',
         metadata: { probe: "head" },
       });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error === undefined ? resolve() : reject(error)));
+      });
+    }
+  });
+
+  it("copy uses R2 CopyObject and returns the actual destination HEAD bytes", async () => {
+    const requests: Array<{ method?: string; url?: string; copySource?: string }> = [];
+    const server = createServer((request, response) => {
+      requests.push({
+        method: request.method,
+        url: request.url,
+        copySource: request.headers["x-amz-copy-source"] as string | undefined,
+      });
+      if (request.method === "PUT") {
+        response.writeHead(200, { "content-type": "application/xml" });
+        response.end("<CopyObjectResult><ETag>\"copy-etag\"</ETag></CopyObjectResult>");
+        return;
+      }
+      response.writeHead(200, {
+        "Content-Length": "6",
+        "Content-Type": "text/plain",
+        ETag: '"copy-etag"',
+        "x-amz-meta-sha256": "f".repeat(64),
+      });
+      response.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      if (address === null || typeof address === "string") throw new Error("missing test address");
+      const adapter = createR2Storage({
+        ...FAKE_CFG,
+        endpoint: `http://127.0.0.1:${address.port}`,
+      });
+      await expect(adapter.copy!("users/u/source.txt", "users/u/share.txt")).resolves.toEqual({
+        key: "users/u/share.txt",
+        bytes: 6,
+      });
+      expect(requests[0]).toMatchObject({ method: "PUT", copySource: "b/users/u/source.txt" });
+      expect(requests[1]?.method).toBe("HEAD");
     } finally {
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error === undefined ? resolve() : reject(error)));
