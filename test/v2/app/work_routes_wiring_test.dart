@@ -1,3 +1,5 @@
+// UNEXECUTED under /tmp/opencode/ovid-production-completion/HEAVY-COMMANDS-PAUSED.md:
+// all new and modified cases in this file remain unexecuted.
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -9,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ovid_ai/core/cloud/cloud_rest.dart';
 import 'package:ovid_ai/core/cloud/schedule_client.dart';
 import 'package:ovid_ai/core/cloud_usage_store.dart';
+import 'package:ovid_ai/core/connectors/connector_api.dart';
 import 'package:ovid_ai/core/html_artifact.dart';
 import 'package:ovid_ai/core/session_artifacts.dart';
 import 'package:ovid_ai/core/state.dart';
@@ -18,6 +21,7 @@ import 'package:ovid_ai/ui/v2/app/v2_settings_actions.dart';
 import 'package:ovid_ai/ui/v2/app/v2_work_routes.dart';
 import 'package:ovid_ai/ui/v2/library/artifact_detail_page.dart';
 import 'package:ovid_ai/ui/v2/library/artifacts_page.dart';
+import 'package:ovid_ai/ui/v2/connectors/connectors_page.dart';
 import 'package:ovid_ai/ui/v2/schedules/schedules_flow.dart';
 
 /// The wiring layer is the only place that maps service rows onto the
@@ -69,6 +73,90 @@ SessionArtifact _artifact({
   cloudArtifactId: 'artifact-1',
   cloudAccountId: 'firebase:uid',
 );
+
+class _RouteConnectorApi implements ConnectorApi {
+  _RouteConnectorApi({this.configured = true, this.includeConnection = true});
+
+  final bool configured;
+  final bool includeConnection;
+
+  @override
+  Future<List<ConnectorCatalogEntry>> listCatalog() async =>
+      <ConnectorCatalogEntry>[
+        ConnectorCatalogEntry(
+          curatedId: 'fetch',
+          displayName: 'Fetch',
+          description: 'Read public-web resources.',
+          credentialFields: <ConnectorCredentialField>[],
+          configurationFields: <ConnectorConfigurationField>[
+            ConnectorConfigurationField(
+              key: 'url',
+              label: 'Health check URL',
+              kind: 'url',
+              required: true,
+              maxLength: 2048,
+            ),
+          ],
+          toolNames: <String>['fetch'],
+          configured: configured,
+          catalogVersion: '2026-10-24-original-read-first',
+          readiness: 'supported',
+          operations: <ConnectorOperation>[
+            ConnectorOperation(
+              name: 'fetch',
+              description: 'Read a public resource.',
+              effect: 'read',
+              approval: 'mode',
+            ),
+          ],
+        ),
+        const ConnectorCatalogEntry(
+          curatedId: 'candidate-fetch',
+          displayName: 'Candidate Fetch',
+          description: 'Must stay hidden.',
+          credentialFields: <ConnectorCredentialField>[],
+          toolNames: <String>[],
+          configured: false,
+          catalogVersion: '2026-10-25-candidate',
+          readiness: 'candidate',
+        ),
+      ];
+
+  @override
+  Future<List<ConnectorConnection>> listConnections() async =>
+      <ConnectorConnection>[
+        if (includeConnection)
+          ConnectorConnection(
+          connectionId: '018f3e11-aaaa-7bbb-8ccc-2d2d2d2d2d2d',
+          userId: 'firebase:test-account',
+          providerId: 'fetch',
+          name: 'Fetch',
+          transport: 'native',
+          enabled: true,
+          agentEnabled: false,
+          authState: 'configured',
+          healthState: 'never_checked',
+          lastCheckedAt: null,
+          lastSuccessAt: null,
+          configVersion: 1,
+          disconnectGeneration: 0,
+          hasSecrets: false,
+          createdAt: DateTime.utc(2026, 10, 24, 12),
+          updatedAt: DateTime.utc(2026, 10, 24, 12),
+        ),
+      ];
+
+  @override
+  Future<ConnectorConnection> getConnection(String connectionId) async {
+    final connections = await listConnections();
+    return connections.firstWhere(
+      (connection) => connection.connectionId == connectionId,
+    );
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -191,6 +279,84 @@ void main() {
       );
       // No URL exists, so no download is invented.
       expect(find.byIcon(Icons.more_vert_rounded), findsNothing);
+    });
+  });
+
+  // UNEXECUTED under HEAVY-COMMANDS-PAUSED.md: this is the actual app route,
+  // not an approved-parity test-only controller construction.
+  group('connector route composition', () {
+    testWidgets('real route exposes supported health and hides candidates', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: OTheme.light(),
+          home: const Scaffold(body: Center(child: Text('home'))),
+        ),
+      );
+      final context = tester.element(find.text('home'));
+
+      final opened = V2WorkRoutes.openConnectors(
+        context,
+        null,
+        connectorApi: _RouteConnectorApi(),
+        accountId: () => 'firebase:test-account',
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(ConnectorsPage), findsOneWidget);
+      final page = tester.widget<ConnectorsPage>(find.byType(ConnectorsPage));
+      expect(page.controller?.capabilities.catalogReadiness, isTrue);
+      expect(page.controller?.capabilities.itemHealthCheck, isTrue);
+      expect(page.controller?.capabilities.createAgentEnabled, isTrue);
+      expect(page.controller?.capabilities.optionalCreateName, isTrue);
+      expect(page.controller?.capabilities.approvedSourceCreate, isFalse);
+      expect(find.text('Fetch'), findsOneWidget);
+      expect(find.text('Candidate Fetch'), findsNothing);
+
+      await tester.tap(find.text('Fetch').first);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 700));
+      expect(find.text('Check health'), findsOneWidget);
+      expect(find.text('Test connection'), findsNothing);
+
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      await tester.pumpAndSettle();
+      await opened;
+    });
+
+    testWidgets('real available-row setup keeps fetch agent-at-create absent', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: OTheme.light(),
+          home: const Scaffold(body: Center(child: Text('home'))),
+        ),
+      );
+      final context = tester.element(find.text('home'));
+
+      final opened = V2WorkRoutes.openConnectors(
+        context,
+        null,
+        connectorApi: _RouteConnectorApi(
+          configured: false,
+          includeConnection: false,
+        ),
+        accountId: () => 'firebase:test-account',
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('connector-add-fetch')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 700));
+      expect(find.byKey(const Key('connector-config-url')), findsOneWidget);
+      expect(find.byKey(const Key('connector-agent-opt-in')), findsNothing);
+      expect(find.text('Use in agent runs'), findsNothing);
+
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      await tester.pumpAndSettle();
+      await opened;
     });
   });
 

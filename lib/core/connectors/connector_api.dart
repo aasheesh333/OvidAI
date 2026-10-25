@@ -19,15 +19,76 @@ class ConnectorCredentialField {
 
   static ConnectorCredentialField? tryParse(Object? raw) {
     if (raw is! Map) return null;
+    const allowed = <String>{'key', 'label', 'secret', 'hint'};
+    if (raw.keys.any((key) => key is! String || !allowed.contains(key))) {
+      return null;
+    }
     final key = raw['key'];
-    if (key is! String || key.isEmpty) return null;
     final label = raw['label'];
+    final secret = raw['secret'];
     final hint = raw['hint'];
+    if (key is! String || key.isEmpty) return null;
+    if (label is! String || label.isEmpty) return null;
+    if (secret is! bool) return null;
+    if (hint != null && hint is! String) return null;
     return ConnectorCredentialField(
       key: key,
-      label: label is String && label.isNotEmpty ? label : key,
-      secret: raw['secret'] == true,
-      hint: hint is String && hint.isNotEmpty ? hint : null,
+      label: label,
+      secret: secret,
+      hint: hint as String?,
+    );
+  }
+}
+
+/// Descriptor for non-secret connection config. Values go only to create.
+class ConnectorConfigurationField {
+  const ConnectorConfigurationField({
+    required this.key,
+    required this.label,
+    required this.kind,
+    required this.required,
+    required this.maxLength,
+    this.hint,
+  });
+
+  final String key;
+  final String label;
+  final String kind;
+  final bool required;
+  final int maxLength;
+  final String? hint;
+
+  static ConnectorConfigurationField? tryParse(Object? raw) {
+    if (raw is! Map) return null;
+    const allowed = <String>{'key', 'label', 'kind', 'required', 'maxLength', 'hint'};
+    if (raw.keys.any((key) => key is! String || !allowed.contains(key))) {
+      return null;
+    }
+    final key = raw['key'];
+    final label = raw['label'];
+    final kind = raw['kind'];
+    final required = raw['required'];
+    final maxLength = raw['maxLength'];
+    final hint = raw['hint'];
+    if (key is! String || key.isEmpty || key.length > 128) return null;
+    if (RegExp(
+      r'authorization|cookie|credential|password|secret|token|api[_-]?key|oauth',
+      caseSensitive: false,
+    ).hasMatch(key)) {
+      return null;
+    }
+    if (label is! String || label.isEmpty || label.length > 200) return null;
+    if (kind != 'string' && kind != 'url') return null;
+    if (required is! bool) return null;
+    if (maxLength is! int || maxLength < 1 || maxLength > 2048) return null;
+    if (hint != null && (hint is! String || hint.length > 1024)) return null;
+    return ConnectorConfigurationField(
+      key: key,
+      label: label,
+      kind: kind as String,
+      required: required,
+      maxLength: maxLength,
+      hint: hint as String?,
     );
   }
 }
@@ -46,23 +107,42 @@ class ConnectorOperation {
 
   final String name;
   final String description;
-  final String effect;
-  final String approval;
+  final String? effect;
+  final String? approval;
 
   static ConnectorOperation? tryParse(Object? raw) {
     if (raw is! Map) return null;
+    const allowed = <String>{
+      'name',
+      'description',
+      'effect',
+      'approval',
+      'requiredScopes',
+    };
+    if (raw.keys.any((key) => key is! String || !allowed.contains(key))) {
+      return null;
+    }
     final name = raw['name'];
+    final description = raw['description'];
     final effect = raw['effect'];
     final approval = raw['approval'];
+    final requiredScopes = raw['requiredScopes'];
     if (name is! String || name.isEmpty) return null;
-    if (effect is! String || effect.isEmpty) return null;
-    if (approval is! String || approval.isEmpty) return null;
-    final description = raw['description'];
+    if (description != null && description is! String) return null;
+    if (effect != null && (effect is! String || effect.isEmpty)) return null;
+    if (approval != null && (approval is! String || approval.isEmpty)) {
+      return null;
+    }
+    if (requiredScopes != null &&
+        (requiredScopes is! List ||
+            requiredScopes.any((scope) => scope is! String))) {
+      return null;
+    }
     return ConnectorOperation(
       name: name,
       description: description is String ? description : '',
-      effect: effect,
-      approval: approval,
+      effect: effect as String?,
+      approval: approval as String?,
     );
   }
 }
@@ -81,6 +161,7 @@ class ConnectorCatalogEntry {
     required this.configured,
     this.catalogVersion = '',
     this.readiness,
+    this.configurationFields = const <ConnectorConfigurationField>[],
     this.operations = const <ConnectorOperation>[],
   });
 
@@ -92,44 +173,88 @@ class ConnectorCatalogEntry {
   final bool configured;
   final String catalogVersion;
   final String? readiness;
+  final List<ConnectorConfigurationField> configurationFields;
   final List<ConnectorOperation> operations;
 
   String get providerId => curatedId;
 
-  /// Older catalog responses predate readiness and remain decodable. Once the
-  /// field is present, anything except an explicitly supported row is hidden.
-  bool get isSupported => readiness == null || readiness == 'supported';
+  /// Only the versioned, explicitly supported contract is installable. Legacy
+  /// rows and candidate/blocked/deprecated rows never inherit installability.
+  bool get isSupported => readiness == 'supported' && catalogVersion.isNotEmpty;
 
   static ConnectorCatalogEntry? tryParse(Object? raw) {
-    if (raw is! Map) return null;
-    final id = raw['providerId'] ?? raw['curatedId'];
-    if (id is! String || id.isEmpty) return null;
+    if (raw is! Map || raw['readiness'] != 'supported') return null;
+    const allowed = <String>{
+      'curatedId',
+      'displayName',
+      'description',
+      'catalogVersion',
+      'readiness',
+      'credentialFields',
+      'configurationFields',
+      'tools',
+      'configured',
+    };
+    if (raw.keys.any((key) => key is! String || !allowed.contains(key))) {
+      return null;
+    }
+    final id = raw['curatedId'];
     final name = raw['displayName'];
     final description = raw['description'];
-    final fields = raw['credentialFields'];
-    final tools = raw['tools'];
-    final operations = raw['operations'];
     final catalogVersion = raw['catalogVersion'];
-    final readiness = raw['readiness'];
+    final configured = raw['configured'];
+    final fields = raw['credentialFields'];
+    final configuration = raw['configurationFields'];
+    final tools = raw['tools'];
+    if (id is! String || id.isEmpty) return null;
+    if (name is! String || name.isEmpty) return null;
+    if (description is! String) return null;
+    if (catalogVersion is! String || catalogVersion.trim().isEmpty ||
+        catalogVersion.length > 128) {
+      return null;
+    }
+    if (configured is! bool || fields is! List || configuration is! List ||
+        tools is! List) {
+      return null;
+    }
+
+    final credentialFields = <ConnectorCredentialField>[];
+    for (final field in fields) {
+      final parsed = ConnectorCredentialField.tryParse(field);
+      if (parsed == null) return null;
+      credentialFields.add(parsed);
+    }
+    final configurationFields = <ConnectorConfigurationField>[];
+    for (final field in configuration) {
+      final parsed = ConnectorConfigurationField.tryParse(field);
+      if (parsed == null) return null;
+      configurationFields.add(parsed);
+    }
+    final parsedOperations = <ConnectorOperation>[];
+    for (final operation in tools) {
+      final parsed = ConnectorOperation.tryParse(operation);
+      if (parsed == null) return null;
+      parsedOperations.add(parsed);
+    }
+    if (id == 'fetch' &&
+        (credentialFields.isNotEmpty || configurationFields.length != 1 ||
+            configurationFields.single.key != 'url' ||
+            configurationFields.single.kind != 'url' ||
+            !configurationFields.single.required ||
+            configurationFields.single.maxLength != 2048)) {
+      return null;
+    }
     return ConnectorCatalogEntry(
       curatedId: id,
-      displayName: name is String && name.isNotEmpty ? name : id,
-      description: description is String ? description : '',
-      credentialFields: [
-        for (final f in (fields is List ? fields : const []))
-          ?ConnectorCredentialField.tryParse(f),
-      ],
-      toolNames: [
-        for (final t in (tools is List ? tools : const []))
-          if (t is Map && t['name'] is String) t['name'] as String,
-      ],
-      configured: raw['configured'] == true,
-      catalogVersion: catalogVersion is String ? catalogVersion : '',
-      readiness: readiness is String ? readiness : null,
-      operations: [
-        for (final operation in (operations is List ? operations : const []))
-          ?ConnectorOperation.tryParse(operation),
-      ],
+      displayName: name,
+      description: description,
+      credentialFields: credentialFields,
+      toolNames: [for (final operation in parsedOperations) operation.name],
+      configured: configured,
+      catalogVersion: catalogVersion,
+      readiness: 'supported',
+      configurationFields: configurationFields,
+      operations: parsedOperations,
     );
   }
 }
@@ -356,6 +481,22 @@ class ConnectorConnection {
   }
 }
 
+/// Validate the exact non-secret URL accepted by fetch health configuration.
+bool isValidFetchHealthUrl(String value) {
+  final text = value.trim();
+  if (text.isEmpty || text.length > 2048) return false;
+  try {
+    final uri = Uri.tryParse(text);
+    return uri != null &&
+        uri.scheme == 'https' &&
+        uri.host.isNotEmpty &&
+        uri.userInfo.isEmpty &&
+        uri.port == 443;
+  } catch (_) {
+    return false;
+  }
+}
+
 /// The connector surface of the gateway.
 ///
 /// Before this client existed the app kept connectors in SharedPreferences
@@ -370,11 +511,28 @@ class ConnectorApi {
   Future<List<ConnectorCatalogEntry>> listCatalog() async {
     final body = await _rest.getJson('/mcp/catalog');
     final items = body['items'];
-    return [
-      for (final item in (items is List ? items : const []))
-        if (ConnectorCatalogEntry.tryParse(item)?.isSupported ?? false)
-          ConnectorCatalogEntry.tryParse(item)!,
-    ];
+    if (body['contractVersion'] != 2 || items is! List) {
+      throw CloudApiException(
+        status: 200,
+        code: 'internal',
+        message: 'Ovid Cloud returned an unreadable connector catalog.',
+      );
+    }
+    final entries = <ConnectorCatalogEntry>[];
+    for (final item in items) {
+      final readiness = item is Map ? item['readiness'] : null;
+      if (readiness != 'supported') continue;
+      final entry = ConnectorCatalogEntry.tryParse(item);
+      if (entry == null || !entry.isSupported) {
+        throw CloudApiException(
+          status: 200,
+          code: 'internal',
+          message: 'Ovid Cloud returned an unreadable connector catalog.',
+        );
+      }
+      entries.add(entry);
+    }
+    return entries;
   }
 
   Future<List<ConnectorConnection>> listConnections() async {
@@ -394,8 +552,16 @@ class ConnectorApi {
     required String providerId,
     String? name,
     Map<String, String> secrets = const <String, String>{},
+    Map<String, String> config = const <String, String>{},
     bool agentEnabled = false,
   }) async {
+    if (providerId == 'fetch') {
+      if (secrets.isNotEmpty || agentEnabled || config.length != 1 ||
+          !config.containsKey('url')) {
+        throw StateError('Fetch accepts only one public health URL.');
+      }
+      return createFetchConnection(name: name, url: config['url']!);
+    }
     final body = await _rest.postJson(
       '/mcp/connections',
       body: <String, Object?>{
@@ -403,6 +569,28 @@ class ConnectorApi {
         if (name != null && name.trim().isNotEmpty) 'name': name.trim(),
         'secrets': secrets,
         'agentEnabled': agentEnabled,
+        if (config.isNotEmpty) 'config': config,
+      },
+    );
+    return _connectionResponse(body);
+  }
+
+  /// Canonical public-fetch create. No credential/agent/request override can
+  /// cross this boundary; only the non-secret health URL is accepted.
+  Future<ConnectorConnection> createFetchConnection({
+    String? name,
+    required String url,
+  }) async {
+    final trimmed = url.trim();
+    if (!isValidFetchHealthUrl(trimmed)) {
+      throw StateError('Enter a credential-free HTTPS URL on port 443.');
+    }
+    final body = await _rest.postJson(
+      '/mcp/connections',
+      body: <String, Object?>{
+        'providerId': 'fetch',
+        if (name != null && name.trim().isNotEmpty) 'name': name.trim(),
+        'config': <String, String>{'url': trimmed},
       },
     );
     return _connectionResponse(body);

@@ -161,6 +161,7 @@ class V2ConnectorDetailData {
     this.connectionStatusLabel = '',
     this.operations = const <ConnectorOperation>[],
     this.credentialFields = const <ConnectorCredentialField>[],
+    this.configurationFields = const <ConnectorConfigurationField>[],
     this.supportsAgentActivation = false,
     this.approvedSourceId,
     this.approvedDigest,
@@ -217,13 +218,17 @@ class V2ConnectorDetailData {
   final String connectionStatusLabel;
   final List<ConnectorOperation> operations;
   final List<ConnectorCredentialField> credentialFields;
+  final List<ConnectorConfigurationField> configurationFields;
   final bool supportsAgentActivation;
   final String? approvedSourceId;
   final String? approvedDigest;
 
   bool get isRemote => providerId != null;
 
-  V2ConnectorDetailData remoteUpdated(ConnectorConnection connection) {
+  V2ConnectorDetailData remoteUpdated(
+    ConnectorConnection connection, {
+    bool? canActivateAgent,
+  }) {
     return V2ConnectorDetailData(
       id: id,
       name: connection.name,
@@ -264,10 +269,12 @@ class V2ConnectorDetailData {
               enabled: connection.enabled,
               authState: connection.authState,
               healthState: connection.healthState,
+              providerId: connection.providerId,
             ),
       operations: operations,
       credentialFields: credentialFields,
-      supportsAgentActivation: supportsAgentActivation,
+      configurationFields: configurationFields,
+      supportsAgentActivation: canActivateAgent ?? supportsAgentActivation,
       approvedSourceId: connection.approvedSourceId,
       approvedDigest: connection.approvedDigest,
     );
@@ -330,7 +337,10 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
     final connection = controller.connectionById(connectionId);
     return connection == null
         ? widget.data
-        : widget.data.remoteUpdated(connection);
+        : widget.data.remoteUpdated(
+            connection,
+            canActivateAgent: controller.canActivateAgent(connectionId),
+          );
   }
 
   bool get _remote => widget.controller != null && _data.isRemote;
@@ -788,6 +798,7 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
               presetName: _data.name,
               presetDescription: _data.description,
               credentialFields: _data.credentialFields,
+              configurationFields: _data.configurationFields,
               approvedSourceId: _data.approvedSourceId,
               approvedDigest: _data.approvedDigest,
             ),
@@ -956,10 +967,19 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
         ],
         if (data.isRemote) ...[
           const SizedBox(height: OSpace.m),
-          Text(
-            'Authentication ${(data.authState ?? 'unavailable').replaceAll('_', ' ')}',
-            style: OType.caption.copyWith(color: c.textMuted),
-          ),
+          if (data.providerId != 'fetch' ||
+              (data.healthState != 'needs_auth' && data.authState != 'needs_auth'))
+            Text(
+              data.providerId == 'fetch'
+                  ? 'Provider sign-in not applicable (public web)'
+                  : 'Authentication ${(data.authState ?? 'unavailable').replaceAll('_', ' ')}',
+              style: OType.caption.copyWith(color: c.textMuted),
+            ),
+          if (data.providerId == 'fetch')
+            Text(
+              'No OAuth, scopes, or provider grant. Health checks require a saved public URL. Invalid configured URLs are unavailable; legacy unknown-row health remains a separate backend gate.',
+              style: OType.caption.copyWith(color: c.textMuted),
+            ),
           Text(
             'Last checked ${data.lastCheckedAt?.toUtc().toIso8601String() ?? '—'}',
             style: OType.caption.copyWith(color: c.textMuted),
@@ -1024,14 +1044,16 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
                       operation.description,
                       style: OType.caption.copyWith(color: c.textMuted),
                     ),
-                  Text(
-                    'Effect: ${operation.effect}',
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                  Text(
-                    'Approval: ${operation.approval}',
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
+                  if (operation.effect != null)
+                    Text(
+                      'Effect: ${operation.effect}',
+                      style: OType.caption.copyWith(color: c.textMuted),
+                    ),
+                  if (operation.approval != null)
+                    Text(
+                      'Approval: ${operation.approval}',
+                      style: OType.caption.copyWith(color: c.textMuted),
+                    ),
                 ],
               ),
             ),
@@ -1177,15 +1199,15 @@ class _ReportLine extends StatelessWidget {
 /// A row with no saved connection is *not* connected: the page then offers the
 /// real setup form instead of a "Connected" badge with nothing behind it.
 ///
-/// `tools` stays empty: the gateway lists tools for *curated* servers on
-/// `GET /mcp/catalog` (`items[].tools`), but the app has no client for that
-/// route, and a custom server's tools would need a live `tools/list`. Until
-/// one of those reaches this adapter, the detail page says the tool list is
-/// not reported instead of inventing one.
+/// Canonical catalog operations arrive through [ConnectorApi]. A custom
+/// server's operations would need a separate authorized live `tools/list`; the
+/// detail page never invents that missing metadata.
 V2ConnectorDetailData v2ConnectorDetailForRow(
   V2Connector row, {
   V2ConnectorConnection? connection,
   ConnectorConnection? remoteConnection,
+  V2ConnectorDetailStatus? status,
+  String? errorMessage,
 }) {
   final saved = connection;
   final remote = row.isRemote || remoteConnection != null;
@@ -1200,6 +1222,9 @@ V2ConnectorDetailData v2ConnectorDetailForRow(
     id: row.id,
     name: row.name,
     description: row.description,
+    disconnectNote: row.providerId == 'fetch'
+        ? 'Ovid disables this local connection and fences future use. No provider grant or remote credential is revoked; disconnected history is retained.'
+        : '',
     icon: row.icon,
     connected: remote
         ? remoteConnection != null && !remoteConnection.isDisconnected
@@ -1212,6 +1237,8 @@ V2ConnectorDetailData v2ConnectorDetailForRow(
     builtIn: row.builtIn,
     authLabel: saved?.auth.label ?? row.auth.label,
     risk: risk,
+    status: status ?? V2ConnectorDetailStatus.content,
+    errorMessage: errorMessage ?? 'This connector did not load.',
     autoSync: saved?.autoSync ?? false,
     disabledTools: saved?.disabledTools ?? const <String>{},
     permissions: remote || saved == null
@@ -1248,9 +1275,11 @@ V2ConnectorDetailData v2ConnectorDetailForRow(
             enabled: remoteConnection.enabled,
             authState: remoteConnection.authState,
             healthState: remoteConnection.healthState,
+            providerId: remoteConnection.providerId,
           ),
     operations: row.operations,
     credentialFields: row.credentialFields,
+    configurationFields: row.configurationFields,
     supportsAgentActivation: row.supportsAgentActivation,
     approvedSourceId:
         remoteConnection?.approvedSourceId ?? row.approvedSourceId,

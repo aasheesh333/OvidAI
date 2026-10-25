@@ -1,7 +1,9 @@
+// UNEXECUTED under /tmp/opencode/ovid-production-completion/HEAVY-COMMANDS-PAUSED.md:
+// the v2 fixture update remains unexecuted.
 // Connectors must be backed by the gateway, not by a local prefs list.
 //
 // The wire shapes asserted here come from
-//   cloud/apps/gateway/src/routes/mcpCatalog.ts   GET  /mcp/catalog -> {items:[...]}
+//   cloud/apps/gateway/src/routes/mcpCatalog.ts   GET  /mcp/catalog -> {contractVersion:2,items:[...]}
 //   cloud/apps/gateway/src/routes/mcpServers.ts   GET  /mcp/servers -> [...]
 //                                                 POST /mcp/servers -> McpServerDto
 //                                                 DELETE /mcp/servers/:id -> 204
@@ -42,18 +44,28 @@ void main() {
         headers: {'content-type': 'application/json'},
       );
 
+  // UNEXECUTED after the v2 fixture update under HEAVY-COMMANDS-PAUSED.md.
   test('listCatalog reads the curated catalog the gateway serves', () async {
     final api = apiWith((r) async => json({
+          'contractVersion': 2,
           'items': [
             {
               'curatedId': 'github',
               'displayName': 'GitHub',
               'description': 'Repos, issues and pull requests.',
+              'catalogVersion': '2026-10-24-original-read-first',
+              'readiness': 'supported',
               'credentialFields': [
                 {'key': 'GITHUB_TOKEN', 'label': 'Token', 'secret': true},
               ],
+              'configurationFields': <Object?>[],
               'tools': [
-                {'name': 'github_search', 'description': 'Search code.'},
+                {
+                  'name': 'github_search',
+                  'description': 'Search code.',
+                  'effect': 'read',
+                  'approval': 'mode',
+                },
               ],
               'configured': true,
             },

@@ -33,6 +33,7 @@ Future<V2ConnectorsData> loadConnectorCatalog(ConnectorApi api) async {
         enabled: configuredByCurated[entry.curatedId]?.enabled ?? false,
         builtIn: true,
         tools: entry.toolNames,
+        configurationFields: entry.configurationFields,
         auth: entry.credentialFields.isEmpty
             ? V2CatalogAuth.none
             : V2CatalogAuth.apiKey,
@@ -71,6 +72,10 @@ V2Connector _remoteRow(
   ConnectorCatalogEntry entry,
   ConnectorConnection? connection,
 ) {
+  final canActivate = connectorCanActivateAgent(
+    definition: entry,
+    connection: connection,
+  );
   return V2Connector(
     id: connection?.connectionId ?? entry.providerId,
     providerId: entry.providerId,
@@ -96,8 +101,9 @@ V2Connector _remoteRow(
     lastCheckedAt: connection?.lastCheckedAt,
     lastSuccessAt: connection?.lastSuccessAt,
     credentialFields: entry.credentialFields,
+    configurationFields: entry.configurationFields,
     operations: entry.operations,
-    supportsAgentActivation: entry.isSupported,
+    supportsAgentActivation: canActivate,
   );
 }
 

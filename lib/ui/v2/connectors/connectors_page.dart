@@ -319,37 +319,30 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
     if (row == null) return;
     final controller = widget.controller;
     final connectionId = row.connectionId;
-    if (controller != null && connectionId != null) {
-      unawaited(_refreshRemoteConnection(connectionId));
-    }
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => ConnectorDetailPage(
-          data: v2ConnectorDetailForRow(
-            row,
-            connection: _remote ? null : _connections[id],
-            remoteConnection: controller?.connectionById(
-              row.connectionId ?? '',
-            ),
-          ),
-          store: _remote ? null : _store,
-          secrets: _secrets,
-          probe: widget.probe,
-          plan: _plan,
-          controller: controller,
-        ),
+        builder: (_) => controller != null && connectionId != null
+            ? _RemoteConnectorDetailHost(
+                row: row,
+                controller: controller,
+                secrets: _secrets,
+                probe: widget.probe,
+                plan: _plan,
+              )
+            : ConnectorDetailPage(
+                data: v2ConnectorDetailForRow(
+                  row,
+                  connection: _remote ? null : _connections[id],
+                ),
+                store: _remote ? null : _store,
+                secrets: _secrets,
+                probe: widget.probe,
+                plan: _plan,
+                controller: controller,
+              ),
       ),
     );
     if (!_remote) await _reload();
-  }
-
-  Future<void> _refreshRemoteConnection(String connectionId) async {
-    try {
-      await widget.controller!.getConnection(connectionId);
-    } catch (_) {
-      if (!mounted) return;
-      showOSnack(context, 'Could not refresh this connector.');
-    }
   }
 
   Future<void> _toggle(String id, bool enabled) async {
@@ -406,6 +399,7 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
       presetDescription: row.description,
       presetCategory: row.category,
       credentialFields: row.credentialFields,
+      configurationFields: row.configurationFields,
       approvedSourceId: row.approvedSourceId,
       approvedDigest: row.approvedDigest,
       presetKind: switch (row.kind) {
@@ -693,6 +687,76 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
         variant: OButtonVariant.secondary,
         onPressed: () => _selectTab(_Tab.installed),
       ),
+    );
+  }
+}
+
+/// Production item-read boundary for remote detail. The initial read owns real
+/// loading/error/retry states; later updates still come from the shared DTO cache.
+class _RemoteConnectorDetailHost extends StatefulWidget {
+  const _RemoteConnectorDetailHost({
+    required this.row,
+    required this.controller,
+    this.secrets,
+    this.probe,
+    this.plan,
+  });
+
+  final V2Connector row;
+  final RemoteConnectorController controller;
+  final V2ConnectorSecrets? secrets;
+  final V2ConnectorProbe? probe;
+  final V2ConnectorPlan? plan;
+
+  @override
+  State<_RemoteConnectorDetailHost> createState() =>
+      _RemoteConnectorDetailHostState();
+}
+
+class _RemoteConnectorDetailHostState
+    extends State<_RemoteConnectorDetailHost> {
+  late Future<ConnectorConnection> _read;
+
+  @override
+  void initState() {
+    super.initState();
+    _read = widget.controller.getConnection(widget.row.connectionId!);
+  }
+
+  void _retry() {
+    setState(() {
+      _read = widget.controller.getConnection(widget.row.connectionId!);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<ConnectorConnection>(
+      future: _read,
+      builder: (context, snapshot) {
+        final loading = snapshot.connectionState != ConnectionState.done;
+        final failed = snapshot.hasError;
+        final connection = snapshot.data ??
+            widget.controller.connectionById(widget.row.connectionId!);
+        return ConnectorDetailPage(
+          data: v2ConnectorDetailForRow(
+            widget.row,
+            remoteConnection: connection,
+            status: loading
+                ? V2ConnectorDetailStatus.loading
+                : failed
+                    ? V2ConnectorDetailStatus.error
+                    : V2ConnectorDetailStatus.content,
+            errorMessage: 'Could not load this connector. Try again.',
+          ),
+          store: null,
+          secrets: widget.secrets,
+          probe: widget.probe,
+          plan: widget.plan,
+          controller: widget.controller,
+          onRetry: failed ? _retry : null,
+        );
+      },
     );
   }
 }

@@ -102,6 +102,7 @@ String remoteConnectorStatusLabel({
   required bool enabled,
   required String? authState,
   required String? healthState,
+  String? providerId,
 }) {
   if (!enabled || healthState == 'disabled') return 'Disabled';
   switch (healthState) {
@@ -112,7 +113,9 @@ String remoteConnectorStatusLabel({
     case 'degraded':
       return 'Degraded';
     case 'needs_auth':
-      return 'Needs authentication';
+      return providerId == 'fetch'
+          ? 'Resource requires authentication'
+          : 'Needs authentication';
     case 'refreshing':
       return 'Refreshing access';
     case 'revoked':
@@ -122,7 +125,9 @@ String remoteConnectorStatusLabel({
     case 'never_checked':
       return switch (authState) {
         'authorized' => 'Authorized',
-        'needs_auth' => 'Needs authentication',
+        'needs_auth' => providerId == 'fetch'
+            ? 'Resource requires authentication'
+            : 'Needs authentication',
         'revoked' => 'Access revoked',
         'missing' => 'Credentials missing',
         _ => 'Configured',
@@ -161,6 +166,7 @@ class V2Connector {
     this.lastCheckedAt,
     this.lastSuccessAt,
     this.credentialFields = const <ConnectorCredentialField>[],
+    this.configurationFields = const <ConnectorConfigurationField>[],
     this.operations = const <ConnectorOperation>[],
     this.approvedSourceId,
     this.approvedDigest,
@@ -203,6 +209,7 @@ class V2Connector {
   final DateTime? lastCheckedAt;
   final DateTime? lastSuccessAt;
   final List<ConnectorCredentialField> credentialFields;
+  final List<ConnectorConfigurationField> configurationFields;
   final List<ConnectorOperation> operations;
   final String? approvedSourceId;
   final String? approvedDigest;
@@ -220,6 +227,7 @@ class V2Connector {
       enabled: enabled,
       authState: authState,
       healthState: healthState,
+      providerId: providerId,
     );
   }
 
@@ -262,6 +270,7 @@ class V2Connector {
       lastCheckedAt: lastCheckedAt,
       lastSuccessAt: lastSuccessAt,
       credentialFields: credentialFields,
+      configurationFields: configurationFields,
       operations: operations,
       approvedSourceId: approvedSourceId,
       approvedDigest: approvedDigest,

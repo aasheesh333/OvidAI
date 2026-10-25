@@ -168,11 +168,16 @@ class V2WorkRoutes {
   /// catalogue read does not need it.
   static Future<void> openConnectors(
     BuildContext context,
-    V2SettingsActions? actions,
-  ) async {
+    V2SettingsActions? actions, {
+    ConnectorApi? connectorApi,
+    String? Function()? accountId,
+  }) async {
     final controller = RemoteConnectorController(
-      api: ConnectorApi(),
-      accountId: () => artifactAccountId,
+      api: connectorApi ?? ConnectorApi(),
+      accountId: accountId ?? () => artifactAccountId,
+      // This route now has versioned readiness, item health and canonical
+      // create/lifecycle fences. Do not use the unavailable fallback.
+      capabilities: ConnectorGatewayCapabilities.connectionLifecycle,
     );
     try {
       await controller.reload();

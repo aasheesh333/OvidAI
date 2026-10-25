@@ -98,6 +98,7 @@ class V2CustomConnectorDraft {
     this.description = '',
     this.kind = 'app',
     this.secrets = const <String, String>{},
+    this.config = const <String, String>{},
     this.agentEnabled = false,
     this.approvedSourceId,
     this.approvedDigest,
@@ -122,6 +123,9 @@ class V2CustomConnectorDraft {
 
   /// Gateway-bound credential values. They are never persisted in this draft.
   final Map<String, String> secrets;
+
+  /// Non-secret connection-owned config, sent only to canonical creation.
+  final Map<String, String> config;
   final bool agentEnabled;
   final String? approvedSourceId;
   final String? approvedDigest;
@@ -182,6 +186,7 @@ class V2AddConnectorData {
     this.presetCategory = 'Custom',
     this.presetKind = 'app',
     this.credentialFields = const <ConnectorCredentialField>[],
+    this.configurationFields = const <ConnectorConfigurationField>[],
     this.agentEnabled = false,
     this.approvedSourceId,
     this.approvedDigest,
@@ -224,6 +229,7 @@ class V2AddConnectorData {
   final String presetCategory;
   final String presetKind;
   final List<ConnectorCredentialField> credentialFields;
+  final List<ConnectorConfigurationField> configurationFields;
   final bool agentEnabled;
   final String? approvedSourceId;
   final String? approvedDigest;
@@ -300,6 +306,8 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
   final TextEditingController _key = TextEditingController();
   final Map<String, TextEditingController> _credentialControllers =
       <String, TextEditingController>{};
+  final Map<String, TextEditingController> _configurationControllers =
+      <String, TextEditingController>{};
 
   late V2ConnectorAuth _auth = widget.data.auth;
   late bool _read = widget.data.read;
@@ -326,6 +334,9 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
     if (widget.data.presetId != null) _target = V2ConnectorTarget.url;
     for (final field in widget.data.credentialFields) {
       _credentialControllers[field.key] = TextEditingController();
+    }
+    for (final field in widget.data.configurationFields) {
+      _configurationControllers[field.key] = TextEditingController();
     }
   }
 
@@ -355,6 +366,19 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
       if (optional) continue;
       if ((_credentialControllers[field.key]?.text.trim() ?? '').isEmpty) {
         return 'Enter ${field.label}.';
+      }
+    }
+    return null;
+  }
+
+  String? get _configurationError {
+    for (final field in widget.data.configurationFields) {
+      final value = _configurationControllers[field.key]?.text.trim() ?? '';
+      if (field.required && value.isEmpty) return 'Enter ${field.label}.';
+      if (value.length > field.maxLength) return '${field.label} is too long.';
+      if (value.isNotEmpty && widget.data.presetId == 'fetch' &&
+          field.key == 'url' && !isValidFetchHealthUrl(value)) {
+        return 'Enter a credential-free HTTPS URL on port 443.';
       }
     }
     return null;
@@ -408,6 +432,9 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
     for (final controller in _credentialControllers.values) {
       controller.dispose();
     }
+    for (final controller in _configurationControllers.values) {
+      controller.dispose();
+    }
     super.dispose();
   }
 
@@ -419,6 +446,10 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
     final credentials = <String, String>{
       for (final field in widget.data.credentialFields)
         field.key: _credentialControllers[field.key]?.text ?? '',
+    };
+    final configuration = <String, String>{
+      for (final field in widget.data.configurationFields)
+        field.key: _configurationControllers[field.key]?.text.trim() ?? '',
     };
     return V2CustomConnectorDraft(
       name: _name.text.trim(),
@@ -435,6 +466,7 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
       description: widget.data.presetDescription,
       kind: widget.data.presetKind,
       secrets: credentials,
+      config: configuration,
       agentEnabled: _agentEnabled,
       approvedSourceId: widget.data.approvedSourceId,
       approvedDigest: widget.data.approvedDigest,
@@ -442,14 +474,15 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
   }
 
   Future<void> _save() async {
+    final configurationError = _configurationError;
     setState(() {
       _submitted = true;
-      _saveError = null;
+      _saveError = configurationError;
     });
     if (!_saveEnabled) return;
     if (_nameError != null ||
         (!_remote && (_endpointError != null || _keyError != null)) ||
-        (_remote && _credentialError != null)) {
+        (_remote && (_credentialError != null || configurationError != null))) {
       return;
     }
     final draft = _draft();
@@ -478,6 +511,7 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
             providerId: providerId,
             name: draft.name,
             secrets: draft.secrets,
+            config: draft.config,
             agentEnabled: draft.agentEnabled,
           );
         }
@@ -501,6 +535,9 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
     if (!mounted) return;
     _key.clear();
     for (final controller in _credentialControllers.values) {
+      controller.clear();
+    }
+    for (final controller in _configurationControllers.values) {
       controller.clear();
     }
     setState(() => _saving = false);
@@ -784,6 +821,27 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
             errorText: _submitted ? _nameError : null,
           ),
         ),
+        for (final field in widget.data.configurationFields) ...[
+          const SizedBox(height: OSpace.m),
+          TextField(
+            key: Key('connector-config-${field.key}'),
+            controller: _configurationControllers[field.key],
+            keyboardType: field.kind == 'url'
+                ? TextInputType.url
+                : TextInputType.text,
+            textInputAction: TextInputAction.next,
+            maxLength: field.maxLength,
+            enableSuggestions: false,
+            autocorrect: false,
+            onChanged: (_) => _fieldChanged(),
+            style: OType.bodySm.copyWith(color: c.text),
+            decoration: InputDecoration(
+              labelText: field.label,
+              hintText: field.hint,
+              counterText: '',
+            ),
+          ),
+        ],
         if (widget.data.isApprovedCustom) ...[
           const SizedBox(height: OSpace.m),
           Text(
@@ -818,7 +876,8 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
             ),
           ),
         ],
-        if (widget.controller!.capabilities.createAgentEnabled) ...[
+        if (widget.controller!.capabilities.createAgentEnabled &&
+            widget.data.presetId != 'fetch') ...[
           const SizedBox(height: OSpace.l),
           OCard(
             child: Row(
@@ -840,9 +899,11 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
         ],
         const SizedBox(height: OSpace.s),
         Text(
-          widget.controller!.capabilities.createAgentEnabled
-              ? 'Off by default. Credentials are sent only to Ovid Cloud.'
-              : 'Credentials are sent only to Ovid Cloud.',
+          widget.data.presetId == 'fetch'
+              ? 'No OAuth, scopes, or provider grant. The health URL is non-secret; checks run only after saving on demand.'
+              : widget.controller!.capabilities.createAgentEnabled
+                  ? 'Off by default. Credentials are sent only to Ovid Cloud.'
+                  : 'Credentials are sent only to Ovid Cloud.',
           style: OType.caption.copyWith(color: c.textMuted),
         ),
         if (_saveError != null) ...[

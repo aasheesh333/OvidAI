@@ -6,9 +6,9 @@ enum ConnectorViewStatus { loading, empty, error, content }
 
 /// Gateway behavior confirmed by the owning backend contract lane.
 ///
-/// Production defaults to [unavailable], so a client never offers a control
-/// backed only by a planned route. Approved-parity tests and a future verified
-/// host can inject [approvedParity] without weakening the strict wire DTOs.
+/// Unverified alternate constructors default to [unavailable], so they never
+/// offer a control backed only by a planned route. The real app route injects
+/// [connectionLifecycle] only after the versioned DTO/composition is present.
 @immutable
 class ConnectorGatewayCapabilities {
   const ConnectorGatewayCapabilities({
@@ -26,6 +26,15 @@ class ConnectorGatewayCapabilities {
     createAgentEnabled: true,
     optionalCreateName: true,
     approvedSourceCreate: true,
+  );
+
+  /// Current gateway catalog/connection lifecycle without claiming the
+  /// separately unavailable approved-source admission route.
+  static const connectionLifecycle = ConnectorGatewayCapabilities(
+    catalogReadiness: true,
+    itemHealthCheck: true,
+    createAgentEnabled: true,
+    optionalCreateName: true,
   );
 
   final bool catalogReadiness;
@@ -50,6 +59,24 @@ class ConnectorViewState {
   final List<ConnectorConnection> connections;
   final String? accountId;
   final String errorMessage;
+}
+
+/// Current supported-definition + canonical-DTO agent gate shared by list,
+/// detail and controller mutations. An enabled agent keeps its disable control.
+bool connectorCanActivateAgent({
+  required ConnectorCatalogEntry? definition,
+  required ConnectorConnection? connection,
+}) {
+  if (definition == null || !definition.isSupported || connection == null) {
+    return false;
+  }
+  if (connection.agentEnabled) return true;
+  final authenticated = connection.authState == 'configured' ||
+      connection.authState == 'authorized';
+  final checkable = connection.healthState == 'never_checked' ||
+      connection.healthState == 'healthy' ||
+      connection.healthState == 'degraded';
+  return connection.enabled && authenticated && checkable;
 }
 
 /// The one remote catalog/connection cache shared by list, setup and detail.
@@ -89,6 +116,64 @@ class RemoteConnectorController extends ValueNotifier<ConnectorViewState> {
       if (connection.connectionId == connectionId) return connection;
     }
     return null;
+  }
+
+  ConnectorCatalogEntry? _supportedDefinition(String providerId) {
+    for (final entry in value.catalog) {
+      if (entry.providerId == providerId && entry.isSupported) return entry;
+    }
+    return null;
+  }
+
+  bool canActivateAgent(String connectionId) {
+    final connection = connectionById(connectionId);
+    return connectorCanActivateAgent(
+      definition: connection == null
+          ? null
+          : _supportedDefinition(connection.providerId),
+      connection: connection,
+    );
+  }
+
+  void _validateCreateConfiguration(
+    String providerId,
+    Map<String, String> config,
+  ) {
+    final definition = _supportedDefinition(providerId);
+    if (definition == null) {
+      throw StateError('This provider is not supported for connection creation.');
+    }
+    final fields = definition.configurationFields;
+    final allowedKeys = <String>{for (final field in fields) field.key};
+    if (config.keys.any((key) => !allowedKeys.contains(key))) {
+      throw StateError('Connection config contains an unsupported field.');
+    }
+    for (final field in fields) {
+      final value = config[field.key]?.trim() ?? '';
+      if (field.required && value.isEmpty) {
+        throw StateError('${field.label} is required.');
+      }
+      if (value.length > field.maxLength) {
+        throw StateError('${field.label} is too long.');
+      }
+      if (value.isNotEmpty && providerId == 'fetch' && field.key == 'url' &&
+          !isValidFetchHealthUrl(value)) {
+        throw StateError('Enter a credential-free HTTPS URL on port 443.');
+      }
+    }
+    if (providerId == 'fetch' &&
+        (config.length != 1 || !config.containsKey('url'))) {
+      throw StateError('Fetch requires exactly one health check URL.');
+    }
+  }
+
+  void _assertAgentActivation(String connectionId) {
+    if (connectionById(connectionId) == null) {
+      throw StateError('Connector not found.');
+    }
+    if (!canActivateAgent(connectionId)) {
+      throw StateError('This connection cannot be enabled for agent runs.');
+    }
   }
 
   void _fenceAccount() {
@@ -218,8 +303,7 @@ class RemoteConnectorController extends ValueNotifier<ConnectorViewState> {
       }
       final catalog = (results[0] as List<ConnectorCatalogEntry>)
           .where(
-            (entry) =>
-                capabilities.catalogReadiness && entry.readiness == 'supported',
+            (entry) => capabilities.catalogReadiness && entry.isSupported,
           )
           .toList(growable: false);
       final incoming = results[1] as List<ConnectorConnection>;
@@ -287,8 +371,14 @@ class RemoteConnectorController extends ValueNotifier<ConnectorViewState> {
     required String providerId,
     String? name,
     Map<String, String> secrets = const <String, String>{},
+    Map<String, String> config = const <String, String>{},
     bool agentEnabled = false,
   }) {
+    if (providerId == 'fetch' && (secrets.isNotEmpty || agentEnabled)) {
+      return Future<ConnectorConnection>.error(
+        StateError('Fetch has no credential or create-time agent fields.'),
+      );
+    }
     if (agentEnabled && !capabilities.createAgentEnabled) {
       return Future<ConnectorConnection>.error(
         StateError('Create-time agent activation is unavailable.'),
@@ -299,13 +389,21 @@ class RemoteConnectorController extends ValueNotifier<ConnectorViewState> {
         StateError('This gateway requires a connection name.'),
       );
     }
+    try {
+      _validateCreateConfiguration(providerId, config);
+    } catch (error) {
+      return Future<ConnectorConnection>.error(error);
+    }
     return _create(
-      () => _api.createConnection(
-        providerId: providerId,
-        name: name,
-        secrets: secrets,
-        agentEnabled: agentEnabled,
-      ),
+      () => providerId == 'fetch'
+          ? _api.createFetchConnection(name: name, url: config['url']!)
+          : _api.createConnection(
+              providerId: providerId,
+              name: name,
+              secrets: secrets,
+              config: config,
+              agentEnabled: agentEnabled,
+            ),
     );
   }
 
@@ -345,10 +443,9 @@ class RemoteConnectorController extends ValueNotifier<ConnectorViewState> {
     final generation = _operationGeneration();
     final connection = await create();
     if (!_accountIsCurrent(generation)) _throwStaleAccount();
-    _nextMutation(connection.connectionId);
-    _bumpCacheVersion(connection.connectionId);
-    _upsert(connection);
-    return connection;
+    // A create response is not health evidence. Publish only the canonical,
+    // account-fenced item read; this read is not a provider health probe.
+    return getConnection(connection.connectionId);
   }
 
   Future<ConnectorConnection> _mutate(
@@ -389,6 +486,7 @@ class RemoteConnectorController extends ValueNotifier<ConnectorViewState> {
   }
 
   Future<void> setAgentEnabled(String connectionId, bool agentEnabled) async {
+    if (agentEnabled) _assertAgentActivation(connectionId);
     await _mutate(
       connectionId,
       () => _api.setAgentEnabled(connectionId, agentEnabled),
@@ -421,6 +519,10 @@ class RemoteConnectorController extends ValueNotifier<ConnectorViewState> {
       await _api.disconnect(connectionId);
       if (!_accountIsCurrent(generation)) _throwStaleAccount();
       _mutationSettled(connectionId);
+      // Publish the server result immediately: retained rows become visible
+      // disconnected history, while removed rows stay removed. No reconnect or
+      // provider reauthorization transition is inferred here.
+      await reload();
     } catch (_) {
       final accountIsCurrent = _accountIsCurrent(generation);
       if (accountIsCurrent) _mutationSettled(connectionId);

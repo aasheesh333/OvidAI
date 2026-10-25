@@ -1,3 +1,5 @@
+// UNEXECUTED under /tmp/opencode/ovid-production-completion/HEAVY-COMMANDS-PAUSED.md:
+// all new and modified cases in this file remain unexecuted.
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -8,10 +10,16 @@ import 'package:ovid_ai/ui/v2/connectors/connector_catalog_loader.dart';
 
 const String _connectionId = '019a0000-0000-7000-8000-000000000001';
 
-ConnectorCatalogEntry _catalog({bool configured = true}) =>
-    ConnectorCatalogEntry(
-      curatedId: 'google-drive',
-      displayName: 'Google Drive',
+ConnectorCatalogEntry _catalog({
+  bool configured = true,
+  String providerId = 'google-drive',
+  String readiness = 'supported',
+  String catalogVersion = '2026-10-25-test-catalog',
+  List<ConnectorConfigurationField> configurationFields =
+      const <ConnectorConfigurationField>[],
+}) => ConnectorCatalogEntry(
+      curatedId: providerId,
+      displayName: providerId == 'fetch' ? 'Fetch' : 'Google Drive',
       description: 'Read Drive files.',
       credentialFields: const <ConnectorCredentialField>[
         ConnectorCredentialField(
@@ -27,7 +35,9 @@ ConnectorCatalogEntry _catalog({bool configured = true}) =>
       ],
       toolNames: const <String>['list_files'],
       configured: configured,
-      readiness: 'supported',
+      catalogVersion: catalogVersion,
+      readiness: readiness,
+      configurationFields: configurationFields,
       operations: const <ConnectorOperation>[
         ConnectorOperation(
           name: 'list_files',
@@ -92,6 +102,11 @@ class _FakeApi implements ConnectorApi {
   int getCalls = 0;
   String? lastMutationId;
   String? lastHealthId;
+  Map<String, String>? createdConfig;
+  int createCalls = 0;
+  ConnectorConnection? createResponse;
+  Completer<ConnectorConnection>? createGate;
+  Completer<ConnectorConnection>? mutationResultGate;
 
   @override
   Future<List<ConnectorCatalogEntry>> listCatalog() async => catalog;
@@ -105,6 +120,38 @@ class _FakeApi implements ConnectorApi {
       return completer.future;
     }
     return Future<List<ConnectorConnection>>.value(connections);
+  }
+
+  @override
+  Future<ConnectorConnection> createConnection({
+    required String providerId,
+    String? name,
+    Map<String, String> secrets = const <String, String>{},
+    Map<String, String> config = const <String, String>{},
+    bool agentEnabled = false,
+  }) async {
+    createCalls++;
+    createdConfig = Map<String, String>.of(config);
+    final created = _connection(
+      providerId: providerId,
+      name: name ?? providerId,
+      agentEnabled: agentEnabled,
+    );
+    connections = <ConnectorConnection>[...connections, created];
+    await createGate?.future;
+    return createResponse ?? created;
+  }
+
+  @override
+  Future<ConnectorConnection> createFetchConnection({
+    String? name,
+    required String url,
+  }) {
+    return createConnection(
+      providerId: 'fetch',
+      name: name,
+      config: <String, String>{'url': url},
+    );
   }
 
   @override
@@ -135,6 +182,7 @@ class _FakeApi implements ConnectorApi {
     );
     final updated = connections[index].copyWith(enabled: enabled);
     connections[index] = updated;
+    await mutationResultGate?.future;
     return updated;
   }
 
@@ -454,8 +502,11 @@ void main() {
       expect(api.pendingLists, hasLength(1));
 
       api.disconnectGate!.complete();
+      await _flush();
+      expect(api.pendingLists, hasLength(2));
+      api.pendingLists[1].complete(<ConnectorConnection>[]);
       await disconnect;
-      api.pendingLists.single.complete(<ConnectorConnection>[_connection()]);
+      api.pendingLists[0].complete(<ConnectorConnection>[_connection()]);
       await reload;
 
       expect(
@@ -523,6 +574,9 @@ void main() {
       reason: 'The pending disconnect tombstone must survive the list answer.',
     );
     api.disconnectGate!.complete();
+    await _flush();
+    expect(api.pendingLists, hasLength(2));
+    api.pendingLists[1].complete(<ConnectorConnection>[]);
     await disconnect;
     expect(controller.connectionById(_connectionId), isNull);
   });
@@ -547,14 +601,17 @@ void main() {
       final staleReload = controller.reload();
       await _flush();
       api.disconnectGate!.complete();
+      await _flush();
+      expect(api.pendingLists, hasLength(2));
+      api.pendingLists[1].complete(<ConnectorConnection>[api.connections.single]);
       await disconnect;
-      api.pendingLists.single.complete(<ConnectorConnection>[_connection()]);
+      api.pendingLists[0].complete(<ConnectorConnection>[_connection()]);
       await staleReload;
 
       expect(
-        controller.connectionById(_connectionId),
-        isNull,
-        reason: 'A pre-disconnect response must not restore the active row.',
+        controller.connectionById(_connectionId)?.isDisconnected,
+        isTrue,
+        reason: 'Canonical history appears immediately; the stale response cannot restore the active row.',
       );
 
       api.deferLists = false;
@@ -575,4 +632,220 @@ void main() {
       expect(remoteConnectorRows(controller.value).single.connected, isFalse);
     },
   );
+
+  // UNEXECUTED under HEAVY-COMMANDS-PAUSED.md: readiness must be explicit and
+  // agent/config mutations require the matching supported definition.
+  test('candidate blocked and versionless catalog rows stay hidden', () async {
+    final api = _FakeApi()
+      ..catalog = <ConnectorCatalogEntry>[
+        _catalog(),
+        _catalog(providerId: 'candidate-drive', readiness: 'candidate'),
+        _catalog(providerId: 'blocked-drive', readiness: 'blocked'),
+        _catalog(providerId: 'legacy-drive', catalogVersion: ''),
+      ];
+    final controller = RemoteConnectorController(
+      api: api,
+      accountId: () => 'account-a',
+      capabilities: ConnectorGatewayCapabilities.approvedParity,
+    );
+    addTearDown(controller.dispose);
+
+    await controller.reload();
+
+    expect(controller.value.catalog.map((entry) => entry.providerId), <String>[
+      'google-drive',
+    ]);
+  });
+
+  test('fetch create validates exact config before any gateway write', () async {
+    final api = _FakeApi()
+      ..connections = <ConnectorConnection>[]
+      ..catalog = <ConnectorCatalogEntry>[
+        _catalog(
+          providerId: 'fetch',
+          configured: false,
+          configurationFields: const <ConnectorConfigurationField>[
+            ConnectorConfigurationField(
+              key: 'url',
+              label: 'Health check URL',
+              kind: 'url',
+              required: true,
+              maxLength: 2048,
+            ),
+          ],
+        ),
+      ];
+    final controller = RemoteConnectorController(
+      api: api,
+      accountId: () => 'account-a',
+      capabilities: ConnectorGatewayCapabilities.approvedParity,
+    );
+    addTearDown(controller.dispose);
+    await controller.reload();
+
+    await expectLater(
+      controller.createConnection(
+        providerId: 'fetch',
+        config: const <String, String>{'url': 'https://example.test:8443/no'},
+      ),
+      throwsStateError,
+    );
+    await expectLater(
+      controller.createConnection(
+        providerId: 'fetch',
+        config: const <String, String>{
+          'url': 'https://example.test/public-health',
+          'method': 'POST',
+        },
+      ),
+      throwsStateError,
+    );
+    expect(api.createCalls, 0);
+    expect(api.createdConfig, isNull);
+
+    await controller.createConnection(
+      providerId: 'fetch',
+      name: 'Fetch',
+      config: const <String, String>{'url': 'https://example.test/public-health'},
+    );
+    expect(api.createCalls, 1);
+    expect(api.createdConfig, <String, String>{
+      'url': 'https://example.test/public-health',
+    });
+  });
+
+  test('agent activation rejects unknown IDs and mismatched definitions, not wrong-user ownership', () async {
+    final api = _FakeApi()
+      ..connections = <ConnectorConnection>[
+        _connection(healthState: 'unavailable'),
+      ];
+    final controller = RemoteConnectorController(
+      api: api,
+      accountId: () => 'account-a',
+      capabilities: ConnectorGatewayCapabilities.approvedParity,
+    );
+    addTearDown(controller.dispose);
+    await controller.reload();
+
+    await expectLater(
+      controller.setAgentEnabled(_connectionId, true),
+      throwsStateError,
+    );
+    await expectLater(controller.setEnabled('foreign-connection', true), throwsStateError);
+    expect(api.lastMutationId, isNull);
+
+    api.connections = <ConnectorConnection>[
+      _connection(providerId: 'different-definition'),
+    ];
+    await controller.reload();
+    await expectLater(
+      controller.setAgentEnabled(_connectionId, true),
+      throwsStateError,
+    );
+    expect(api.lastMutationId, isNull);
+  });
+
+  // UNEXECUTED: accepted create responses are not health evidence. Only the
+  // account-fenced canonical item read may populate visible health/timestamps.
+  test('create refetches canonical health instead of caching a healthy create response', () async {
+    final checkedAt = DateTime.utc(2026, 10, 25, 1, 1);
+    final api = _FakeApi()
+      ..connections = <ConnectorConnection>[]
+      ..createResponse = _connection(
+        healthState: 'healthy',
+        lastCheckedAt: checkedAt,
+        lastSuccessAt: checkedAt,
+      );
+    final controller = RemoteConnectorController(
+      api: api,
+      accountId: () => 'account-a',
+      capabilities: ConnectorGatewayCapabilities.connectionLifecycle,
+    );
+    addTearDown(controller.dispose);
+    await controller.reload();
+
+    final created = await controller.createConnection(
+      providerId: 'google-drive',
+      name: 'Google Drive',
+    );
+
+    expect(created.healthState, 'never_checked');
+    expect(created.lastCheckedAt, isNull);
+    expect(created.lastSuccessAt, isNull);
+    expect(api.getCalls, 1);
+    expect(api.createCalls, 1);
+    expect(controller.connectionById(_connectionId)?.healthState, 'never_checked');
+    expect(controller.connectionById(_connectionId)?.lastCheckedAt, isNull);
+    expect(controller.connectionById(_connectionId)?.lastSuccessAt, isNull);
+  });
+
+  test('current definition and DTO recompute agent eligibility in both directions', () async {
+    final api = _FakeApi()
+      ..connections = <ConnectorConnection>[
+        _connection(healthState: 'unavailable'),
+      ];
+    final controller = RemoteConnectorController(
+      api: api,
+      accountId: () => 'account-a',
+      capabilities: ConnectorGatewayCapabilities.connectionLifecycle,
+    );
+    addTearDown(controller.dispose);
+    await controller.reload();
+    expect(controller.canActivateAgent(_connectionId), isFalse);
+
+    await controller.checkHealth(_connectionId);
+    expect(controller.canActivateAgent(_connectionId), isTrue);
+
+    await controller.setAgentEnabled(_connectionId, true);
+    await controller.setEnabled(_connectionId, false);
+    expect(
+      controller.canActivateAgent(_connectionId),
+      isTrue,
+      reason: 'An already-enabled agent still needs its disable control.',
+    );
+  });
+
+  test('late account-A create and mutation completions cannot populate account B', () async {
+    final api = _FakeApi()
+      ..createGate = Completer<ConnectorConnection>()
+      ..mutationResultGate = Completer<ConnectorConnection>();
+    var account = 'account-a';
+    final controller = RemoteConnectorController(
+      api: api,
+      accountId: () => account,
+      capabilities: ConnectorGatewayCapabilities.connectionLifecycle,
+    );
+    addTearDown(controller.dispose);
+    await controller.reload();
+
+    final creating = controller.createConnection(
+      providerId: 'google-drive',
+      name: 'Account A create',
+    );
+    final mutating = controller.setEnabled(_connectionId, false);
+    await _flush();
+    account = 'account-b';
+    api.connections = <ConnectorConnection>[
+      _connection(
+        connectionId: '019a0000-0000-7000-8000-00000000000b',
+        name: 'Account B connection',
+      ),
+    ];
+    await controller.reload();
+    api.createGate!.complete(_connection(name: 'Misleading A health'));
+    api.mutationResultGate!.complete(_connection(enabled: false));
+
+    await expectLater(creating, throwsStateError);
+    await expectLater(mutating, throwsStateError);
+    expect(controller.value.accountId, 'account-b');
+    expect(controller.value.connections, hasLength(1));
+    expect(controller.value.connections.single.name, 'Account B connection');
+    expect(controller.value.connections.single.enabled, isTrue);
+    expect(
+      controller.value.connections.any(
+        (connection) => connection.name == 'Misleading A health',
+      ),
+      isFalse,
+    );
+  });
 }
