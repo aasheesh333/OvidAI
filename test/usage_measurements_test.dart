@@ -12,6 +12,8 @@ void main() {
     });
     expect(run.requestedModels, ['auto']);
     expect(run.providerModels, isNull);
+    expect(run.costUsd, isNull);
+    expect(run.counts.costUsd, isNull);
     expect(run.costMicros, isNull);
     expect(run.imagesGenerated, isNull);
     expect(run.imagesEdited, isNull);
@@ -27,6 +29,7 @@ void main() {
         'runId': 'r1',
         'requestedModels': ['auto', 'reasoning'],
         'providerModels': ['openai/gpt-5', 'openai/gpt-5-mini'],
+        'costUsd': '0.0000000001',
         'costMicros': 123456,
         'imagesGenerated': 2,
         'imagesEdited': 1,
@@ -34,16 +37,20 @@ void main() {
 
       expect(run.requestedModels, ['auto', 'reasoning']);
       expect(run.providerModels, ['openai/gpt-5', 'openai/gpt-5-mini']);
+      expect(run.costUsd, '0.0000000001');
+      expect(run.counts.costUsd, '0.0000000001');
       expect(run.costMicros, 123456);
       expect(run.imagesGenerated, 2);
       expect(run.imagesEdited, 1);
 
       final zero = UsageRunRow.fromJson({
         'runId': 'r0',
+        'costUsd': '0.0000000000',
         'costMicros': 0,
         'imagesGenerated': 0,
         'imagesEdited': 0,
       });
+      expect(zero.costUsd, '0.0000000000');
       expect(zero.costMicros, 0);
       expect(zero.imagesGenerated, 0);
       expect(zero.imagesEdited, 0);
@@ -51,17 +58,26 @@ void main() {
     },
   );
 
-  test('cost and image session aggregates stay attached to their buckets', () {
+  test('exact cost and nested images stay attached to their DTO buckets', () {
     final history = UsageHistory.fromJson({
       'totals': {
         'runs': 2,
         'modelCalls': 4,
         'inputTokens': 100,
         'outputTokens': 50,
-        'costMicros': 700,
-        'imagesGenerated': 5,
-        'imagesEdited': 2,
+        'costUsd': '0.1000000001',
       },
+      'images': {
+        'generateCount': 5,
+        'editCount': 2,
+        'costUsd': '0.2000000001',
+      },
+      'days': [
+        {'date': '2026-10-24', 'costUsd': '0.0000000001'},
+      ],
+      'models': [
+        {'model': 'auto', 'costUsd': '0.1000000000'},
+      ],
       'sessions': [
         {
           'sessionId': 's1',
@@ -70,22 +86,126 @@ void main() {
           'modelCalls': 4,
           'inputTokens': 100,
           'outputTokens': 50,
-          'costMicros': 400,
-          'imagesGenerated': 3,
-          'imagesEdited': 1,
+          'costUsd': '0.1000000001',
+          'images': {
+            'generateCount': 3,
+            'editCount': 1,
+            'costUsd': '0.0000000001',
+          },
           'lastAt': '2026-10-24T10:00:00.000Z',
+        },
+        {
+          'sessionId': 's2',
+          'title': 'No measured images',
+          'costUsd': null,
+          'images': {
+            'generateCount': null,
+            'editCount': null,
+            'costUsd': null,
+          },
+          'lastAt': '2026-10-23T10:00:00.000Z',
         },
       ],
       'runs': const [],
     });
 
-    expect(history.totals.costMicros, 700);
-    expect(history.totals.imagesGenerated, 5);
-    expect(history.totals.imagesEdited, 2);
-    expect(history.sessions.single.costMicros, 400);
-    expect(history.sessions.single.imagesGenerated, 3);
-    expect(history.sessions.single.imagesEdited, 1);
-    expect(history.sessions.single.counts.costMicros, 400);
+    expect(history.totals.costUsd, '0.1000000001');
+    expect(history.days.single.counts.costUsd, '0.0000000001');
+    expect(history.models.single.counts.costUsd, '0.1000000000');
+    expect(history.images.generateCount, 5);
+    expect(history.images.editCount, 2);
+    expect(history.images.costUsd, '0.2000000001');
+
+    final attributed = history.sessions.first;
+    expect(attributed.costUsd, '0.1000000001');
+    expect(attributed.counts.costUsd, '0.1000000001');
+    expect(attributed.images.generateCount, 3);
+    expect(attributed.images.editCount, 1);
+    expect(attributed.images.costUsd, '0.0000000001');
+
+    // Global historical images must not be guessed into a session whose image
+    // aggregate is unknown. Null historical attribution stays unattributed.
+    final unknown = history.sessions.last;
+    expect(unknown.costUsd, isNull);
+    expect(unknown.images.generateCount, isNull);
+    expect(unknown.images.editCount, isNull);
+    expect(unknown.images.costUsd, isNull);
+  });
+
+  test('legacy costMicros never reconstructs or rounds exact costUsd', () {
+    final both = UsageCounts.fromJson(const {
+      'costUsd': '0.0000000001',
+      'costMicros': 123456,
+    });
+    final microsOnly = UsageCounts.fromJson(const {'costMicros': 1000000});
+    final exactOnly = UsageCounts.fromJson(const {
+      'costUsd': '0.0000000001',
+    });
+
+    expect(both.costUsd, '0.0000000001');
+    expect(both.costMicros, 123456);
+    expect(microsOnly.costUsd, isNull);
+    expect(microsOnly.costMicros, 1000000);
+    expect(exactOnly.costUsd, '0.0000000001');
+    expect(exactOnly.costMicros, isNull);
+  });
+
+  test('old payloads without additive keys retain legacy measurements', () {
+    final history = UsageHistory.fromJson({
+      'totals': {
+        'runs': 1,
+        'modelCalls': 1,
+        'inputTokens': 10,
+        'outputTokens': 5,
+        'costMicros': 1000000,
+        'imagesGenerated': 2,
+        'imagesEdited': 1,
+      },
+      'sessions': [
+        {
+          'sessionId': 'legacy-session',
+          'costMicros': 1000000,
+          'imagesGenerated': 2,
+          'imagesEdited': 1,
+        },
+      ],
+      'runs': [
+        {
+          'runId': 'legacy-run',
+          'models': ['auto'],
+          'costMicros': 1000000,
+        },
+      ],
+    });
+
+    expect(history.totals.costUsd, isNull);
+    expect(history.totals.costMicros, 1000000);
+    expect(history.totals.imagesGenerated, 2);
+    expect(history.totals.imagesEdited, 1);
+    expect(history.images.generateCount, isNull);
+    expect(history.images.editCount, isNull);
+    expect(history.images.costUsd, isNull);
+    expect(history.sessions.single.costUsd, isNull);
+    expect(history.sessions.single.costMicros, 1000000);
+    expect(history.sessions.single.images.generateCount, isNull);
+    expect(history.sessions.single.imagesGenerated, 2);
+    expect(history.runs.single.requestedModels, ['auto']);
+    expect(history.runs.single.providerModels, isNull);
+    expect(history.runs.single.costUsd, isNull);
+    expect(history.runs.single.costMicros, 1000000);
+  });
+
+  test('explicit null provider models never fall back to auto', () {
+    final run = UsageRunRow.fromJson({
+      'runId': 'unknown-provider',
+      'models': ['auto'],
+      'requestedModels': ['auto'],
+      'providerModels': null,
+    });
+
+    expect(run.models, ['auto']);
+    expect(run.requestedModels, ['auto']);
+    expect(run.providerModels, isNull);
   });
 
   test('missing or malformed session aggregates are unknown, not zero', () {

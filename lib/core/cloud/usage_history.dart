@@ -8,6 +8,10 @@ int? _measurement(Object? value) {
   return value.toInt();
 }
 
+/// Exact server-measured USD decimal text. Never parse, round, or reconstruct
+/// this value from the legacy integer-micros field.
+String? _costUsd(Object? value) => value is String ? value : null;
+
 /// Formats a nullable measured count without turning an unknown into zero.
 String formatUsageValue(int? value) => value == null ? '—' : '$value';
 
@@ -16,8 +20,9 @@ String formatUsageValue(int? value) => value == null ? '—' : '$value';
 String formatUsageSessionCount(UsageHistory history) =>
     history.sessionsKnown ? '${history.sessions.length}' : '—';
 
-/// Formats provider-reported USD micros. No currency conversion or inference
-/// is performed: an unknown value stays a dash and a recorded zero stays zero.
+/// Formats legacy provider-reported USD micros. Exact [UsageCounts.costUsd]
+/// text must not be routed through this formatter. No currency conversion or
+/// inference is performed: unknown stays a dash and recorded zero stays zero.
 String formatUsageCostMicros(int? micros) {
   if (micros == null || micros < 0) return '—';
   final whole = micros ~/ 1000000;
@@ -36,6 +41,7 @@ class UsageCounts {
     this.outputTokens = 0,
     this.cacheReadTokens = 0,
     this.cacheWriteTokens = 0,
+    this.costUsd,
     this.costMicros,
     this.imagesGenerated,
     this.imagesEdited,
@@ -48,8 +54,11 @@ class UsageCounts {
   final int cacheReadTokens;
   final int cacheWriteTokens;
 
-  /// Measured provider cost and image operations. Null means the provider did
-  /// not report them; zero is reserved for a real recorded zero.
+  /// Authoritative exact provider cost. Null means no measured cost exists.
+  final String? costUsd;
+
+  /// Separate legacy measurements retained for old payloads. These are never
+  /// used to synthesize [costUsd]. Null is unknown; zero is a recorded zero.
   final int? costMicros;
   final int? imagesGenerated;
   final int? imagesEdited;
@@ -68,10 +77,31 @@ class UsageCounts {
     outputTokens: _n(j, 'outputTokens'),
     cacheReadTokens: _n(j, 'cacheReadTokens'),
     cacheWriteTokens: _n(j, 'cacheWriteTokens'),
+    costUsd: _costUsd(j['costUsd']),
     costMicros: _measurement(j['costMicros']),
     imagesGenerated: _measurement(j['imagesGenerated']),
     imagesEdited: _measurement(j['imagesEdited']),
   );
+}
+
+/// Nested image measurements returned at the top level and for each session.
+/// Every member is nullable so an unknown measurement is never rendered as 0.
+class UsageImages {
+  const UsageImages({this.generateCount, this.editCount, this.costUsd});
+
+  final int? generateCount;
+  final int? editCount;
+  final String? costUsd;
+
+  factory UsageImages.fromJson(Object? raw) {
+    if (raw is! Map) return const UsageImages();
+    final json = Map<String, dynamic>.from(raw);
+    return UsageImages(
+      generateCount: _measurement(json['generateCount']),
+      editCount: _measurement(json['editCount']),
+      costUsd: _costUsd(json['costUsd']),
+    );
+  }
 }
 
 class UsageDay {
@@ -99,6 +129,7 @@ class UsageSessionRow {
     required this.title,
     required this.counts,
     required this.lastAt,
+    this.images = const UsageImages(),
   });
 
   /// SERVER session id.
@@ -108,7 +139,9 @@ class UsageSessionRow {
   final String? title;
   final UsageCounts counts;
   final DateTime? lastAt;
+  final UsageImages images;
 
+  String? get costUsd => counts.costUsd;
   int? get costMicros => counts.costMicros;
   int? get imagesGenerated => counts.imagesGenerated;
   int? get imagesEdited => counts.imagesEdited;
@@ -126,6 +159,7 @@ class UsageRunRow {
     required this.counts,
     this.requestedModels,
     this.providerModels,
+    this.costUsd,
     this.costMicros,
     this.imagesGenerated,
     this.imagesEdited,
@@ -144,6 +178,7 @@ class UsageRunRow {
   /// are nullable: `auto` is not evidence of the provider's concrete model.
   final List<String>? requestedModels;
   final List<String>? providerModels;
+  final String? costUsd;
   final int? costMicros;
   final int? imagesGenerated;
   final int? imagesEdited;
@@ -164,6 +199,7 @@ class UsageRunRow {
       requestedModels: requested,
       providerModels: _modelList(json['providerModels']),
       counts: counts,
+      costUsd: counts.costUsd,
       costMicros: counts.costMicros,
       imagesGenerated: counts.imagesGenerated,
       imagesEdited: counts.imagesEdited,
@@ -192,12 +228,14 @@ class UsageHistory {
     required this.sessions,
     required this.runs,
     required this.nextBefore,
+    this.images = const UsageImages(),
     this.sessionsKnown = true,
   });
 
   final DateTime? since;
   final DateTime? until;
   final UsageCounts totals;
+  final UsageImages images;
 
   /// Every day in range, newest first, zero-filled.
   final List<UsageDay> days;
@@ -243,6 +281,7 @@ class UsageHistory {
                 : null,
             counts: UsageCounts.fromJson(session),
             lastAt: _t(session['lastAt']),
+            images: UsageImages.fromJson(session['images']),
           ),
         );
       }
@@ -255,6 +294,7 @@ class UsageHistory {
             ? Map<String, dynamic>.from(j['totals'] as Map)
             : const {},
       ),
+      images: UsageImages.fromJson(j['images']),
       days: [
         for (final d in _list(j['days']))
           if (d['date'] is String)
@@ -362,6 +402,7 @@ class UsageHistoryStore extends ChangeNotifier {
         since: current.since,
         until: current.until,
         totals: current.totals,
+        images: current.images,
         days: current.days,
         models: current.models,
         sessions: current.sessions,
