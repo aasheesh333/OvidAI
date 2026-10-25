@@ -34,20 +34,19 @@ Both branches share the merge base `e7a4dd79`.
 
 ---
 
-## Current state (2026-10-23)
+## Deployment state — static reconciliation 2026-10-25
 
-### What is deployed right now
-
-| Thing | Runs from | Branch |
+| Thing | Current evidence | Source branch |
 |---|---|---|
-| `ovid-worker` (agent runs) | `/opt/ovid-cloud/repo/cloud` → `/root/OvidBackend/cloud` | `feat/ovid-cloud` |
-| `ovid-cloud-gateway-1` (docker) | same tree, image rebuilt from it | `feat/ovid-cloud` |
-| `beta.ovidsi.com` (web) | `/root/OvidWeb/web` via `npm run cf:deploy` | `tier1` (OvidWeb) |
+| `ovid-worker` (agent runs) | `/opt/ovid-cloud/repo` and observed worker cwd resolve to `/opt/ovid-cloud/releases/50889af8`; rollback is `/opt/ovid-cloud/releases/9971fd01` | `feat/ovid-cloud` |
+| `ovid-cloud-gateway-1` (docker) | Current image provenance/live health not established by the permitted static audit; do not infer it from this checkout | `feat/ovid-cloud` |
+| `beta.ovidsi.com` (web) | Recorded deployed version `e86797f4-063e-4615-b958-b2ccbeb36c62`; rollback `78ef4d1c-13e5-47a3-9a89-ef9880bd2fee` | `tier1` (OvidWeb) |
 
-**The deployed backend is `feat/ovid-cloud`, which is 56 commits behind
-`feat/ovid-si-rebuild`.** Everything the Flutter session has built in
-`cloud/packages/{agent-core,browser,sandbox}` is on disk in its worktree but is
-**not** in the running worker.
+New commits in the canonical repositories are **not deployed** by virtue of
+being committed or pushed. Builds must come from an authorized isolated clean
+release, not the current dirty source tree. The historical 2026-10-23 branch
+comparison below is retained for merge-conflict context, not as the current
+release state.
 
 ### Divergence
 
