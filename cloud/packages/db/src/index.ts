@@ -2,6 +2,7 @@ export * from "./client.js";
 export * from "./repos.js";
 export * from "./providerConnections.js";
 export * from "./subagentAdmission.js";
+export * from "./subagentReportSnapshots.js";
 export * from "./systemRequests.js";
 export * from "./artifactVault.js";
 export * from "./moneyRepos.js";

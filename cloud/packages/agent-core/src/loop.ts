@@ -63,10 +63,7 @@ import {
 } from "./roster.js";
 import { resolveRoute, type ResolvedRoute } from "./routing.js";
 import { drainQueuedRuns } from "./steering.js";
-import {
-  formatSubagentReports,
-  takePendingSubagentReports,
-} from "./subagents.js";
+import { drainDurableSubagentReportsForLoop } from "./durableSubagentReportLoop.js";
 import { buildSystemPrompt } from "./systemPrompt.js";
 import { spillToolOutput, toolOutputCapFor, withToolTimeout } from "./tools/spill.js";
 import { TerminalModelError, TransientModelError } from "./transport/errors.js";
@@ -994,18 +991,16 @@ export async function runAgentLoop(
         volatile.trim() !== "" ? [{ role: "system", content: volatile, volatile: true }] : [];
 
       // ── finished subagents ─────────────────────────────────────────────
-      // A detached child leaves its outcome in this session's state, never in
-      // the tool result. Fold it in here, once: the parent reads it on the
-      // request after the child settles, whether that is the next step of this
-      // run or the first step of a later one.
-      const childReports = await takePendingSubagentReports(deps.state, sessionId);
-      if (childReports.length > 0) {
-        volatileRows.push({
-          role: "system",
-          content: formatSubagentReports(childReports),
-          volatile: true,
-        });
-      }
+      // Durable reports replace the lossy in-memory queue. The adapter removes
+      // the stable history copy and supplies one refreshed batch in the legacy
+      // volatile position; it never synthesizes a response or starts work.
+      const childReports = await drainDurableSubagentReportsForLoop({
+        db: deps.db,
+        sessionId,
+        history: msgs,
+      });
+      msgs = childReports.history;
+      volatileRows.push(...childReports.volatileRows);
 
       // ── 4. pre_request hook notes (leading system rows; observe-only) ──
       // Dart inserts each note at index 0, so the LAST systemMessage ends up

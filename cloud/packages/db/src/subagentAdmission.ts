@@ -1,6 +1,7 @@
 import { and, asc, eq, gt, inArray, isNotNull, sql } from "drizzle-orm";
 import type { StructuredSubagentReport } from "@ovid/shared";
 import type { Db } from "./client.js";
+import { readDurableSubagentReportSnapshotWithin } from "./subagentReportSnapshots.js";
 import { newId } from "./repos.js";
 import {
   messages,
@@ -76,6 +77,16 @@ export interface SubagentReportRecord {
   task: string;
   at: number;
   structuredReport?: StructuredSubagentReport;
+}
+
+/** Atomic root/epoch/active/report input for the root-finalization adapter. */
+export interface RootFinalizationSnapshotRecord {
+  rootTaskRunId: string;
+  sessionId: string;
+  executionEpoch: number;
+  activeAttemptIds: readonly string[];
+  finalized: boolean;
+  reports: readonly SubagentReportRecord[];
 }
 
 interface RootContext {
@@ -893,7 +904,145 @@ export async function settleAttemptAndMaybeWake(
   });
 }
 
+export async function snapshotRootFinalization(
+  db: Db,
+  input: { rootTaskRunId: string },
+): Promise<RootFinalizationSnapshotRecord | null> {
+  return db.transaction(async (tx) => {
+    const [root] = await tx
+      .select()
+      .from(subagentRoots)
+      .where(eq(subagentRoots.rootTaskRunId, input.rootTaskRunId))
+      .for("update")
+      .limit(1);
+    if (root === undefined) return null;
+    const active = await tx
+      .select({ id: subagentAttempts.id })
+      .from(subagentAttempts)
+      .where(and(
+        eq(subagentAttempts.rootTaskRunId, input.rootTaskRunId),
+        eq(subagentAttempts.executionEpoch, root.executionEpoch),
+        eq(subagentAttempts.status, "running"),
+      ))
+      .orderBy(asc(subagentAttempts.id));
+    const [finalized] = await tx
+      .select({ id: subagentRootFinalizations.id })
+      .from(subagentRootFinalizations)
+      .where(and(
+        eq(subagentRootFinalizations.rootTaskRunId, input.rootTaskRunId),
+        eq(subagentRootFinalizations.executionEpoch, root.executionEpoch),
+        isNotNull(subagentRootFinalizations.finalizedAt),
+      ))
+      .limit(1);
+    const reports = await readDurableSubagentReportSnapshotWithin(tx, {
+      sessionId: root.sessionId,
+      rootTaskRunId: input.rootTaskRunId,
+      pageSize: 50,
+    }, drainReports);
+    return {
+      rootTaskRunId: root.rootTaskRunId,
+      sessionId: root.sessionId,
+      executionEpoch: root.executionEpoch,
+      activeAttemptIds: active.map((attempt) => attempt.id),
+      finalized: finalized !== undefined,
+      reports,
+    };
+  });
+}
+
 export async function markRootFinalized(
+  db: Db,
+  input: {
+    rootTaskRunId: string;
+    executionEpoch: number;
+    activeAttemptIds: readonly string[];
+    /** Optional for legacy callers; the root-finalization adapter always supplies it. */
+    expectedReportAttemptIds?: readonly string[];
+  },
+): Promise<"committed" | "fenced"> {
+  return db.transaction(async (tx) => {
+    const [root] = await tx
+      .select()
+      .from(subagentRoots)
+      .where(eq(subagentRoots.rootTaskRunId, input.rootTaskRunId))
+      .for("update")
+      .limit(1);
+    if (root === undefined || root.executionEpoch !== input.executionEpoch) return "fenced";
+    const current = await tx
+      .select({ id: subagentAttempts.id })
+      .from(subagentAttempts)
+      .where(and(
+        eq(subagentAttempts.rootTaskRunId, input.rootTaskRunId),
+        eq(subagentAttempts.executionEpoch, input.executionEpoch),
+        eq(subagentAttempts.status, "running"),
+      ))
+      .orderBy(asc(subagentAttempts.id));
+    const currentIds = current.map((row) => row.id);
+    const suppliedIds = [...input.activeAttemptIds].sort();
+    if (
+      currentIds.length !== 0 ||
+      currentIds.length !== suppliedIds.length ||
+      currentIds.some((id, index) => id !== suppliedIds[index])
+    ) {
+      return "fenced";
+    }
+    if (input.expectedReportAttemptIds !== undefined) {
+      // Reports are append-only and unique per attempt. Comparing this set
+      // under the root lock closes admit -> settle -> empty-running-set ABA
+      // without requiring executionEpoch to change on every admission.
+      const reportRows = await tx
+        .select({ attemptId: subagentReports.attemptId })
+        .from(subagentReports)
+        .innerJoin(subagentAttempts, eq(subagentReports.attemptId, subagentAttempts.id))
+        .where(eq(subagentAttempts.rootTaskRunId, input.rootTaskRunId))
+        .orderBy(asc(subagentReports.attemptId));
+      const currentReportIds = reportRows.map((report) => report.attemptId);
+      const expectedReportIds = [...input.expectedReportAttemptIds].sort();
+      if (
+        currentReportIds.length !== expectedReportIds.length ||
+        currentReportIds.some((id, index) => id !== expectedReportIds[index])
+      ) {
+        return "fenced";
+      }
+    }
+    const [existing] = await tx
+      .select()
+      .from(subagentRootFinalizations)
+      .where(and(
+        eq(subagentRootFinalizations.rootTaskRunId, input.rootTaskRunId),
+        eq(subagentRootFinalizations.executionEpoch, input.executionEpoch),
+      ))
+      .for("update")
+      .limit(1);
+    if (existing?.finalizedAt != null) return "fenced";
+    const now = new Date();
+    if (existing !== undefined) {
+      await tx
+        .update(subagentRootFinalizations)
+        .set({ finalizedAt: now, activeAttemptIds: suppliedIds })
+        .where(eq(subagentRootFinalizations.id, existing.id));
+      return "committed";
+    }
+    const inserted = await tx
+      .insert(subagentRootFinalizations)
+      .values({
+        id: newId(),
+        rootTaskRunId: input.rootTaskRunId,
+        sessionId: root.sessionId,
+        executionEpoch: input.executionEpoch,
+        activeAttemptIds: suppliedIds,
+        finalizedAt: now,
+        createdAt: now,
+      })
+      .onConflictDoNothing({
+        target: [subagentRootFinalizations.rootTaskRunId, subagentRootFinalizations.executionEpoch],
+      })
+      .returning({ id: subagentRootFinalizations.id });
+    return inserted.length === 1 ? "committed" : "fenced";
+  });
+}
+
+export async function drainReports(
   db: Db,
   input: {
     rootTaskRunId: string;
