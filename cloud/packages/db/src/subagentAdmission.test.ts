@@ -773,4 +773,46 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("durable subagent admission", () 
     })).toBe("committed");
   }, 180_000);
 
+  it("persists explicit, null, and omitted inherited temperatures for ordinary admitted dispatches", async () => {
+    const fixture = await createFixture("admission_inherited_temperature");
+    cleanups.push(fixture.close);
+    const { db, scratch, sessionId, userId } = fixture;
+    const root = await createUserRoot(db, sessionId, "Inherited temperature root");
+    const batchId = newId();
+    const requests = requestsFor({
+      sessionId, userId, rootTaskRunId: root.rootTaskRunId, batchId,
+      count: 3, provenance: "server", promptPrefix: "temperature",
+    });
+    requests[0]!.modelContext = { ...requests[0]!.modelContext, temperature: 0.17 };
+    requests[1]!.modelContext = { ...requests[1]!.modelContext, temperature: null };
+    expect(requests[2]!.modelContext).not.toHaveProperty("temperature");
+
+    const outcomes = await admitDispatches(db, requests);
+    expect(outcomes.map((outcome) => [outcome.index, outcome.admission])).toEqual([
+      [0, "admitted"],
+      [1, "admitted"],
+      [2, "admitted"],
+    ]);
+
+    const stored = await scratch.client`
+      SELECT request_index, requested_model, byok_key_id, byok_model,
+        actor_user_id, temperature, state
+      FROM subagent_dispatches
+      WHERE batch_id = ${batchId}
+      ORDER BY request_index`;
+    expect(stored.map((row) => row.temperature)).toEqual([0.17, null, null]);
+    expect(stored.map((row) => [
+      row.request_index,
+      row.requested_model,
+      row.byok_key_id,
+      row.byok_model,
+      row.actor_user_id,
+      row.state,
+    ])).toEqual([
+      [0, "parent/model", "key-id-only", "provider/model", userId, "admitted"],
+      [1, "parent/model", "key-id-only", "provider/model", userId, "admitted"],
+      [2, "parent/model", "key-id-only", "provider/model", userId, "admitted"],
+    ]);
+  }, 180_000);
+
 });

@@ -37,6 +37,7 @@ export interface InheritedModelContext {
   requestedModel: string | null;
   byokKeyId: string | null;
   byokModel?: string;
+  temperature?: number | null;
   actorUserId: string;
 }
 
@@ -387,6 +388,7 @@ function dispatchValues(request: AdmissionRequest, now: Date): typeof subagentDi
     requestedModel: request.modelContext.requestedModel,
     byokKeyId: request.modelContext.byokKeyId,
     byokModel: request.modelContext.byokModel ?? null,
+    temperature: request.modelContext.temperature ?? null,
     actorUserId: request.modelContext.actorUserId,
     state: "awaiting_next_user_task",
     deferReason: "capacity_exhausted",
