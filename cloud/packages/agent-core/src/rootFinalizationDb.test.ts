@@ -192,7 +192,7 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("real Task 5 root finalization ad
   }, 30_000);
 
   it.each(["beforeRootFinalResponse", "markRootFinalized"] as const)(
-    "fences same-epoch admit -> settle ABA at %s and then includes the new report",
+    "rejects stale ABA input at %s and recovers with a fresh both-report snapshot",
     async (point) => {
       const fixture = await createFixture(`aba_${point}`);
       cleanups.push(fixture.close);
@@ -208,7 +208,7 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("real Task 5 root finalization ad
       expect(initial.wake).toEqual({ trigger: "parent_wake", rootTaskRunId });
 
       const control = pause();
-      const stalePromise = createRootFinalizationGate(pausedStore(base, point, control))
+      const originalFinalize = createRootFinalizationGate(pausedStore(base, point, control))
         .finalize(rootTaskRunId);
       await control.entered;
       const second = await admitOne(fixture, rootTaskRunId, "new admitted and settled work");
@@ -221,21 +221,16 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("real Task 5 root finalization ad
       expect(secondSettlement.rootTaskRunId).toBe(rootTaskRunId);
       control.release();
 
-      const stale = await stalePromise;
-      expect(stale.status).toBe("fenced");
-      if (stale.status === "committed") throw new Error("stale response was authorized");
-      expect(stale.snapshot.reports.map((report) => report.attemptId)).toEqual([first.attemptId]);
-
-      const legitimate = await gate.finalize(rootTaskRunId);
-      expect(legitimate.status).toBe("committed");
-      if (legitimate.status !== "committed") throw new Error("fresh response was fenced");
-      expect(legitimate.snapshot.executionEpoch).toBe(1);
-      expect(legitimate.snapshot.activeAttemptIds).toEqual([]);
-      expect(legitimate.snapshot.reports.map((report) => report.attemptId).sort()).toEqual([
+      const recovered = await originalFinalize;
+      expect(recovered.status).toBe("committed");
+      if (recovered.status !== "committed") throw new Error("fresh response was fenced");
+      expect(recovered.snapshot.executionEpoch).toBe(1);
+      expect(recovered.snapshot.activeAttemptIds).toEqual([]);
+      expect(recovered.snapshot.reports.map((report) => report.attemptId).sort()).toEqual([
         first.attemptId,
         second.attemptId,
       ].sort());
-      expect(legitimate.snapshot.reports.find((report) => report.attemptId === second.attemptId))
+      expect(recovered.snapshot.reports.find((report) => report.attemptId === second.attemptId))
         .toMatchObject({ status: "failed" });
       const drained = await drainAll(db, fixture.sessionId);
       expect(drained.map((report) => report.attemptId).sort()).toEqual([

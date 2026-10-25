@@ -1,7 +1,11 @@
 import { and, asc, eq, gt, inArray, isNotNull, sql } from "drizzle-orm";
 import type { StructuredSubagentReport } from "@ovid/shared";
 import type { Db } from "./client.js";
-import { readDurableSubagentReportSnapshotWithin } from "./subagentReportSnapshots.js";
+import {
+  fingerprintRootFinalizationReports,
+  readDurableSubagentReportSnapshotWithin,
+  type DurableSubagentReportRecord,
+} from "./subagentReportSnapshots.js";
 import { lockCompactionSession, newId } from "./repos.js";
 import {
   messages,
@@ -86,7 +90,7 @@ export interface RootFinalizationSnapshotRecord {
   executionEpoch: number;
   activeAttemptIds: readonly string[];
   finalized: boolean;
-  reports: readonly SubagentReportRecord[];
+  reports: readonly DurableSubagentReportRecord[];
 }
 
 interface RootContext {
@@ -1090,77 +1094,6 @@ export async function markRootFinalized(
       }
     } else {
       // ID-only legacy callers cannot authorize a root-final response.
-      return "fenced";
-    }
-    const [existing] = await tx
-      .select()
-      .from(subagentRootFinalizations)
-      .where(and(
-        eq(subagentRootFinalizations.rootTaskRunId, input.rootTaskRunId),
-        eq(subagentRootFinalizations.executionEpoch, input.executionEpoch),
-      ))
-      .for("update")
-      .limit(1);
-    if (existing?.finalizedAt != null) return "fenced";
-    const now = new Date();
-    if (existing !== undefined) {
-      await tx
-        .update(subagentRootFinalizations)
-        .set({ finalizedAt: now, activeAttemptIds: suppliedIds })
-        .where(eq(subagentRootFinalizations.id, existing.id));
-      return "committed";
-    }
-    const inserted = await tx
-      .insert(subagentRootFinalizations)
-      .values({
-        id: newId(),
-        rootTaskRunId: input.rootTaskRunId,
-        sessionId: root.sessionId,
-        executionEpoch: input.executionEpoch,
-        activeAttemptIds: suppliedIds,
-        finalizedAt: now,
-        createdAt: now,
-      })
-      .onConflictDoNothing({
-        target: [subagentRootFinalizations.rootTaskRunId, subagentRootFinalizations.executionEpoch],
-      })
-      .returning({ id: subagentRootFinalizations.id });
-    return inserted.length === 1 ? "committed" : "fenced";
-  });
-}
-
-export async function drainReports(
-  db: Db,
-  input: {
-    rootTaskRunId: string;
-    executionEpoch: number;
-    activeAttemptIds: readonly string[];
-  },
-): Promise<"committed" | "fenced"> {
-  return db.transaction(async (tx) => {
-    const [root] = await tx
-      .select()
-      .from(subagentRoots)
-      .where(eq(subagentRoots.rootTaskRunId, input.rootTaskRunId))
-      .for("update")
-      .limit(1);
-    if (root === undefined || root.executionEpoch !== input.executionEpoch) return "fenced";
-    const current = await tx
-      .select({ id: subagentAttempts.id })
-      .from(subagentAttempts)
-      .where(and(
-        eq(subagentAttempts.rootTaskRunId, input.rootTaskRunId),
-        eq(subagentAttempts.executionEpoch, input.executionEpoch),
-        eq(subagentAttempts.status, "running"),
-      ))
-      .orderBy(asc(subagentAttempts.id));
-    const currentIds = current.map((row) => row.id);
-    const suppliedIds = [...input.activeAttemptIds].sort();
-    if (
-      currentIds.length !== 0 ||
-      currentIds.length !== suppliedIds.length ||
-      currentIds.some((id, index) => id !== suppliedIds[index])
-    ) {
       return "fenced";
     }
     const [existing] = await tx

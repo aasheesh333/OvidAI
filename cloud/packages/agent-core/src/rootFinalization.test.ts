@@ -1,5 +1,8 @@
 // The new fix-round-1 ABA/CAS cases are UNEXECUTED while heavy verification is paused.
-import type { SubagentReportRecord } from "@ovid/db";
+import {
+  fingerprintRootFinalizationReports,
+  type SubagentReportRecord,
+} from "@ovid/db";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -112,12 +115,19 @@ class FakeRootFinalizationStore implements RootFinalizationStore {
     this.failures.set(method, new Error(`crash before ${method} commit`));
   }
 
-  reports(rootTaskRunId: string): SubagentReportRecord[] {
+  reports(rootTaskRunId: string): RootFinalizationSnapshot["reports"] {
     return this.reportsFor(this.requireRoot(rootTaskRunId));
   }
 
   deferred(rootTaskRunId: string): string[] {
     return [...this.requireRoot(rootTaskRunId).deferredRequestIds].sort();
+  }
+
+  enrich(attemptId: string, summary: string): void {
+    const attempt = this.attempts.get(attemptId);
+    if (attempt?.report !== null && attempt?.report !== undefined) {
+      attempt.report.summary = summary;
+    }
   }
 
   markCalls(): number {
@@ -153,12 +163,23 @@ class FakeRootFinalizationStore implements RootFinalizationStore {
   async beforeRootFinalResponse(input: {
     rootTaskRunId: string;
     executionEpoch: number;
+    expectedReportAttemptIds?: readonly string[];
+    expectedReportFingerprint?: string;
   }): Promise<"allow" | "wait"> {
     await this.interleave("beforeRootFinalResponse");
     const root = this.roots.get(input.rootTaskRunId);
     if (root === undefined || root.executionEpoch !== input.executionEpoch) return "wait";
     if (root.finalizations.get(input.executionEpoch)?.finalized === true) return "wait";
-    return this.activeAttempts(root).length === 0 ? "allow" : "wait";
+    if (this.activeAttempts(root).length !== 0) return "wait";
+    if (input.expectedReportFingerprint !== undefined) {
+      const current = fingerprintRootFinalizationReports(this.reportsFor(root));
+      const expectedIds = [...(input.expectedReportAttemptIds ?? [])].sort();
+      const currentIds = this.reportsFor(root).map((report) => report.attemptId);
+      if (current !== input.expectedReportFingerprint ||
+          currentIds.length !== expectedIds.length ||
+          currentIds.some((id, index) => id !== expectedIds[index])) return "wait";
+    }
+    return "allow";
   }
 
   async settleAttemptAndMaybeWake(input: {
@@ -195,6 +216,7 @@ class FakeRootFinalizationStore implements RootFinalizationStore {
     executionEpoch: number;
     activeAttemptIds: readonly string[];
     expectedReportAttemptIds: readonly string[];
+    expectedReportFingerprint: string;
   }): Promise<"committed" | "fenced"> {
     this.markCallCount += 1;
     await this.interleave("markRootFinalized");
@@ -219,6 +241,8 @@ class FakeRootFinalizationStore implements RootFinalizationStore {
     ) {
       return "fenced";
     }
+    const currentFingerprint = fingerprintRootFinalizationReports(this.reportsFor(root));
+    if (currentFingerprint !== input.expectedReportFingerprint) return "fenced";
     const existing = root.finalizations.get(input.executionEpoch);
     if (existing?.finalized === true) return "fenced";
     root.finalizations.set(input.executionEpoch, {
@@ -255,12 +279,16 @@ class FakeRootFinalizationStore implements RootFinalizationStore {
       .sort((a, b) => a.attemptId.localeCompare(b.attemptId));
   }
 
-  private reportsFor(root: FakeRoot): SubagentReportRecord[] {
+  private reportsFor(root: FakeRoot): RootFinalizationSnapshot["reports"] {
     return [...root.attemptIds]
       .sort()
-      .map((id) => this.attempts.get(id)!.report)
-      .filter((report): report is SubagentReportRecord => report !== null)
-      .map((report) => ({ ...report }));
+      .map((id) => this.attempts.get(id)!)
+      .filter((attempt) => attempt.report !== null)
+      .map((attempt) => ({
+        ...attempt.report!,
+        rootTaskRunId: attempt.rootTaskRunId,
+        executionEpoch: attempt.executionEpoch,
+      }));
   }
 
   private report(attempt: FakeAttempt, outcome: Outcome): SubagentReportRecord {
@@ -335,7 +363,7 @@ describe("RootFinalizationGate", () => {
     expect(store.finalizedEpochs("root")).toEqual([1]);
   });
 
-  it("fences a stale final snapshot when admission wins before commit", async () => {
+  it("waits on a fresh active attempt after rejecting the stale final fence", async () => {
     const { store, gate } = fixture();
     store.admit("root", "attempt-old");
     await gate.settle({ attemptId: "attempt-old", outcome: "failed" });
@@ -346,14 +374,13 @@ describe("RootFinalizationGate", () => {
     const resumed = store.admit("root", "attempt-new", 1);
     expect(resumed).toEqual({ admitted: true, executionEpoch: 1 });
     paused.release();
-    expect((await staleFinal).status).toBe("fenced");
-    expect(store.finalizedEpochs("root")).toEqual([]);
-
-    const waiting = await gate.finalize("root");
+    const waiting = await staleFinal;
     expect(waiting).toMatchObject({
       status: "wait",
       snapshot: { executionEpoch: 1, activeAttemptIds: ["attempt-new"] },
     });
+    expect(store.finalizedEpochs("root")).toEqual([]);
+
     await gate.settle({ attemptId: "attempt-new", outcome: "completed" });
     const committed = await gate.finalize("root");
     expect(committed).toMatchObject({
@@ -367,7 +394,25 @@ describe("RootFinalizationGate", () => {
     ]);
   });
 
-  it("fences same-epoch ABA after admission and settlement before the final CAS", async () => {
+  it("fences same-attempt report enrichment and retries from a fresh snapshot", async () => {
+    const { store, gate } = fixture();
+    store.admit("root", "attempt-old");
+    await gate.settle({ attemptId: "attempt-old", outcome: "completed" });
+    const paused = store.pause("markRootFinalized");
+    const finalized = gate.finalize("root");
+    await paused.entered;
+    store.enrich("attempt-old", "enriched findings and checkpoint disclosure");
+    paused.release();
+    const committed = await finalized;
+    expect(committed.status).toBe("committed");
+    expect(store.markCalls()).toBe(2);
+    if (committed.status === "committed") {
+      expect(committed.snapshot.reports[0]?.summary)
+        .toBe("enriched findings and checkpoint disclosure");
+    }
+  });
+
+  it("rejects stale ABA input and recovers with a fresh both-report snapshot", async () => {
     const { store, gate } = fixture();
     store.admit("root", "attempt-old");
     await gate.settle({ attemptId: "attempt-old", outcome: "completed" });
@@ -381,13 +426,12 @@ describe("RootFinalizationGate", () => {
     });
     await gate.settle({ attemptId: "attempt-new", outcome: "failed" });
     paused.release();
-    expect((await staleFinal).status).toBe("fenced");
-    expect(store.finalizedEpochs("root")).toEqual([]);
-
-    const legitimate = await gate.finalize("root");
+    const legitimate = await staleFinal;
     expect(legitimate.status).toBe("committed");
+    expect(store.markCalls()).toBe(2);
     if (legitimate.status !== "committed") throw new Error("expected fresh final permit");
     expect(legitimate.snapshot.executionEpoch).toBe(1);
+    expect(legitimate.snapshot.activeAttemptIds).toEqual([]);
     expect(legitimate.snapshot.reports.map((report) => report.attemptId)).toEqual([
       "attempt-new", "attempt-old",
     ]);

@@ -3,6 +3,7 @@ import {
   admitDispatches,
   createDb,
   drainReports,
+  fingerprintRootFinalizationReports,
   markRootFinalized,
   messages,
   migrate,
@@ -966,6 +967,7 @@ describe.skipIf(!TEST_DATABASE_URL).sequential(
         executionEpoch: fresh!.executionEpoch,
         activeAttemptIds: fresh!.activeAttemptIds,
         expectedReportAttemptIds: fresh!.reports.map((report) => report.attemptId),
+        expectedReportFingerprint: fingerprintRootFinalizationReports(fresh!.reports),
       })).toBe("committed");
     }, 180_000);
 

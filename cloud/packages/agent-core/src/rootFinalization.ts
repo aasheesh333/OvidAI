@@ -1,4 +1,8 @@
-import type { SubagentReportRecord } from "@ovid/db";
+import {
+  fingerprintRootFinalizationReports,
+  type DurableSubagentReportRecord,
+  type SubagentReportRecord,
+} from "@ovid/db";
 
 export type RootTerminalOutcome = SubagentReportRecord["status"];
 
@@ -24,6 +28,8 @@ export interface RootFinalizationStore {
   beforeRootFinalResponse(input: {
     rootTaskRunId: string;
     executionEpoch: number;
+    expectedReportAttemptIds?: readonly string[];
+    expectedReportFingerprint?: string;
   }): Promise<"allow" | "wait">;
   settleAttemptAndMaybeWake(input: {
     attemptId: string;
@@ -35,6 +41,8 @@ export interface RootFinalizationStore {
     activeAttemptIds: readonly string[];
     /** Exact root-scoped report set captured with the active/epoch snapshot. */
     expectedReportAttemptIds: readonly string[];
+    /** Summary/structured-content fence; legacy adapters may still refuse it. */
+    expectedReportFingerprint: string;
   }): Promise<"committed" | "fenced">;
 }
 

@@ -13,8 +13,10 @@ export type DurableSubagentReportTransaction =
 
 export type SubagentReportFingerprintRecord = Omit<
   DurableSubagentReportRecord,
-  "task" | "at"
->;
+  "task" | "at" | "structuredReport"
+> & {
+  structuredReport?: DurableSubagentReportRecord["structuredReport"] | null;
+};
 
 /** Canonical per-report content; this exact value is also the outbox input. */
 export function fingerprintSubagentReport(
