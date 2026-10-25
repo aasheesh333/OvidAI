@@ -1,8 +1,15 @@
+import { sql } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
 import type postgres from "postgres";
 import { createDb, migrate, type Db } from "./client.js";
 import { createMigrationScratch, type MigrationScratch } from "./migrationTestKit.js";
+import {
+  RunQuotaService,
+  type QuotaBillingClass,
+  type RunQuotaAdmissionInput,
+} from "./quotaService.js";
 import { messages, newId, runs, sessions, users } from "./repos.js";
+import { subagentSessionAdmission } from "./schema.js";
 import { fingerprintRootFinalizationReports } from "./subagentReportSnapshots.js";
 import {
   admitDispatches,
@@ -16,9 +23,12 @@ import {
   updateDeferred,
   type AdmissionRequest,
   type AdmissionOutcome,
+  type SubagentAdmissionOptions,
+  type SubagentRunQuota,
 } from "./subagentAdmission.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
+const GENEROUS_TOKEN_CAPS = { perDay: 100_000, perMonth: 1_000_000 };
 const MODEL_CONTEXT = {
   requestedModel: "parent/model",
   byokKeyId: "key-id-only",
@@ -74,6 +84,7 @@ function requestsFor(input: {
   provenance: "web" | "android" | "server";
   indexOffset?: number;
   promptPrefix?: string;
+  billingClass?: QuotaBillingClass;
 }): AdmissionRequest[] {
   const requestedAt = Date.now() - 10_000;
   return Array.from({ length: input.count }, (_, offset) => {
@@ -93,7 +104,14 @@ function requestsFor(input: {
       provenance: input.provenance,
       requestedAt: new Date(requestedAt + index),
       userPriorityHint: index,
-      modelContext: { ...MODEL_CONTEXT, actorUserId: input.userId },
+      modelContext: {
+        requestedModel: MODEL_CONTEXT.requestedModel,
+        byokKeyId: input.billingClass === "ovid_allowance" ? null : MODEL_CONTEXT.byokKeyId,
+        ...(input.billingClass === "ovid_allowance"
+          ? {}
+          : { byokModel: MODEL_CONTEXT.byokModel }),
+        actorUserId: input.userId,
+      },
     };
   });
 }
@@ -117,13 +135,15 @@ async function rawDeferred(client: postgres.Sql, requestId: string) {
 async function createDeferredSlot(
   fixture: Fixture,
   prefix: string,
+  billingClass: QuotaBillingClass = "byok",
+  options: SubagentAdmissionOptions = {},
 ): Promise<{ originalRootId: string; deferredRequestId: string }> {
   const { db, sessionId, userId } = fixture;
   const originalRoot = await createUserRoot(db, sessionId, `${prefix} original root`);
   const outcomes = await admitDispatches(db, requestsFor({
     sessionId, userId, rootTaskRunId: originalRoot.rootTaskRunId, batchId: newId(),
-    count: 51, provenance: "web", promptPrefix: prefix,
-  }));
+    count: 51, provenance: "web", promptPrefix: prefix, billingClass,
+  }), options);
   expect(outcomes.filter((outcome) => outcome.admission === "admitted")).toHaveLength(50);
   const deferredRequestId = outcomes[50]?.deferredRequestId!;
   expect(outcomes[50]?.admission).toBe("awaiting_next_user_task");
@@ -134,6 +154,129 @@ async function createDeferredSlot(
     active: 49, limit: 50, available: 1, awaiting: 1,
   });
   return { originalRootId: originalRoot.rootTaskRunId, deferredRequestId };
+}
+
+function realQuota(
+  db: Db,
+  tokenCaps = GENEROUS_TOKEN_CAPS,
+): RunQuotaService {
+  return new RunQuotaService(db, { tokenCaps });
+}
+
+async function exhaustOvidDay(
+  fixture: Fixture,
+  service: RunQuotaService,
+  existingRootTaskRunId?: string,
+): Promise<void> {
+  const rootTaskRunId = existingRootTaskRunId ?? (await createUserRoot(
+    fixture.db,
+    fixture.sessionId,
+    "Ovid allowance seed",
+  )).rootTaskRunId;
+  expect(await service.admitRun({
+    actorUserId: fixture.userId,
+    source: "interactive",
+    runId: rootTaskRunId,
+    idempotencyKey: `ovid-cap-admission-${newId()}`,
+    billingClass: "ovid_allowance",
+  })).toEqual({ ok: true });
+  const reservation = await service.reserveModelCall({
+    actorUserId: fixture.userId,
+    runId: rootTaskRunId,
+    reservationKey: `ovid-cap-reservation-${newId()}`,
+    inputTokens: 1,
+    maxOutputTokens: 0,
+    requestedModel: "parent/model",
+    billingClass: "ovid_allowance",
+  });
+  if (!reservation.ok) throw new Error("Ovid allowance seed was unexpectedly exhausted");
+  await service.settleModelCall({
+    reservationId: reservation.reservationId,
+    usage: {
+      inputTokens: 1,
+      outputTokens: 0,
+      requestedModel: "parent/model",
+      billingClass: "ovid_allowance",
+    },
+  });
+}
+
+function observingQuota(
+  service: RunQuotaService,
+  seen: RunQuotaAdmissionInput[],
+): SubagentRunQuota {
+  const wrap = (bound: RunQuotaService): SubagentRunQuota => ({
+    forTransaction(tx) {
+      return wrap(bound.forTransaction(tx));
+    },
+    async admitRun(input) {
+      seen.push({ ...input });
+      return bound.admitRun(input);
+    },
+  });
+  return wrap(service);
+}
+
+function sameKeyBillingConflictQuota(
+  service: RunQuotaService,
+  seen: RunQuotaAdmissionInput[],
+): SubagentRunQuota {
+  const wrap = (bound: RunQuotaService): SubagentRunQuota => ({
+    forTransaction(tx) {
+      return wrap(bound.forTransaction(tx));
+    },
+    async admitRun(input) {
+      seen.push({ ...input });
+      const admitted = await bound.admitRun(input);
+      const conflict: RunQuotaAdmissionInput = {
+        ...input,
+        billingClass: input.billingClass === "byok" ? "ovid_allowance" : "byok",
+      };
+      seen.push({ ...conflict });
+      await bound.admitRun(conflict);
+      return admitted;
+    },
+  });
+  return wrap(service);
+}
+
+async function rawQuotaRefusal(client: postgres.Sql, requestId: string) {
+  const rows = await client`
+    SELECT d.state, d.defer_reason, d.prompt, d.first_message_id,
+      d.admitted_root_task_run_id, d.decision_actor_run_id, d.scheduling_reason,
+      d.admitted_at, d.cancelled_at, r.id AS child_run_id,
+      r.session_id AS child_session_id, r.status AS run_status,
+      r.started_at AS run_started_at, r.finished_at AS run_finished_at,
+      r.last_error AS run_last_error,
+      (SELECT count(*)::int FROM subagent_logical_workers w
+        WHERE w.request_id = d.id) AS workers,
+      (SELECT count(*)::int FROM subagent_attempts a
+        JOIN subagent_logical_workers w ON w.id = a.logical_worker_id
+        WHERE w.request_id = d.id) AS attempts
+    FROM subagent_dispatches d
+    LEFT JOIN runs r ON r.prompt_message_id = d.first_message_id
+    WHERE d.id = ${requestId}`;
+  expect(rows).toHaveLength(1);
+  return rows[0]!;
+}
+
+async function waitForActorLockWait(client: postgres.Sql): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const waits = await client`
+      SELECT query FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND pid <> pg_backend_pid()
+        AND wait_event_type = 'Lock'`;
+    if (waits.some((row) => {
+      const query = String(row.query ?? "").toLowerCase();
+      return query.includes("from users") || query.includes('from "users"');
+    })) return;
+    if (Date.now() >= deadline) {
+      throw new Error("Admission did not reach the actor/user lock boundary");
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
 }
 
 describe.skipIf(!TEST_DATABASE_URL).sequential("durable subagent admission", () => {
@@ -814,5 +957,438 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("durable subagent admission", () 
       [2, "parent/model", "key-id-only", "provider/model", userId, "admitted"],
     ]);
   }, 180_000);
+
+  // UNEXECUTED real-Postgres regression under the heavy-command pause.
+  it("refuses initial Ovid admission into cancelled non-started state without worker or capacity leakage", async () => {
+    const fixture = await createFixture("admission_ovid_initial_refusal");
+    cleanups.push(fixture.close);
+    const { db, scratch, sessionId, userId } = fixture;
+    const service = realQuota(db, { perDay: 1, perMonth: 100 });
+    await exhaustOvidDay(fixture, service);
+    const root = await createUserRoot(db, sessionId, "Initial Ovid refusal root");
+    const batchId = newId();
+    const request = requestsFor({
+      sessionId, userId, rootTaskRunId: root.rootTaskRunId, batchId,
+      count: 1, provenance: "server", promptPrefix: "initial-ovid-refusal",
+      billingClass: "ovid_allowance",
+    })[0]!;
+
+    const outcomes = await admitDispatches(db, [request], { quota: service });
+
+    expect(outcomes).toEqual([{
+      index: 0,
+      admission: "refused",
+      code: "quota_exceeded",
+      message: "Run quota is exhausted; the subagent was not started.",
+    }]);
+    const stored = await rawQuotaRefusal(scratch.client, request.requestId);
+    expect(stored).toMatchObject({
+      state: "cancelled",
+      defer_reason: "quota_exceeded",
+      prompt: null,
+      admitted_root_task_run_id: null,
+      decision_actor_run_id: root.rootTaskRunId,
+      scheduling_reason: null,
+      admitted_at: null,
+      run_status: "cancelled",
+      run_started_at: null,
+      run_last_error: "Run quota is exhausted; the subagent was not started.",
+      workers: 0,
+      attempts: 0,
+    });
+    expect(stored.first_message_id).toEqual(expect.any(String));
+    expect(stored.child_run_id).toEqual(expect.any(String));
+    expect(stored.child_session_id).toEqual(expect.any(String));
+    expect(stored.child_session_id).not.toBe(sessionId);
+    expect(stored.cancelled_at).toBeInstanceOf(Date);
+    expect(stored.run_finished_at).toBeInstanceOf(Date);
+    expect(await scratch.client`
+      SELECT
+        (SELECT count(*)::int FROM usage_run_admissions
+          WHERE run_id = ${stored.child_run_id}) AS admissions,
+        (SELECT count(*)::int FROM usage_quota_reservations
+          WHERE run_id = ${stored.child_run_id}) AS reservations,
+        (SELECT count(*)::int FROM run_usage
+          WHERE run_id = ${stored.child_run_id}) AS usage,
+        (SELECT active_worker_count FROM subagent_roots
+          WHERE root_task_run_id = ${root.rootTaskRunId}) AS active_workers`)
+      .toEqual([{ admissions: 0, reservations: 0, usage: 0, active_workers: 0 }]);
+    expect(await capacityForSession(db, sessionId)).toEqual({
+      active: 0, limit: 50, available: 50, awaiting: 0,
+    });
+  }, 180_000);
+
+  // UNEXECUTED real-Postgres regression under the heavy-command pause.
+  it("refuses deferred Ovid activation into cancelled non-started state without consuming the free slot", async () => {
+    const fixture = await createFixture("admission_ovid_deferred_refusal");
+    cleanups.push(fixture.close);
+    const { db, scratch, sessionId, userId } = fixture;
+    const service = realQuota(db, { perDay: 1, perMonth: 100 });
+    const { deferredRequestId } = await createDeferredSlot(
+      fixture,
+      "deferred-ovid-refusal",
+      "ovid_allowance",
+      { quota: service },
+    );
+    const nextRoot = await createUserRoot(db, sessionId, "Deferred Ovid refusal next root");
+    await exhaustOvidDay(fixture, service, nextRoot.rootTaskRunId);
+
+    const outcomes = await reconsiderDeferred(db, {
+      sessionId,
+      rootTaskRunId: nextRoot.rootTaskRunId,
+      requestIds: [deferredRequestId],
+      actorRunId: nextRoot.rootTaskRunId,
+      schedulingReason: "main selected deferred work before quota refusal",
+    }, { quota: service });
+
+    expect(outcomes).toEqual([{
+      index: 0,
+      admission: "refused",
+      deferredRequestId,
+      code: "quota_exceeded",
+      message: "Run quota is exhausted; the subagent was not started.",
+    }]);
+    const stored = await rawQuotaRefusal(scratch.client, deferredRequestId);
+    expect(stored).toMatchObject({
+      state: "cancelled",
+      defer_reason: "quota_exceeded",
+      prompt: null,
+      admitted_root_task_run_id: null,
+      decision_actor_run_id: nextRoot.rootTaskRunId,
+      scheduling_reason: "main selected deferred work before quota refusal",
+      admitted_at: null,
+      run_status: "cancelled",
+      run_started_at: null,
+      run_last_error: "Run quota is exhausted; the subagent was not started.",
+      workers: 0,
+      attempts: 0,
+    });
+    expect(stored.first_message_id).toEqual(expect.any(String));
+    expect(stored.cancelled_at).toBeInstanceOf(Date);
+    expect(stored.run_finished_at).toBeInstanceOf(Date);
+    expect(await capacityForSession(db, sessionId)).toEqual({
+      active: 49, limit: 50, available: 1, awaiting: 0,
+    });
+    expect(await scratch.client`
+      SELECT
+        (SELECT count(*)::int FROM subagent_attempts
+          WHERE session_id = ${sessionId}) AS attempts,
+        (SELECT count(*)::int FROM subagent_logical_workers
+          WHERE session_id = ${sessionId}) AS workers,
+        (SELECT count(*)::int FROM usage_run_admissions
+          WHERE actor_user_id = ${userId} AND source = 'subagent') AS subagent_admissions,
+        (SELECT count(*)::int FROM usage_run_admissions
+          WHERE run_id = ${stored.child_run_id}) AS refused_admissions,
+        (SELECT active_worker_count FROM subagent_roots
+          WHERE root_task_run_id = ${nextRoot.rootTaskRunId}) AS next_root_active`)
+      .toEqual([{
+        attempts: 50,
+        workers: 50,
+        subagent_admissions: 50,
+        refused_admissions: 0,
+        next_root_active: 0,
+      }]);
+  }, 180_000);
+
+  // UNEXECUTED real-Postgres regression under the heavy-command pause.
+  it("admits captured BYOK identity at the Ovid cap and preserves the five-field same-owner snapshot", async () => {
+    const fixture = await createFixture("admission_byok_snapshot");
+    cleanups.push(fixture.close);
+    const { db, scratch, sessionId, userId } = fixture;
+    const service = realQuota(db, { perDay: 1, perMonth: 100 });
+    await exhaustOvidDay(fixture, service);
+    const root = await createUserRoot(db, sessionId, "BYOK admission root");
+    const batchId = newId();
+    const request = requestsFor({
+      sessionId, userId, rootTaskRunId: root.rootTaskRunId, batchId,
+      count: 1, provenance: "android", promptPrefix: "byok-admission",
+      billingClass: "byok",
+    })[0]!;
+    request.modelContext = { ...request.modelContext, temperature: 0.17 };
+    const seen: RunQuotaAdmissionInput[] = [];
+
+    const [outcome] = await admitDispatches(db, [request], {
+      quota: observingQuota(service, seen),
+    });
+
+    expect(outcome).toMatchObject({ index: 0, admission: "admitted" });
+    expect(seen).toEqual([{
+      actorUserId: userId,
+      source: "subagent",
+      runId: outcome!.childRunId,
+      idempotencyKey: expect.any(String),
+      billingClass: "byok",
+    }]);
+    const snapshot = await scratch.client`
+      SELECT requested_model, byok_key_id, byok_model, temperature, actor_user_id, state
+      FROM subagent_dispatches WHERE id = ${request.requestId}`;
+    expect(snapshot).toEqual([{
+      requested_model: "parent/model",
+      byok_key_id: "key-id-only",
+      byok_model: "provider/model",
+      temperature: 0.17,
+      actor_user_id: userId,
+      state: "admitted",
+    }]);
+    expect(await scratch.client`
+      SELECT actor_user_id, source, run_id, billing_class
+      FROM usage_run_admissions
+      WHERE actor_user_id = ${userId}
+        AND idempotency_key = ${seen[0]!.idempotencyKey}`)
+      .toEqual([{
+        actor_user_id: userId,
+        source: "subagent",
+        run_id: outcome!.childRunId,
+        billing_class: "byok",
+      }]);
+    expect(await scratch.client`
+      SELECT r.status, r.started_at, a.status AS attempt_status, w.status AS worker_status
+      FROM runs r
+      JOIN subagent_attempts a ON a.child_run_id = r.id
+      JOIN subagent_logical_workers w ON w.id = a.logical_worker_id
+      WHERE r.id = ${outcome!.childRunId!}`)
+      .toEqual([{ status: "running", started_at: expect.any(Date), attempt_status: "running", worker_status: "running" }]);
+    expect(await scratch.client`
+      SELECT window_kind, used_tokens::int, reserved_tokens::int
+      FROM usage_quota_counters WHERE actor_user_id = ${userId}
+      ORDER BY window_kind`)
+      .toEqual([
+        { window_kind: "day", used_tokens: 1, reserved_tokens: 0 },
+        { window_kind: "month", used_tokens: 1, reserved_tokens: 0 },
+      ]);
+    expect(await capacityForSession(db, sessionId)).toEqual({
+      active: 1, limit: 50, available: 49, awaiting: 0,
+    });
+  }, 180_000);
+
+  // UNEXECUTED real-Postgres regression under the heavy-command pause.
+  it("uses the canonical quota service on the admission transaction when no override is supplied", async () => {
+    const fixture = await createFixture("admission_default_quota");
+    cleanups.push(fixture.close);
+    const { db, scratch, sessionId, userId } = fixture;
+    const root = await createUserRoot(db, sessionId, "Canonical quota root");
+    const request = requestsFor({
+      sessionId, userId, rootTaskRunId: root.rootTaskRunId, batchId: newId(),
+      count: 1, provenance: "web", billingClass: "byok",
+    })[0]!;
+
+    const [outcome] = await admitDispatches(db, [request]);
+
+    expect(outcome).toMatchObject({ admission: "admitted" });
+    expect(await scratch.client`
+      SELECT actor_user_id, source, run_id, billing_class
+      FROM usage_run_admissions WHERE run_id = ${outcome!.childRunId!}`)
+      .toEqual([{
+        actor_user_id: userId,
+        source: "subagent",
+        run_id: outcome!.childRunId,
+        billing_class: "byok",
+      }]);
+  }, 180_000);
+
+  // UNEXECUTED real-Postgres regression under the heavy-command pause.
+  it("rolls back child and quota writes when a same-key billing conflict fails after real admission", async () => {
+    const fixture = await createFixture("admission_billing_conflict");
+    cleanups.push(fixture.close);
+    const { db, scratch, sessionId, userId } = fixture;
+    const root = await createUserRoot(db, sessionId, "Billing conflict root");
+    const batchId = newId();
+    const request = requestsFor({
+      sessionId, userId, rootTaskRunId: root.rootTaskRunId, batchId,
+      count: 1, provenance: "server", billingClass: "byok",
+    })[0]!;
+    const seen: RunQuotaAdmissionInput[] = [];
+
+    await expect(admitDispatches(db, [request], {
+      quota: sameKeyBillingConflictQuota(realQuota(db), seen),
+    })).rejects.toMatchObject({ code: "idempotency_conflict" });
+
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toMatchObject({
+      actorUserId: userId,
+      source: "subagent",
+      billingClass: "byok",
+    });
+    expect(seen[1]).toEqual({
+      ...seen[0]!,
+      billingClass: "ovid_allowance",
+    });
+    expect(seen[1]!.idempotencyKey).toBe(seen[0]!.idempotencyKey);
+    expect(seen[1]!.runId).toBe(seen[0]!.runId);
+    expect(await scratch.client`
+      SELECT
+        (SELECT count(*)::int FROM subagent_dispatches
+          WHERE id = ${request.requestId}) AS dispatches,
+        (SELECT count(*)::int FROM subagent_batches
+          WHERE id = ${batchId}) AS batches,
+        (SELECT count(*)::int FROM subagent_roots
+          WHERE root_task_run_id = ${root.rootTaskRunId}) AS roots,
+        (SELECT count(*)::int FROM usage_run_admissions
+          WHERE actor_user_id = ${userId}) AS admissions,
+        (SELECT count(*)::int FROM usage_quota_counters
+          WHERE actor_user_id = ${userId}) AS counters,
+        (SELECT count(*)::int FROM sessions
+          WHERE id <> ${sessionId}) AS child_sessions,
+        (SELECT count(*)::int FROM runs
+          WHERE session_id <> ${sessionId}) AS child_runs,
+        (SELECT count(*)::int FROM subagent_logical_workers
+          WHERE session_id = ${sessionId}) AS workers,
+        (SELECT count(*)::int FROM subagent_attempts
+          WHERE session_id = ${sessionId}) AS attempts`)
+      .toEqual([{
+        dispatches: 0,
+        batches: 0,
+        roots: 0,
+        admissions: 0,
+        counters: 0,
+        child_sessions: 0,
+        child_runs: 0,
+        workers: 0,
+        attempts: 0,
+      }]);
+    expect(await capacityForSession(db, sessionId)).toEqual({
+      active: 0, limit: 50, available: 50, awaiting: 0,
+    });
+  }, 180_000);
+
+  // UNEXECUTED real-Postgres regression under the heavy-command pause.
+  it("preserves same-owner actor validation before quota or canonical child writes", async () => {
+    const fixture = await createFixture("admission_same_owner_actor");
+    cleanups.push(fixture.close);
+    const { db, scratch, sessionId, userId } = fixture;
+    const root = await createUserRoot(db, sessionId, "Same-owner actor root");
+    const request = requestsFor({
+      sessionId, userId, rootTaskRunId: root.rootTaskRunId, batchId: newId(),
+      count: 1, provenance: "server", billingClass: "byok",
+    })[0]!;
+    request.modelContext = { ...request.modelContext, actorUserId: "not-the-session-owner" };
+    const seen: RunQuotaAdmissionInput[] = [];
+
+    const outcomes = await admitDispatches(db, [request], {
+      quota: observingQuota(realQuota(db), seen),
+    });
+
+    expect(outcomes).toEqual([{
+      index: 0,
+      admission: "refused",
+      code: "actor_mismatch",
+      message: "Model billing identity does not match the dispatch user.",
+    }]);
+    expect(seen).toEqual([]);
+    expect(await scratch.client`
+      SELECT
+        (SELECT count(*)::int FROM subagent_dispatches
+          WHERE id = ${request.requestId}) AS dispatches,
+        (SELECT count(*)::int FROM usage_run_admissions
+          WHERE actor_user_id = ${userId}) AS admissions,
+        (SELECT count(*)::int FROM sessions
+          WHERE id <> ${sessionId}) AS child_sessions,
+        (SELECT count(*)::int FROM subagent_roots
+          WHERE root_task_run_id = ${root.rootTaskRunId}) AS roots`)
+      .toEqual([{ dispatches: 0, admissions: 0, child_sessions: 0, roots: 0 }]);
+    expect(await capacityForSession(db, sessionId)).toEqual({
+      active: 0, limit: 50, available: 50, awaiting: 0,
+    });
+  }, 180_000);
+
+  // UNEXECUTED real-Postgres regressions under the heavy-command pause.
+  it.each(["initial", "deferred"] as const)(
+    "uses parent session -> actor -> session-admission -> root -> quota lock order without a separate-connection deadlock: %s",
+    async (mode) => {
+      const fixture = await createFixture(`admission_lock_${mode}`);
+      cleanups.push(fixture.close);
+      const { db, scratch, sessionId, userId } = fixture;
+      const other = createDb(scratch.url, { max: 2 });
+      cleanups.push(() => other.$client.end({ timeout: 5 }));
+      const service = realQuota(db);
+      let rootTaskRunId: string;
+      let request: AdmissionRequest | undefined;
+      let deferredRequestId: string | undefined;
+      if (mode === "initial") {
+        const root = await createUserRoot(db, sessionId, "Initial lock-order root");
+        rootTaskRunId = root.rootTaskRunId;
+        request = requestsFor({
+          sessionId, userId, rootTaskRunId, batchId: newId(),
+          count: 1, provenance: "web", billingClass: "ovid_allowance",
+        })[0]!;
+        expect(await service.admitRun({
+          actorUserId: userId,
+          source: "interactive",
+          runId: rootTaskRunId,
+          idempotencyKey: `lock-order-seed-${newId()}`,
+          billingClass: "ovid_allowance",
+        })).toEqual({ ok: true });
+      } else {
+        const deferred = await createDeferredSlot(
+          fixture,
+          "deferred-lock-order",
+          "ovid_allowance",
+          { quota: service },
+        );
+        deferredRequestId = deferred.deferredRequestId;
+        const nextRoot = await createUserRoot(db, sessionId, "Deferred lock-order next root");
+        rootTaskRunId = nextRoot.rootTaskRunId;
+      }
+
+      // Seed the real migrated table for the canonical parent session. This
+      // auto-committed fixture row is visible before either transaction starts;
+      // the race itself still enters through the public admission operation.
+      await db.insert(subagentSessionAdmission)
+        .values({ sessionId })
+        .onConflictDoNothing({ target: subagentSessionAdmission.sessionId });
+      expect(await scratch.client`
+        SELECT session_id FROM subagent_session_admission
+        WHERE session_id = ${sessionId}`).toEqual([{ session_id: sessionId }]);
+
+      let admissionPromise: Promise<AdmissionOutcome[]> | undefined;
+      try {
+        await other.transaction(async (tx) => {
+          await tx.execute(sql`SET LOCAL deadlock_timeout = '150ms'`);
+          await tx.execute(sql`SET LOCAL lock_timeout = '10s'`);
+          // Opposite entry point: user -> session-admission -> root -> quota.
+          const lockedUsers = await tx.execute(
+            sql`SELECT uid FROM users WHERE uid = ${userId} FOR UPDATE`,
+          ) as unknown as Array<{ uid: string }>;
+          expect(lockedUsers).toHaveLength(1);
+          admissionPromise = mode === "initial"
+            ? admitDispatches(db, [request!], { quota: service })
+            : reconsiderDeferred(db, {
+              sessionId,
+              rootTaskRunId,
+              requestIds: [deferredRequestId!],
+              actorRunId: rootTaskRunId,
+              schedulingReason: "main selected deferred work during lock race",
+            }, { quota: service });
+          void admissionPromise.catch(() => {});
+          await waitForActorLockWait(scratch.client);
+          // Correct admission holds neither session-admission nor root lock
+          // while waiting for this user. Either inverse order deadlocks here.
+          const lockedSessionAdmission = await tx.execute(sql`
+            SELECT session_id FROM subagent_session_admission
+            WHERE session_id = ${sessionId} FOR UPDATE`) as unknown as Array<{ session_id: string }>;
+          expect(lockedSessionAdmission).toHaveLength(1);
+          expect(lockedSessionAdmission[0]?.session_id).toBe(sessionId);
+          const lockedRoot = await tx.execute(
+            sql`SELECT id FROM runs WHERE id = ${rootTaskRunId} FOR UPDATE`,
+          ) as unknown as Array<{ id: string }>;
+          expect(lockedRoot).toHaveLength(1);
+          const lockedCounters = await tx.execute(sql`
+            SELECT actor_user_id FROM usage_quota_counters
+            WHERE actor_user_id = ${userId} FOR UPDATE`) as unknown as Array<{ actor_user_id: string }>;
+          expect(lockedCounters).toHaveLength(2);
+        });
+        const outcomes = await admissionPromise!;
+        expect(outcomes).toHaveLength(1);
+        expect(outcomes[0]).toMatchObject({ index: 0, admission: "admitted" });
+        if (mode === "deferred") {
+          expect(outcomes[0]!.deferredRequestId).toBe(deferredRequestId);
+        }
+        expect((await capacityForSession(db, sessionId)).active).toBe(mode === "initial" ? 1 : 50);
+      } finally {
+        if (admissionPromise !== undefined) await admissionPromise.catch(() => {});
+      }
+    },
+    180_000,
+  );
 
 });

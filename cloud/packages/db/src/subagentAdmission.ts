@@ -1,6 +1,7 @@
 import { and, asc, eq, gt, inArray, isNotNull, sql } from "drizzle-orm";
 import type { StructuredSubagentReport } from "@ovid/shared";
 import type { Db } from "./client.js";
+import { RunQuotaService } from "./quotaService.js";
 import {
   fingerprintRootFinalizationReports,
   readDurableSubagentReportSnapshotWithin,
@@ -21,6 +22,7 @@ import {
   subagentRootFinalizations,
   subagentRoots,
   subagentSessionAdmission,
+  users,
   type SubagentAttemptRow,
   type SubagentDispatchRow,
   type SubagentRootRow,
@@ -39,6 +41,15 @@ export interface InheritedModelContext {
   byokModel?: string;
   temperature?: number | null;
   actorUserId: string;
+}
+
+export type SubagentRunQuota = Pick<RunQuotaService, "admitRun"> & {
+  /** Bind admission to the caller's transaction; never use the root pool independently. */
+  forTransaction(db: Db): Pick<RunQuotaService, "admitRun">;
+};
+
+export interface SubagentAdmissionOptions {
+  quota?: SubagentRunQuota;
 }
 
 export interface AdmissionRequest {
@@ -103,6 +114,18 @@ interface RootContext {
 
 class RootFinalizedError extends Error {}
 
+const QUOTA_EXCEEDED_MESSAGE = "Run quota is exhausted; the subagent was not started.";
+
+function quotaFor(
+  tx: Tx,
+  quota: SubagentRunQuota | undefined,
+): Pick<RunQuotaService, "admitRun"> {
+  const transactionDb = tx as unknown as Db;
+  return quota === undefined
+    ? new RunQuotaService(transactionDb)
+    : quota.forTransaction(transactionDb);
+}
+
 function refusal(index: number, code: string, message: string): AdmissionOutcome {
   return { index, admission: "refused", code, message };
 }
@@ -143,14 +166,17 @@ function validateRequest(request: AdmissionRequest): AdmissionOutcome | null {
   return null;
 }
 
-async function lockSession(tx: Tx, sessionId: string): Promise<{ userId: string } | null> {
+async function lockParentSession(tx: Tx, sessionId: string): Promise<{ userId: string } | null> {
   const found = await tx
     .select({ userId: sessions.userId })
     .from(sessions)
     .where(eq(sessions.id, sessionId))
     .for("update")
     .limit(1);
-  if (found.length === 0) return null;
+  return found[0] ?? null;
+}
+
+async function lockSessionAdmission(tx: Tx, sessionId: string): Promise<void> {
   await tx
     .insert(subagentSessionAdmission)
     .values({ sessionId })
@@ -161,7 +187,25 @@ async function lockSession(tx: Tx, sessionId: string): Promise<{ userId: string 
     .where(eq(subagentSessionAdmission.sessionId, sessionId))
     .for("update")
     .limit(1);
-  return found[0]!;
+}
+
+async function lockSession(tx: Tx, sessionId: string): Promise<{ userId: string } | null> {
+  const session = await lockParentSession(tx, sessionId);
+  if (session === null) return null;
+  await lockSessionAdmission(tx, sessionId);
+  return session;
+}
+
+async function lockAdmissionActor(tx: Tx, actorUserId: string): Promise<void> {
+  // R0 locks user before run/counter rows. Take that lock before the session-
+  // admission or root locks so quota paths have no inverse-order cycle.
+  const found = await tx
+    .select({ uid: users.uid })
+    .from(users)
+    .where(eq(users.uid, actorUserId))
+    .for("update")
+    .limit(1);
+  if (found.length === 0) throw new Error("Subagent admission actor not found");
 }
 
 async function canonicalRoot(
@@ -262,11 +306,11 @@ async function materializeAdmission(
   decisionActorRunId: string,
   schedulingReason: string | null,
   includeDeferredId: boolean,
+  quota: Pick<RunQuotaService, "admitRun">,
 ): Promise<AdmissionOutcome> {
   const root = await lockRootForAdmission(tx, dispatch.sessionId, activeRootTaskRunId);
-  const admittedAt = new Date();
-  // IDs are deliberately allocated only after capacity and finalization fences
-  // have admitted this request. Deferred/refused work has no child identity.
+  // Capacity/finalization have admitted this far. Prepare the canonical run
+  // anchor required by R0 without creating an active attempt or started run.
   const logicalWorkerId = newId();
   const attemptId = newId();
   const childSessionId = newId();
@@ -274,13 +318,14 @@ async function materializeAdmission(
   const firstMessageId = newId();
   const prompt = dispatch.prompt;
   if (prompt === null) throw new Error("Deferred prompt is unavailable before canonical child creation");
+  const preparedAt = new Date();
 
   await tx.insert(sessions).values({
     id: childSessionId,
     userId: dispatch.userId,
     title: `subagent: ${prompt.replace(/\s+/g, " ").slice(0, 60)}`,
-    createdAt: admittedAt,
-    updatedAt: admittedAt,
+    createdAt: preparedAt,
+    updatedAt: preparedAt,
   });
   // Keep the existing cold-resume lineage reader compatible. The lifecycle
   // tables add precise root/attempt lineage; they do not replace this reader.
@@ -288,6 +333,60 @@ async function materializeAdmission(
     sessionId: childSessionId,
     state: { subagentParentSessionId: dispatch.sessionId },
   });
+  await tx.insert(messages).values({
+    id: firstMessageId,
+    sessionId: childSessionId,
+    role: "user",
+    content: prompt,
+    createdAt: preparedAt,
+  });
+  await tx.insert(runs).values({
+    id: childRunId,
+    sessionId: childSessionId,
+    status: "queued",
+    promptMessageId: firstMessageId,
+    createdAt: preparedAt,
+  });
+  const quotaAdmission = await quota.admitRun({
+    actorUserId: dispatch.actorUserId,
+    source: "subagent",
+    runId: childRunId,
+    idempotencyKey: `subagent:${dispatch.id}:${childRunId}`,
+    billingClass: dispatch.byokKeyId === null ? "ovid_allowance" : "byok",
+  });
+  if (!quotaAdmission.ok) {
+    const refusedAt = new Date();
+    await tx
+      .update(runs)
+      .set({
+        status: "cancelled",
+        finishedAt: refusedAt,
+        lastError: QUOTA_EXCEEDED_MESSAGE,
+      })
+      .where(and(eq(runs.id, childRunId), eq(runs.status, "queued")));
+    await tx
+      .update(subagentDispatches)
+      .set({
+        state: "cancelled",
+        prompt: null,
+        firstMessageId,
+        deferReason: "quota_exceeded",
+        decisionActorRunId,
+        schedulingReason,
+        cancelledAt: refusedAt,
+        updatedAt: refusedAt,
+      })
+      .where(eq(subagentDispatches.id, dispatch.id));
+    return {
+      index: dispatch.requestIndex,
+      admission: "refused",
+      ...(includeDeferredId ? { deferredRequestId: dispatch.id } : {}),
+      code: "quota_exceeded",
+      message: QUOTA_EXCEEDED_MESSAGE,
+    };
+  }
+
+  const admittedAt = new Date();
   let startedAt = new Date();
   if (startedAt.getTime() === admittedAt.getTime()) {
     // timestamptz(3) is millisecond precision. Ensure the two real transitions
@@ -295,21 +394,10 @@ async function materializeAdmission(
     await tx.execute(sql`SELECT pg_sleep(0.001)`);
     startedAt = new Date();
   }
-  await tx.insert(messages).values({
-    id: firstMessageId,
-    sessionId: childSessionId,
-    role: "user",
-    content: prompt,
-    createdAt: startedAt,
-  });
-  await tx.insert(runs).values({
-    id: childRunId,
-    sessionId: childSessionId,
-    status: "running",
-    promptMessageId: firstMessageId,
-    startedAt,
-    createdAt: startedAt,
-  });
+  await tx
+    .update(runs)
+    .set({ status: "running", startedAt })
+    .where(and(eq(runs.id, childRunId), eq(runs.status, "queued")));
   await tx.insert(subagentLogicalWorkers).values({
     id: logicalWorkerId,
     requestId: dispatch.id,
@@ -402,6 +490,7 @@ function dispatchValues(request: AdmissionRequest, now: Date): typeof subagentDi
 export async function admitDispatches(
   db: Db,
   requests: readonly AdmissionRequest[],
+  options: SubagentAdmissionOptions = {},
 ): Promise<AdmissionOutcome[]> {
   if (requests.length === 0) return [];
   const sessionId = requests[0]!.sessionId;
@@ -410,10 +499,15 @@ export async function admitDispatches(
       refusal(request.index, "invalid_batch", "One admission transaction cannot span sessions."));
   }
   return db.transaction(async (tx) => {
-    const session = await lockSession(tx, sessionId);
+    const session = await lockParentSession(tx, sessionId);
     if (session === null) {
       return requests.map((request) => refusal(request.index, "not_found", "Session not found."));
     }
+    // Every valid dispatch has actorUserId === userId === session.userId.
+    // Lock that sole actor before session-admission and every root/quota lock.
+    await lockAdmissionActor(tx, session.userId);
+    await lockSessionAdmission(tx, sessionId);
+    const quota = quotaFor(tx, options.quota);
     const outcomes = new Map<AdmissionRequest, AdmissionOutcome>();
     const valid: AdmissionRequest[] = [];
     const rootCache = new Map<string, Promise<RootContext | null>>();
@@ -497,10 +591,13 @@ export async function admitDispatches(
           request.parentRunId,
           null,
           false,
+          quota,
         );
         outcomes.set(request, outcome);
-        active += 1;
-        counts.admitted += 1;
+        if (outcome.admission === "admitted") {
+          active += 1;
+          counts.admitted += 1;
+        }
       } catch (error) {
         if (!(error instanceof RootFinalizedError)) throw error;
         outcomes.set(request, refusal(request.index, "root_finalized", "The root execution epoch is already finalized."));
@@ -550,13 +647,19 @@ export async function reconsiderDeferred(
     actorRunId: string;
     schedulingReason: string;
   },
+  options: SubagentAdmissionOptions = {},
 ): Promise<AdmissionOutcome[]> {
   if (input.requestIds.length === 0) return [];
   return db.transaction(async (tx) => {
-    const session = await lockSession(tx, input.sessionId);
+    const session = await lockParentSession(tx, input.sessionId);
     if (session === null) {
       return input.requestIds.map((_, index) => refusal(index, "not_found", "Session not found."));
     }
+    // HEAD's same-owner invariant makes the session owner the captured actor.
+    // Lock that actor before session-admission and every root/quota lock.
+    await lockAdmissionActor(tx, session.userId);
+    await lockSessionAdmission(tx, input.sessionId);
+    const quota = quotaFor(tx, options.quota);
     const root = await canonicalRoot(tx, input.sessionId, input.rootTaskRunId);
     // Reconsideration is a main-run action inside the exact active next-user
     // root transaction. Same-session lineage alone cannot authorize a late
@@ -609,9 +712,10 @@ export async function reconsiderDeferred(
           input.actorRunId,
           input.schedulingReason,
           true,
+          quota,
         );
         outcomes.push(outcome);
-        active += 1;
+        if (outcome.admission === "admitted") active += 1;
       } catch (error) {
         if (!(error instanceof RootFinalizedError)) throw error;
         outcomes.push(refusal(index, "root_finalized", "The root execution epoch is already finalized."));
