@@ -2,7 +2,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import { createDb, migrate, type Db } from "./client.js";
 import { messages, newId, runs, sessions, users as usersRepo } from "./repos.js";
-import { runUsage } from "./runUsageRepos.js";
+import { imagesRepo } from "./imagesRepos.js";
+import { imageUsage, runUsage } from "./runUsageRepos.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 
@@ -75,6 +76,11 @@ describe.skipIf(!TEST_DATABASE_URL)("runUsage repo against real postgres", () =>
       outputTokens: 30,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
+      quotaCallId: null,
+      requestedModel: "auto",
+      providerModel: null,
+      costUsd: null,
+      costSource: null,
     });
     expect(row.createdAt).toBeInstanceOf(Date);
   });
@@ -97,12 +103,53 @@ describe.skipIf(!TEST_DATABASE_URL)("runUsage repo against real postgres", () =>
     ]);
   });
 
+  it("record is idempotent by run/quota call and preserves exact measured facts", async () => {
+    const uid = await seedUser();
+    const { session, run } = await seedRun(uid, "Exact");
+    const input = {
+      userId: uid,
+      sessionId: session.id,
+      runId: run.id,
+      quotaCallId: `${run.id}:model-call:0`,
+      model: "auto",
+      inputTokens: 12,
+      outputTokens: 3,
+      providerModel: "provider/actual",
+      costUsd: "0.0000000001",
+      costSource: "litellm" as const,
+      createdAt: at("2026-10-18T20:00:00.000Z"),
+    };
+    const [first, replay, concurrent] = await Promise.all([
+      runUsage.record(db, input),
+      runUsage.record(db, input),
+      runUsage.record(db, input),
+    ]);
+    expect(first).toMatchObject({
+      requestedModel: "auto",
+      providerModel: "provider/actual",
+      costUsd: "0.0000000001",
+      costSource: "litellm",
+    });
+    expect(replay.id).toBe(first.id);
+    expect(concurrent.id).toBe(first.id);
+    const stored = await db.$client<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM run_usage
+       WHERE run_id = ${run.id} AND quota_call_id = ${input.quotaCallId}`;
+    expect(stored[0]?.count).toBe(1);
+    expect(await runUsage.totals(db, {
+      userId: uid,
+      since: at("2026-10-18T00:00:00.000Z"),
+      until: at("2026-10-19T00:00:00.000Z"),
+    })).toMatchObject({ modelCalls: 1, costUsd: "0.0000000001" });
+  });
+
   describe("aggregates", () => {
     let uid: string;
     let other: string;
     let a: Awaited<ReturnType<typeof seedRun>>;
     let b: Awaited<ReturnType<typeof seedRun>>;
     let c: Awaited<ReturnType<typeof seedRun>>;
+    let d: Awaited<ReturnType<typeof seedRun>>;
     const since = at("2026-10-10T00:00:00.000Z");
     const until = at("2026-10-20T00:00:00.000Z");
 
@@ -112,6 +159,7 @@ describe.skipIf(!TEST_DATABASE_URL)("runUsage repo against real postgres", () =>
       a = await seedRun(uid, "Alpha");
       b = await seedRun(uid, "Beta");
       c = await seedRun(uid, "Gone");
+      d = await seedRun(uid, "Images only");
       await sessions.softDelete(db, c.session.id, uid);
       const rec = (
         run: Awaited<ReturnType<typeof seedRun>>,
@@ -121,6 +169,13 @@ describe.skipIf(!TEST_DATABASE_URL)("runUsage repo against real postgres", () =>
         createdAt: string,
         cache: [number, number] = [0, 0],
         user = uid,
+        facts: {
+          quotaCallId?: string;
+          requestedModel?: string | null;
+          providerModel?: string | null;
+          costUsd?: string | null;
+          costSource?: "litellm" | "provider" | null;
+        } = {},
       ) =>
         runUsage.record(db, {
           userId: user,
@@ -132,18 +187,79 @@ describe.skipIf(!TEST_DATABASE_URL)("runUsage repo against real postgres", () =>
           cacheReadTokens: cache[0],
           cacheWriteTokens: cache[1],
           createdAt: at(createdAt),
+          ...facts,
         });
       // Run A: two calls (auto, then glm) on 2026-10-18 UTC late evening —
       // which is 2026-10-19 in IST (+330).
-      await rec(a, "auto", 1000, 100, "2026-10-18T20:00:00.000Z", [400, 50]);
-      await rec(a, "glm-5.3-flash", 500, 50, "2026-10-18T20:01:00.000Z");
-      // Run B: one call on 2026-10-17.
-      await rec(b, "auto", 3000, 300, "2026-10-17T10:00:00.000Z");
-      // Run C (deleted session): counted, title hidden.
-      await rec(c, "minimax-m3", 10, 1, "2026-10-16T10:00:00.000Z");
+      await rec(a, "auto", 1000, 100, "2026-10-18T20:00:00.000Z", [400, 50], uid, {
+        quotaCallId: "a-call-1",
+        providerModel: "served/a",
+        costUsd: "0.0000000001",
+        costSource: "litellm",
+      });
+      await rec(a, "glm-5.3-flash", 500, 50, "2026-10-18T20:01:00.000Z", [0, 0], uid, {
+        quotaCallId: "a-call-2",
+        providerModel: "served/b",
+      });
+      // Run B: one call on 2026-10-17; provider model remains unknown.
+      await rec(b, "auto", 3000, 300, "2026-10-17T10:00:00.000Z", [0, 0], uid, {
+        costUsd: "0.2",
+        costSource: "provider",
+      });
+      // Run C (deleted session): counted, title hidden; a measured zero is not null.
+      await rec(c, "minimax-m3", 10, 1, "2026-10-16T10:00:00.000Z", [0, 0], uid, {
+        costUsd: "0",
+        costSource: "provider",
+      });
       // Out of window, and another user's data: never counted.
-      await rec(a, "auto", 99999, 9999, "2026-10-01T10:00:00.000Z");
-      await rec(a, "auto", 77777, 7777, "2026-10-18T10:00:00.000Z", [0, 0], other);
+      await rec(a, "auto", 99999, 9999, "2026-10-01T10:00:00.000Z", [0, 0], uid, { costUsd: "999" });
+      await rec(a, "auto", 77777, 7777, "2026-10-18T10:00:00.000Z", [0, 0], other, { costUsd: "777" });
+
+      let imageSequence = 0;
+      const image = async (
+        account: string,
+        sessionId: string | null,
+        runId: string | null,
+        op: "generate" | "edit",
+        costUsd: string | null,
+        createdAt: string,
+      ) => {
+        imageSequence += 1;
+        const request = `image-${imageSequence}`;
+        await imagesRepo.insertPending(db, {
+          account,
+          request,
+          fingerprint: `${imageSequence}`.padStart(64, "0"),
+          reserved: "0",
+          budgetWindow: "test",
+          createdAt: Math.floor(at(createdAt).getTime() / 1000),
+        });
+        await imageUsage.record(db, { account, request, sessionId, runId, op, costUsd });
+      };
+      await image(uid, a.session.id, a.run.id, "generate", "0.0000000001", "2026-10-18T21:00:00.000Z");
+      // Replaying the same image job must not add a second operation or charge.
+      await imageUsage.record(db, {
+        account: uid,
+        request: "image-1",
+        sessionId: a.session.id,
+        runId: a.run.id,
+        op: "generate",
+        costUsd: "0.0000000001",
+      });
+      await image(uid, b.session.id, b.run.id, "edit", null, "2026-10-17T11:00:00.000Z");
+      await image(uid, d.session.id, d.run.id, "edit", "0", "2026-10-16T11:00:00.000Z");
+      // Historical/unattributed images count globally but are never assigned a chat.
+      await image(uid, null, null, "generate", "0.1", "2026-10-18T22:00:00.000Z");
+      await image(other, null, null, "edit", "777", "2026-10-18T22:00:00.000Z");
+      await imagesRepo.insertPending(db, {
+        account: uid,
+        request: "historical-unknown",
+        fingerprint: "f".repeat(64),
+        reserved: "0",
+        budgetWindow: "test",
+        createdAt: Math.floor(at("2026-10-18T22:00:00.000Z").getTime() / 1000),
+      });
+      await db.$client`INSERT INTO image_usage_facts (account, request) VALUES (${uid}, 'historical-unknown')`;
     });
 
     it("totals: runs = distinct runs, model_calls = rows, token sums; only the caller, only the window", async () => {
@@ -154,6 +270,7 @@ describe.skipIf(!TEST_DATABASE_URL)("runUsage repo against real postgres", () =>
         outputTokens: 451,
         cacheReadTokens: 400,
         cacheWriteTokens: 50,
+        costUsd: "0.2000000001",
       });
       expect(
         await runUsage.totals(db, { userId: uid, since: at("2030-01-01T00:00:00Z"), until: at("2030-01-02T00:00:00Z") }),
@@ -164,15 +281,29 @@ describe.skipIf(!TEST_DATABASE_URL)("runUsage repo against real postgres", () =>
         outputTokens: 0,
         cacheReadTokens: 0,
         cacheWriteTokens: 0,
+        costUsd: null,
       });
+    });
+
+    it("images aggregate measured operations/cost once while unknown empty facts stay null", async () => {
+      expect(await imageUsage.totals(db, { userId: uid, since, until })).toEqual({
+        generateCount: 2,
+        editCount: 2,
+        costUsd: "0.1000000001",
+      });
+      expect(await imageUsage.totals(db, {
+        userId: uid,
+        since: at("2030-01-01T00:00:00Z"),
+        until: at("2030-01-02T00:00:00Z"),
+      })).toEqual({ generateCount: null, editCount: null, costUsd: null });
     });
 
     it("byDay buckets by the client's UTC offset (newest first) and validates it", async () => {
       const utc = await runUsage.byDay(db, { userId: uid, since, until, utcOffsetMinutes: 0 });
-      expect(utc.map((d) => [d.date, d.runs, d.modelCalls, d.inputTokens])).toEqual([
-        ["2026-10-18", 1, 2, 1500],
-        ["2026-10-17", 1, 1, 3000],
-        ["2026-10-16", 1, 1, 10],
+      expect(utc.map((d) => [d.date, d.runs, d.modelCalls, d.inputTokens, d.costUsd])).toEqual([
+        ["2026-10-18", 1, 2, 1500, "0.0000000001"],
+        ["2026-10-17", 1, 1, 3000, "0.2000000000"],
+        ["2026-10-16", 1, 1, 10, "0.0000000000"],
       ]);
       const ist = await runUsage.byDay(db, { userId: uid, since, until, utcOffsetMinutes: 330 });
       expect(ist.map((d) => d.date)).toEqual(["2026-10-19", "2026-10-17", "2026-10-16"]);
@@ -187,21 +318,29 @@ describe.skipIf(!TEST_DATABASE_URL)("runUsage repo against real postgres", () =>
 
     it("byModel sorts by total tokens desc", async () => {
       const models = await runUsage.byModel(db, { userId: uid, since, until });
-      expect(models.map((m) => [m.model, m.runs, m.modelCalls, m.inputTokens, m.outputTokens])).toEqual([
-        ["auto", 2, 2, 4000, 400],
-        ["glm-5.3-flash", 1, 1, 500, 50],
-        ["minimax-m3", 1, 1, 10, 1],
+      expect(models.map((m) => [m.model, m.runs, m.modelCalls, m.inputTokens, m.outputTokens, m.costUsd])).toEqual([
+        ["auto", 2, 2, 4000, 400, "0.2000000001"],
+        ["glm-5.3-flash", 1, 1, 500, 50, null],
+        ["minimax-m3", 1, 1, 10, 1, "0.0000000000"],
       ]);
     });
 
-    it("bySession joins titles, hides deleted sessions' titles but still counts them", async () => {
+    it("bySession joins titles/cost/images without guessing unattributed history", async () => {
       const rows = await runUsage.bySession(db, { userId: uid, since, until });
-      expect(rows.map((s) => [s.sessionId, s.title, s.runs, s.modelCalls, s.inputTokens, s.outputTokens])).toEqual([
-        [b.session.id, "Beta", 1, 1, 3000, 300],
-        [a.session.id, "Alpha", 1, 2, 1500, 150],
-        [c.session.id, null, 1, 1, 10, 1],
+      expect(rows.map((s) => [s.sessionId, s.title, s.runs, s.modelCalls, s.inputTokens, s.outputTokens, s.costUsd])).toEqual([
+        [b.session.id, "Beta", 1, 1, 3000, 300, "0.2000000000"],
+        [a.session.id, "Alpha", 1, 2, 1500, 150, "0.0000000001"],
+        [c.session.id, null, 1, 1, 10, 1, "0.0000000000"],
+        [d.session.id, "Images only", 0, 0, 0, 0, null],
       ]);
-      expect(rows[1]!.lastAt.toISOString()).toBe("2026-10-18T20:01:00.000Z");
+      expect(rows.map((s) => s.images)).toEqual([
+        { generateCount: 0, editCount: 1, costUsd: null },
+        { generateCount: 1, editCount: 0, costUsd: "0.0000000001" },
+        { generateCount: null, editCount: null, costUsd: null },
+        { generateCount: 0, editCount: 1, costUsd: "0.0000000000" },
+      ]);
+      expect(rows.every((s) => s.sessionId !== null)).toBe(true);
+      expect(rows[1]!.lastAt.toISOString()).toBe("2026-10-18T21:00:00.000Z");
       expect(await runUsage.bySession(db, { userId: uid, since, until, limit: 1 })).toHaveLength(1);
     });
 
@@ -225,6 +364,9 @@ describe.skipIf(!TEST_DATABASE_URL)("runUsage repo against real postgres", () =>
         sessionTitle: "Alpha",
         status: "running",
         models: ["auto", "glm-5.3-flash"],
+        requestedModels: ["auto", "glm-5.3-flash"],
+        providerModels: ["served/a", "served/b"],
+        costUsd: "0.0000000001",
         modelCalls: 2,
         inputTokens: 1500,
         outputTokens: 150,
@@ -234,6 +376,10 @@ describe.skipIf(!TEST_DATABASE_URL)("runUsage repo against real postgres", () =>
       expect(runA.startedAt).toBeInstanceOf(Date);
       expect(runA.finishedAt).toBeNull();
       expect(page1.rows[0]!.sessionTitle).toBeNull(); // deleted session
+      expect(page1.rows.map((r) => [r.requestedModels, r.providerModels, r.costUsd])).toEqual([
+        [["minimax-m3"], null, "0.0000000000"],
+        [["auto"], null, "0.2000000000"],
+      ]);
     });
 
     it("recentRuns limit defaults to 50 and is capped at 200", async () => {

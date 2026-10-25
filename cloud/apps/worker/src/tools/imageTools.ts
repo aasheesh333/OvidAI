@@ -441,10 +441,26 @@ export type ImageVisionGuard = () => Promise<ImageVisionDecision>;
 // Tools
 // ---------------------------------------------------------------------------
 
+export type ImageToolContext = Pick<ToolContext, "userId" | "sessionId" | "runId">;
+
+export interface ImageUsageFact {
+  account: string;
+  request: string;
+  sessionId: string;
+  runId: string;
+  op: "generate" | "edit";
+  costUsd: string | null;
+}
+
+export type ImageUsageRecorder = (fact: ImageUsageFact) => Promise<unknown>;
+
 export interface ImageToolDeps {
   call: ImageCall;
   capabilities: ImageCapabilities | null;
   publishArtifact: ImageArtifactPublisher;
+  /** Approved image_usage_facts satellite; optional for older tool embedders. */
+  recordUsage?: ImageUsageRecorder;
+  log?: (message: string) => void;
   notifier?: ImageFailureNotifier;
   visionGuard?: ImageVisionGuard;
 }
@@ -683,6 +699,41 @@ function validateCapabilities(
   return null;
 }
 
+const RECEIPT_COST_RE = /^\d+(?:\.\d{1,10})?$/;
+
+function confirmedReceiptCost(body: Record<string, unknown>): string | null {
+  const receipt = isObject(body.receipt) ? body.receipt : null;
+  if (receipt?.state !== "confirmed" || typeof receipt.charged !== "string") return null;
+  const charged = receipt.charged;
+  const [whole] = charged.split(".");
+  return RECEIPT_COST_RE.test(charged) && whole!.length <= 28 ? charged : null;
+}
+
+async function recordImageUsage(
+  ctx: ImageToolContext,
+  deps: ImageToolDeps,
+  op: "generate" | "edit",
+  requestId: string,
+  body: Record<string, unknown>,
+): Promise<void> {
+  if (deps.recordUsage === undefined) return;
+  try {
+    await deps.recordUsage({
+      account: ctx.userId,
+      request: requestId,
+      sessionId: ctx.sessionId,
+      runId: ctx.runId,
+      op,
+      costUsd: confirmedReceiptCost(body),
+    });
+  } catch (err) {
+    // Telemetry must not turn an already-confirmed image into a failed tool.
+    (deps.log ?? console.warn)(
+      `[worker] image usage record failed (run ${ctx.runId}): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
 async function persistImage(
   ctx: ToolContext,
   deps: ImageToolDeps,
@@ -690,6 +741,7 @@ async function persistImage(
   requestId: string,
   body: Record<string, unknown>,
 ): Promise<ToolResult> {
+  await recordImageUsage(ctx, deps, op, requestId, body);
   const rows = Array.isArray(body.data) ? body.data : [];
   const first = rows[0];
   if (!isObject(first) || typeof first.b64_json !== "string" || first.b64_json === "") {

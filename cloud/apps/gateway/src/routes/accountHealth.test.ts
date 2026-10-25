@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Db } from "@ovid/db";
 import { buildGateway } from "../app.js";
 import {
@@ -29,8 +29,8 @@ interface FakeOptions {
   bannedAt?: Date | null;
   bannedReason?: string | null;
   usedBytes?: number;
-  today?: Record<string, number>;
-  month?: Record<string, number>;
+  today?: Record<string, number | string>;
+  month?: Record<string, number | string>;
   deletion?: { uid: string; state: string; deleteAfter: number; record: Record<string, unknown> } | null;
 }
 
@@ -149,6 +149,7 @@ describe("GET /cloud/v1/account/health", () => {
       outputTokens: 200,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
+      costUsd: null,
     });
     expect(body.usage.month.used.inputTokens).toBe(8000);
     // Token caps are the plan's, and the remaining number is the one the
@@ -178,9 +179,9 @@ describe("GET /cloud/v1/account/health", () => {
     expect(body.storage.remainingBytes).toBe(0);
   });
 
-  it("a recorded zero is a fact: no usage rows reads as 0, not null", async () => {
-    // The ledger was read and had nothing in it. That is different from a
-    // number the gateway cannot see, which is null.
+  it("recorded zero token counts stay zero while unmeasured cost stays null", async () => {
+    // The token ledger was read and had nothing in it. Its measured USD sum
+    // is still unknown, so the additive cost field is null rather than zero.
     const { body } = await read({});
     expect(body.usage.today.used).toEqual({
       runs: 0,
@@ -189,8 +190,40 @@ describe("GET /cloud/v1/account/health", () => {
       outputTokens: 0,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
+      costUsd: null,
     });
     expect(body.storage.usedBytes).toBe(0);
+  });
+
+  // UNEXECUTED regression while HEAVY-COMMANDS-PAUSED.md is active. Exact DTO
+  // assertions keep measured cost, measured zero, and unknown cost distinct.
+  it("projects exact measured USD and recorded zero while unknown cost stays null", async () => {
+    const measured = await read({
+      today: { cost_usd: "0.0000000001" },
+      month: { cost_usd: "0.0000000000" },
+    });
+    expect(measured.body.usage.today.used).toEqual({
+      runs: 0,
+      modelCalls: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      costUsd: "0.0000000001",
+    });
+    expect(measured.body.usage.month.used).toEqual({
+      runs: 0,
+      modelCalls: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      costUsd: "0.0000000000",
+    });
+
+    const unknown = await read({});
+    expect(unknown.body.usage.today.used.costUsd).toBeNull();
+    expect(unknown.body.usage.month.used.costUsd).toBeNull();
   });
 
   it("reports the Free token caps and counts input + output only", async () => {
@@ -306,6 +339,50 @@ describe("GET /cloud/v1/account/health", () => {
     const { status, body } = await read({}, "/cloud/v1/account/health?utcOffsetMinutes=999");
     expect(status).toBe(400);
     expect(body.error.code).toBe("bad_request");
+  });
+
+  it("exposes mint's canonical entitlement verbatim instead of the stale stored tier", async () => {
+    const entitlement = {
+      tier: "plus",
+      productId: "ovid_pro_yearly",
+      period: "yearly",
+      expiresAt: 1_900_000_000,
+      autoRenewing: false,
+      purchaseState: "cancelled",
+    };
+    const originalFetch = globalThis.fetch;
+    const originalUrl = process.env.OVID_INTERNAL_MINT_URL;
+    const originalSecret = process.env.OVID_INTERNAL_API_SECRET;
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ entitlement }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    process.env.OVID_INTERNAL_MINT_URL = "http://mint:8092";
+    process.env.OVID_INTERNAL_API_SECRET = "test-internal-secret-0123456789abcdef";
+    vi.stubGlobal("fetch", fetchImpl);
+    try {
+      const { status, body } = await read({ tier: "pro" });
+      expect(status).toBe(200);
+      expect(body.entitlement).toEqual(entitlement);
+      expect(body.plan).toMatchObject({
+        tier: "plus",
+        id: "plus",
+        name: "Ovid Plus",
+        expiresAt: new Date(entitlement.expiresAt * 1000).toISOString(),
+        limits: { storageBytes: 15 * GIB },
+      });
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      const [url, init] = fetchImpl.mock.calls[0]! as unknown as [string, RequestInit];
+      expect(url).toContain("/internal/billing/entitlement?uid=u1");
+      expect(init.method).toBe("GET");
+      expect(init.body).toBeUndefined();
+    } finally {
+      if (originalUrl === undefined) delete process.env.OVID_INTERNAL_MINT_URL;
+      else process.env.OVID_INTERNAL_MINT_URL = originalUrl;
+      if (originalSecret === undefined) delete process.env.OVID_INTERNAL_API_SECRET;
+      else process.env.OVID_INTERNAL_API_SECRET = originalSecret;
+      vi.stubGlobal("fetch", originalFetch);
+    }
   });
 
   it("requires authentication", async () => {

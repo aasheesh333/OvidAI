@@ -341,6 +341,7 @@ export function createAnthropicTransport(egress: EgressFetch): AgentTransport {
       let sawMessageStop = false;
       let content = "";
       let thinking = "";
+      let providerModel: string | null = null;
       const usageState: UsageState = {};
       const openBlocks = new Map<number, ToolBlockBuffer>(); // tool_use buffers between start and stop
       const finishedCalls = new Map<number, ToolCall>(); // finalized calls, by content-block index
@@ -378,7 +379,11 @@ export function createAnthropicTransport(egress: EgressFetch): AgentTransport {
           case "message_start": {
             const message = p.message;
             if (message !== null && typeof message === "object") {
-              mergeUsage(usageState, (message as Record<string, unknown>).usage);
+              const reported = message as Record<string, unknown>;
+              if (typeof reported.model === "string" && reported.model.trim() !== "") {
+                providerModel = reported.model;
+              }
+              mergeUsage(usageState, reported.usage);
             }
             break;
           }
@@ -531,6 +536,10 @@ export function createAnthropicTransport(egress: EgressFetch): AgentTransport {
                 outputTokens: usage.output,
                 ...(usage.cacheRead !== undefined ? { cacheReadTokens: usage.cacheRead } : {}),
                 ...(usage.cacheWrite !== undefined ? { cacheWriteTokens: usage.cacheWrite } : {}),
+                providerModel,
+                // Native Anthropic streams report no authoritative USD price.
+                costUsd: null,
+                costSource: null,
               },
       };
     },

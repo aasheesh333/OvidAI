@@ -1,6 +1,12 @@
+import { and, eq } from "drizzle-orm";
 import type { Db } from "./client.js";
 import { newId } from "./repos.js";
-import { runUsage as runUsageTable, type RunUsageRow } from "./schema.js";
+import {
+  imageUsageFacts as imageUsageFactsTable,
+  runUsage as runUsageTable,
+  type ImageUsageFactRow,
+  type RunUsageRow,
+} from "./schema.js";
 
 /**
  * Wave 3: the per-model-call token ledger (`run_usage`) and the aggregates
@@ -22,14 +28,24 @@ export interface RunUsageInput {
   outputTokens: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  /** Stable model-call identity; replaying it never inserts a second charge. */
+  quotaCallId?: string | null;
+  requestedModel?: string | null;
+  providerModel?: string | null;
+  costUsd?: string | null;
+  costSource?: "litellm" | "provider" | null;
   /** Tests/backfill only; omitted → now(). */
   createdAt?: Date;
+  /** Explicit billing classification for new quota-aware telemetry. */
+  billingClass?: "ovid_allowance" | "byok";
 }
 
 export interface UsageWindow {
   userId: string;
   since: Date;
   until: Date;
+  /** Allowance checks opt into one class; history defaults to all actual usage. */
+  billingClass?: "ovid_allowance" | "byok";
 }
 
 export interface TokenSums {
@@ -39,7 +55,12 @@ export interface TokenSums {
   cacheWriteTokens: number;
 }
 
-export interface UsageTotals extends TokenSums {
+export interface CostSum {
+  /** Exact numeric(38,10) text; null when no measured cost exists. */
+  costUsd: string | null;
+}
+
+export interface UsageTotals extends TokenSums, CostSum {
   runs: number;
   modelCalls: number;
 }
@@ -53,6 +74,21 @@ export interface UsageModel extends UsageTotals {
   model: string;
 }
 
+export interface ImageUsageTotals {
+  generateCount: number | null;
+  editCount: number | null;
+  costUsd: string | null;
+}
+
+export interface ImageUsageInput {
+  account: string;
+  request: string;
+  sessionId: string | null;
+  runId: string | null;
+  op: "generate" | "edit";
+  costUsd?: string | null;
+}
+
 export interface UsageSession {
   sessionId: string;
   /** null when the session was deleted (still counted) or never titled. */
@@ -63,10 +99,12 @@ export interface UsageSession {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  costUsd: string | null;
+  images: ImageUsageTotals;
   lastAt: Date;
 }
 
-export interface UsageRun extends TokenSums {
+export interface UsageRun extends TokenSums, CostSum {
   runId: string;
   sessionId: string;
   sessionTitle: string | null;
@@ -76,8 +114,11 @@ export interface UsageRun extends TokenSums {
   finishedAt: Date | null;
   /** Keyset position: the run's created_at (first usage row when the run row is gone). */
   runCreatedAt: Date;
-  /** Distinct requested model ids, sorted. */
+  /** Legacy requested-model array, retained for old DTO consumers. */
   models: string[];
+  requestedModels: string[];
+  /** Distinct provider-reported models, or null when none were reported. */
+  providerModels: string[] | null;
   modelCalls: number;
 }
 
@@ -100,6 +141,36 @@ function num(v: unknown): number {
   if (v === null || v === undefined) return 0;
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
+}
+
+function nullableNum(v: unknown): number | null {
+  return v === null || v === undefined ? null : num(v);
+}
+
+function nullableText(v: unknown): string | null {
+  return v === null || v === undefined ? null : String(v);
+}
+
+function nullableModel(v: string | null | undefined): string | null {
+  return v === null || v === undefined || v.trim() === "" ? null : v;
+}
+
+const DECIMAL_RE = /^\d+(?:\.\d{1,10})?$/;
+
+function cost(v: string | null | undefined): string | null {
+  if (v === null || v === undefined) return null;
+  if (!DECIMAL_RE.test(v)) {
+    throw new RangeError("costUsd must be a non-negative decimal with at most 10 places");
+  }
+  const [whole] = v.split(".");
+  if (whole!.length > 28) throw new RangeError("costUsd exceeds numeric(38,10)");
+  return v;
+}
+
+function costSource(v: "litellm" | "provider" | null | undefined): "litellm" | "provider" | null {
+  if (v === null || v === undefined) return null;
+  if (v !== "litellm" && v !== "provider") throw new RangeError("invalid costSource");
+  return v;
 }
 
 function date(v: unknown): Date | null {
@@ -132,7 +203,15 @@ function sums(r: Row): TokenSums {
 }
 
 function totalsOf(r: Row): UsageTotals {
-  return { runs: num(r.runs), modelCalls: num(r.model_calls), ...sums(r) };
+  return { runs: num(r.runs), modelCalls: num(r.model_calls), ...sums(r), costUsd: nullableText(r.cost_usd) };
+}
+
+function imagesOf(r: Row): ImageUsageTotals {
+  return {
+    generateCount: nullableNum(r.generate_count),
+    editCount: nullableNum(r.edit_count),
+    costUsd: nullableText(r.cost_usd),
+  };
 }
 
 function clampLimit(limit: number | undefined, dflt = DEFAULT_LIMIT, max = MAX_LIMIT): number {
@@ -143,8 +222,9 @@ function clampLimit(limit: number | undefined, dflt = DEFAULT_LIMIT, max = MAX_L
 export const runUsage = {
   clampLimit: (limit: number | undefined) => clampLimit(limit),
 
-  /** One row per model call. Counts are clamped to non-negative integers. */
+  /** One row per model call, idempotent by (runId, quotaCallId) when supplied. */
   async record(db: Db, row: RunUsageInput): Promise<RunUsageRow> {
+    const quotaCallId = nullableModel(row.quotaCallId);
     const [inserted] = await db
       .insert(runUsageTable)
       .values({
@@ -157,10 +237,27 @@ export const runUsage = {
         outputTokens: count(row.outputTokens),
         cacheReadTokens: count(row.cacheReadTokens),
         cacheWriteTokens: count(row.cacheWriteTokens),
+        quotaCallId,
+        requestedModel:
+          row.requestedModel === undefined ? nullableModel(row.model) : nullableModel(row.requestedModel),
+        providerModel: nullableModel(row.providerModel),
+        costUsd: cost(row.costUsd),
+        costSource: costSource(row.costSource),
+        ...(row.billingClass !== undefined ? { billingClass: row.billingClass } : {}),
         ...(row.createdAt !== undefined ? { createdAt: row.createdAt } : {}),
       })
+      .onConflictDoNothing()
       .returning();
-    return inserted!;
+    if (inserted !== undefined) return inserted;
+    if (quotaCallId !== null) {
+      const [existing] = await db
+        .select()
+        .from(runUsageTable)
+        .where(and(eq(runUsageTable.runId, row.runId), eq(runUsageTable.quotaCallId, quotaCallId)))
+        .limit(1);
+      if (existing !== undefined) return existing;
+    }
+    throw new Error("run_usage insert conflict");
   },
 
   async totals(db: Db, w: UsageWindow): Promise<UsageTotals> {
@@ -170,10 +267,12 @@ export const runUsage = {
              coalesce(sum(input_tokens), 0) AS input_tokens,
              coalesce(sum(output_tokens), 0) AS output_tokens,
              coalesce(sum(cache_read_tokens), 0) AS cache_read_tokens,
-             coalesce(sum(cache_write_tokens), 0) AS cache_write_tokens
+             coalesce(sum(cache_write_tokens), 0) AS cache_write_tokens,
+             sum(cost_usd)::text AS cost_usd
         FROM run_usage
        WHERE user_id = ${w.userId}
          AND created_at >= ${w.since.toISOString()}::timestamptz AND created_at < ${w.until.toISOString()}::timestamptz
+         AND (${w.billingClass ?? null}::text IS NULL OR billing_class = ${w.billingClass ?? "ovid_allowance"})
     `) as Row[];
     return totalsOf(rows[0] ?? {});
   },
@@ -188,7 +287,8 @@ export const runUsage = {
              sum(input_tokens) AS input_tokens,
              sum(output_tokens) AS output_tokens,
              sum(cache_read_tokens) AS cache_read_tokens,
-             sum(cache_write_tokens) AS cache_write_tokens
+             sum(cache_write_tokens) AS cache_write_tokens,
+             sum(cost_usd)::text AS cost_usd
         FROM run_usage
        WHERE user_id = ${w.userId}
          AND created_at >= ${w.since.toISOString()}::timestamptz AND created_at < ${w.until.toISOString()}::timestamptz
@@ -207,7 +307,8 @@ export const runUsage = {
              sum(input_tokens) AS input_tokens,
              sum(output_tokens) AS output_tokens,
              sum(cache_read_tokens) AS cache_read_tokens,
-             sum(cache_write_tokens) AS cache_write_tokens
+             sum(cache_write_tokens) AS cache_write_tokens,
+             sum(cost_usd)::text AS cost_usd
         FROM run_usage
        WHERE user_id = ${w.userId}
          AND created_at >= ${w.since.toISOString()}::timestamptz AND created_at < ${w.until.toISOString()}::timestamptz
@@ -224,21 +325,61 @@ export const runUsage = {
   async bySession(db: Db, w: UsageWindow & { limit?: number }): Promise<UsageSession[]> {
     const limit = clampLimit(w.limit, 50, MAX_LIMIT);
     const rows = (await db.$client`
-      SELECT u.session_id,
+      WITH run_sessions AS (
+        SELECT u.user_id, u.session_id,
+               count(DISTINCT u.run_id) AS runs,
+               count(*) AS model_calls,
+               sum(u.input_tokens) AS input_tokens,
+               sum(u.output_tokens) AS output_tokens,
+               sum(u.cache_read_tokens) AS cache_read_tokens,
+               sum(u.cache_write_tokens) AS cache_write_tokens,
+               sum(u.cost_usd)::text AS cost_usd,
+               max(u.created_at) AS last_at
+          FROM run_usage u
+         WHERE u.user_id = ${w.userId}
+           AND u.created_at >= ${w.since.toISOString()}::timestamptz AND u.created_at < ${w.until.toISOString()}::timestamptz
+           AND (${w.billingClass ?? null}::text IS NULL OR u.billing_class = ${w.billingClass ?? "ovid_allowance"})
+         GROUP BY u.user_id, u.session_id
+      ), image_sessions AS (
+        SELECT f.account AS user_id, f.session_id,
+               sum(f.generate_count) AS generate_count,
+               sum(f.edit_count) AS edit_count,
+               sum(f.cost_usd)::text AS cost_usd,
+               max(to_timestamp(j.created_at)) AS last_at
+          FROM image_usage_facts f
+          JOIN image_jobs j ON j.account = f.account AND j.request = f.request
+         WHERE f.account = ${w.userId}
+           AND f.session_id IS NOT NULL
+           AND to_timestamp(j.created_at) >= ${w.since.toISOString()}::timestamptz
+           AND to_timestamp(j.created_at) < ${w.until.toISOString()}::timestamptz
+         GROUP BY f.account, f.session_id
+      ), session_ids AS (
+        SELECT user_id, session_id FROM run_sessions
+        UNION
+        SELECT user_id, session_id FROM image_sessions
+      )
+      SELECT ids.session_id,
              CASE WHEN s.deleted_at IS NULL THEN s.title ELSE NULL END AS title,
-             count(DISTINCT u.run_id) AS runs,
-             count(*) AS model_calls,
-             sum(u.input_tokens) AS input_tokens,
-             sum(u.output_tokens) AS output_tokens,
-             sum(u.cache_read_tokens) AS cache_read_tokens,
-             sum(u.cache_write_tokens) AS cache_write_tokens,
-             max(u.created_at) AS last_at
-        FROM run_usage u
-        LEFT JOIN sessions s ON s.id = u.session_id AND s.user_id = u.user_id
-       WHERE u.user_id = ${w.userId}
-         AND u.created_at >= ${w.since.toISOString()}::timestamptz AND u.created_at < ${w.until.toISOString()}::timestamptz
-       GROUP BY u.session_id, s.title, s.deleted_at
-       ORDER BY sum(u.input_tokens) + sum(u.output_tokens) DESC, max(u.created_at) DESC
+             coalesce(r.runs, 0) AS runs,
+             coalesce(r.model_calls, 0) AS model_calls,
+             coalesce(r.input_tokens, 0) AS input_tokens,
+             coalesce(r.output_tokens, 0) AS output_tokens,
+             coalesce(r.cache_read_tokens, 0) AS cache_read_tokens,
+             coalesce(r.cache_write_tokens, 0) AS cache_write_tokens,
+             r.cost_usd,
+             i.generate_count,
+             i.edit_count,
+             i.cost_usd AS image_cost_usd,
+             CASE
+               WHEN r.last_at IS NULL THEN i.last_at
+               WHEN i.last_at IS NULL THEN r.last_at
+               ELSE greatest(r.last_at, i.last_at)
+             END AS last_at
+        FROM session_ids ids
+        LEFT JOIN run_sessions r ON r.user_id = ids.user_id AND r.session_id = ids.session_id
+        LEFT JOIN image_sessions i ON i.user_id = ids.user_id AND i.session_id = ids.session_id
+        LEFT JOIN sessions s ON s.id = ids.session_id AND s.user_id = ids.user_id
+       ORDER BY coalesce(r.input_tokens, 0) + coalesce(r.output_tokens, 0) DESC, last_at DESC
        LIMIT ${limit}
     `) as Row[];
     return rows.map((r) => ({
@@ -247,6 +388,8 @@ export const runUsage = {
       runs: num(r.runs),
       modelCalls: num(r.model_calls),
       ...sums(r),
+      costUsd: nullableText(r.cost_usd),
+      images: imagesOf({ ...r, cost_usd: r.image_cost_usd }),
       lastAt: date(r.last_at)!,
     }));
   },
@@ -273,11 +416,16 @@ export const runUsage = {
                r.finished_at,
                coalesce(r.created_at, min(u.created_at)) AS run_created_at,
                array_agg(DISTINCT u.model ORDER BY u.model) AS models,
+               array_agg(DISTINCT coalesce(u.requested_model, nullif(u.model, '')) ORDER BY coalesce(u.requested_model, nullif(u.model, '')))
+                 FILTER (WHERE coalesce(u.requested_model, nullif(u.model, '')) IS NOT NULL) AS requested_models,
+               array_agg(DISTINCT nullif(u.provider_model, '') ORDER BY nullif(u.provider_model, ''))
+                 FILTER (WHERE nullif(u.provider_model, '') IS NOT NULL) AS provider_models,
                count(*) AS model_calls,
                sum(u.input_tokens) AS input_tokens,
                sum(u.output_tokens) AS output_tokens,
                sum(u.cache_read_tokens) AS cache_read_tokens,
-               sum(u.cache_write_tokens) AS cache_write_tokens
+               sum(u.cache_write_tokens) AS cache_write_tokens,
+               sum(u.cost_usd)::text AS cost_usd
           FROM run_usage u
           LEFT JOIN runs r ON r.id = u.run_id
           LEFT JOIN sessions s ON s.id = u.session_id AND s.user_id = u.user_id
@@ -300,8 +448,15 @@ export const runUsage = {
       finishedAt: date(r.finished_at),
       runCreatedAt: date(r.run_created_at)!,
       models: Array.isArray(r.models) ? (r.models as unknown[]).map(String) : [],
+      requestedModels: Array.isArray(r.requested_models)
+        ? (r.requested_models as unknown[]).map(String)
+        : [],
+      providerModels: Array.isArray(r.provider_models)
+        ? (r.provider_models as unknown[]).map(String)
+        : null,
       modelCalls: num(r.model_calls),
       ...sums(r),
+      costUsd: nullableText(r.cost_usd),
     }));
     const last = mapped.at(-1);
     const next =
@@ -309,5 +464,49 @@ export const runUsage = {
         ? { createdAt: last.runCreatedAt, runId: last.runId }
         : null;
     return { rows: mapped, next };
+  },
+};
+
+/** Approved 0038 image satellite; image_jobs remains the charge/result ledger. */
+export const imageUsage = {
+  async record(db: Db, row: ImageUsageInput): Promise<ImageUsageFactRow> {
+    const [inserted] = await db
+      .insert(imageUsageFactsTable)
+      .values({
+        account: row.account,
+        request: row.request,
+        sessionId: row.sessionId,
+        runId: row.runId,
+        generateCount: row.op === "generate" ? 1 : 0,
+        editCount: row.op === "edit" ? 1 : 0,
+        costUsd: cost(row.costUsd),
+      })
+      .onConflictDoNothing()
+      .returning();
+    if (inserted !== undefined) return inserted;
+    const [existing] = await db
+      .select()
+      .from(imageUsageFactsTable)
+      .where(and(
+        eq(imageUsageFactsTable.account, row.account),
+        eq(imageUsageFactsTable.request, row.request),
+      ))
+      .limit(1);
+    if (existing === undefined) throw new Error("image_usage_facts insert conflict");
+    return existing;
+  },
+
+  async totals(db: Db, w: UsageWindow): Promise<ImageUsageTotals> {
+    const rows = (await db.$client`
+      SELECT sum(f.generate_count) AS generate_count,
+             sum(f.edit_count) AS edit_count,
+             sum(f.cost_usd)::text AS cost_usd
+        FROM image_usage_facts f
+        JOIN image_jobs j ON j.account = f.account AND j.request = f.request
+       WHERE f.account = ${w.userId}
+         AND to_timestamp(j.created_at) >= ${w.since.toISOString()}::timestamptz
+         AND to_timestamp(j.created_at) < ${w.until.toISOString()}::timestamptz
+    `) as Row[];
+    return imagesOf(rows[0] ?? {});
   },
 };

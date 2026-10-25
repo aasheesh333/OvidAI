@@ -72,7 +72,16 @@ export function createToolRegistry(tools: readonly Tool[]): ToolRegistry {
     },
   };
 }
-export interface Usage { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number; }
+export interface Usage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  /** Actual response metadata; never copied from the requested model or estimated. */
+  providerModel?: string | null;
+  costUsd?: string | null;
+  costSource?: "litellm" | "provider" | null;
+}
 // Defined HERE in types.ts (Tasks 3/5/6 consume — do NOT redefine in promptCache.ts).
 export type PromptCacheMode = "none" | "implicit" | "openaiBlocks" | "anthropicNative";
 export interface AgentRequest {

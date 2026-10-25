@@ -44,6 +44,158 @@ interface UsageFragment {
   prompt_tokens?: unknown;
   completion_tokens?: unknown;
   prompt_tokens_details?: { cached_tokens?: unknown } | null;
+  /** LiteLLM's opt-in measured streaming cost (USD), never an estimate. */
+  cost?: unknown;
+}
+
+/** Convert decimal text to fixed-point without binary arithmetic or rounding. */
+function measuredCost(value: string): string | null {
+  const match = /^(\d+)(?:\.(\d*))?(?:e([+-]?\d+))?$/i.exec(value);
+  if (match === null) return null;
+  const whole = match[1]!;
+  const fraction = match[2] ?? "";
+  const exponent = Number(match[3] ?? "0");
+  if (!Number.isSafeInteger(exponent) || Math.abs(exponent) > 1_000) return null;
+  const digits = `${whole}${fraction}`;
+  const point = whole.length + exponent;
+  let fixedWhole: string;
+  let fixedFraction: string;
+  if (point <= 0) {
+    fixedWhole = "0";
+    fixedFraction = `${"0".repeat(-point)}${digits}`;
+  } else if (point >= digits.length) {
+    fixedWhole = `${digits}${"0".repeat(point - digits.length)}`;
+    fixedFraction = "";
+  } else {
+    fixedWhole = digits.slice(0, point);
+    fixedFraction = digits.slice(point);
+  }
+  fixedWhole = fixedWhole.replace(/^0+(?=\d)/, "");
+  fixedFraction = fixedFraction.replace(/0+$/, "");
+  if (fixedWhole.length > 28 || fixedFraction.length > 10) return null;
+  return fixedFraction === "" ? fixedWhole : `${fixedWhole}.${fixedFraction}`;
+}
+
+interface JsonRange { start: number; end: number; }
+
+function skipJsonWhitespace(json: string, start: number): number {
+  let index = start;
+  while (index < json.length && /\s/.test(json[index]!)) index += 1;
+  return index;
+}
+
+/** Return the index after a JSON string, or -1 for an unterminated value. */
+function skipJsonString(json: string, start: number): number {
+  if (json[start] !== '"') return -1;
+  let index = start + 1;
+  while (index < json.length) {
+    if (json[index] === '"') return index + 1;
+    index += json[index] === "\\" ? 2 : 1;
+  }
+  return -1;
+}
+
+/** Skip one value without parsing its numbers; provider JSON remains the authority. */
+function skipJsonValue(json: string, start: number, depth = 0): number {
+  if (depth > 128) return -1;
+  const index = skipJsonWhitespace(json, start);
+  const first = json[index];
+  if (first === '"') return skipJsonString(json, index);
+  if (first !== "{" && first !== "[") {
+    let end = index;
+    while (end < json.length && !/[\s,\]}]/.test(json[end]!)) end += 1;
+    return end === index ? -1 : end;
+  }
+
+  const object = first === "{";
+  let cursor = skipJsonWhitespace(json, index + 1);
+  if (json[cursor] === (object ? "}" : "]")) return cursor + 1;
+  while (cursor < json.length) {
+    if (object) {
+      const keyEnd = skipJsonString(json, cursor);
+      if (keyEnd < 0) return -1;
+      cursor = skipJsonWhitespace(json, keyEnd);
+      if (json[cursor] !== ":") return -1;
+      cursor += 1;
+    }
+    cursor = skipJsonValue(json, cursor, depth + 1);
+    if (cursor < 0) return -1;
+    cursor = skipJsonWhitespace(json, cursor);
+    const close = object ? "}" : "]";
+    if (json[cursor] === close) return cursor + 1;
+    if (json[cursor] !== ",") return -1;
+    cursor = skipJsonWhitespace(json, cursor + 1);
+  }
+  return -1;
+}
+
+/** Decode only a property-name string; numeric values are never parsed here. */
+function jsonPropertyName(raw: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return typeof parsed === "string" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Find a direct object property with JSON's exact last-duplicate semantics. */
+function findJsonProperty(json: string, object: JsonRange, name: string): JsonRange | null {
+  let cursor = skipJsonWhitespace(json, object.start);
+  if (json[cursor] !== "{") return null;
+  cursor += 1;
+  let found: JsonRange | null = null;
+  while (cursor < object.end) {
+    cursor = skipJsonWhitespace(json, cursor);
+    if (json[cursor] === "}") return found;
+    const keyStart = cursor;
+    const keyEnd = skipJsonString(json, cursor);
+    if (keyEnd < 0 || keyEnd > object.end) return null;
+    const key = jsonPropertyName(json.slice(keyStart, keyEnd));
+    cursor = skipJsonWhitespace(json, keyEnd);
+    if (json[cursor] !== ":") return null;
+    const valueStart = skipJsonWhitespace(json, cursor + 1);
+    const valueEnd = skipJsonValue(json, valueStart);
+    if (valueEnd < 0 || valueEnd > object.end) return null;
+    if (key === name) found = { start: valueStart, end: valueEnd };
+    cursor = skipJsonWhitespace(json, valueEnd);
+    if (json[cursor] === "}") return found;
+    if (json[cursor] !== ",") return null;
+    cursor += 1;
+  }
+  return null;
+}
+
+/** Capture usage.cost before JSON.parse can round a numeric token through IEEE754. */
+function rawUsageCostToken(json: string): string | null {
+  const usage = findJsonProperty(json, { start: 0, end: json.length }, "usage");
+  if (usage === null) return null;
+  const cost = findJsonProperty(json, usage, "cost");
+  return cost === null ? null : json.slice(cost.start, cost.end);
+}
+
+function measuredCostToken(token: string | null, parsed: unknown): string | null {
+  if (token === null) return null;
+  if (token.startsWith('"')) {
+    return typeof parsed === "string" ? measuredCost(parsed) : null;
+  }
+  return typeof parsed === "number" && Number.isFinite(parsed)
+    ? measuredCost(token)
+    : null;
+}
+
+function withMeasuredFacts(
+  usage: Usage | null,
+  providerModel: string | null,
+  costUsd: string | null,
+): Usage | null {
+  if (usage === null) return null;
+  return {
+    ...usage,
+    providerModel,
+    costUsd,
+    costSource: costUsd === null ? null : "litellm",
+  };
 }
 
 /** One parsed `data:` payload; mutates nothing, returns the deltas and finish_reason (if any). */
@@ -53,14 +205,17 @@ function readChunk(json: string): {
   toolCallDeltas: ToolCallFragment[] | null;
   finishReason: string | null;
   usage: Usage | null;
+  providerModel: string | null;
+  costUsd: string | null;
 } {
+  const rawCostToken = rawUsageCostToken(json);
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
   } catch {
-    return { delta: null, thinking: null, toolCallDeltas: null, finishReason: null, usage: null }; // garbage line: skip, keep streaming
+    return { delta: null, thinking: null, toolCallDeltas: null, finishReason: null, usage: null, providerModel: null, costUsd: null }; // garbage line: skip, keep streaming
   }
-  const obj = parsed as { choices?: unknown[]; usage?: unknown } | null;
+  const obj = parsed as { choices?: unknown[]; usage?: unknown; model?: unknown } | null;
   // The include_usage trailer chunk has an empty `choices` array — guard [0].
   const choice = (
     obj?.choices as Array<{
@@ -74,10 +229,12 @@ function readChunk(json: string): {
   const finish = choice?.finish_reason;
   const usageRaw = obj?.usage;
   let usage: Usage | null = null;
+  let costUsd: string | null = null;
   if (usageRaw !== null && typeof usageRaw === "object") {
     const u = usageRaw as UsageFragment;
     const input = u.prompt_tokens;
     const output = u.completion_tokens;
+    costUsd = measuredCostToken(rawCostToken, u.cost);
     if (typeof input === "number" && typeof output === "number") {
       const cached = u.prompt_tokens_details?.cached_tokens;
       usage = {
@@ -93,6 +250,9 @@ function readChunk(json: string): {
     toolCallDeltas: Array.isArray(toolCalls) ? (toolCalls as ToolCallFragment[]) : null,
     finishReason: typeof finish === "string" && finish !== "" ? finish : null,
     usage,
+    providerModel:
+      typeof obj?.model === "string" && obj.model.trim() !== "" ? obj.model : null,
+    costUsd,
   };
 }
 
@@ -266,6 +426,8 @@ export function createOpenAiAgentTransport(fetchImpl: EgressFetch): AgentTranspo
       let content = "";
       let thinking = "";
       let usage: Usage | null = null;
+      let providerModel: string | null = null;
+      let costUsd: string | null = null;
       const toolCalls = createToolCallAggregator();
       const decoder = new TextDecoder(); // streaming mode: splits multi-byte chars across chunks safely
       const reader = res.body.getReader();
@@ -280,7 +442,7 @@ export function createOpenAiAgentTransport(fetchImpl: EgressFetch): AgentTranspo
           sawDone = true;
           return;
         }
-        const { delta, thinking: thinkDelta, toolCallDeltas, finishReason: fr, usage: u } = readChunk(value);
+        const { delta, thinking: thinkDelta, toolCallDeltas, finishReason: fr, usage: u, providerModel: served, costUsd: measured } = readChunk(value);
         if (delta !== null) {
           content += delta;
           h.onTextDelta(delta);
@@ -292,6 +454,8 @@ export function createOpenAiAgentTransport(fetchImpl: EgressFetch): AgentTranspo
         if (toolCallDeltas !== null) toolCalls.merge(toolCallDeltas);
         if (fr !== null) finishReason = fr;
         if (u !== null) usage = u;
+        if (served !== null) providerModel = served;
+        if (measured !== null) costUsd = measured;
       };
 
       try {
@@ -338,7 +502,7 @@ export function createOpenAiAgentTransport(fetchImpl: EgressFetch): AgentTranspo
         thinking,
         toolCalls: parseToolCalls(toolCalls.finish()),
         finishReason,
-        usage,
+        usage: withMeasuredFacts(usage, providerModel, costUsd),
       };
     },
   };

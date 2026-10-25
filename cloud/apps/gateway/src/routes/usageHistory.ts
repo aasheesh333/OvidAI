@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { runUsage, type RunCursor, type UsageTotals } from "@ovid/db";
+import { imageUsage, runUsage, type RunCursor, type UsageTotals } from "@ovid/db";
 import type { GatewayDeps } from "../app.js";
 import { badRequest, queryValue } from "./http.js";
 
@@ -76,6 +76,7 @@ function zero(): UsageTotals {
     outputTokens: 0,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
+    costUsd: null,
   };
 }
 
@@ -106,12 +107,13 @@ export function registerUsageHistoryRoutes(app: FastifyInstance, deps: GatewayDe
     const since = new Date(localToday - (days - 1) * DAY_MS - offsetMs);
     const window = { userId, since, until };
 
-    const [totals, byDay, models, sessions, page] = await Promise.all([
+    const [totals, byDay, models, sessions, page, images] = await Promise.all([
       runUsage.totals(deps.db, window),
       runUsage.byDay(deps.db, { ...window, utcOffsetMinutes: offset }),
       runUsage.byModel(deps.db, window),
       runUsage.bySession(deps.db, { ...window, limit: 50 }),
       runUsage.recentRuns(deps.db, { ...window, limit, before }),
+      imageUsage.totals(deps.db, window),
     ]);
 
     const dayMap = new Map(byDay.map((d) => [d.date, d]));
@@ -128,6 +130,7 @@ export function registerUsageHistoryRoutes(app: FastifyInstance, deps: GatewayDe
       until: until.toISOString(),
       utcOffsetMinutes: offset,
       totals,
+      images,
       days: dayList,
       models,
       sessions: sessions.map((s) => ({ ...s, lastAt: s.lastAt.toISOString() })),
@@ -139,6 +142,9 @@ export function registerUsageHistoryRoutes(app: FastifyInstance, deps: GatewayDe
         startedAt: iso(r.startedAt),
         finishedAt: iso(r.finishedAt),
         models: r.models,
+        requestedModels: r.requestedModels,
+        providerModels: r.providerModels,
+        costUsd: r.costUsd,
         modelCalls: r.modelCalls,
         inputTokens: r.inputTokens,
         outputTokens: r.outputTokens,
@@ -158,5 +164,6 @@ function stripDate(d: UsageTotals & { date: string }): UsageTotals {
     outputTokens: d.outputTokens,
     cacheReadTokens: d.cacheReadTokens,
     cacheWriteTokens: d.cacheWriteTokens,
+    costUsd: d.costUsd,
   };
 }

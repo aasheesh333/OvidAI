@@ -166,7 +166,59 @@ it("(a) streams text deltas, concatenates content, maps end_turn → finishReaso
     thinking: "",
     toolCalls: [],
     finishReason: "stop",
-    usage: { inputTokens: 15, outputTokens: 7, cacheReadTokens: 4, cacheWriteTokens: 1 },
+    usage: {
+      inputTokens: 15,
+      outputTokens: 7,
+      cacheReadTokens: 4,
+      cacheWriteTokens: 1,
+      providerModel: null,
+      costUsd: null,
+      costSource: null,
+    },
+  });
+});
+
+it("reads a real provider-reported message model without inventing provider cost", async () => {
+  await startMock((_req, res) => {
+    sseHead(res);
+    sse(res, "message_start", {
+      type: "message_start",
+      message: { model: "anthropic/actual-v9", usage: { input_tokens: 11 } },
+    });
+    endTurn(res);
+    res.end();
+  });
+
+  const result = await streamCall({ model: "auto" }).promise;
+  expect(result.usage).toEqual({
+    inputTokens: 11,
+    outputTokens: 7,
+    providerModel: "anthropic/actual-v9",
+    costUsd: null,
+    costSource: null,
+  });
+});
+
+// UNEXECUTED regressions while HEAVY-COMMANDS-PAUSED.md is active. Absence and
+// blank text are unknown, never a provider model or a fallback to requested auto.
+it.each([
+  { kind: "absent", message: { usage: { input_tokens: 11 } } },
+  { kind: "blank", message: { model: "", usage: { input_tokens: 11 } } },
+])("keeps an $kind provider model null", async ({ message }) => {
+  await startMock((_req, res) => {
+    sseHead(res);
+    sse(res, "message_start", { type: "message_start", message });
+    endTurn(res);
+    res.end();
+  });
+
+  const result = await streamCall({ model: "auto" }).promise;
+  expect(result.usage).toEqual({
+    inputTokens: 11,
+    outputTokens: 7,
+    providerModel: null,
+    costUsd: null,
+    costSource: null,
   });
 });
 

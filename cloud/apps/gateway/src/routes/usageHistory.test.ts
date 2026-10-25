@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { messages, runs, runUsage, sessions, users, type Db } from "@ovid/db";
+import { imageUsage, imagesRepo, messages, runs, runUsage, sessions, users, type Db } from "@ovid/db";
 import { buildGateway } from "../app.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
 import {
@@ -61,6 +61,12 @@ describe.skipIf(!TEST_DATABASE_URL)("GET /cloud/v1/usage/history (real postgres)
       input: number,
       output: number,
       at: string,
+      facts: {
+        quotaCallId?: string;
+        providerModel?: string | null;
+        costUsd?: string | null;
+        costSource?: "litellm" | "provider" | null;
+      } = {},
     ) =>
       runUsage.record(db, {
         userId: owner,
@@ -72,16 +78,52 @@ describe.skipIf(!TEST_DATABASE_URL)("GET /cloud/v1/usage/history (real postgres)
         cacheReadTokens: 10,
         cacheWriteTokens: 1,
         createdAt: new Date(at),
+        ...facts,
       });
     // Run A: 2026-10-18 20:00Z (= 10-19 01:30 IST) and 20:05Z.
-    await rec(a, uid, "auto", 1000, 100, "2026-10-18T20:00:00.000Z");
-    await rec(a, uid, "glm-5.3-flash", 400, 40, "2026-10-18T20:05:00.000Z");
-    // Run B: 2026-10-15 09:00Z.
+    await rec(a, uid, "auto", 1000, 100, "2026-10-18T20:00:00.000Z", {
+      quotaCallId: "route-a-1",
+      providerModel: "served/a",
+      costUsd: "0.0000000001",
+      costSource: "litellm",
+    });
+    await rec(a, uid, "glm-5.3-flash", 400, 40, "2026-10-18T20:05:00.000Z", {
+      quotaCallId: "route-a-2",
+      providerModel: "served/b",
+      costUsd: "0.1",
+      costSource: "litellm",
+    });
+    // Run B: 2026-10-15 09:00Z; provider model and cost are unknown.
     await rec(b, uid, "auto", 50, 5, "2026-10-15T09:00:00.000Z");
     // 40 days ago: outside the default 30-day window.
     await rec(b, uid, "auto", 7777, 777, "2026-09-09T09:00:00.000Z");
     // Another user's usage in range: never visible.
     await rec(o, other, "auto", 99999, 9999, "2026-10-18T20:00:00.000Z");
+
+    const image = async (
+      owner: string,
+      request: string,
+      sessionId: string | null,
+      runId: string | null,
+      op: "generate" | "edit",
+      costUsd: string | null,
+      at: string,
+    ) => {
+      await imagesRepo.insertPending(db, {
+        account: owner,
+        request,
+        fingerprint: request.padEnd(64, "0"),
+        reserved: "0",
+        budgetWindow: "test",
+        createdAt: Math.floor(new Date(at).getTime() / 1000),
+      });
+      await imageUsage.record(db, { account: owner, request, sessionId, runId, op, costUsd });
+    };
+    await image(uid, "route-image-a", a.sessionId, a.runId, "generate", "0.0000000001", "2026-10-18T21:00:00.000Z");
+    await image(uid, "route-image-b", b.sessionId, b.runId, "edit", "0.2", "2026-10-15T10:00:00.000Z");
+    // Global history includes this operation, but no session is inferred for it.
+    await image(uid, "route-image-old", null, null, "generate", null, "2026-10-18T22:00:00.000Z");
+    await image(other, "route-image-other", null, null, "generate", "777", "2026-10-18T22:00:00.000Z");
   }, 60_000);
 
   afterAll(async () => {
@@ -117,6 +159,12 @@ describe.skipIf(!TEST_DATABASE_URL)("GET /cloud/v1/usage/history (real postgres)
       outputTokens: 145,
       cacheReadTokens: 30,
       cacheWriteTokens: 3,
+      costUsd: "0.1000000001",
+    });
+    expect(body.images).toEqual({
+      generateCount: 2,
+      editCount: 1,
+      costUsd: "0.2000000001",
     });
     expect(body.days).toHaveLength(30);
     expect(body.days[0].date).toBe("2026-10-19");
@@ -129,9 +177,10 @@ describe.skipIf(!TEST_DATABASE_URL)("GET /cloud/v1/usage/history (real postgres)
       outputTokens: 0,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
+      costUsd: null,
     });
-    expect(body.days[1]).toMatchObject({ date: "2026-10-18", runs: 1, modelCalls: 2, inputTokens: 1400 });
-    expect(body.days[4]).toMatchObject({ date: "2026-10-15", runs: 1, modelCalls: 1, inputTokens: 50 });
+    expect(body.days[1]).toMatchObject({ date: "2026-10-18", runs: 1, modelCalls: 2, inputTokens: 1400, costUsd: "0.1000000001" });
+    expect(body.days[4]).toMatchObject({ date: "2026-10-15", runs: 1, modelCalls: 1, inputTokens: 50, costUsd: null });
     expect(body.models.map((m: { model: string }) => m.model)).toEqual(["auto", "glm-5.3-flash"]);
     expect(body.models[0]).toEqual({
       model: "auto",
@@ -141,6 +190,7 @@ describe.skipIf(!TEST_DATABASE_URL)("GET /cloud/v1/usage/history (real postgres)
       outputTokens: 105,
       cacheReadTokens: 20,
       cacheWriteTokens: 2,
+      costUsd: "0.0000000001",
     });
     expect(body.sessions).toEqual([
       {
@@ -152,7 +202,9 @@ describe.skipIf(!TEST_DATABASE_URL)("GET /cloud/v1/usage/history (real postgres)
         outputTokens: 140,
         cacheReadTokens: 20,
         cacheWriteTokens: 2,
-        lastAt: "2026-10-18T20:05:00.000Z",
+        costUsd: "0.1000000001",
+        images: { generateCount: 1, editCount: 0, costUsd: "0.0000000001" },
+        lastAt: "2026-10-18T21:00:00.000Z",
       },
       {
         sessionId: ids.sessions[1],
@@ -163,7 +215,9 @@ describe.skipIf(!TEST_DATABASE_URL)("GET /cloud/v1/usage/history (real postgres)
         outputTokens: 5,
         cacheReadTokens: 10,
         cacheWriteTokens: 1,
-        lastAt: "2026-10-15T09:00:00.000Z",
+        costUsd: null,
+        images: { generateCount: 0, editCount: 1, costUsd: "0.2000000000" },
+        lastAt: "2026-10-15T10:00:00.000Z",
       },
     ]);
     expect(body.runs).toHaveLength(2);
@@ -175,13 +229,22 @@ describe.skipIf(!TEST_DATABASE_URL)("GET /cloud/v1/usage/history (real postgres)
       startedAt: null,
       finishedAt: null,
       models: ["auto"],
+      requestedModels: ["auto"],
+      providerModels: null,
+      costUsd: null,
       modelCalls: 1,
       inputTokens: 50,
       outputTokens: 5,
       cacheReadTokens: 10,
       cacheWriteTokens: 1,
     });
-    expect(body.runs[1]).toMatchObject({ runId: ids.runs[0], models: ["auto", "glm-5.3-flash"] });
+    expect(body.runs[1]).toMatchObject({
+      runId: ids.runs[0],
+      models: ["auto", "glm-5.3-flash"],
+      requestedModels: ["auto", "glm-5.3-flash"],
+      providerModels: ["served/a", "served/b"],
+      costUsd: "0.1000000001",
+    });
     expect(body.nextBefore).toBeNull();
     expect(JSON.stringify(body)).not.toContain("Theirs");
   });

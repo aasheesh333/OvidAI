@@ -222,12 +222,16 @@ describe("generate_image / edit_image", () => {
     expect(generate!.description).toContain("allowance is exhausted");
   });
 
-  it("generate: saves the image, publishes the artifact and returns the receipt", async () => {
+  it("generate: saves the image, publishes the artifact and records measured usage", async () => {
     const h = harness({ ok: true, body: successBody() });
+    const usage: Array<Record<string, unknown>> = [];
     const [generate] = createImageTools({
       call: h.call,
       capabilities: caps(),
       publishArtifact: h.publishArtifact,
+      recordUsage: async (fact) => {
+        usage.push(fact);
+      },
     });
 
     const result = await generate!.execute(
@@ -264,6 +268,16 @@ describe("generate_image / edit_image", () => {
     expect(result.content).toContain('"model":"ovid-image:img-one"');
     expect(result.content).toContain('"charged":"0.0123"');
     expect(result.content).toContain('"id":"art-1"');
+    expect(usage).toEqual([
+      {
+        account: "u1",
+        request: "request-1",
+        sessionId: "s1",
+        runId: "r1",
+        op: "generate",
+        costUsd: "0.0123",
+      },
+    ]);
   });
 
   it("generate: rejects a size/model the cards do not advertise, without a call", async () => {
@@ -290,13 +304,17 @@ describe("generate_image / edit_image", () => {
     expect(h.calls).toHaveLength(0);
   });
 
-  it("edit: reads the workspace image and sends it as a data URL", async () => {
+  it("edit: reads the workspace image and records its real run/session", async () => {
     await writeFile(join(root, "input.png"), PNG_BYTES);
     const h = harness({ ok: true, body: successBody() });
+    const usage: Array<Record<string, unknown>> = [];
     const [, edit] = createImageTools({
       call: h.call,
       capabilities: caps(),
       publishArtifact: h.publishArtifact,
+      recordUsage: async (fact) => {
+        usage.push(fact);
+      },
     });
 
     const result = await edit!.execute(
@@ -311,6 +329,47 @@ describe("generate_image / edit_image", () => {
       image: `data:image/png;base64,${PNG_B64}`,
     });
     expect(result.content).toContain("generated/edit_request-2.png");
+    expect(usage).toEqual([
+      {
+        account: "u1",
+        request: "request-2",
+        sessionId: "s1",
+        runId: "r1",
+        op: "edit",
+        costUsd: "0.0123",
+      },
+    ]);
+  });
+
+  it("keeps an absent receipt charge null instead of estimating image cost", async () => {
+    const body = successBody();
+    (body.receipt as { charged: string | null }).charged = null;
+    const h = harness({ ok: true, body });
+    const usage: Array<Record<string, unknown>> = [];
+    const [generate] = createImageTools({
+      call: h.call,
+      capabilities: caps(),
+      publishArtifact: h.publishArtifact,
+      recordUsage: async (fact) => {
+        usage.push(fact);
+      },
+    });
+
+    const result = await generate!.execute(
+      { prompt: "a cube", request_id: "request-null" },
+      context(root),
+    );
+    expect(result.isError).toBe(false);
+    expect(usage).toEqual([
+      {
+        account: "u1",
+        request: "request-null",
+        sessionId: "s1",
+        runId: "r1",
+        op: "generate",
+        costUsd: null,
+      },
+    ]);
   });
 
   it("edit: refuses a path outside the workspace", async () => {

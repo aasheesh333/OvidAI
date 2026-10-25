@@ -353,7 +353,14 @@ it("usage trailer maps to AgentResponse.usage including cacheReadTokens from pro
   });
   const { promise } = streamCall();
   const result = await promise;
-  expect(result.usage).toEqual({ inputTokens: 10, outputTokens: 20, cacheReadTokens: 7 });
+  expect(result.usage).toEqual({
+    inputTokens: 10,
+    outputTokens: 20,
+    cacheReadTokens: 7,
+    providerModel: null,
+    costUsd: null,
+    costSource: null,
+  });
 });
 
 it("usage without prompt_tokens_details has no cacheReadTokens", async () => {
@@ -364,7 +371,105 @@ it("usage without prompt_tokens_details has no cacheReadTokens", async () => {
   });
   const { promise } = streamCall();
   const result = await promise;
-  expect(result.usage).toEqual({ inputTokens: 3, outputTokens: 5 });
+  expect(result.usage).toEqual({
+    inputTokens: 3,
+    outputTokens: 5,
+    providerModel: null,
+    costUsd: null,
+    costSource: null,
+  });
+});
+
+it("keeps the served model separate and preserves exact LiteLLM usage.cost decimal text", async () => {
+  await startMock((_req, res) => {
+    sseHead(res);
+    res.write('data: {"model":"provider/actual-v9","choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}\n\n');
+    // Literal wire precision matters: parsing must not turn this into 0, INR,
+    // a binary floating-point aggregate, or an estimated cost.
+    res.write('data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30,"cost":0.0000000001}}\n\n');
+    res.end("data: [DONE]\n\n");
+  });
+
+  const result = await streamCall({ model: "auto" }).promise;
+  expect(result.usage).toEqual({
+    inputTokens: 10,
+    outputTokens: 20,
+    providerModel: "provider/actual-v9",
+    costUsd: "0.0000000001",
+    costSource: "litellm",
+  });
+});
+
+async function usageWithRawCost(rawCost: string) {
+  await startMock((_req, res) => {
+    sseHead(res);
+    res.write(`data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"cost":${rawCost}}}\n\n`);
+    res.end("data: [DONE]\n\n");
+  });
+  return (await streamCall().promise).usage;
+}
+
+// UNEXECUTED regressions while HEAVY-COMMANDS-PAUSED.md is active. The unsafe
+// integer and high-precision cases fail if a JSON number is stringified after
+// IEEE754 parsing instead of preserving its original decimal token.
+it.each([
+  {
+    name: "unsafe integer",
+    raw: "9007199254740993",
+    expected: "9007199254740993",
+  },
+  {
+    name: "unsafe large value with ten-place fraction",
+    raw: "9007199254740993.0000000001",
+    expected: "9007199254740993.0000000001",
+  },
+  {
+    name: "high precision numeric(38,10)",
+    raw: "1234567890123456789012345678.0000000001",
+    expected: "1234567890123456789012345678.0000000001",
+  },
+  {
+    name: "exact decimal string",
+    raw: '"1234567890123456789012345678.0000000001"',
+    expected: "1234567890123456789012345678.0000000001",
+  },
+  {
+    name: "whole-part overflow",
+    raw: "12345678901234567890123456789",
+    expected: null,
+  },
+  {
+    name: "fractional precision overflow",
+    raw: "0.00000000001",
+    expected: null,
+  },
+])("preserves the raw cost lexeme or marks it unknown: $name", async ({ raw, expected }) => {
+  expect(await usageWithRawCost(raw)).toEqual({
+    inputTokens: 1,
+    outputTokens: 2,
+    providerModel: null,
+    costUsd: expected,
+    costSource: expected === null ? null : "litellm",
+  });
+});
+
+// UNEXECUTED regression: JSON.parse treats an escaped property alias as the
+// same key. The raw lexer must use the same last-value identity, not a
+// different numeric token than the parsed usage object.
+it("preserves the last raw cost token when an escaped alias repeats the key", async () => {
+  await startMock((_req, res) => {
+    sseHead(res);
+    res.write('data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"cost":9007199254740993,"\\u0063ost":9007199254740994}}\n\n');
+    res.end("data: [DONE]\n\n");
+  });
+
+  expect((await streamCall().promise).usage).toEqual({
+    inputTokens: 1,
+    outputTokens: 2,
+    providerModel: null,
+    costUsd: "9007199254740994",
+    costSource: "litellm",
+  });
 });
 
 // The four P1 taxonomy cases, re-pinned at the new home.
