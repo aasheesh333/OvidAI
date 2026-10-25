@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:qr/qr.dart' as qr;
 
-import '../core/collaboration/models.dart' show MessageRole, maxActiveMembers;
+import '../core/collaboration/models.dart' show maxActiveMembers;
 import '../core/collaboration/production.dart';
 import '../core/conversation_share_service.dart';
 import '../core/firebase_service.dart';
@@ -249,19 +249,8 @@ class _CollabPanelState extends State<_CollabPanel> {
   }
 
   Future<void> _start(CollaborationProduction controller) => _run(() async {
-    final snapshot = ConversationSnapshot.fromSession(
-      widget.session,
-      messages: widget.messages,
-    );
     await controller.startFromConversation(
       sourceSessionId: widget.session.id,
-      seed: [
-        for (final message in snapshot.messages)
-          CollaborationSeedMessage(
-            message.role == 'user' ? MessageRole.user : MessageRole.assistant,
-            message.content,
-          ),
-      ],
     );
   });
 
@@ -374,7 +363,7 @@ class _CollabPanelState extends State<_CollabPanel> {
               ),
               const SizedBox(height: 8),
               Text(
-                'Each person\'s messages are answered by their own model and billed to their own account. Your key is never used for anyone else. The last ${CollaborationProduction.maxSeedMessages} visible messages of this chat are shared as context.',
+                'Collab uses this chat\'s existing server history; no local history is uploaded.',
                 style: AetherType.caption.copyWith(height: 1.5),
               ),
             ],
