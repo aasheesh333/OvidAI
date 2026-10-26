@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { sharesRepo, type Db } from "@ovid/db";
+import { sessions, sharesRepo, type Db } from "@ovid/db";
 import type { AuthPrincipal, Verifier } from "../auth.js";
+import { isUuid } from "../routes/http.js";
 import { pageCsp, SHARES_HEADERS } from "./headers.js";
 import { parseCreateShare, parseForkShare, ShareValidationError } from "./snapshot.js";
 import { escapeHtml, landingPage, packageName, playStoreUrl } from "./viewer.js";
@@ -127,6 +128,18 @@ function knownError(error: unknown): { status: number; code: string } | null {
 
 function nowOf(deps: SharesDeps): Date {
   return deps.clock ? deps.clock() : new Date();
+}
+
+/**
+ * A share names an existing session, but that field must never let a caller
+ * label a link with somebody else's chat. Malformed, unknown, foreign-owned
+ * and soft-deleted sessions all get the same legacy 404, so the refusal says
+ * nothing about whether the supplied id exists.
+ */
+async function requireOwnedSession(deps: SharesDeps, uid: string, sessionId: string): Promise<void> {
+  if (!isUuid(sessionId) || (await sessions.get(deps.db, sessionId, uid)) === null) {
+    throw new SharesHttpError(404, "share_not_found");
+  }
 }
 
 /** Bearer + App Check via the gateway verifier → Python error codes. */
@@ -286,6 +299,7 @@ export function registerSharesRoutes(app: FastifyInstance, deps: SharesDeps): vo
       const principal = await requirePrincipal(request, deps.verifier);
       const body = parseCreateShare(request.body);
       const receipt = await withAdmission(deps, principal, async (uid) => {
+        await requireOwnedSession(deps, uid, body.session_id);
         const now = nowOf(deps);
         await enforceQuota(deps, uid, body.request_id, now);
         return sharesRepo.create(deps.db, uid, toRepoBody(body), {

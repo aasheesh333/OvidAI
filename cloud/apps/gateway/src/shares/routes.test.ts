@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { schema, sharesRepo, type Db } from "@ovid/db";
+import { schema, sessions, sharesRepo, users, type Db } from "@ovid/db";
 import { buildGateway } from "../app.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
 import {
@@ -48,6 +48,7 @@ function seedToken(): string {
 describe.skipIf(!TEST_DATABASE_URL)("gateway legacy shares routes (real postgres)", () => {
   let db: Db;
   const built: FastifyInstance[] = [];
+  const ownedSessionIds = new Map<string, string>();
 
   beforeAll(async () => {
     db = await openTestDb();
@@ -86,27 +87,43 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway legacy shares routes (real postgres
     return app;
   }
 
+  async function ownedSession(uid: string): Promise<string> {
+    await users.ensure(db, uid, null);
+    const session = await sessions.create(db, uid, "share fixture");
+    return session.id;
+  }
+
+  async function fixtureSession(uid: string): Promise<string> {
+    const existing = ownedSessionIds.get(uid);
+    if (existing !== undefined) return existing;
+    const sessionId = await ownedSession(uid);
+    ownedSessionIds.set(uid, sessionId);
+    return sessionId;
+  }
+
   async function create(
     app: FastifyInstance,
     uid: string,
     overrides: Record<string, unknown> = {},
   ) {
+    const sessionId = await fixtureSession(uid);
     return app.inject({
       method: "POST",
       url: "/shares",
       headers: authHeaders(uid),
-      payload: payload(overrides),
+      payload: payload({ session_id: sessionId, ...overrides }),
     });
   }
 
   it("create → receipt from the configured base only (Host spoof ignored)", async () => {
     const uid = testUid("share-create");
+    const sessionId = await fixtureSession(uid);
     const app = makeApp();
     const res = await app.inject({
       method: "POST",
       url: "/shares",
       headers: { ...authHeaders(uid), host: "evil.test", "x-forwarded-host": "evil.test" },
-      payload: payload(),
+      payload: payload({ session_id: sessionId }),
     });
     expect(res.statusCode).toBe(201);
     const receipt = res.json() as Record<string, unknown>;
@@ -114,13 +131,87 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway legacy shares routes (real postgres
       ["created_at", "expires_at", "id", "request_id", "session_id", "url"].sort(),
     );
     expect(receipt.id).toMatch(TOKEN_RE);
-    expect(receipt.session_id).toBe("session-1");
+    expect(receipt.session_id).toBe(sessionId);
     expect(receipt.request_id).toBe("request-1");
     expect(receipt.created_at).toBe(BASE.getTime() / 1000);
     expect(receipt.expires_at).toBe(BASE.getTime() / 1000 + TTL_SECONDS);
     expect(receipt.url).toBe(`${BASE_URL}/s/${receipt.id as string}`);
     expect(res.headers["cache-control"]).toContain("no-store");
     expect(res.headers["cache-control"]).toContain("private");
+  });
+
+  it("creation refuses an unowned or unknown session without consuming the request or writing a share", async () => {
+    const alice = testUid("share-owner-check-alice");
+    const bob = testUid("share-owner-check-bob");
+    const foreignSessionId = await ownedSession(bob);
+    const unknownSessionId = "00000000-0000-4000-8000-000000000000";
+    const app = makeApp();
+
+    for (const sessionId of [foreignSessionId, unknownSessionId, "session-1"]) {
+      const refused = await app.inject({
+        method: "POST",
+        url: "/shares",
+        headers: authHeaders(alice),
+        payload: payload({ session_id: sessionId }),
+      });
+      expect(refused.statusCode).toBe(404);
+      expect(refused.json()).toEqual({ detail: "share_not_found" });
+      expect(refused.body).not.toContain(sessionId);
+    }
+    expect(await db.$client`SELECT token FROM shares WHERE owner_uid = ${alice}`).toHaveLength(0);
+
+    const ownerSessionId = await fixtureSession(alice);
+    const first = await app.inject({
+      method: "POST",
+      url: "/shares",
+      headers: authHeaders(alice),
+      payload: payload({ session_id: ownerSessionId }),
+    });
+    expect(first.statusCode).toBe(201);
+    const replay = await app.inject({
+      method: "POST",
+      url: "/shares",
+      headers: authHeaders(alice),
+      payload: payload({ session_id: ownerSessionId }),
+    });
+    expect(replay.statusCode).toBe(201);
+    expect(replay.json()).toEqual(first.json());
+    expect(await db.$client`SELECT token FROM shares WHERE owner_uid = ${alice}`).toHaveLength(1);
+  });
+
+  it("creation refuses an owned soft-deleted session without consuming the request or writing a share", async () => {
+    const uid = testUid("share-owner-check-deleted");
+    const deletedSessionId = await ownedSession(uid);
+    expect(await sessions.softDelete(db, deletedSessionId, uid)).not.toBeNull();
+    const app = makeApp();
+    const requestId = "soft-deleted-request";
+
+    const refused = await app.inject({
+      method: "POST",
+      url: "/shares",
+      headers: authHeaders(uid),
+      payload: payload({ session_id: deletedSessionId, request_id: requestId }),
+    });
+    expect(refused.statusCode).toBe(404);
+    expect(refused.json()).toEqual({ detail: "share_not_found" });
+    expect(refused.body).not.toContain(deletedSessionId);
+    expect(
+      await db.$client`SELECT token FROM shares WHERE owner_uid = ${uid} AND request_id = ${requestId}`,
+    ).toHaveLength(0);
+
+    const liveSessionId = await fixtureSession(uid);
+    const accepted = await app.inject({
+      method: "POST",
+      url: "/shares",
+      headers: authHeaders(uid),
+      payload: payload({ session_id: liveSessionId, request_id: requestId }),
+    });
+    expect(accepted.statusCode).toBe(201);
+    expect((accepted.json() as { session_id: string }).session_id).toBe(liveSessionId);
+    expect((accepted.json() as { request_id: string }).request_id).toBe(requestId);
+    expect(
+      await db.$client`SELECT token FROM shares WHERE owner_uid = ${uid} AND request_id = ${requestId}`,
+    ).toHaveLength(1);
   });
 
   it("authentication failures use the legacy detail envelope and never cache", async () => {
@@ -141,8 +232,9 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway legacy shares routes (real postgres
 
   it("dedup identical retry → the same immutable receipt; changed content → 409", async () => {
     const uid = testUid("share-dedup");
+    const sessionId = await fixtureSession(uid);
     const app = makeApp();
-    const first = await create(app, uid);
+    const first = await create(app, uid, { session_id: sessionId });
     expect(first.statusCode).toBe(201);
     const again = await create(app, uid);
     expect(again.statusCode).toBe(201);
@@ -156,7 +248,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway legacy shares routes (real postgres
 
     const token = (first.json() as { id: string }).id;
     const publicSnap = await app.inject({ method: "GET", url: `/s/${token}.json` });
-    expect(publicSnap.json()).toEqual({ messages: MESSAGES, session_id: "session-1" });
+    expect(publicSnap.json()).toEqual({ messages: MESSAGES, session_id: sessionId });
   });
 
   it("revoked receipt retry → 409 (never republishes)", async () => {
@@ -252,8 +344,11 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway legacy shares routes (real postgres
   it("owner lists only their own active receipts, filterable by session", async () => {
     const alice = testUid("share-list-alice");
     const bob = testUid("share-list-bob");
+    const aliceSessionId = await fixtureSession(alice);
     const app = makeApp();
-    const receipt = (await create(app, alice)).json() as { id: string };
+    const receipt = (await create(app, alice, { session_id: aliceSessionId })).json() as {
+      id: string;
+    };
     expect(
       (await app.inject({ method: "GET", url: "/shares", headers: authHeaders(bob) })).json(),
     ).toEqual({ shares: [] });
@@ -264,7 +359,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway legacy shares routes (real postgres
     );
     const filtered = await app.inject({
       method: "GET",
-      url: "/shares?session_id=session-1",
+      url: `/shares?session_id=${encodeURIComponent(aliceSessionId)}`,
       headers: authHeaders(alice),
     });
     expect((filtered.json() as { shares: unknown[] }).shares).toHaveLength(1);
@@ -279,15 +374,20 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway legacy shares routes (real postgres
     const page = await app.inject({ method: "GET", url: `/s/${receipt.id}` });
     expect(page.body).not.toContain(alice);
     expect(page.body).not.toContain("request-1");
-    expect(page.body).not.toContain("session-1");
+    expect(page.body).not.toContain(aliceSessionId);
   });
 
   it("owner updates a live link in place; token/expiry are immutable", async () => {
     const alice = testUid("share-update");
     const bob = testUid("share-update-bob");
     const app = makeApp();
-    const share = (await create(app, alice)).json() as { id: string; expires_at: number };
+    const sessionId = await fixtureSession(alice);
+    const share = (await create(app, alice, { session_id: sessionId })).json() as {
+      id: string;
+      expires_at: number;
+    };
     const updated = payload({
+      session_id: sessionId,
       request_id: "update-1",
       messages: [...MESSAGES, { role: "user", content: "More" }],
     });
@@ -327,6 +427,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway legacy shares routes (real postgres
       url: `/shares/${share.id}`,
       headers: authHeaders(alice),
       payload: payload({
+        session_id: sessionId,
         messages: [{ role: "user", content: "<think>x</think>" }],
       }),
     });
