@@ -491,6 +491,7 @@ const OWNED_CASES: Record<string, Case> = {
   // The read-only event log the user follows a run through (the terminal was
   // removed; this route replaced it). Ownership is checked before any read.
   "GET /cloud/v1/sessions/:id/events": { params: (f) => ({ id: f.sessionA.id }) },
+  "GET /cloud/v1/sessions/:id/subagents": { params: (f) => ({ id: f.sessionA.id }) },
   "POST /cloud/v1/sessions/:id/attachments": {
     params: (f) => ({ id: f.sessionA.id }),
     body: { name: "a.txt", size: 1 },

@@ -10,6 +10,8 @@ import {
   mcpConnectionsResponseContractSchema,
   structuredSubagentReportSchema,
   subagentCompactedPayloadSchema,
+  subagentSessionProjectionSchema,
+  subagentSummarySchema,
   subagentLifecycleEventSchema,
 } from "./contracts.js";
 import { mcpServerDtoSchema } from "./mcpRest.js";
@@ -69,6 +71,69 @@ describe("versioned attachment and connection contracts", () => {
 });
 
 describe("subagent lifecycle and report contracts", () => {
+  it("matches the shipped Web/Flutter SubagentSessionProjection and full summary shape", () => {
+    const item = {
+      requestId: "request-1",
+      deferredRequestId: null,
+      logicalWorkerId: "worker-1",
+      childSessionId: "child-1",
+      childRunId: "child-run-1",
+      attemptId: "attempt-1",
+      attemptNumber: 1,
+      rootTaskRunId: "root-run-1",
+      parentRunId: "root-run-1",
+      batchId: "batch-1",
+      agentType: "general-purpose",
+      launchReason: "Independent work",
+      schedulingReason: "Main selected it",
+      prompt: "bounded prompt",
+      promptTruncated: false,
+      summary: "done",
+      error: null,
+      requestedAt: "2026-10-24T12:00:00.000Z",
+      deferredAt: null,
+      admittedAt: "2026-10-24T12:00:01.000Z",
+      startedAt: "2026-10-24T12:00:02.000Z",
+      endedAt: "2026-10-24T12:01:00.000Z",
+      startKnown: true,
+      status: "completed",
+      lastActivity: "subagent_completed",
+      lastActivityAt: "2026-10-24T12:01:00.000Z",
+      lastCursor: null,
+      structuredReport: {
+        subagent_id: "child-1",
+        status: "completed",
+        files_modified: ["src/a.ts"],
+        artifacts_created: [],
+        key_findings: "Actual finding",
+        error_if_any: null,
+      },
+      logAvailable: false,
+      compaction: null,
+      steps: [],
+    } as const;
+    const page = {
+      counts: {
+        total: 1,
+        running: 0,
+        awaiting_next_user_task: 0,
+        completed: 1,
+        failed: 0,
+        cancelled: 0,
+        timeout: 0,
+      },
+      items: [item],
+      nextCursor: "opaque-after",
+    } as const;
+    expect(subagentSummarySchema.parse(item)).toEqual(item);
+    expect(subagentSessionProjectionSchema.parse(page)).toEqual(page);
+    expect(() => subagentSummarySchema.parse({ ...item, inventedAlias: true })).toThrow();
+    expect(() => subagentSummarySchema.parse({ ...item, prompt: "x".repeat(201) })).toThrow();
+    expect(() =>
+      subagentSessionProjectionSchema.parse({ ...page, counts: { ...page.counts, total: 2 } }),
+    ).not.toThrow();
+  });
+
   it("declares exactly the six additive scheduling/control/compaction/finalization event names", () => {
     expect(ADDITIVE_SUBAGENT_EVENT_TYPES).toEqual([
       "subagent_requested",

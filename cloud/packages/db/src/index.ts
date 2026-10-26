@@ -5,6 +5,7 @@ export * from "./providerConnections.js";
 export * from "./connectionHealthStore.js";
 export * from "./subagentAdmission.js";
 export * from "./subagentReportSnapshots.js";
+export * from "./subagentRoster.js";
 export * from "./systemRequests.js";
 export * from "./artifactVault.js";
 export * from "./moneyRepos.js";

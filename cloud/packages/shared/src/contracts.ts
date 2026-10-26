@@ -117,15 +117,6 @@ export const structuredSubagentReportSchema = z
   .strict();
 export type StructuredSubagentReport = z.infer<typeof structuredSubagentReportSchema>;
 
-export const ADDITIVE_SUBAGENT_EVENT_TYPES = [
-  "subagent_requested",
-  "subagent_deferred",
-  "subagent_admitted",
-  "subagent_controlled",
-  "subagent_compacted",
-  "root_finalized",
-] as const;
-
 const compactionMetadataShape = {
   sessionId: nonEmptyString,
   runId: nonEmptyString,
@@ -148,6 +139,128 @@ const subagentCompactedShape = {
 
 export const subagentCompactedPayloadSchema = z.object(subagentCompactedShape).strict();
 export type SubagentCompactedPayload = z.infer<typeof subagentCompactedPayloadSchema>;
+
+export const subagentCompactionMetadataSchema = subagentCompactedPayloadSchema;
+export type SubagentCompactionMetadata = SubagentCompactedPayload;
+
+const nullableRosterString = z.string().min(1).max(4096).nullable();
+// lastActivity may be an empty code emitted by an older writer; the clients
+// preserve that as "no activity label" rather than treating the item as bad.
+const nullableActivityString = z.string().max(4096).nullable();
+const nullableRosterTimestamp = z.string().min(1).max(128).nullable();
+
+const subagentUsageSchema = z
+  .object({
+    inputTokens: z.number().nonnegative().nullable(),
+    outputTokens: z.number().nonnegative().nullable(),
+    cacheReadTokens: z.number().nonnegative().nullable(),
+    cacheWriteTokens: z.number().nonnegative().nullable(),
+    costUsd: z.number().nonnegative().nullable(),
+  })
+  .strict();
+
+export const subagentTrajectoryStepSchema = z
+  .object({
+    cursor: nonEmptyString.max(4096),
+    sessionId: nonEmptyString,
+    runId: z.string().max(4096),
+    seq: z.string().max(4096),
+    actorKind: z.enum(["main", "worker"]),
+    kind: z.enum(["model", "tool", "subagent", "system"]),
+    type: nonEmptyString.max(512),
+    ts: nonEmptyString.max(128),
+    prompt: z.string().max(16000).nullable(),
+    output: z.string().max(16000).nullable(),
+    evidence: z.string().max(16000).nullable(),
+    files: z.array(z.union([nonEmptyString.max(4096), z.record(z.string(), z.unknown())])).max(1000),
+    diffs: z.array(z.union([nonEmptyString.max(4096), z.record(z.string(), z.unknown())])).max(1000),
+    artifacts: z.array(z.union([nonEmptyString.max(4096), z.record(z.string(), z.unknown())])).max(1000),
+    preview: z.string().max(8192).nullable(),
+    requestedModel: nullableRosterString,
+    providerModel: nullableRosterString,
+    usage: subagentUsageSchema,
+    workerId: nonEmptyString.max(4096).optional(),
+    compactionId: nonEmptyString.max(4096).optional(),
+    checkpointId: nonEmptyString.max(4096).optional(),
+    model: nonEmptyString.max(512).optional(),
+    contextLimit: z.number().int().positive().optional(),
+    beforeTokens: z.number().int().nonnegative().optional(),
+    afterTokens: z.number().int().nonnegative().optional(),
+    usageSource: z.enum(["measured", "deterministic_fallback"]).optional(),
+    continuation: z.literal("continuing_existing_task").optional(),
+  })
+  .strict();
+export type SubagentTrajectoryStep = z.infer<typeof subagentTrajectoryStepSchema>;
+
+/** Exact shipped-client `SubagentSummaryDto`; null is explicit missing evidence. */
+export const subagentSummarySchema = z
+  .object({
+    requestId: nullableRosterString,
+    deferredRequestId: nullableRosterString,
+    logicalWorkerId: nullableRosterString,
+    childSessionId: nullableRosterString,
+    childRunId: nullableRosterString,
+    attemptId: nullableRosterString,
+    attemptNumber: z.number().int().positive().nullable(),
+    rootTaskRunId: nullableRosterString,
+    parentRunId: nullableRosterString,
+    batchId: nullableRosterString,
+    agentType: nullableRosterString,
+    launchReason: z.string().max(4000).nullable(),
+    schedulingReason: z.string().max(4000).nullable(),
+    prompt: z.string().max(200).nullable(),
+    promptTruncated: z.boolean(),
+    summary: z.string().max(4000).nullable(),
+    error: z.string().max(4000).nullable(),
+    requestedAt: nullableRosterTimestamp,
+    deferredAt: nullableRosterTimestamp,
+    admittedAt: nullableRosterTimestamp,
+    startedAt: nullableRosterTimestamp,
+    endedAt: nullableRosterTimestamp,
+    startKnown: z.boolean(),
+    status: subagentStatusSchema,
+    lastActivity: nullableActivityString,
+    lastActivityAt: nullableRosterTimestamp,
+    lastCursor: nullableRosterString,
+    structuredReport: structuredSubagentReportSchema.nullable(),
+    logAvailable: z.boolean().nullable(),
+    compaction: subagentCompactionMetadataSchema.nullable(),
+    steps: z.array(subagentTrajectoryStepSchema).max(1000),
+  })
+  .strict();
+export type SubagentSummary = z.infer<typeof subagentSummarySchema>;
+
+export const subagentCountsSchema = z
+  .object({
+    total: z.number().int().nonnegative(),
+    running: z.number().int().nonnegative(),
+    awaiting_next_user_task: z.number().int().nonnegative(),
+    completed: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+    cancelled: z.number().int().nonnegative(),
+    timeout: z.number().int().nonnegative(),
+  })
+  .strict();
+export type SubagentCounts = z.infer<typeof subagentCountsSchema>;
+
+/** The exact shipped Web/Flutter `SubagentSessionProjection` wire shape. */
+export const subagentSessionProjectionSchema = z
+  .object({
+    counts: subagentCountsSchema,
+    items: z.array(subagentSummarySchema),
+    nextCursor: nonEmptyString.max(4096).nullable(),
+  })
+  .strict();
+export type SubagentSessionProjection = z.infer<typeof subagentSessionProjectionSchema>;
+
+export const ADDITIVE_SUBAGENT_EVENT_TYPES = [
+  "subagent_requested",
+  "subagent_deferred",
+  "subagent_admitted",
+  "subagent_controlled",
+  "subagent_compacted",
+  "root_finalized",
+] as const;
 
 export const mainCompactionDiagnosticsSchema = z
   .object({

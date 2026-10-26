@@ -34,6 +34,7 @@ import { registerDevicesRoutes } from "./routes/devices.js";
 import { registerWebPushRoutes } from "./routes/webPush.js";
 import { registerUsageHistoryRoutes } from "./routes/usageHistory.js";
 import { registerEventRoutes } from "./routes/events.js";
+import { registerSubagentRoutes } from "./routes/subagents.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerImportRoutes } from "./routes/import.js";
 import { registerMcpCatalogRoutes } from "./routes/mcpCatalog.js";
@@ -662,6 +663,7 @@ export function buildGateway(
       registerAccountSettingsRoutes(scope, deps);
       registerMemoryRoutes(scope, deps);
       registerEventRoutes(scope, deps);
+      registerSubagentRoutes(scope, deps);
       registerAttachmentRoutes(scope, deps);
       registerRunRoutes(scope, deps);
       registerImportRoutes(scope, deps);
