@@ -7,10 +7,47 @@
 // have is worse than no design file.
 //
 // This test reads both lists and fails on any difference, in either direction.
+// The sheets are generated artifacts, so the test regenerates them in
+// setUpAll rather than requiring a manual step before running tests.
 
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+
+/// Locate a usable Python 3 interpreter, or return `null`.
+///
+/// The generator is pure Python stdlib and is required to render the SVGs that
+/// this test compares against the app registry. Tests are skipped when no Python
+/// toolchain is available.
+String? _findPython() {
+  for (final name in const ['python3', 'python']) {
+    try {
+      final result = Process.runSync(name, const ['--version']);
+      if (result.exitCode == 0) return name;
+    } on ProcessException {
+      // Try the next candidate.
+    }
+  }
+  return null;
+}
+
+final String? _python = _findPython();
+
+void _generateSheet({required bool dark}) {
+  final result = Process.runSync(
+    _python!,
+    dark ? const ['tool/figma_sheet.py', '--dark'] : const ['tool/figma_sheet.py'],
+    workingDirectory: Directory.current.path,
+  );
+  if (result.exitCode != 0) {
+    fail(
+      'Figma sheet generation failed for ${dark ? 'dark' : 'light'} theme '
+      '(exit ${result.exitCode}).\n'
+      'stdout: ${result.stdout}\n'
+      'stderr: ${result.stderr}',
+    );
+  }
+}
 
 /// Screen ids the generator draws, in sheet order.
 List<String> _sheetScreenIds(String svgPath) {
@@ -43,57 +80,64 @@ List<String> _registryIds() {
 }
 
 void main() {
-  test('the Figma sheet draws exactly the screens the app has', () {
-    final sheet = _sheetScreenIds('build/figma/ovid-si-screens.svg');
-    final registry = _registryIds();
+  group('Figma parity', () {
+    setUpAll(() {
+      _generateSheet(dark: false);
+      _generateSheet(dark: true);
+    });
 
-    final inSheetOnly = sheet.toSet().difference(registry.toSet()).toList()
-      ..sort();
-    final inAppOnly = registry.toSet().difference(sheet.toSet()).toList()
-      ..sort();
+    test('the Figma sheet draws exactly the screens the app has', () {
+      final sheet = _sheetScreenIds('build/figma/ovid-si-screens.svg');
+      final registry = _registryIds();
 
-    expect(
-      inSheetOnly,
-      isEmpty,
-      reason:
-          'The design sheet draws screens the app cannot open: '
-          '${inSheetOnly.join(', ')}. Remove them from tool/figma_sheet.py, or '
-          'wire the screen in the app — a design file must not show a screen '
-          'the product does not have.',
-    );
-    expect(
-      inAppOnly,
-      isEmpty,
-      reason:
-          'The app has screens the design sheet does not draw: '
-          '${inAppOnly.join(', ')}. Add them to tool/figma_sheet.py so the '
-          'design reference stays complete.',
-    );
-    expect(sheet.length, equals(registry.length));
-  });
+      final inSheetOnly = sheet.toSet().difference(registry.toSet()).toList()
+        ..sort();
+      final inAppOnly = registry.toSet().difference(sheet.toSet()).toList()
+        ..sort();
 
-  test('the dark sheet draws the same screens as the light one', () {
-    final light = _sheetScreenIds('build/figma/ovid-si-screens.svg');
-    final dark = _sheetScreenIds('build/figma/ovid-si-screens-dark.svg');
-    expect(
-      dark,
-      equals(light),
-      reason:
-          'The two themes are generated from the same builder list, so a '
-          'difference means one was generated from a stale copy of the tool.',
-    );
-  });
+      expect(
+        inSheetOnly,
+        isEmpty,
+        reason:
+            'The design sheet draws screens the app cannot open: '
+            '${inSheetOnly.join(', ')}. Remove them from tool/figma_sheet.py, or '
+            'wire the screen in the app — a design file must not show a screen '
+            'the product does not have.',
+      );
+      expect(
+        inAppOnly,
+        isEmpty,
+        reason:
+            'The app has screens the design sheet does not draw: '
+            '${inAppOnly.join(', ')}. Add them to tool/figma_sheet.py so the '
+            'design reference stays complete.',
+      );
+      expect(sheet.length, equals(registry.length));
+    });
 
-  test('the sheet covers every screen group, not just a subset', () {
-    // A regression guard for the generator: it once drew only the 16 primary
-    // screens and the sheet looked complete.
-    final sheet = _sheetScreenIds('build/figma/ovid-si-screens.svg');
-    expect(
-      sheet.length,
-      greaterThanOrEqualTo(45),
-      reason:
-          'The sheet has only ${sheet.length} screens. Every registered screen '
-          'must be drawn, not just the primary ones.',
-    );
-  });
+    test('the dark sheet draws the same screens as the light one', () {
+      final light = _sheetScreenIds('build/figma/ovid-si-screens.svg');
+      final dark = _sheetScreenIds('build/figma/ovid-si-screens-dark.svg');
+      expect(
+        dark,
+        equals(light),
+        reason:
+            'The two themes are generated from the same builder list, so a '
+            'difference means one was generated from a stale copy of the tool.',
+      );
+    });
+
+    test('the sheet covers every screen group, not just a subset', () {
+      // A regression guard for the generator: it once drew only the 16 primary
+      // screens and the sheet looked complete.
+      final sheet = _sheetScreenIds('build/figma/ovid-si-screens.svg');
+      expect(
+        sheet.length,
+        greaterThanOrEqualTo(45),
+        reason:
+            'The sheet has only ${sheet.length} screens. Every registered screen '
+            'must be drawn, not just the primary ones.',
+      );
+    });
+  }, skip: _python == null ? 'Python 3 is not available; install it to run the Figma parity tests.' : null);
 }
