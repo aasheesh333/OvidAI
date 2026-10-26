@@ -1,5 +1,10 @@
 # Ovid Master Roadmap — post-P6 request batch (2026-09-13)
 
+> **Release reality (2026-10-26):** P5 (voice input) is gated OFF. `lib/core/voice_capability.dart`
+> sets `kOvidVoiceEnabled = false`. The on-device service code exists, but no real-audio
+> evidence has been recorded. This historical tracker preserves the original implementation
+> status; it does not claim voice is active in release.
+
 **Status:** Active. This is the single tracker for the large 2026-09-12/13 request
 batch. Each project below has a design spec (`specs/`) and an implementation plan
 (`plans/`). Execute **one project at a time**, top to bottom, using
@@ -29,7 +34,7 @@ reviewer, fix rounds max 5, per-plan ledger under `.superpowers/sdd/<plan>/`).
 | P2 | Control mode + overlay | `specs/2026-09-13-control-mode-overlay-design.md` | `plans/2026-09-13-control-mode-overlay.md` | DONE (one-time disclosure, background-only overlay, lower opacity + stroke, control briefing, overlay mic, overlay AI questions) |
 | P3 | 24/7 background operation | `specs/2026-09-13-background-24-7-design.md` | `plans/2026-09-13-background-24-7.md` | DONE (boot receiver + keep-alive gate, battery-exemption request, in-app stop; Kotlin compiles) |
 | P4 | Studio + browser | `specs/2026-09-13-studio-browser-design.md` | `plans/2026-09-13-studio-browser.md` | DONE (external GitHub login, login dot, fresh blank tabs, Studio-only picker, non-wv UA for OAuth) |
-| P5 | Voice input (mic) | `specs/2026-09-13-voice-input-design.md` | `plans/2026-09-13-voice-input.md` | DONE (on-device STT service; composer mic; overlay mic native↔Dart; Kotlin compiles) |
+| P5 | Voice input (mic) | `specs/2026-09-13-voice-input-design.md` | `plans/2026-09-13-voice-input.md` | DONE (on-device STT service; composer mic; overlay mic native↔Dart; Kotlin compiles) — **release-gated OFF at `b412960d`** |
 | P6 | Token efficiency (no-folder) | `specs/2026-09-13-token-efficiency-design.md` | `plans/2026-09-13-token-efficiency.md` | DONE (device tools omitted outside Control; measured 82 vs 91 tools ≈ 810 tokens/request saved) |
 
 ## Source requirements (verbatim, user 2026-09-12/13)

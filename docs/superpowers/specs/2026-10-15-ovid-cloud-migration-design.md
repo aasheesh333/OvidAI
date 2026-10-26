@@ -72,7 +72,7 @@ offline**, and state re-syncs on reconnect via replayable event streams.
 | D2 | **Keep LiteLLM** as the model gateway. TS `mint` re-implementation keeps the `/mint`, `/usage`, `/plans`, `/v1/models` client contracts and the `ovid_pools.py` in-proxy hook semantics. |
 | D3 | **BYOK kept via server-side key escrow**: user provider keys uploaded, envelope-encrypted in Postgres, used by the server agent directly against the provider (bypassing LiteLLM) through the single SSRF-guarded egress client. |
 | D4 | **Current VPS** (this box: `vps-6bc54f43-vps-ovh-ca`, 8 vCPU / 22 GB / 193 GB — migrated 2026-10-16 from `vm-mtx87lmp`; live stack at `/opt/ovid-gateway`), re-provisioned; must handle **≥100 concurrent users**. |
-| D5 | **Control mode removed** (accessibility `device_*` tools, overlay). **Voice input stays on-device** (STT → text upstream). **On-device WebView browser removed**; browser is server-side per G6. |
+| D5 | **Control mode removed** (accessibility `device_*` tools, overlay). **Voice input stays client-side but is release-gated OFF** (`kOvidVoiceEnabled = false`; STT code exists but is not active). **On-device WebView browser removed**; browser is server-side per G6. |
 | D6 | Python backend replaced entirely (account, billing, collaboration, images, mint, reports, shares, sync). `private_sync` is **deleted, not ported** — server becomes authoritative for transcripts/memory/usage; the app keeps a read cache. |
 | D7 | Cloudflare **R2** for object storage (workspaces, browser states, artifacts, image results). Owner provisions bucket + API token (env vars `OVID_R2_*`); agents never see Cloudflare credentials. |
 | D8 | Scheduler must work like Meta Muse: description + time/date, autonomous completion without the user (see §8). |

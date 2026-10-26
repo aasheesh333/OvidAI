@@ -1222,6 +1222,8 @@ class _RoundAction extends StatelessWidget {
       label: label,
       button: true,
       enabled: enabled,
+      excludeSemantics: true,
+      onTap: onPressed,
       child: SizedBox(
         width: OSpace.touch,
         height: OSpace.touch,

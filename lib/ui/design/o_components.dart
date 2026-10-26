@@ -244,6 +244,8 @@ class OIconButton extends StatelessWidget {
       // See OButton: keep the icon button's own node so an overflow menu
       // inside a tappable card is still reachable.
       container: true,
+      excludeSemantics: true,
+      onTap: onPressed,
       child: tooltip == null ? button : Tooltip(message: tooltip!, child: button),
     );
   }

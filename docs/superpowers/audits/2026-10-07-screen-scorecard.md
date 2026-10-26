@@ -1,5 +1,9 @@
 # Ovid 45-screen UI/UX scorecard
 
+> **Release reality (2026-10-26):** Voice is gated OFF (`kOvidVoiceEnabled = false` in
+> `lib/core/voice_capability.dart`). The scorecard's voice/mic observations below were accurate
+> for the 2026-10-07 tree; they are not claims that voice is active in release.
+
 **Audit date:** 2026-10-07  
 **Scope:** `lib/ui/**`, `lib/main.dart`, and navigation call sites in the UI layer  
 **Constraint:** Read-only product audit. No app code was changed.
@@ -207,7 +211,8 @@ network, destructive, and runtime operations.
    treatment or “coming soon” state is more honest than a tappable dead end.
 10. **Voice status can contradict chat behavior.** The earlier audit cites a
     dead mic affordance in `chat_screen.dart:4130` alongside settings copy that
-    advertises voice input as on.
+    advertises voice input as on. **2026-10-26: voice is release-gated OFF
+    (`kOvidVoiceEnabled = false`).**
 11. **Studio’s first-open auth is interruptive.** The implementation deliberately
     triggers GitHub auth from the first-open flow (`studio_screen.dart:203-252`).
     A contextual connect CTA may preserve momentum better than an unsolicited
@@ -241,7 +246,7 @@ network, destructive, and runtime operations.
 | 2 | Add confirm/undo behavior for session deletion and unify destructive-action copy. | Protects conversation history and establishes a trustworthy interaction contract. | `sidebar.dart:332-348`; account/storage/plugin deletion surfaces |
 | 3 | Give Browser a first-class zero-tab/new-tab state and clamp active-tab indices after close. | Removes blank-screen and assertion-risk behavior from a core destination. | `browser_screen.dart:151-154`, prior audit `325-333` |
 | 4 | Replace silent catches and infinite spinners with retryable inline error states. | Makes Studio, Plugins, Health, and Trajectory diagnosable and recoverable. | `studio_screen.dart`; `plugins_screen.dart`; `health_screen.dart`; `trajectory_screen.dart` |
-| 5 | Remove or relabel settings controls whose handlers do nothing, and reconcile voice status with actual chat behavior. | Stops users forming false expectations from the settings hub. | `settings_screen.dart`; prior sweep findings at settings `154-261` |
+| 5 | Remove or relabel settings controls whose handlers do nothing, and reconcile voice status with actual chat behavior. | Stops users forming false expectations from the settings hub. | `settings_screen.dart`; prior sweep findings at settings `154-261`; 2026-10-26 voice is release-gated OFF |
 | 6 | Validate the 45 surfaces at 360×640, 420×1000, 720×1280, 780×1688, and 1024×768 with text scaling enabled. | Existing objective screenshot review found edge-touching heuristics on 7/15 captures; code review cannot establish visual clipping. | `docs/superpowers/audits/2026-10-06-ui-screenshot-review.md:41-57` |
 | 7 | Add a common async-surface contract: loading, empty, error, retry, success, and persistence confirmation. | Reduces repeated screen-specific omissions and raises the entire 45-screen floor. | Cross-cutting: `AetherEmptyState`, startup panels, Studio, Health, Trajectory |
 | 8 | Add route-level analytics or a route registry abstraction only if navigation breadth continues to grow. | The current push-based architecture works, but discoverability and route inventory are increasingly implicit. | `main.dart`; repeated `MaterialPageRoute` pushes |

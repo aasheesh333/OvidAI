@@ -1,6 +1,11 @@
 # UI/UX 14-Screen Sweep — file:line audit (2026-09-06)
 
-Read-only audit of `lib/ui/*.dart`. No code modified. Each row: `file:line | issue | severity | suggested fix`.
+> **Release reality (2026-10-26):** Voice is gated OFF in release (`kOvidVoiceEnabled = false` in
+> `lib/core/voice_capability.dart`). The mic/Settings rows described below were accurate for the
+> 2026-09-06 tree; the current release disables real voice and the capability probe reports
+> unavailable. No real-audio evidence has been recorded.
+
+Read-only audit of `lib/ui/*.dart`. No code modified. Each rows: `file:line | issue | severity | suggested fix`.
 Severities: Critical / High / Med / Low.
 
 ---
@@ -9,7 +14,7 @@ Severities: Critical / High / Med / Low.
 
 | file:line | issue | severity | suggested fix |
 |---|---|---|---|
-| chat_screen.dart:4130-4138 | Voice (mic) button is dead: `onPressed: () {}` renders a tappable affordance that does nothing. | Med | Wire to speech-to-text or remove button until implemented; Settings also advertises `Voice input / On`. |
+| chat_screen.dart:4130-4138 | Voice (mic) button is dead: `onPressed: () {}` renders a tappable affordance that does nothing. | Med | Wire to speech-to-text or remove button until implemented; Settings also advertises `Voice input / On`. **2026-10-26: voice is release-gated OFF (`kOvidVoiceEnabled = false`).** |
 | chat_screen.dart:1106-1107 + 4173-4186 | Approval lock bypass: `locked` disables the `TextField` (4089) and `onSubmitted` (4106), but the circular primary send button (4173-4186) calls the `onSend` closure (1107) which never checks `pendingApproval` — user can send while an approval card awaits an answer. | High | Check `AgentService.I.pendingApproval != null` at the top of the `onSend` closure and disable/grey the send button when locked. |
 | chat_screen.dart:4853-4866 | Approval detail truncated at `maxLines: 8` + ellipsis; the dangerous part of a long destructive command can be cut off with no expand affordance. | Med | Make the detail text expandable (tap to expand / show full in scrollable). |
 | chat_screen.dart:4613-4625 | Queue "Clear all" deletes every queued message with no confirmation and no undo. | Low | Add confirm or an undo snackbar. |
@@ -60,7 +65,7 @@ Severities: Critical / High / Med / Low.
 
 | file:line | issue | severity | suggested fix |
 |---|---|---|---|
-| settings_screen.dart:154-161, 185-194, 230-234, 260-261 | Nine rows look tappable but are dead (`_settingTile` hardcodes `onTap: () {}` at 296): Appearance, Language, Image generation, Voice input (`On` — contradicts the dead chat mic), Default agent, In-app browser, Sandbox status, Notifications, About. | High | Either implement, show "coming soon" feedback on tap, or render as non-interactive info rows. |
+| settings_screen.dart:154-161, 185-194, 230-234, 260-261 | Nine rows look tappable but are dead (`_settingTile` hardcodes `onTap: () {}` at 296): Appearance, Language, Image generation, Voice input (`On` — contradicts the dead chat mic), Default agent, In-app browser, Sandbox status, Notifications, About. | High | Either implement, show "coming soon" feedback on tap, or render as non-interactive info rows. **2026-10-26: voice is release-gated OFF (`kOvidVoiceEnabled = false`).** |
 | settings_screen.dart:314-330 | Privacy-policy dialog shows the URL as plain non-tappable text — user must retype it. | Med | `SelectableText` + launch URL button (or open in the in-app browser). |
 | settings_screen.dart:103-126 | Back-to-back `SectionHeader('Workspace')` / `SectionHeader('Workspace stats')` reads as a duplicate. | Low | Merge into one `Workspace` section. |
 | settings_screen.dart:261 | Hardcoded `About … 0.1.0-demo` version string. | Low | Inject from `package_info_plus`. |
@@ -147,7 +152,7 @@ No Critical issues found. Ranked by severity, then by blast radius:
 9. **Med** — Unresponsive 210px/240px Studio panes (studio:339).
 10. **Med** — Error-view flex fight hiding the log (sandbox_setup:348).
 11. **Med** — Retry without cancelling in-flight install (sandbox_setup:389).
-12. **Med** — Dead mic button (chat:4130) + false `Voice input: On` (settings:161).
+12. **Med** — Dead mic button (chat:4130) + false `Voice input: On` (settings:161). **2026-10-26: voice is release-gated OFF (`kOvidVoiceEnabled = false`).**
 13. **Med** — Truncated approval detail, no expand (chat:4853).
 14. **Med** — Global-kill Stop without scope disclosure (chat:4177).
 15. **Med** — Fresh-install sidebar dead end (sidebar:169).

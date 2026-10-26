@@ -27,7 +27,7 @@
 - **Dependency direction:** `packages/*` never import from `apps/*`; `@ovid/agent-core` imports only `@ovid/{shared,db,events,queue}` + npm deps (pinned by a static test in Task 1). `KeyProvider`-style interfaces live in `@ovid/shared` (P1 ledger ruling, row 1).
 - **P1+P2 suites stay green UNMODIFIED (R1):** `cloud/apps/worker/src/liteLlm.test.ts` and `runProcessor.test.ts` — P1 cases plus P2's Task-12 tool-call additions — keep passing (liteLlm.ts becomes a re-export shim in Task 4 over the P2 tool-capable contract); **P2's suite stays green unmodified** — tests may be EXTENDED additively, never rewritten. `RunDeps`/`ModelTransport`/`ChatMessage` references mean P2's landed shapes, not P1's v0 shapes.
 - **AG4:** every ported mechanism carries ported Vitest cases derived from the Dart tests named in that task; a ported case that cannot hold in the cloud (on-device UI, control mode) is deleted-with-comment, never silently dropped.
-- **D5:** `device_*` tools and Control mode never exist in the cloud roster; voice stays client-side.
+- **D5:** `device_*` tools and Control mode never exist in the cloud roster; voice stays client-side but is release-gated OFF (`kOvidVoiceEnabled = false`).
 - **Production boundary:** P3 never deploys, never touches `/opt/ovid-cloud`, the live gateway stack, or non-disposable containers.
 - **8c/22GB box (ledger 2026-10-16):** no unbounded in-memory transcript growth — spill caps, compaction, and sequential (never parallel) subagent child loops are the memory discipline.
 

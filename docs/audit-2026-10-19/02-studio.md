@@ -1,5 +1,12 @@
 # 02 — Studio audit (feat/ovid-cloud @ fdf2c5f, release APK in /root/ovid-audit/apk)
 
+> **Release reality (2026-10-26):** This audit was taken against commit `fdf2c5f`.
+> At commit `b412960d` the Android `ovid/studio-preview` platform-view factory is
+> registered (`android/app/src/main/kotlin/com/dhanuk/ovidai/MainActivity.kt`),
+> so the Studio live-preview rendering path is no longer blocked by a missing
+> factory. The backend preview producer / tunnel remains absent, so the screen
+> still opens `unavailable`.
+
 Scope: lib/ui/studio_*.dart, lib/core/studio_drafts.dart, lib/core/cloud/studio_files.dart,
 lib/core/cloud/studio_remote_client.dart, entry points (chat_screen/shell/sidebar/app_router),
 gateway `cloud/apps/gateway/src/routes/workspace.ts`, worker `cloud/apps/worker/src/fileService.ts`,

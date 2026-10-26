@@ -1352,7 +1352,7 @@ def parse_tts_evidence(raw, require_done=True, device_pid=None):
     pattern = re.compile(
         r"v3 event=(accepted|start|done) logical=([A-Za-z0-9_.:-]{1,96}) "
         r"native=([A-Za-z0-9_.:-]{1,128}) requested=([A-Za-z0-9_.:-]{1,96}) "
-        r"resolved=([A-Za-z0-9_.:-]{1,96}) epochMs=(\d+)\s*$")
+        r"resolved=([A-Za-z0-9_.:-]{1,96}) epochMs=(\d+)")
     for line in raw.splitlines():
         if "OvidTtsEvidence:" not in line:
             continue
@@ -1456,7 +1456,7 @@ class ClockAnchorSeries:
             value = self.device.clock_anchor()
         if not isinstance(value, dict):
             raise Blocked("device_clock_unavailable")
-        self.anchors.append(dict(value, phase=phase)
+        self.anchors.append(dict(value, phase=phase))
 
     def validate(self, capture):
         if len(self.anchors) < CLOCK_MIN_ANCHORS:
@@ -1600,8 +1600,8 @@ def capture_window_bounds(trace, capture, anchor):
     pcm_end = (completed_device - first_device_ms) * 1000 - guard_us
     # Include no sample outside the guarded interval. Quantize once so the
     # selected-window duration and pcm_metrics agree at fractional clock offsets.
-    start_sample = math.ceil(pcm_start * SAMPLE_RATE / 1000)
-    end_sample = math.floor(pcm_end * SAMPLE_RATE / 1000)
+    start_sample = math.ceil(pcm_start * SAMPLE_RATE / 1_000_000)
+    end_sample = math.floor(pcm_end * SAMPLE_RATE / 1_000_000)
     if start_sample < 0 or end_sample - start_sample < SAMPLE_RATE // 4:
         raise Blocked("tts_utterance_interval_too_short")
     if end_sample > capture["sample_count"]:
@@ -2344,9 +2344,14 @@ def validate_stt_lifecycle(evidence):
 
 
 def validate_capture_artifacts(artifacts):
-    if not isinstance(artifacts, (list, tuple)) or not set(CAPTURE_ARTIFACTS).issubset(artifacts):
+    if not isinstance(artifacts, (list, tuple, set)):
         return ["capture_artifacts_missing"]
-    if list(artifacts) != list(CAPTURE_ARTIFACTS):
+    artifact_set = set(artifacts)
+    if len(artifact_set) != len(artifacts):
+        return ["capture_artifacts_exact_set_required"]
+    if not set(CAPTURE_ARTIFACTS).issubset(artifact_set):
+        return ["capture_artifacts_missing"]
+    if artifact_set != set(CAPTURE_ARTIFACTS):
         return ["capture_artifacts_exact_set_required"]
     return []
 
@@ -2503,6 +2508,8 @@ def validate_acceptance(report):
 
 
 def _json_equal(left, right):
+    if isinstance(left, bool) and isinstance(right, bool):
+        return left == right
     if isinstance(left, bool) != isinstance(right, bool):
         return False
     if isinstance(left, dict) and isinstance(right, dict):

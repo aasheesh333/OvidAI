@@ -36,12 +36,15 @@ def baseline_capture(seconds=0.75):
 
 
 def memory_pcm(payload):
-    descriptor = os.memfd_create("ovid-fixture-pcm", flags=0)
-    view = memoryview(payload)
-    while view:
-        view = view[os.write(descriptor, view):]
-    os.lseek(descriptor, 0, os.SEEK_SET)
-    return os.fdopen(descriptor, "rb", buffering=0, closefd=True)
+    import socket
+    read_sock, write_sock = socket.socketpair()
+    try:
+        write_sock.sendall(payload)
+    finally:
+        write_sock.close()
+    read_fd = os.dup(read_sock.fileno())
+    read_sock.close()
+    return os.fdopen(read_fd, "rb", buffering=0, closefd=True)
 
 
 class ControlledClock:

@@ -1,5 +1,9 @@
 # Ovid remaining-work closure report — 2026-10-06
 
+> **Release reality (2026-10-26):** Voice is gated OFF (`kOvidVoiceEnabled = false`).
+> The `voice_input_service.dart` references below describe the implementation state;
+> they do not claim voice is active in release or that real-audio evidence exists.
+
 **Scope:** Read-only reconciliation of the remaining work between the master plan,
 the current git state, and the 2026-10-06 execution reports. This report does **not**
 mark any new task complete. The only verified canonical task remains **W12.01**;

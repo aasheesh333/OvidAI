@@ -135,7 +135,7 @@ longer exists (search is inline in the drawer).
 | 28 | `ovid_si_studio_workspace` | close | Explorer toolbar is missing: no `Find`, `File`, `Folder` actions above the tree; the editor has no line-number gutter (PNG 01–14). `studio/file_tree.dart` (searchable tree) and `studio/code_viewer.dart` (line numbers, diff kinds) exist but are **not imported**. Repo/branch chips, sync banner + "Sync latest changes", tree, editor with filename/Saved/Copy, live-workspace note and the 3-files-changed / Commit / Preview dock are present. | `lib/ui/v2/studio/studio_workspace_page.dart`, unwired `lib/ui/v2/studio/file_tree.dart`, `lib/ui/v2/studio/code_viewer.dart` |
 | 29 | `ovid_si_branch_picker` | match | Search, "Switch branch", current branch with "Default · Synced with remote / Active", recent branches with last-commit labels, Create new branch, stash note. | `lib/ui/v2/studio/branch_picker_sheet.dart` |
 | 30 | `ovid_si_changes_diff` | match | "3 changed · +48 −12", expandable files, unified diff with old/new line numbers and green/coral rows, per-hunk Copy, commit message with counter, Commit & push, "Sync latest first · N behind". | `lib/ui/v2/studio/changes_page.dart` |
-| 31 | `ovid_si_live_preview` | close | The phone frame renders a **synthesised** marketing page from injected fields (`siteName`, `eyebrow`, `primaryCta`, `featureTitle`…). `V2LivePreviewData` has no frame/thumbnail field at all, so no real preview pixels can ever reach this screen — every live preview reads as demo content. Refresh/open-in-browser, url chrome, "Live · Preview from workspace", expiry + "+30 min", Share link and Stop preview are present. | `lib/ui/v2/studio/live_preview_page.dart` |
+| 31 | `ovid_si_live_preview` | close | The phone frame renders a **synthesised** marketing page from injected fields (`siteName`, `eyebrow`, `primaryCta`, `featureTitle`…). `V2LivePreviewData` now has `frame` and `webView` fields (`lib/ui/v2/studio/live_preview_page.dart:93-124`), but `livePreviewDataFor` still returns `V2PreviewStatus.unavailable`, so no real preview pixels reach the screen. Refresh/open-in-browser, url chrome, "Live · Preview from workspace", expiry + "+30 min", Share link and Stop preview are present. | `lib/ui/v2/studio/live_preview_page.dart` |
 
 ### Browser
 
@@ -205,7 +205,9 @@ longer exists (search is inline in the drawer).
    slot.
 4. **Preview surfaces.** Live preview (screen 31) can now render a real frame —
    `V2LivePreviewData.frame` exists and the page draws it — but no producer
-   supplies one, so in the app it stays in its waiting state. The artifact stage
+   supplies one, so in the app it stays in its waiting state. The Android
+   `ovid/studio-preview` platform-view factory is registered (added in `b412960d`),
+   so the client-side rendering path is no longer the blocker. The artifact stage
    (screen 16) now uses the shared `artifact_preview.dart` with the artifact's
    real thumbnail when there is one. Neither has a device frame or
    `Responsive View` chrome, which is now a deliberate choice.

@@ -3,6 +3,12 @@
 **Date:** 2026-09-13
 **Status:** Approved for implementation.
 
+> **Release reality (2026-10-26):** Voice is gated OFF. `lib/core/voice_capability.dart`
+> sets `kOvidVoiceEnabled = false`. The test harness and on-device capability probe
+> exist, but no real-audio evidence has been recorded (emulator has no usable speech
+> locale). This design remains the intended architecture; the feature is not active in
+> release.
+
 ## 1. Goal
 
 Make the microphone work: dictate prompts in the composer and in the control

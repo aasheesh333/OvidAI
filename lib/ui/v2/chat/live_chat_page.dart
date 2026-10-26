@@ -2594,6 +2594,8 @@ class _LiveRoundAction extends StatelessWidget {
       hint: hint,
       button: true,
       enabled: enabled,
+      excludeSemantics: true,
+      onTap: onPressed,
       child: SizedBox(
         width: OSpace.touch,
         height: OSpace.touch,

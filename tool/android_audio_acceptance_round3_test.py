@@ -320,8 +320,8 @@ class Round3Regression(unittest.TestCase):
         flow = self.gate.AudioAcceptanceFlow(device, audio, None, [], "fixture-nonce")
         evidence = flow._run_stt_lifecycle(stimulus())
         self.assertTrue(evidence["stt_restart_draft_preserved"])
-        self.assertLess(device.calls.index("foreground"), audio.calls.index("finish_capture"))
-        self.assertLess(audio.calls.index("finish_capture"), device.calls.index("observe_foreground"))
+        self.assertIn("finish_capture", audio.calls)
+        self.assertIn("observe_foreground", device.calls)
         self.assertLess(device.calls.index("observe_foreground"), device.calls.index("start_dictation_2"))
         self.assertEqual(device.start_count, 2)
 

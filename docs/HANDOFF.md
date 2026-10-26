@@ -4,10 +4,10 @@
 agent can continue exactly where the previous session stopped. Read this file
 first, then `docs/superpowers/plans/2026-10-23-ovid-architecture-gaps.md`.
 
-**Last commit:** `4bbe80ef feat(connectors): 100 curated connectors (20 -> 100)`
+**Last commit:** `b412960d fix(flutter): repair the committed tree and its failing suites`
 **Branch:** `feat/ovid-si-rebuild`
-**Working tree:** clean (except `docs/legal/PRIVACY.md`, which the human is
-editing — do not touch it)
+**Working tree:** docs-only update in progress (this handoff is being edited to
+match verified reality; do not touch `docs/legal/PRIVACY.md`)
 
 ---
 
@@ -52,8 +52,8 @@ docs/                    plans, play runbooks, architecture notes
 ```bash
 # Flutter
 export PATH=/root/flutter/bin:$PATH
-flutter analyze            # must be clean
-flutter test               # 5470 pass, 2 skipped
+flutter analyze --no-pub   # 0 issues (commit b412960d)
+flutter test --no-pub        # 6008 passed, 2 skipped (commit b412960d)
 
 # TypeScript packages (each has its own vitest)
 cd cloud/packages/agent-core && npx vitest run
@@ -326,7 +326,7 @@ See `docs/play/DEMO-BUILD.md` and `docs/play/PRODUCTION-RUNBOOK.md`.
 ## 9. The one-paragraph summary to paste into a fresh agent
 
 > We are continuing **Ovid Si**, a Flutter Android + TypeScript cloud agent
-> product, at commit `4bbe80ef` on branch `feat/ovid-si-rebuild` in this
+> product, at commit `b412960d` on branch `feat/ovid-si-rebuild` in this
 > repository. Read `docs/HANDOFF.md` first — it has the full state, the
 > rulings already made, the exact test commands and the remaining work. Then
 > read `docs/superpowers/plans/2026-10-23-ovid-architecture-gaps.md`. Do not
@@ -334,3 +334,59 @@ See `docs/play/DEMO-BUILD.md` and `docs/play/PRODUCTION-RUNBOOK.md`.
 > enforce limits server-side, and commit per task with a why-focused message.
 > The highest-value remaining task is §6.1 (connector Add/save is still
 > local-only). Do not touch `docs/legal/PRIVACY.md` — the human is editing it.
+
+---
+
+## 10. Verified state (2026-10-26)
+
+Captured at commit `b412960d` on this branch.
+
+| Check | Result |
+|---|---|
+| `flutter analyze --no-pub` | 0 issues |
+| `flutter test --no-pub` | 6008 passed, 2 skipped, 0 failed |
+| Pre-existing skips | `release_flags_test.dart`, `ui_finish_03_account_test.dart` (environment-gated) |
+
+**What is ON vs OFF:**
+
+- **Voice is OFF.** `lib/core/voice_capability.dart` sets `kOvidVoiceEnabled = false`. The 27-case voice harness and the on-device capability probe exist, but the emulator has no usable speech locale and there is **zero real-audio evidence**.
+- **Studio live preview platform view is registered.** `ovid/studio-preview` is registered in `android/app/src/main/kotlin/com/dhanuk/ovidai/MainActivity.kt` (added in `b412960d`). The screen remains **blocked** at the wiring layer because there is no preview producer / tunnel (`docs/audit/FEATURE_GAPS.md` A1).
+- **FCM/deep-link fresh-process routing is proven end-to-end on an emulator** (cold/warm deep links, invalid-token negative control, notification-tap cold/warm). FCM *delivery* is blocked on `GOOGLE_APPLICATION_CREDENTIALS` and a signed-in account.
+- **Authenticated acceptance has never been performed.** The signed APK below was installed on an API-34 emulator and launched to sign-in without crashes; that is not an owner acceptance pass.
+
+**Top blockers:**
+
+1. No preview producer / tunnel for Studio live preview (A1).
+2. FCM delivery needs `GOOGLE_APPLICATION_CREDENTIALS` + signed-in account.
+3. Voice cannot be claimed as working without a device with a usable speech locale.
+4. No authenticated acceptance has been done.
+
+---
+
+## 11. Release evidence (2026-10-26)
+
+A signed release APK was built from `b412960d` and verified with:
+
+```bash
+apksigner verify -v build/app/outputs/flutter-apk/app-release.apk
+```
+
+| Property | Value |
+|---|---|
+| File size | 35,884,740 B |
+| SHA-256 | `7914a3ba644c98fa98a4f1b20d13142236ad581e08ce8574f6bd5b95253d19a1` |
+| Signers | 1 |
+| Signing scheme | v2-signed, **not debug** |
+| Certificate SHA-256 | `96d76a02dc7da1790706bd324868273863c8bf01d3d3fbf72048483c133f7755` |
+| Package | `com.dhanuk.ovidai` |
+| versionName | `1.0.0` |
+| versionCode | `3` |
+| minSdk | 24 |
+| targetSdk | 36 |
+| ABIs | **x86_64 only** |
+
+**Limitations and warnings:**
+
+- **x86_64-only ABI.** The verified APK is **not Play-acceptable** because it ships x86_64 only. Do not call this a production-ready artifact.
+- **Historical signed-install evidence is uncorroborated.** A previously referenced signed install (`cbe92360…`, 34,612,835 B) could not be found anywhere in the repositories; treat it as uncorroborated.
+- This APK installed cleanly on an API-34 emulator, launched to the sign-in screen, and showed no crashes. That is an install/boot smoke test only, not authenticated acceptance.

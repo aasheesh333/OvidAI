@@ -16,6 +16,58 @@ it server-side (`cloud/apps/gateway/src/routes/byok.ts`).
 
 ---
 
+## Verified state (2026-10-26)
+
+Measured at commit `b412960d` (`feat/ovid-si-rebuild`).
+
+| Check | Result |
+|---|---|
+| `flutter analyze --no-pub` | 0 issues |
+| `flutter test --no-pub` | 6008 passed, 2 skipped, 0 failed |
+| Pre-existing skips | `release_flags_test.dart`, `ui_finish_03_account_test.dart` (environment-gated) |
+
+**What is ON vs OFF:**
+
+- **Voice is OFF.** `lib/core/voice_capability.dart` sets `kOvidVoiceEnabled = false`. The test harness and on-device capability probe exist, but the emulator has no usable speech locale, so there is **zero real-audio evidence**.
+- **Studio live preview platform view is registered.** `ovid/studio-preview` is registered in `MainActivity.kt` (added in `b412960d`). Live preview remains **blocked** at the wiring layer because there is no preview producer / tunnel (`docs/audit/FEATURE_GAPS.md` A1).
+- **FCM/deep-link fresh-process routing is proven end-to-end on an emulator** (cold/warm deep link, invalid-token negative control, notification-tap cold/warm). FCM *delivery* is blocked on `GOOGLE_APPLICATION_CREDENTIALS` and a signed-in account.
+- **Authenticated acceptance has never been performed.** The signed APK was installed on an API-34 emulator and launched to sign-in without crashes; that is an install/boot smoke test only.
+
+**Top blockers:**
+
+1. No preview producer / tunnel for Studio live preview.
+2. FCM delivery needs `GOOGLE_APPLICATION_CREDENTIALS` + a signed-in account.
+3. Voice cannot be claimed as working without a device with a usable speech locale.
+4. No authenticated acceptance pass has been done.
+
+---
+
+## Release evidence (2026-10-26)
+
+A signed release APK was built from `b412960d` and verified with `apksigner verify -v`:
+
+| Property | Value |
+|---|---|
+| File size | 35,884,740 B |
+| SHA-256 | `7914a3ba644c98fa98a4f1b20d13142236ad581e08ce8574f6bd5b95253d19a1` |
+| Signers | 1 |
+| Signing scheme | v2-signed, **not debug** |
+| Certificate SHA-256 | `96d76a02dc7da1790706bd324868273863c8bf01d3d3fbf72048483c133f7755` |
+| Package | `com.dhanuk.ovidai` |
+| versionName | `1.0.0` |
+| versionCode | `3` |
+| minSdk | 24 |
+| targetSdk | 36 |
+| ABIs | **x86_64 only** |
+
+**Limitations:**
+
+- **x86_64-only ABI.** The verified APK is **not Play-acceptable** because it ships x86_64 only. Do not call this a production artifact.
+- **Historical signed-install evidence is uncorroborated.** A previously referenced signed install (`cbe92360…`, 34,612,835 B) could not be found anywhere in the repositories; treat it as uncorroborated.
+- The APK installed cleanly on an API-34 emulator, launched to the sign-in screen, and showed no crashes. That is an install/boot smoke test, not authenticated acceptance.
+
+---
+
 ## Quick start
 
 Requirements: Flutter with Dart SDK `^3.12.2` (`pubspec.yaml`), and for a
@@ -49,11 +101,11 @@ its own guide at [`server/account/DEPLOYMENT.md`](server/account/DEPLOYMENT.md).
 ## How to test
 
 ```bash
-# Flutter unit + widget suite (393 *_test.dart files at the time of writing)
-flutter test
+# Flutter unit + widget suite
+flutter test --no-pub        # 6008 passed, 2 skipped at commit b412960d
 
 # Static analysis
-flutter analyze
+flutter analyze --no-pub     # 0 issues at commit b412960d
 
 # Python tooling tests (no server dependencies)
 python3 -m unittest discover -s tool -p '*_test.py'
@@ -237,9 +289,9 @@ ids (`plugin:<id>/command:<name>`, `…/skill:<name>`, `…/agent:<name>`,
 The chat release gate and its measured evidence (focused suites, the full
 Flutter suite, `flutter analyze`, the debug APK SHA-256, and the
 physical-device checklist) are recorded in
-`docs/superpowers/audits/2026-09-10-chat-dsh-parity.md`. The physical-device
-smoke pass is `NOT EXECUTED` when no Android device/emulator is attached;
-on-device sign-off remains open until a release owner completes that checklist.
+`docs/superpowers/audits/2026-09-10-chat-dsh-parity.md`. An emulator
+smoke pass (install → launch → sign-in, no crashes) was done at commit
+`b412960d`; authenticated on-device sign-off remains open.
 
 ## Studio and Git behavior contract
 
@@ -274,10 +326,9 @@ on-device sign-off remains open until a release owner completes that checklist.
 The Studio/Git release gate and its measured evidence (the end-to-end suite,
 the full Flutter suite, `flutter analyze`, the debug APK SHA-256, and the
 physical-device checklist) are recorded in
-`docs/superpowers/audits/2026-09-10-studio-git-reliability.md`. The
-physical-device pass is `NOT EXECUTED` when no Android device/emulator is
-attached; on-device sign-off remains open until a release owner completes that
-checklist.
+`docs/superpowers/audits/2026-09-10-studio-git-reliability.md`. An emulator
+smoke pass (install → launch → sign-in, no crashes) was done at commit
+`b412960d`; authenticated on-device sign-off remains open.
 
 ## Browser desktop behavior contract
 
@@ -303,11 +354,9 @@ surface and is not a current UI capability.
 The Browser Desktop release gate and its measured evidence (the end-to-end
 parity suite, the full Flutter suite, `flutter analyze`, and the
 physical-device checklist) are recorded in
-`docs/superpowers/audits/2026-09-10-browser-desktop.md`. The debug APK build
-in that gate fails on the missing `google-services.json` and the
-physical-device pass is `NOT EXECUTED` when no Android device/emulator is
-attached; on-device sign-off remains open until a release owner completes
-those items.
+`docs/superpowers/audits/2026-09-10-browser-desktop.md`. An emulator
+smoke pass (install → launch → sign-in, no crashes) was done at commit
+`b412960d`; authenticated on-device sign-off remains open.
 
 ## MCP servers
 
@@ -397,7 +446,6 @@ pinned by the audit in
 The startup/plugin-runtime release gate and its measured evidence (first-frame
 budget, 120-second deadline, runtime skill + `session_start` integration, legacy
 migration, APK SHA-256, and the physical-Android checklist) are recorded in
-`docs/superpowers/audits/2026-09-10-startup-plugin-runtime-reliability.md`. The
-physical-device smoke pass is `NOT EXECUTED` when no Android device/emulator is
-attached; on-device sign-off remains open until a release owner completes that
-checklist.
+`docs/superpowers/audits/2026-09-10-startup-plugin-runtime-reliability.md`. An
+emulator smoke pass (install → launch → sign-in, no crashes) was done at
+commit `b412960d`; authenticated on-device sign-off remains open.

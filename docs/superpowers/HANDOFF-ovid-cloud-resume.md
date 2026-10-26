@@ -17,7 +17,7 @@ on this VPS in per-user bubblewrap sandboxes; tasks survive app close/offline; M
 scheduler (owner's top product priority).
 
 - **Binding spec:** `docs/superpowers/specs/2026-10-15-ovid-cloud-migration-design.md` (approved by owner; contains locked decisions D1–D8, goals G1–G11, anti-goals, capacity model, security, data layer, migration strategy, plan breakdown §14).
-- **Owner's locked decisions:** full TypeScript rewrite of agent core · keep LiteLLM as model gateway (Python quota hook stays inside it) · BYOK via server-side encrypted escrow · this VPS, ≥100 concurrent users · Control mode REMOVED, voice input stays on-device, browser fully server-side (2-tier) · Python backend replaced entirely (strangler) · Cloudflare R2 storage · scheduler per spec §8.
+- **Owner's locked decisions:** full TypeScript rewrite of agent core · keep LiteLLM as model gateway (Python quota hook stays inside it) · BYOK via server-side encrypted escrow · this VPS, ≥100 concurrent users · Control mode REMOVED, voice input is OFF in release (`kOvidVoiceEnabled = false`; the on-device capability exists but is gated), browser fully server-side (2-tier) · Python backend replaced entirely (strangler) · Cloudflare R2 storage · scheduler per spec §8.
 
 ## 2. Authoritative state (read these first)
 
