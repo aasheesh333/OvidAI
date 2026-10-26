@@ -1,4 +1,4 @@
-import { type Db, type ScheduleRow, messages, runs, schedules, scheduleRuns, users, type Tx } from "@ovid/db";
+import { RunQuotaService, type Db, type ScheduleRow, messages, runs, schedules, scheduleRuns, users, type Tx } from "@ovid/db";
 import type { SystemBus } from "@ovid/events";
 import {
   isRecurringTrigger,
@@ -41,11 +41,20 @@ import { settleScheduleRuns as defaultSettle, type SettleDeps } from "./schedule
 export const SCHEDULER_TICK_MS = 15_000;
 /** Max due schedules handled per tick pass. */
 export const TICK_BATCH_LIMIT = 50;
+/** Max staged model-call settlements replayed per tick pass. */
+const SETTLEMENT_RECOVERY_BATCH_LIMIT = 50;
+
+export type ModelCallSettlementQuota = Pick<
+  RunQuotaService,
+  "pendingSettlements" | "settleModelCall"
+>;
 
 export interface SchedulerDeps {
   db: Db;
   queues: QueueServices;
   system: SystemBus;
+  /** Recovery defaults to the canonical service on this same DB. */
+  quota?: ModelCallSettlementQuota;
   /** Injectable for tests; defaults to the wall clock. */
   clock?: () => Date;
 }
@@ -312,12 +321,43 @@ export async function fireScheduleOccurrence(
 }
 
 /**
- * One tick pass: a short transaction claims the due batch (FOR UPDATE SKIP
- * LOCKED — overlapping ticks partition the set), then each schedule fires in
- * its OWN transaction. A fire that throws is caught and logged — Postgres is
- * authoritative and the next tick retries the schedule.
+ * Replay actual facts already staged by the canonical quota service. This path
+ * has no provider call: it discovers exact reservations, then settles them in
+ * canonical order with a bounded sequential batch. Per-item failures stay
+ * pending for a later pass. The service's user/reservation locks and settled
+ * fact checks make concurrent and repeated replay idempotent across processes.
+ */
+export async function recoverPendingModelCallSettlements(
+  deps: SchedulerDeps,
+  opts?: { limit?: number },
+): Promise<void> {
+  const quota = deps.quota ?? new RunQuotaService(deps.db);
+  const pending = await quota.pendingSettlements(
+    opts?.limit ?? SETTLEMENT_RECOVERY_BATCH_LIMIT,
+  );
+  for (const reservation of pending) {
+    try {
+      await quota.settleModelCall({
+        reservationId: reservation.reservationId,
+        usage: reservation.usage,
+      });
+    } catch (err) {
+      console.error("[scheduler] model usage settlement recovery failed", {
+        reservationId: reservation.reservationId,
+        err,
+      });
+    }
+  }
+}
+
+/**
+ * One tick pass: recover staged model-call usage, then claim a due batch in a
+ * short transaction (FOR UPDATE SKIP LOCKED — overlapping ticks partition the
+ * set). Each schedule fires in its OWN transaction. A fire that throws is
+ * caught and logged — Postgres is authoritative and the next tick retries.
  */
 export async function runSchedulerTick(deps: SchedulerDeps): Promise<TickReport> {
+  await recoverPendingModelCallSettlements(deps);
   const now = deps.clock?.() ?? new Date();
   const report: TickReport = {
     fired: 0,
