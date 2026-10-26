@@ -259,7 +259,7 @@ class CollaborationClient {
         'schemaVersion': collaborationSchemaVersion,
         'requestId': requestId,
         'idempotencyKey': requestId,
-        if (sessionId != null) 'sessionId': sessionId,
+        'sessionId': ?sessionId,
       },
     );
     _exact(data, const {
@@ -340,7 +340,7 @@ class CollaborationClient {
       'schemaVersion': collaborationSchemaVersion,
       'idempotencyKey': idempotencyKey,
       'text': text,
-      if (model != null) 'model': model,
+      'model': ?model,
       if (attachmentIds.isNotEmpty) 'attachmentIds': attachmentIds,
     });
     return _wire(() => CollaborationTurnResult.fromWire(data));
@@ -666,7 +666,7 @@ class CollaborationClient {
       'kind': kind,
       'targetId': targetId,
       'reason': reason,
-      if (details != null) 'details': details,
+      'details': ?details,
     });
     _exact(data, const {'schemaVersion', 'reportId'});
     _version(data);

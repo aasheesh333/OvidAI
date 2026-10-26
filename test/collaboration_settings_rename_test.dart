@@ -92,9 +92,11 @@ class _RenameServer {
   }
 }
 
-Future<void> _until(bool Function() condition) async {
+Future<void> _until(WidgetTester tester, bool Function() condition) async {
   for (var index = 0; index < 400 && !condition(); index++) {
-    await Future<void>.delayed(const Duration(milliseconds: 5));
+    // Widget tests run in a fake-async zone, so a bare Future.delayed would
+    // never advance without a frame pump.
+    await tester.pump(const Duration(milliseconds: 5));
   }
   expect(condition(), isTrue);
 }
@@ -174,7 +176,7 @@ void main() {
   }
 
   testWidgets('confirmed server save forces Collab read even when Firebase fails', (tester) async {
-    await bindLiveSession();
+    await tester.runAsync(bindLiveSession);
     final firebaseCalls = <String>[];
     await rename(
       tester,
@@ -184,18 +186,18 @@ void main() {
         return 'mirror failed';
       },
     );
-    await _until(() => AppState.I.collaboration!.state?.nameOf('p-owner') == 'Confirmed Name');
+    await _until(tester, () => AppState.I.collaboration!.state?.nameOf('p-owner') == 'Confirmed Name');
 
     expect(server.events, ['server-confirmed']);
     expect(firebaseCalls, ['Confirmed Name']);
     expect(server.stateRequests, isNotEmpty);
     expect(find.text('Saved; profile failed.'), findsOneWidget);
     expect(find.text('Rename failed.'), findsNothing);
-    await AppState.I.collaboration!.release();
+    await tester.runAsync(() => AppState.I.collaboration!.release());
   });
 
   testWidgets('server rejection skips forced read and Firebase mirror', (tester) async {
-    await bindLiveSession();
+    await tester.runAsync(bindLiveSession);
     server.rejectProfile = true;
     final firebaseCalls = <String>[];
     await rename(
@@ -210,12 +212,12 @@ void main() {
     expect(firebaseCalls, isEmpty);
     expect(server.stateRequests, isEmpty);
     expect(find.text('Rename failed.'), findsOneWidget);
-    await AppState.I.collaboration!.release();
+    await tester.runAsync(() => AppState.I.collaboration!.release());
   });
 
   testWidgets('no live session makes profile refresh a no-op without blocking Firebase', (tester) async {
     AppState.I.collaboration = makeProduction();
-    await AppState.I.collaboration!.bind('alice', 7);
+    await tester.runAsync(() => AppState.I.collaboration!.bind('alice', 7));
     final firebaseCalls = <String>[];
     await rename(
       tester,
@@ -229,11 +231,11 @@ void main() {
     expect(firebaseCalls, ['No Room Name']);
     expect(server.stateRequests, isEmpty);
     expect(find.text('Rename failed.'), findsNothing);
-    await AppState.I.collaboration!.release();
+    await tester.runAsync(() => AppState.I.collaboration!.release());
   });
 
   testWidgets('refresh failure after confirmed save cannot block the Firebase mirror', (tester) async {
-    await bindLiveSession();
+    await tester.runAsync(bindLiveSession);
     server.failState = true;
     final firebaseCalls = <String>[];
     await rename(
@@ -244,13 +246,12 @@ void main() {
         return null;
       },
     );
-    await _until(() => server.stateRequests.isNotEmpty);
-
+    await _until(tester, () => server.stateRequests.isNotEmpty);
     expect(firebaseCalls, ['Durable Server Name']);
     expect(find.text('Rename failed.'), findsNothing);
     server.failState = false;
     AppState.I.collaboration!.forceRefreshAfterProfileRename(uid: 'alice', generation: 7);
-    await _until(() => AppState.I.collaboration!.state?.nameOf('p-owner') == 'Durable Server Name');
-    await AppState.I.collaboration!.release();
+    await _until(tester, () => AppState.I.collaboration!.state?.nameOf('p-owner') == 'Durable Server Name');
+    await tester.runAsync(() => AppState.I.collaboration!.release());
   });
 }

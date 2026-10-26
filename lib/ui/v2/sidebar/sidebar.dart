@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 
@@ -153,6 +155,7 @@ class Sidebar extends StatefulWidget {
     this.onRetry,
     this.messageSearch,
     this.onMessageTap,
+    this.onSearchHit,
   });
 
   final V2SidebarData data;
@@ -206,6 +209,10 @@ class Sidebar extends StatefulWidget {
   /// Opens a server message hit's chat. Falls back to [onSessionTap] when the
   /// hit's session is in the drawer index.
   final ValueChanged<String>? onMessageTap;
+
+  /// Opens the exact server message. Local hits without an ID continue through
+  /// the legacy session callback; this is never a second search engine.
+  final ValueChanged<MessageSearchHit>? onSearchHit;
 
   @override
   State<Sidebar> createState() => _SidebarState();
@@ -435,6 +442,7 @@ class _SidebarState extends State<Sidebar> {
         showDivider: showDivider,
         onTap: e.onTap,
       ),
+      _MessageMoreEntry e => _messageMore(e, showDivider: showDivider),
     };
     // Keep the entrance stagger for the first screenful only.
     if (index >= 8) return row;
@@ -569,6 +577,24 @@ class _SidebarState extends State<Sidebar> {
         for (final hit in messages.hits) {
           entries.add(_MessageHitEntry(hit, onTap: () => _openMessageHit(hit)));
         }
+        if (messages.moreError != null) {
+          entries.add(
+            _MessageErrorEntry(
+              message: messages.moreError!,
+              onRetry: () => unawaited(_w.messageSearch?.loadMore()),
+            ),
+          );
+        }
+        if (messages.hasMore) {
+          entries.add(
+            _MessageMoreEntry(
+              loading: messages.loadingMore,
+              onTap: messages.loadingMore
+                  ? null
+                  : () => unawaited(_w.messageSearch?.loadMore()),
+            ),
+          );
+        }
         break;
     }
     return entries;
@@ -590,6 +616,11 @@ class _SidebarState extends State<Sidebar> {
   /// A server hit names its chat by id. Prefer the shell's callback (it also
   /// loads the transcript); fall back to the drawer row when there is one.
   void _openMessageHit(MessageSearchHit hit) {
+    final exact = _w.onSearchHit;
+    if (exact != null && hit.messageId != null) {
+      exact(hit);
+      return;
+    }
     final id = hit.sessionId;
     if (id == null) return;
     final callback = _w.onMessageTap;
@@ -603,6 +634,25 @@ class _SidebarState extends State<Sidebar> {
         return;
       }
     }
+  }
+
+  Widget _messageMore(_MessageMoreEntry entry, {required bool showDivider}) {
+    if (entry.loading) {
+      return _messageNote('Loading more messages…', showDivider: showDivider);
+    }
+    return Container(
+      decoration: showDivider
+          ? BoxDecoration(
+              border: Border(
+                bottom: BorderSide(color: OColors.of(context).hairline),
+              ),
+            )
+          : null,
+      child: TextButton(
+        onPressed: entry.onTap,
+        child: const Text('Load more messages'),
+      ),
+    );
   }
 
   /// A one-line note inside the Messages section: loading, empty or the
@@ -778,6 +828,13 @@ final class _MessageErrorEntry extends _SidebarEntry {
 
   final String message;
   final VoidCallback? onRetry;
+}
+
+final class _MessageMoreEntry extends _SidebarEntry {
+  const _MessageMoreEntry({required this.loading, required this.onTap});
+
+  final bool loading;
+  final VoidCallback? onTap;
 }
 
 /// One ranked message hit from the gateway (or the device index).

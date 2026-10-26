@@ -51,3 +51,39 @@ void main() {
     expect(stopped, isTrue);
     expect(voice.isListening, isFalse);
   });
+
+  test('unavailable input never enters the start seam', () async {
+    voice.availabilityOverrideForTest = false;
+    var starts = 0;
+    voice.startOverrideForTest = (_) => starts++;
+
+    expect(await voice.start((_, _) {}), isFalse);
+    expect(starts, 0);
+    expect(voice.isListening, isFalse);
+  });
+
+  test('permission denial never enters the start seam', () async {
+    voice.availabilityOverrideForTest = true;
+    voice.ensureMicrophonePermissionForTest = () async => false;
+    var starts = 0;
+    voice.startOverrideForTest = (_) => starts++;
+
+    expect(await voice.start((_, _) {}), isFalse);
+    expect(starts, 0);
+    expect(voice.isListening, isFalse);
+  });
+
+  test('cancel clears listening and uses the cancellation seam', () async {
+    voice.availabilityOverrideForTest = true;
+    var cancels = 0;
+    voice.startOverrideForTest = (_) {};
+    voice.cancelOverrideForTest = () => cancels++;
+    addTearDown(() => voice.cancelOverrideForTest = null);
+
+    await voice.start((_, _) {});
+    await voice.cancel();
+
+    expect(cancels, 1);
+    expect(voice.isListening, isFalse);
+  });
+}

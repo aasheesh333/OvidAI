@@ -628,7 +628,7 @@ class _LiveCollabRouteState extends State<_LiveCollabRoute> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('Remove this message from the room?'),
+        title: const Text('Remove this message?'),
         content: const Text('The server keeps canonical history for moderation.'),
         actions: [
           TextButton(

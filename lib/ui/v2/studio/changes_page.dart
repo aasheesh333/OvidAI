@@ -95,7 +95,7 @@ class V2ChangesData {
     this.errorMessage,
     bool? totalsKnown,
     this.coverageWarning,
-  }) : _totalsKnown = totalsKnown;
+  }) : _totalsKnown = totalsKnown; // ignore: prefer_initializing_formals
 
   final V2ChangesStatus status;
   final List<V2ChangedFile> files;
@@ -349,7 +349,7 @@ class _V2ChangesPageState extends State<V2ChangesPage> {
       itemCount: files.length + (hasWarning ? 1 : 0),
       itemBuilder: (context, index) {
         if (hasWarning && index == 0) {
-          return _DiffCoverageWarning(message: warning!);
+          return _DiffCoverageWarning(message: warning);
         }
         final file = files[index - (hasWarning ? 1 : 0)];
         return _DiffFileRow(

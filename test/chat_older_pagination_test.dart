@@ -235,6 +235,9 @@ void main() {
       final dynamic shell = tester.state<State<V2AppShell>>(
         find.byType(V2AppShell),
       );
+      // The live socket is already at seq 900; the page read for this deep
+      // link reports that same watermark.
+      rest.lastEventSeq = '900';
       ws.seedCursor('srv-1', '900');
 
       await shell.openSearchHit(
@@ -371,6 +374,12 @@ class _PagingHostState extends State<_PagingHost> {
 class _PagingRest extends CloudRestClient {
   _PagingRest() : super(restBase: 'https://example.test/cloud/v1');
 
+  /// The snapshot watermark the gateway reports with the newest page. The
+  /// deep-link test raises it to the live cursor it seeds, because a real
+  /// REST snapshot is never older than the events the client already holds
+  /// (CH-003 rebases the replay onto this watermark by design).
+  String lastEventSeq = '10';
+
   final List<({String? before, int limit, bool withEvents})> calls = [];
 
   @override
@@ -394,7 +403,7 @@ class _PagingRest extends CloudRestClient {
       ],
       nextCursor: initial ? 'older-2' : null,
       hasWatermark: true,
-      lastEventSeq: '10',
+      lastEventSeq: lastEventSeq,
       activeRunId: 'run-live',
       rawEvents: const <Map<String, dynamic>>[],
     );

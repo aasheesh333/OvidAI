@@ -10,6 +10,8 @@ import '../../../core/cloud/studio_preview_client.dart';
 import '../../../core/cloud/studio_remote_client.dart';
 import '../../../core/state.dart';
 import '../../design/o_components.dart';
+import '../../design/o_screen.dart';
+import '../../design/o_tokens.dart';
 import '../../studio_errors.dart';
 import '../studio/branch_picker_sheet.dart';
 import '../studio/changes_page.dart';

@@ -23,6 +23,7 @@ class _ThinServer {
   final attachmentCreateKeys = <String, String>{};
   var failNextTurn = false;
   var loseNextTurnResponse = false;
+  var capabilityAbsent = false;
   Future<void> Function()? afterAcceptedTurn;
   var runs = 0;
   var messages = 0;
@@ -34,6 +35,15 @@ class _ThinServer {
       status,
       headers: {'cache-control': 'private, no-store'},
     );
+    if (capabilityAbsent &&
+        (request.url.path.endsWith('/url') ||
+            request.url.path.endsWith('/reports') ||
+            request.url.path.contains('/blocks/') ||
+            request.url.path.contains('/messages/'))) {
+      // An older gateway without the object/UGC routes: a plain cloud 404,
+      // not the collaboration error envelope.
+      return json({'error': {'code': 'not_found', 'message': 'Route not found.'}}, 404);
+    }
     if (request.url.path == '/chat') {
       return json({
         'schemaVersion': 1,
@@ -226,6 +236,7 @@ void main() {
     final owner = make();
     await owner.bind('alice', 1);
     await owner.create(sessionId: _sessionId);
+    server.capabilityAbsent = true;
     for (final call in <Future<Object?> Function()>[
       () => owner.objectUrl(attachmentId: _attachmentId),
       () => owner.report(

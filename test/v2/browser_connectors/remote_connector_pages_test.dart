@@ -843,8 +843,7 @@ void main() {
     addTearDown(controller.dispose);
     await _pumpRemote(tester, controller);
 
-    await tester.tap(find.text('Google Drive').first);
-    await tester.pump();
+    await _openDetail(tester);
     expect(find.byType(ConnectorDetailPage), findsOneWidget);
     expect(find.byType(OSkeletonList), findsOneWidget);
     expect(find.text('Check health'), findsNothing);

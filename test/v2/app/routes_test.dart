@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:ovid_ai/core/chat_integration_ports.dart';
+import 'package:ovid_ai/core/cloud/studio_git_api.dart';
 import 'package:ovid_ai/core/collaboration/models.dart';
 import 'package:ovid_ai/core/collaboration/reducer.dart';
 import 'package:ovid_ai/core/state.dart';
@@ -661,9 +662,23 @@ void main() {
     });
 
     test('changes stay empty and only carry the bound branch label', () {
+      const cleanStatus = StudioGitStatus(
+        branch: 'dev',
+        headSha: 'abc123',
+        upstream: null,
+        dirty: false,
+        ahead: 0,
+        behind: 0,
+        reason: null,
+        fetchedAt: null,
+      );
+      const emptyDiff = StudioDiff(patch: '', truncated: false);
+
       final ready = V2StudioRoutes.changesDataFor(
         branch: 'dev',
         portReady: true,
+        gitStatus: cleanStatus,
+        diff: emptyDiff,
       );
       expect(ready.status, V2ChangesStatus.empty);
       expect(ready.branchLabel, 'dev');
@@ -672,6 +687,8 @@ void main() {
       final noPort = V2StudioRoutes.changesDataFor(
         branch: 'dev',
         portReady: false,
+        gitStatus: cleanStatus,
+        diff: emptyDiff,
       );
       expect(noPort.branchLabel, isNull);
     });

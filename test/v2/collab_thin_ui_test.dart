@@ -105,7 +105,14 @@ void main() {
       ),
     );
 
-    await tester.tap(find.bySemanticsLabel('Open result.txt'));
+    // The artifact row merges into the message bubble's semantics node, so
+    // assert the open label is attached to the row text rather than assuming a
+    // standalone node.
+    expect(
+      tester.getSemantics(find.text('result.txt')).label,
+      contains('Open result.txt'),
+    );
+    await tester.tap(find.text('result.txt'));
     await tester.tap(find.bySemanticsLabel('Report message'));
     await tester.tap(find.bySemanticsLabel('Remove message'));
     expect(opened, 'artifact-1');
@@ -225,7 +232,8 @@ void main() {
 
     expect(find.text('notes.txt'), findsOneWidget);
     await tester.tap(find.bySemanticsLabel('Attach files'));
-    await tester.tap(find.byIcon(Icons.cancel));
+    // Material 3 chips use Icons.clear for the delete affordance.
+    await tester.tap(find.byIcon(Icons.clear));
     expect(attaches, 1);
     expect(removed, [0]);
   });

@@ -259,8 +259,10 @@ void main() {
 
   testWidgets('refused Generate image keeps the draft', (tester) async {
     a.messages.clear();
-    // No usable model: the send path refuses with a snack bar.
-    AppState.I.providers.single.models = ['other-model'];
+    // Studio mode without a repo/branch binding: the send path refuses with
+    // the Studio gate snack bar (the retired local provider/model validation
+    // is gone — admission is server-side now).
+    a.mode = AgentMode.studio.name;
     await pumpChat(tester);
     await tester.enterText(composer, 'My unrelated draft');
     await tester.tap(find.byTooltip('Attach'));

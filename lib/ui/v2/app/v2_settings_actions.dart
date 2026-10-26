@@ -165,32 +165,12 @@ class V2SettingsActions {
   }
 
   Future<void> renameAccount(BuildContext context) async {
-    final current = FirebaseService.I.displayName ?? '';
-    final controller = TextEditingController(text: current);
     final name = await showDialog<String>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Display name'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          textCapitalization: TextCapitalization.words,
-          decoration: const InputDecoration(hintText: 'Your name'),
-          onSubmitted: (value) => Navigator.pop(dialogContext, value),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, controller.text),
-            child: const Text('Save'),
-          ),
-        ],
+      builder: (_) => _RenameAccountDialog(
+        initial: FirebaseService.I.displayName ?? '',
       ),
     );
-    controller.dispose();
     final clean = name?.trim();
     if (clean == null || clean.isEmpty) return;
     try {
@@ -839,6 +819,52 @@ class V2SettingsActions {
     UpgradeResult.offline => 'You appear to be offline. Try again.',
     UpgradeResult.unknown => 'The purchase did not complete. Try again.',
   };
+}
+
+/// Owns the rename field's controller for exactly as long as the dialog route
+/// is alive. Disposing it as soon as [showDialog] returns would race the exit
+/// animation, which still rebuilds the field.
+class _RenameAccountDialog extends StatefulWidget {
+  const _RenameAccountDialog({required this.initial});
+
+  final String initial;
+
+  @override
+  State<_RenameAccountDialog> createState() => _RenameAccountDialogState();
+}
+
+class _RenameAccountDialogState extends State<_RenameAccountDialog> {
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.initial,
+  );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Display name'),
+    content: TextField(
+      controller: _controller,
+      autofocus: true,
+      textCapitalization: TextCapitalization.words,
+      decoration: const InputDecoration(hintText: 'Your name'),
+      onSubmitted: (value) => Navigator.pop(context, value),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      TextButton(
+        onPressed: () => Navigator.pop(context, _controller.text),
+        child: const Text('Save'),
+      ),
+    ],
+  );
 }
 
 ThemeMode themeModeOf(String value) => switch (value) {

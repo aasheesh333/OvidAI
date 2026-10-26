@@ -133,6 +133,10 @@ class MainActivity : FlutterActivity() {
         flutterEngine.platformViewsController.registry.registerViewFactory(
             "ovid/html-artifact", HtmlArtifactViewFactory(flutterEngine.dartExecutor.binaryMessenger),
         )
+        flutterEngine.platformViewsController.registry.registerViewFactory(
+            "ovid/studio-preview",
+            PreviewWebViewFactory(flutterEngine.dartExecutor.binaryMessenger),
+        )
         stopTts(notify = false)
         tts?.shutdown()
         ttsReady = false

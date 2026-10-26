@@ -231,15 +231,22 @@ void main() {
       autoRetry: false,
     );
     final facade = CloudAgentFacade(rest: _Rest(), ws: ws, store: store);
-    addTearDown(() {
+    // The widget-test binding checks for pending timers BEFORE addTearDown
+    // callbacks run, and the facade's subscribe() opens the socket (and arms
+    // its heartbeat). Tear the cloud objects down inside the body, keeping
+    // the registered cleanup for failure paths.
+    var tornDown = false;
+    void tearDownCloud() {
+      if (tornDown) return;
+      tornDown = true;
       facade.dispose();
       store.dispose();
       ws.dispose();
-    });
+    }
+    addTearDown(tearDownCloud);
     await store.ready;
     facade.seedTranscript('srv-1', const <Message>[], null);
-    final restored = facade.transcriptFor('srv-1')!.single.attachments
-        as List<MessageAttachment>;
+    final restored = facade.transcriptFor('srv-1')!.single.attachments;
     expect(restored.map((a) => a.name), ['checkpoint.txt', 'later.txt']);
     for (final attachment in restored.cast<RichMessageAttachment>()) {
       expect(attachment.availability, MessageAttachmentAvailability.unavailable);
@@ -266,6 +273,7 @@ void main() {
     expect(find.text('Uploading…'), findsNothing);
     expect(find.bySemanticsLabel('Open checkpoint.txt'), findsNothing);
     expect(find.bySemanticsLabel('Download later.txt'), findsNothing);
+    tearDownCloud();
   });
 
   // UNEXECUTED under HEAVY-COMMANDS-PAUSED.md (2026-10-25): file 1 checkpoints
@@ -456,6 +464,11 @@ void main() {
     final replayedRows = facade.transcriptFor('srv-1')!.single.attachments
         .cast<RichMessageAttachment>();
     expect(replayedRows.map((a) => a.path), [first.path, second.path]);
+
+    // A real restart replaces the facade together with its socket
+    // subscription. WsMultiplexer.subscribe() is single-listener per session,
+    // so the old facade must be torn down before the restarted one listens.
+    facade.dispose();
 
     // Seed a deliberately bare cache row: ID/name/size are present but local
     // paths are null, so offline restoration must consult the sidecar rather

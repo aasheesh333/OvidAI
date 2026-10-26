@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/collaboration/client.dart' as client;
 import 'package:ovid_ai/core/collaboration/coordinator.dart';
 import 'package:ovid_ai/core/collaboration/models.dart';
+import 'package:ovid_ai/core/collaboration/reducer.dart';
 import 'package:ovid_ai/core/collaboration/store.dart';
 
 void main() {
@@ -290,7 +291,7 @@ void main() {
   });
 }
 
-client.CollaborationEvent membershipEvent({
+CollaborationEvent membershipEvent({
   required int sequence,
   required String action,
 }) =>

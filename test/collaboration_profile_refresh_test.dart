@@ -110,17 +110,19 @@ class _ProfileServer {
       if (gate != null) await gate.future;
       final numberedGate = stateGates.remove(stateRequests.length);
       if (numberedGate != null) await numberedGate.future;
-      if (failState) return http.Response('private upstream detail', 503,
-          headers: {'cache-control': 'private, no-store'});
+      if (failState) {
+        return http.Response('private upstream detail', 503,
+            headers: {'cache-control': 'private, no-store'});
+      }
       final response = state;
       final member = Map<String, Object?>.from(response['member'] as Map)
         ..['displayName'] = responseOwnerName;
       final members = [
         for (final raw in response['members'] as List)
-          Map<String, Object?>.from(raw as Map)
-            ..['displayName'] = (raw as Map)['participantId'] == 'p-owner'
+          Map<String, Object?>.from(raw)
+            ..['displayName'] = raw['participantId'] == 'p-owner'
                 ? responseOwnerName
-                : (raw as Map)['displayName'],
+                : raw['displayName'],
       ];
       final initialMembers = [
         for (final raw in response['initialMembers'] as List)
@@ -190,7 +192,10 @@ void main() {
     await _until(() => owner.state?.nameOf('p-friend') == 'New Friend');
 
     // One forced operation performs before/after-replay reads; the duplicate
-    // call is coalesced rather than starting another operation.
+    // call is coalesced rather than starting another operation. The names land
+    // on the pre-replay read, so wait for the trailing read to be issued before
+    // counting: the assertion below still rejects any extra operation.
+    await _until(() => server.stateRequests.length >= baselineReads + 2);
     expect(server.stateRequests, hasLength(baselineReads + 2));
     expect(owner.state!.members, hasLength(2));
     expect(owner.state!.nameOf('p-owner'), 'New Owner');

@@ -155,6 +155,24 @@ class SessionTransport {
   String? terminal;
   final session = {'schemaVersion': 1, 'sessionId': 'session', 'ownerParticipantId': 'owner', 'lifecycle': 'active'};
   final member = {'participantId': 'owner', 'role': 'owner', 'status': 'active'};
+
+  /// The authoritative active roster, including membership events already
+  /// accepted into the stream. State must agree with replay.
+  List<Map<String, Object?>> get roster {
+    final byId = <String, Map<String, Object?>>{member['participantId'] as String: member};
+    for (final event in events) {
+      if (event['kind'] != 'membership') continue;
+      final payload = event['payload'] as Map;
+      final id = payload['participantId'] as String;
+      if (payload['action'] == 'joined') {
+        byId[id] = {'participantId': id, 'role': payload['role'], 'status': 'active'};
+      } else {
+        byId.remove(id);
+      }
+    }
+    return byId.values.toList();
+  }
+
   Map<String, Object?> add(String text, [String? id]) {
     final event = <String, Object?>{'schemaVersion': 1, 'eventId': id ?? 'e${events.length}',
       'sessionId': 'session', 'eventSequence': events.length + 1, 'senderParticipantId': 'owner',
@@ -194,7 +212,8 @@ class SessionTransport {
         'hasMore': start + page.length < events.length});
     }
     stateReads++;
-    return ok({'schemaVersion': 1, 'session': session, 'member': member, 'members': [member],
+    final members = roster;
+    return ok({'schemaVersion': 1, 'session': session, 'member': member, 'members': members,
       'initialMembers': [member], 'replayThroughSequence': events.length, 'cursor': '0'});
   }
 }

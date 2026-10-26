@@ -41,9 +41,11 @@ void main() {
           body: Column(
             children: [
               CollabMessageBubble(
+                // Reporting targets a canonical server message event; a bare
+                // local event id is not a reportable source.
                 message: const CollaborationMessage(
                   sequence: 1,
-                  clientEventId: 'a',
+                  clientEventId: 'message:a',
                   author: 'p-bob',
                   createdAt: '2026-10-10T00:00:00.000Z',
                   text: 'Hi',
@@ -56,7 +58,7 @@ void main() {
               const CollabMessageBubble(
                 message: CollaborationMessage(
                   sequence: 2,
-                  clientEventId: 'b',
+                  clientEventId: 'message:b',
                   author: 'p-me',
                   createdAt: '2026-10-10T00:00:00.000Z',
                   text: 'Mine',

@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:ovid_ai/core/collaboration/client.dart';
+import 'package:ovid_ai/core/collaboration/client.dart' hide CollaborationState;
 import 'package:ovid_ai/core/collaboration/models.dart';
 import 'package:ovid_ai/core/collaboration/reducer.dart';
 
@@ -397,13 +397,13 @@ void main() {
     expect(state.messages.single.text, 'Canonical question');
     expect(state.modelStates['p-owner']!.runId, _lease['runId']);
     expect(state.modelStates['p-owner']!.model, 'canonical-model');
-    expect(state.tools['call-1']!.status, 'running');
+    expect(state.tools['call-1']!.status, ModelExecutionStatus.running);
     expect(state.artifacts['00000000-0000-4000-8000-000000000401']!.sizeBytes, 12);
     expect(state.artifacts.values.single.author, isEmpty);
   });
 
   test('opaque cursors retain the canonical 4096-byte transport bound', () async {
-    final cursor = 'v1:${'x' * 4090}';
+    final cursor = 'v1:${'x' * 4093}';
     late Uri uri;
     final client = CollaborationClient(
       baseUri: Uri.parse('https://collab.example.test'),
@@ -417,7 +417,7 @@ void main() {
     expect(uri.queryParameters['cursor'], cursor);
     expect(page.nextCursor.value, cursor);
     await expectLater(
-      client.replay('tok', cursor: CollaborationCursor('v1:${'x' * 4091}')),
+      client.replay('tok', cursor: CollaborationCursor('v1:${'x' * 4094}')),
       throwsA(isA<CollaborationClientException>()),
     );
   });

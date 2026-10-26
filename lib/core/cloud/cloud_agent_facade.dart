@@ -1528,7 +1528,7 @@ class CloudAgentFacade extends ChangeNotifier
     return RichMessageAttachment(
       id: id,
       name: hasRealName
-          ? old!.name
+          ? old.name
           : staged?.name ?? persisted?.name ?? old?.name ?? 'Attachment',
       size: old != null && old.size > 0
           ? old.size
