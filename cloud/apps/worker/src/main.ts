@@ -2,7 +2,7 @@ import { pathToFileURL } from "node:url";
 import { hostname } from "node:os";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { Redis } from "ioredis";
-import { assertSessionFileCapacity, createDb, createStorageQuotaRepos, createStudioPreviewPostgresStore, createStudioPreviewStore, dbPoolOptionsFromEnv, byokKeysRepo, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, imagesRepo, mcpOauthFlows, mcpServers as mcpServersRepo, messages as messagesRepo, runs as runsRepo, sharesRepo, users, workspaceObjects as workspaceObjectsRepo, type Db } from "@ovid/db";
+import { assertSessionFileCapacity, createDb, createStorageQuotaRepos, RunQuotaService, createStudioPreviewPostgresStore, createStudioPreviewStore, dbPoolOptionsFromEnv, byokKeysRepo, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, imagesRepo, mcpOauthFlows, mcpServers as mcpServersRepo, messages as messagesRepo, runs as runsRepo, sharesRepo, users, workspaceObjects as workspaceObjectsRepo, type Db } from "@ovid/db";
 import {
   createCloudCleanup,
   createFirebaseAdmin,
@@ -1091,9 +1091,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     cfg.githubToken !== null
       ? createGitHubApiPort({ token: cfg.githubToken, egress })
       : null;
+  const modelCallQuota = new RunQuotaService(db);
   const processor = createProductionAgentRunProcessor({
     db,
     events,
+    quota: modelCallQuota,
     keys: createProductionKeyResolver({
       db,
       redisMint,

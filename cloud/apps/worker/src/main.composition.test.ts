@@ -14,6 +14,7 @@ import { createImageTools } from "./tools/imageTools.js";
 const h = vi.hoisted(() => {
   const marker = { studio: "real-service-from-factory" };
   const artifactQuota = { storage: "real-db-quota" };
+  const modelCallQuota = { modelCall: "canonical-run-quota" };
   const artifactGrantFactory = async () => ({ grantId: "grant", key: "frozen" });
   const manager = {
     recover: vi.fn(async () => undefined),
@@ -23,9 +24,11 @@ const h = vi.hoisted(() => {
   return {
     marker,
     artifactQuota,
+    modelCallQuota,
     artifactGrantFactory,
     createStorageQuotaRepos: vi.fn(() => artifactQuota),
     createHttpArtifactGrantFactory: vi.fn(() => artifactGrantFactory),
+    runQuotaService: vi.fn((_db: Db) => modelCallQuota),
     manager,
     createDb: vi.fn(),
     redisConstructor: vi.fn(),
@@ -49,6 +52,7 @@ const h = vi.hoisted(() => {
 vi.mock("@ovid/db", () => ({
   createDb: h.createDb,
   createStorageQuotaRepos: h.createStorageQuotaRepos,
+  RunQuotaService: h.runQuotaService,
   createStudioPreviewPostgresStore: vi.fn(),
   createStudioPreviewStore: vi.fn(),
   assertSessionFileCapacity: vi.fn(),
@@ -361,5 +365,22 @@ describe("worker Studio production composition", () => {
     });
     expect(artifactDeps.assertProjectFileCapacity).toBeTypeOf("function");
     expect(artifactDeps.cdn).toEqual(cdn);
+  });
+});
+
+describe("worker model-call quota production composition (UNEXECUTED)", () => {
+  it("constructs one canonical service and injects that exact instance", async () => {
+    const db = mainDb();
+    h.createDb.mockReturnValue(db);
+    h.createMcpRuntime.mockReturnValue(null);
+    const { main } = await import("./main.js");
+
+    await expect(main(baseEnv({ OVID_MASTER_KEY: MASTER_KEY })))
+      .rejects.toThrow("composition-stop-after-processor");
+
+    expect(h.runQuotaService).toHaveBeenCalledTimes(1);
+    expect(h.runQuotaService.mock.calls[0]?.[0]).toBe(db);
+    const processor = h.createFullAgentRunProcessor.mock.calls[0]![0];
+    expect(processor.quota).toBe(h.modelCallQuota);
   });
 });
