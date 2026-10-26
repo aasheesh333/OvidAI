@@ -1,4 +1,4 @@
-import { RunQuotaService, type Db, type ScheduleRow, messages, runs, schedules, scheduleRuns, users, type Tx } from "@ovid/db";
+import { RunQuotaService, type Db, type QuotaBillingClass, type ScheduleRow, messages, runs, schedules, scheduleRuns, sessionState, turns, users, type Tx } from "@ovid/db";
 import type { SystemBus } from "@ovid/events";
 import {
   isRecurringTrigger,
@@ -9,7 +9,10 @@ import {
   decideMissedRun,
 } from "@ovid/shared";
 import { AGENT_RUN_JOB_NAME, addScheduleMirrorJob, type QueueServices } from "@ovid/queue";
+import { loadRunAccountContext, snapshotRunModelContext } from "./runAccount.js";
 import { settleScheduleRuns as defaultSettle, type SettleDeps } from "./schedulerSettle.js";
+import type { FinalDelivery } from "./runFinalDelivery.js";
+import { recoverPendingCompactionContinuations } from "./compactionContinuation.js";
 
 /**
  * P4 Task 8: the scheduler's firing engine — occurrence claiming, the
@@ -49,12 +52,36 @@ export type ModelCallSettlementQuota = Pick<
   "pendingSettlements" | "settleModelCall"
 >;
 
+/**
+ * The scheduler's optional recovery seams. `abandonedReservations` /
+ * `sweepAbandonedReservations` are optional so the preserved settlement-only
+ * doubles stay valid; absent → that recovery step is skipped, exactly like the
+ * other optional seams.
+ */
+export type ModelCallRecoveryQuota = ModelCallSettlementQuota &
+  Partial<Pick<RunQuotaService, "abandonedReservations" | "sweepAbandonedReservations">>;
+
+/**
+ * R2 extends the committed recovery dependency with canonical run admission.
+ * `admitRun` is optional so the preserved R1b recovery doubles (settlement
+ * only) stay valid; when it is absent the canonical service on this same DB
+ * admits instead, exactly like production's default.
+ */
+export type SchedulerQuota = ModelCallRecoveryQuota &
+  Partial<Pick<RunQuotaService, "admitRun">>;
+
 export interface SchedulerDeps {
   db: Db;
   queues: QueueServices;
   system: SystemBus;
-  /** Recovery defaults to the canonical service on this same DB. */
-  quota?: ModelCallSettlementQuota;
+  /** Recovery + admission; both default to the canonical service on this DB. */
+  quota?: SchedulerQuota;
+  /**
+   * Final-response delivery recovery (run outbox). Present in the worker
+   * composition (main.ts) and in tests; absent → the pass skips it, exactly
+   * like the settlement recovery's optional quota seam.
+   */
+  finalDelivery?: Pick<FinalDelivery, "recover">;
   /** Injectable for tests; defaults to the wall clock. */
   clock?: () => Date;
 }
@@ -67,7 +94,8 @@ export type FireOutcome =
   | "deferred_busy"
   | "duplicate_claim"
   | "not_due"
-  | "not_found";
+  | "not_found"
+  | "quota_exhausted";
 
 export interface TickReport {
   fired: number;
@@ -98,6 +126,20 @@ function txSql(tx: Tx): PinnedSql {
 const CLAIM_LOST = Symbol("scheduler claim lost — rollback");
 
 /**
+ * The canonical admission authority. A recovery-only override falls back to
+ * the service on this DB rather than skipping admission: an omitted injection
+ * must never become an admission bypass.
+ */
+function admissionFor(deps: SchedulerDeps): Pick<RunQuotaService, "admitRun"> {
+  const injected = deps.quota?.admitRun;
+  if (injected !== undefined) {
+    const quota = deps.quota!;
+    return { admitRun: (input) => injected.call(quota, input) };
+  }
+  return new RunQuotaService(deps.db);
+}
+
+/**
  * Fire one occurrence of a schedule (retry pass first, then a new-occurrence
  * pass). `expectedScheduledFor` — what the CALLER believed `nextRunAt` was
  * when it decided this schedule is due (the tick passes the scanned row's
@@ -112,20 +154,72 @@ export async function fireScheduleOccurrence(
   opts?: { expectedScheduledFor?: Date | null },
 ): Promise<FireOutcome> {
   const now = deps.clock?.() ?? new Date();
-  /** Post-commit side effects, in the pinned order. */
-  let postCommit: (() => Promise<void>) | null = null;
+  /** Post-commit side effects, in the pinned order. A returned outcome replaces
+   * the committed one (only admission refusal does that). */
+  let postCommit: (() => Promise<FireOutcome | null>) | null = null;
 
-  /** Enqueue the agent run for a fired occurrence (step 5). Never rethrows. */
-  const enqueue = async (row: ScheduleRow, runId: string, scheduleRunId: string, prompt: string): Promise<void> => {
+  /**
+   * R2: capture the schedule owner's model/billing snapshot ONCE, admit the
+   * run under `run:${runId}:${source}`, and only then add it to the queue.
+   *
+   * Admission is the canonical Ovid gate, so it must precede the queue add:
+   * a refused run never reaches a worker, a provider, or a start event. The
+   * occurrence and run rows were already committed above, so refusal
+   * finalizes both truthfully (`quota_exhausted`) instead of leaving them
+   * running. Infrastructure failures below keep the existing contract: the
+   * run stays `queued` and settle's stale arm recovers it as `run_lost`.
+   */
+  const enqueue = async (o: {
+    row: ScheduleRow;
+    runId: string;
+    scheduleRunId: string;
+    prompt: string;
+    source: "schedule_tick" | "schedule_retry";
+  }): Promise<boolean> => {
+    // The schedule owner is the run's initiating actor: schedules execute as
+    // the owner, never as a session guest. Session preset/model (including an
+    // effort suffix) and the owner's BYOK identity are captured together so
+    // the nested snapshot and the admission decision cannot disagree.
+    const account = await loadRunAccountContext(deps.db, o.row.userId);
+    const state = await sessionState.get(deps.db, o.row.sessionId);
+    const preset = account.presets(state.presetId);
+    const modelContext = snapshotRunModelContext({
+      actorUserId: o.row.userId,
+      requestedModel: state.modelPin,
+      presetModel: preset?.model ?? null,
+      ...(preset?.temperature != null ? { presetTemperature: preset.temperature } : {}),
+      byokKeyId: null,
+      byokDefault: account.byokDefault,
+    });
+    const billingClass: QuotaBillingClass =
+      modelContext.byokKeyId === null ? "ovid_allowance" : "byok";
+    const admitted = await admissionFor(deps).admitRun({
+      actorUserId: o.row.userId,
+      source: o.source,
+      runId: o.runId,
+      idempotencyKey: `run:${o.runId}:${o.source}`,
+      billingClass,
+    });
+    if (!admitted.ok) {
+      console.error("[scheduler] run admission refused", {
+        scheduleId: o.row.id,
+        runId: o.runId,
+        source: o.source,
+        window: admitted.window,
+      });
+      await runs.finish(deps.db, o.runId, "failed", "quota_exhausted");
+      await scheduleRuns.finish(deps.db, o.scheduleRunId, "failed", "quota_exhausted");
+      return false;
+    }
     try {
-      const tier = (await users.ensure(deps.db, row.userId, null)).tier;
+      const tier = (await users.ensure(deps.db, o.row.userId, null)).tier;
       await deps.queues.agentRuns.add(
         AGENT_RUN_JOB_NAME,
         {
-          runId,
-          sessionId: row.sessionId,
-          userId: row.userId,
-          prompt,
+          runId: o.runId,
+          sessionId: o.row.sessionId,
+          userId: o.row.userId,
+          prompt: o.prompt,
           // H1 (final review): autonomy is the schedule's permission profile
           // and MUST reach the run as a mode. `mode` is the only read-only
           // gate on the run path (agent-core roster.modePolicy); without this
@@ -133,21 +227,36 @@ export async function fireScheduleOccurrence(
           // mode — `auto` (default) mutated, `drive` ran with no prompts at
           // all. `safe` = read-only; `auto` = the explicit mutation opt-in
           // (spec §8), never widened by a `drive` session binding.
-          autonomy: row.autonomy as "safe" | "auto",
-          mode: row.autonomy === "safe" ? "safe" : "auto",
+          autonomy: o.row.autonomy as "safe" | "auto",
+          mode: o.row.autonomy === "safe" ? "safe" : "auto",
+          // R2: the producer's identity travels with the job so the worker
+          // rechecks the SAME actor/source/run/billing admission the
+          // scheduler just made, and the root engine runs from this snapshot
+          // instead of rebuilding one from whatever settings exist later.
+          source: o.source,
+          actorUserId: o.row.userId,
+          provenance: "server",
+          modelContext,
+          // Compatibility mirror: the legacy top-level fields stay EQUAL to
+          // the nested snapshot (byokModel only when the snapshot has one).
+          byokKeyId: modelContext.byokKeyId,
+          ...(modelContext.byokModel !== undefined
+            ? { byokModel: modelContext.byokModel }
+            : {}),
           schedule: {
-            scheduleId: row.id,
-            scheduleRunId,
-            autonomy: row.autonomy as "safe" | "auto",
+            scheduleId: o.row.id,
+            scheduleRunId: o.scheduleRunId,
+            autonomy: o.row.autonomy as "safe" | "auto",
           },
         },
-        { jobId: runId, priority: tier === "free" ? 2 : 1 },
+        { jobId: o.runId, priority: tier === "free" ? 2 : 1 },
       );
     } catch (err) {
       // Never rethrow: the occurrence IS claimed and committed — the run row
       // stays 'queued' and Task 9's settle stale path recovers it.
-      console.error("[scheduler] enqueue failed", { scheduleId: row.id, runId, err });
+      console.error("[scheduler] enqueue failed", { scheduleId: o.row.id, runId: o.runId, err });
     }
+    return true;
   };
 
   let outcome: FireOutcome;
@@ -187,16 +296,32 @@ export async function fireScheduleOccurrence(
           role: "user",
           content: prompt,
         });
-        const run = await runs.create(tdb, {
+        // Admit through the ordering primitive, not `runs.create`: the run's
+        // `created_at` is GREATEST(clock_timestamp(), session max + 1µs)
+        // under the session advisory lock, so a scheduled run cannot be
+        // ordered before a turn admitted while this transaction was open.
+        // `defaultNow()` (transaction-start time) could, and the resulting
+        // `seq`/admission disagreement drops a legitimate run as
+        // `newer_turn_running`.
+        const run = await turns.admit(tdb, {
           sessionId: row.sessionId,
           promptMessageId: message.id,
         });
-        const claimed = await scheduleRuns.claimRetry(tdb, retry.id, run.id, {
+        const claimed = await scheduleRuns.claimRetry(tdb, retry.id, run.runId, {
           sessionId: row.sessionId,
           triggerKind: row.trigger.kind,
         });
         if (claimed === null) throw CLAIM_LOST; // lost the retry race: rollback
-        postCommit = () => enqueue(row, run.id, claimed!.id, prompt);
+        postCommit = async () =>
+          (await enqueue({
+            row,
+            runId: run.runId,
+            scheduleRunId: claimed!.id,
+            prompt,
+            source: "schedule_retry",
+          }))
+            ? null
+            : "quota_exhausted";
         return "retry_fired";
       }
 
@@ -217,14 +342,16 @@ export async function fireScheduleOccurrence(
           role: "user",
           content: prompt,
         });
-        const run = await runs.create(tdb, {
+        // Same admission rule as the retry pass above: ordered insert, never
+        // `runs.create`'s transaction-start `defaultNow()`.
+        const run = await turns.admit(tdb, {
           sessionId: row.sessionId,
           promptMessageId: message.id,
         });
         const claimed = await scheduleRuns.claim(tdb, {
           scheduleId,
           scheduledFor: due,
-          runId: run.id,
+          runId: run.runId,
           ranLate,
           sessionId: row.sessionId,
           triggerKind: row.trigger.kind,
@@ -242,14 +369,29 @@ export async function fireScheduleOccurrence(
 
         const nextRunAt = next;
         postCommit = async () => {
-          await enqueue(row, run.id, claimed!.id, prompt);
+          // Admission precedes the queue add (and the start event): a refused
+          // occurrence is finalized as failed and announces nothing.
+          if (!(await enqueue({
+            row,
+            runId: run.runId,
+            scheduleRunId: claimed!.id,
+            prompt,
+            source: "schedule_tick",
+          }))) {
+            // The schedule keeps its committed advance, so the mirror is
+            // still re-armed for the next occurrence.
+            if (nextRunAt !== null) {
+              await addScheduleMirrorJob(deps.queues, scheduleId, nextRunAt, now);
+            }
+            return "quota_exhausted";
+          }
           await deps.system.publish(row.userId, {
             type: "schedule_run_started",
             scheduleId,
             ts: now.toISOString(),
             payload: {
               scheduleRunId: claimed!.id,
-              runId: run.id,
+              runId: run.runId,
               scheduledFor: due.toISOString(),
               ranLate,
               attempt: claimed!.attempt,
@@ -258,6 +400,7 @@ export async function fireScheduleOccurrence(
           if (nextRunAt !== null) {
             await addScheduleMirrorJob(deps.queues, scheduleId, nextRunAt, now);
           }
+          return null;
         };
         return "fired";
       }
@@ -287,6 +430,7 @@ export async function fireScheduleOccurrence(
           if (nextRunAt !== null) {
             await addScheduleMirrorJob(deps.queues, scheduleId, nextRunAt, now);
           }
+          return null;
         };
         return "skipped_next";
       }
@@ -304,6 +448,7 @@ export async function fireScheduleOccurrence(
           ts: now.toISOString(),
           payload: { reason: "missed_beyond_grace", scheduledFor: due.toISOString() },
         });
+        return null;
       };
       return "paused";
     });
@@ -315,9 +460,45 @@ export async function fireScheduleOccurrence(
   // TypeScript's control-flow analysis cannot see assignments made inside the
   // transaction callback and still believes the initializer's `null`; widen
   // the read back to the declared union before calling.
-  const afterCommit = postCommit as (() => Promise<void>) | null;
-  if (afterCommit !== null) await afterCommit();
+  const afterCommit = postCommit as (() => Promise<FireOutcome | null>) | null;
+  if (afterCommit !== null) {
+    const replaced = await afterCommit();
+    if (replaced !== null) return replaced;
+  }
   return outcome;
+}
+
+/**
+ * Release holds orphaned by a process that died between the reserve and the
+ * staging commit. This path has no provider call and no settlement: the row
+ * has no staged usage, so nothing can be charged, but the actor's allowance is
+ * still reserved. Without this pass the hold would be permanent.
+ *
+ * Never races a live call: `RunQuotaService.abandonedReservations` requires the
+ * run to be terminal AND the hold to be older than the sweep window, and the
+ * service's release refuses a row whose usage was staged meanwhile.
+ */
+export async function releaseAbandonedModelReservations(
+  deps: SchedulerDeps,
+  opts?: { now?: Date; olderThanMs?: number; limit?: number },
+): Promise<void> {
+  const quota = deps.quota ?? new RunQuotaService(deps.db);
+  if (quota.sweepAbandonedReservations === undefined) return;
+  try {
+    const released = await quota.sweepAbandonedReservations({
+      now: opts?.now ?? deps.clock?.() ?? new Date(),
+      ...(opts?.olderThanMs === undefined ? {} : { olderThanMs: opts.olderThanMs }),
+      ...(opts?.limit === undefined ? {} : { limit: opts.limit }),
+    });
+    if (released.length > 0) {
+      console.warn("[scheduler] released abandoned model-call holds", {
+        count: released.length,
+      });
+    }
+  } catch (err) {
+    // Recovery is never fatal: an unreadable batch must not stop scheduling.
+    console.error("[scheduler] abandoned model-call hold sweep failed", err);
+  }
 }
 
 /**
@@ -351,13 +532,53 @@ export async function recoverPendingModelCallSettlements(
 }
 
 /**
- * One tick pass: recover staged model-call usage, then claim a due batch in a
- * short transaction (FOR UPDATE SKIP LOCKED — overlapping ticks partition the
- * set). Each schedule fires in its OWN transaction. A fire that throws is
- * caught and logged — Postgres is authoritative and the next tick retries.
+ * Replay run completions whose durable intent committed but whose terminal
+ * events / completion push did not. Same shape as the settlement recovery
+ * above: bounded sequential batch, per-item continuation, Postgres as the
+ * authority (a failed item stays pending for the next pass).
+ */
+export async function recoverRunFinalDeliveries(
+  deps: SchedulerDeps,
+  opts?: { limit?: number },
+): Promise<void> {
+  if (deps.finalDelivery === undefined) return;
+  try {
+    await deps.finalDelivery.recover(opts);
+  } catch (err) {
+    console.error("[scheduler] final delivery recovery failed", err);
+  }
+}
+
+/**
+ * One tick pass: recover staged model-call usage and any fold that committed a
+ * checkpoint without projecting it into the legacy replay state, replay
+ * run completions whose durable delivery intent outlived their terminal
+ * events/push, then claim a due batch in a short transaction (FOR UPDATE SKIP
+ * LOCKED — overlapping ticks partition the set). Each schedule fires in its
+ * OWN transaction. A fire that throws is caught and logged — Postgres is
+ * authoritative and the next tick retries.
  */
 export async function runSchedulerTick(deps: SchedulerDeps): Promise<TickReport> {
   await recoverPendingModelCallSettlements(deps);
+  // Then return the allowance still held by calls whose owner died before any
+  // usage could be staged. Order matters: settle first, so a staged row is
+  // charged rather than released, and only then release what has no usage.
+  await releaseAbandonedModelReservations(deps);
+  // A crash between the compaction fold commit and the legacy-state projection
+  // leaves the DB cursor ahead of `session_agent_state`. Replay the committed
+  // fact here (bounded, idempotent, per-item) so the next run consumes the
+  // compacted context instead of re-sending folded history.
+  try {
+    await recoverPendingCompactionContinuations(deps);
+  } catch (err) {
+    // Recovery is never fatal: an unreadable recovery batch must not stop
+    // scheduling. The cursor stays authoritative for the next pass.
+    console.error("[scheduler] compaction continuation recovery failed", err);
+  }
+  // Crash-safe final delivery (run outbox): same bounded sequential shape as
+  // the settlement replay above. A pending row means "answer committed, its
+  // terminal events/push not confirmed"; the row is the authority.
+  await recoverRunFinalDeliveries(deps);
   const now = deps.clock?.() ?? new Date();
   const report: TickReport = {
     fired: 0,
@@ -384,6 +605,11 @@ export async function runSchedulerTick(deps: SchedulerDeps): Promise<TickReport>
           report.retried += 1;
           break;
         case "skipped_next":
+          report.skipped += 1;
+          break;
+        case "quota_exhausted":
+          // Refused by canonical admission: the occurrence is terminal, but
+          // no run was enqueued and no start event was published.
           report.skipped += 1;
           break;
         case "paused":

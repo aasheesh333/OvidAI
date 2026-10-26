@@ -5,6 +5,7 @@
  * never from another application's rootDir/src tree.
  */
 import { createHash } from "node:crypto";
+import { writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -189,9 +190,12 @@ describe("Collab orphan sweep fairness and delayed rescan — UNEXECUTED", () =>
   it("repeated head rescans preserve later-page continuation progress", () => {
     let now = 0;
     const scheduler = new CollabOrphanSweepScheduler({ rescanDelayMs: 30, now: () => now });
+    // Stable identities: the continuation assertion compares the exact cursor
+    // object, so generating a fresh id per call would never match.
+    const artifactId = newId();
     const cursor = (attempt: number) => ({
       createdAt: new Date(attempt),
-      attemptReservationId: `${newId()}:collab-attempt:${attempt}`,
+      attemptReservationId: `${artifactId}:collab-attempt:${attempt}`,
     });
     const first = scheduler.nextPlan(50);
     scheduler.complete(first, cursor(1));
@@ -236,6 +240,12 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("CollabArtifactRegistrar review f
     while (temporaryRoots.length > 0) {
       await rm(temporaryRoots.pop()!, { recursive: true, force: true });
     }
+    // Orphan discovery is intentionally global (not scoped to a fixture user),
+    // so this file's own tables must not leak between tests.
+    await db.$client`
+      TRUNCATE storage_reservations, storage_usage_counters, upload_window_counters,
+               workspace_objects, attachments, sessions, users
+      CASCADE`;
   });
 
   afterAll(async () => {
@@ -387,7 +397,17 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("CollabArtifactRegistrar review f
   async function reservation(artifactId: string) {
     const rows = await db.$client<Array<Record<string, unknown>>>`
       SELECT * FROM storage_reservations WHERE id = ${artifactId}`;
-    return rows[0];
+    const row = rows[0];
+    if (row === undefined) return undefined;
+    // Drizzle's raw client keeps bigint columns as text; the schema contract
+    // (and every caller) uses numbers.
+    return {
+      ...row,
+      declared_bytes: Number(row.declared_bytes),
+      actual_bytes: row.actual_bytes === null || row.actual_bytes === undefined
+        ? null
+        : Number(row.actual_bytes),
+    };
   }
 
   async function attemptReservations(artifactId: string, ownerUserId: string, sessionId: string) {
@@ -493,7 +513,11 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("CollabArtifactRegistrar review f
 
   it("converges concurrent identical calls to one PUT, active row, public reservation and charge", async () => {
     const fixture = await identities();
-    const harness = await makeHarness({ timeouts: { pendingWaitMs: 10_000, storageDeadlineMs: 20_000 } });
+    // Eight concurrent writers contend for the artifact advisory lock; use the
+    // production lock ceiling instead of the harness's short timeout probe.
+    const harness = await makeHarness({
+      timeouts: { pendingWaitMs: 10_000, storageDeadlineMs: 20_000, dbLockTimeoutMs: 5_000 },
+    });
     const input = inputFor(fixture.identity, { idempotencyKey: "concurrent-replay" });
 
     const records = await Promise.all(Array.from({ length: 8 }, () => harness.registrar.register(input)));
@@ -786,12 +810,19 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("CollabArtifactRegistrar review f
     const fixture = await identities();
     const attemptedKeys: string[] = [];
     let sourcePath = "";
+    let poisoned = false;
     const harness: Awaited<ReturnType<typeof makeHarness>> = await makeHarness({
       workspaceDir: async () => harness.workspaceRoot,
       put: async (key, body, options) => {
         attemptedKeys.push(key);
-        // Same length, different bytes; fs/R2 metadata still receives hash(aaaa).
-        await writeFile(sourcePath, "bbbb");
+        // Poison only the first upload: same length, different bytes, so the
+        // stored metadata still claims hash(aaaa). The retry must succeed.
+        if (!poisoned) {
+          poisoned = true;
+          // Synchronous so the truncate+rewrite lands before the source read
+          // stream's first read; an async write races the stream to EOF.
+          writeFileSync(sourcePath, "bbbb");
+        }
         return harness.base.put(key, body, options);
       },
       delete: async () => { throw new Error("orphan cleanup unavailable"); },
@@ -1373,7 +1404,9 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("CollabArtifactRegistrar review f
         latePublished.resolve();
         return result;
       },
-      timeouts: { storageDeadlineMs: 20, cleanupDeadlineMs: 20, pendingWaitMs: 0 },
+      // The storage deadline covers the whole register; it must outlast the
+      // DB intent work so the stalled adapter is what trips it.
+      timeouts: { storageDeadlineMs: 500, cleanupDeadlineMs: 100, pendingWaitMs: 0 },
     });
     const input = inputFor(fixture.identity, { idempotencyKey: "late-put-orphan" });
     const pending = harness.registrar.register(input);
@@ -1408,16 +1441,24 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("CollabArtifactRegistrar review f
 
     let activeTransactions = 0;
     const ioDuringTransaction: string[] = [];
-    const trackingDb = {
-      transaction: async <T>(callback: (tx: Db) => Promise<T>): Promise<T> => {
-        activeTransactions += 1;
-        try {
-          return await db.transaction((tx) => callback(tx as unknown as Db));
-        } finally {
-          activeTransactions -= 1;
+    // Proxy every method to the real client; only transaction boundaries are
+    // observed. A bare { transaction } stub would break db.execute callers.
+    const trackingDb = new Proxy(db, {
+      get(target, property) {
+        if (property === "transaction") {
+          return async <T>(callback: (tx: Db) => Promise<T>): Promise<T> => {
+            activeTransactions += 1;
+            try {
+              return await target.transaction((tx) => callback(tx as unknown as Db));
+            } finally {
+              activeTransactions -= 1;
+            }
+          };
         }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
       },
-    } as unknown as Db;
+    }) as Db;
     const lockFreeStorage: Pick<StorageAdapter, "put" | "head" | "get" | "delete"> = {
       put: (key, body, options) => harness.base.put(key, body, options),
       head: async (key) => {
@@ -1500,20 +1541,33 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("CollabArtifactRegistrar review f
     const fixture = await identities();
     let transactions = 0;
     const cancelCalls: number[] = [];
+    let abandoned: Promise<unknown> | null = null;
     const stalledDb = {
       transaction: async <T>(callback: (tx: Db) => Promise<T>): Promise<T> => {
         transactions += 1;
-        return db.transaction(async (tx) => {
+        const run = db.transaction(async (tx) => {
           if (transactions === 2) {
             // Start the callback so pg_backend_pid is known, then hold the
             // transaction open. Only the overall operation signal ends this
             // cumulative wait; the per-statement timeout is not the gate.
             const pending = callback(tx as unknown as Db);
-            await new Promise<void>((resolve) => setTimeout(resolve, 200));
+            // The deadline can reject the callback during this artificial
+            // stall; observe it now instead of later.
+            void pending.catch(() => {});
+            // Hold the real transaction open with short real queries rather
+            // than one JS sleep: an idle transaction is killed by the
+            // server's idle-in-transaction timeout, which leaves postgres.js
+            // writing a rollback on a dead socket.
+            const until = Date.now() + 200;
+            while (Date.now() < until) {
+              await tx.execute(sql`SELECT 1`).catch(() => {});
+            }
             return pending;
           }
           return callback(tx as unknown as Db);
         });
+        if (transactions === 2) abandoned = run.then(() => undefined, () => undefined);
+        return run;
       },
     } as unknown as Db;
     const harness = await makeHarness({
@@ -1529,6 +1583,11 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("CollabArtifactRegistrar review f
     expect(transactions).toBe(2);
     expect(cancelCalls.length).toBeGreaterThan(0);
     expect(harness.calls.put).toBe(0);
+    // Drain the abandoned real transaction (its 200 ms stall plus rollback)
+    // before this file closes its clients. postgres.js queues the rollback on
+    // setImmediate, so yield once more after the transaction settles.
+    await abandoned;
+    await new Promise((resolve) => setImmediate(resolve));
   });
 
   it("caller cancellation interrupts DB waiting before an intent write", async () => {

@@ -1064,6 +1064,13 @@ export const notificationDeliveryClaims = pgTable(
     runId: char("run_id", { length: 36 }).notNull(),
     state: text("state").notNull().default("pending"),
     claimant: text("claimant"),
+    /**
+     * Lease stamp for the in-progress claim (migration 0042). A worker that
+     * dies mid-fan-out leaves `in_progress` behind; after the lease another
+     * attempt may take the claim over. NULL on pre-0042 rows, which are
+     * treated as immediately reclaimable (they cannot have a live owner).
+     */
+    claimedAt: timestamptz("claimed_at"),
     createdAt: timestamptz("created_at").notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.userId, t.kind, t.runId] })],
@@ -1604,6 +1611,67 @@ export const runOutbox = pgTable(
     check("run_outbox_attempts_check", sql`${t.attempts} >= 0`),
   ],
 );
+
+/**
+ * Crash-safe final-response delivery outbox (migration 0042).
+ *
+ * `run_outbox` above is the Collab *request publication* ledger; this table is
+ * the ordinary root-run completion ledger and must not be confused with it.
+ *
+ * One row per root run, inserted in the SAME transaction as the final
+ * assistant message (`message_id`). That transaction is the durable intent:
+ * after it commits the answer exists and delivery will be replayed; before it
+ * commits neither row exists (no phantom answer). Delivery is at-least-once:
+ * `pending` rows are retried by `recoverRunFinalDeliveries` on worker boot and
+ * on every scheduler tick, keyed by the unique `run_id`. `delivered` is only
+ * written after the message + both terminal events + (when configured) the
+ * completion push are confirmed. `failed` is a truthful terminal verdict for
+ * an item that can never be delivered (missing message, run already
+ * terminalized non-completed); it is never used for an unknown outcome.
+ */
+export const runDeliveryOutbox = pgTable(
+  "run_delivery_outbox",
+  {
+    outboxId: char("outbox_id", { length: 36 }).primaryKey(),
+    runId: char("run_id", { length: 36 })
+      .notNull()
+      .references(() => runs.id, { onDelete: "cascade" }),
+    sessionId: char("session_id", { length: 36 })
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.uid, { onDelete: "cascade" }),
+    messageId: char("message_id", { length: 36 })
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    /** Scheduled runs use notifyScheduleSucceeded, never agentFinished. */
+    scheduled: boolean("scheduled").notNull().default(false),
+    /** Exact `run_completed` payload (runId + optional usage) for replay. */
+    completionPayload: jsonb("completion_payload").notNull().$type<Record<string, unknown>>(),
+    status: text("status")
+      .notNull()
+      .default("pending")
+      .$type<"pending" | "delivering" | "delivered" | "failed">(),
+    attempts: integer("attempts").notNull().default(0),
+    lastAttemptAt: timestamptz("last_attempt_at"),
+    deliveredAt: timestamptz("delivered_at"),
+    lastError: text("last_error"),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("run_delivery_outbox_run_uq").on(t.runId),
+    index("run_delivery_outbox_status_idx").on(t.status, t.lastAttemptAt, t.createdAt),
+    check(
+      "run_delivery_outbox_status_check",
+      sql`${t.status} IN ('pending','delivering','delivered','failed')`,
+    ),
+    check("run_delivery_outbox_attempts_check", sql`${t.attempts} >= 0`),
+  ],
+);
+
+export type RunDeliveryOutboxRow = typeof runDeliveryOutbox.$inferSelect;
 
 // RevenueCat/verified entitlement facts and webhook replay dedupe. No raw
 // webhook payload or purchase token is retained here. Unknown product/tier,

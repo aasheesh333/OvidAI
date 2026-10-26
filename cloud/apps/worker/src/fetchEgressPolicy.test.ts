@@ -554,14 +554,17 @@ describe("production-shaped native → worker selection → publicWebFetch compo
     let cancelled = 0;
     let markFirstChunk!: () => void;
     const firstChunk = new Promise<void>((resolve) => { markFirstChunk = resolve; });
-    let sent = false;
+    let pulls = 0;
     const body = new ReadableStream<Uint8Array>({
       pull(controller) {
-        if (!sent) {
-          sent = true;
+        pulls += 1;
+        if (pulls === 1) {
           controller.enqueue(utf8("first"));
-          markFirstChunk();
+          return;
         }
+        // The first chunk was already consumed: the consumer is now blocked in
+        // its next read. Never resolve it until the caller aborts.
+        markFirstChunk();
       },
       cancel() { cancelled++; },
     });

@@ -230,6 +230,9 @@ describe("real worker health provider composition", () => {
 
   it("executes Vercel's bounded v10 read and leaves resource-specific GitHub probes unavailable", async () => {
     const requests: EgressRequest[] = [];
+    // Vercel is OAuth-credentialed, so the worker reads its token row before
+    // dispatch. This harness carries a static config token only.
+    vi.spyOn(mcpOauthTokens, "get").mockResolvedValue(null);
     const { lifecycle } = providerHarness("vercel", {
       operation: async (request) => {
         requests.push(request);

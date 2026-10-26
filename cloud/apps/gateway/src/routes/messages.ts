@@ -10,6 +10,7 @@ import {
   runUsage,
   sessionState,
   sessions,
+  turns,
   users,
   type Db,
   type MessageRow,
@@ -806,7 +807,12 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
     }
     // Wave 1b (CH-006): the uploads ride under this prompt in history.
     await attachments.linkToMessage(deps.db, sessionId, requestedAttachmentIds, userMessage.id);
-    const run = await runs.create(deps.db, {
+    // A1: admit the turn through the ordering primitive — the run's
+    // `created_at` is forced strictly past every earlier turn of the session
+    // under the per-session admission lock, so the turn sequence is admission
+    // order (never a clock tie) and a replayed prompt cannot create a second
+    // turn.
+    const run = await turns.admit(deps.db, {
       sessionId,
       promptMessageId: userMessage.id,
     });
@@ -833,7 +839,7 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
         // request sent one (the worker maps it onto the engine request's
         // maxTokens; absent = the provider's own default).
         {
-          runId: run.id,
+          runId: run.runId,
           sessionId,
           userId: uid,
           prompt: content,
@@ -856,14 +862,14 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
           // worker injects their memory and never persists it on the session.
           ...(projectRefs.length > 0 ? { projectRefs } : {}),
         },
-        { jobId: run.id, priority },
+        { jobId: run.runId, priority },
       );
     } catch (err) {
       // Documented ruling: the user message row stays and the run row is LEFT
       // 'queued' (not deleted) so an operator/reconciler can re-enqueue it;
       // the client sees 503 and can retry (jobId=runId keeps re-adds
       // idempotent on the queue side).
-      request.log.error({ err, runId: run.id, sessionId }, "queue add failed; run row left queued");
+      request.log.error({ err, runId: run.runId, sessionId }, "queue add failed; run row left queued");
       return sendError(
         reply,
         503,
@@ -883,7 +889,7 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
     }
     await sessions.touch(deps.db, sessionId);
     const body: SendMessageResponse = {
-      runId: run.id,
+      runId: run.runId,
       userMessageId: userMessage.id,
       status: "queued",
       model: effectiveModel,

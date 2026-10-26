@@ -3,6 +3,7 @@ import { and, eq, sql } from "drizzle-orm";
 import {
   createDb,
   messages,
+  migrate,
   newId,
   schema,
   type Db,
@@ -237,8 +238,34 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("Collab lifecycle real Postgres (
   let db: Db;
   let secondDb: Db;
   let observerDb: Db;
+  const createdSessionIds: string[] = [];
+
+  // Global stale sweeps scan every lease in the database, so each fixture's
+  // session must not outlive its test (session deletes cascade to runs,
+  // rooms, turns, leases, and the outbox).
+  afterEach(async () => {
+    if (createdSessionIds.length > 0) {
+      for (const sessionId of createdSessionIds) {
+        // Delete in dependency order: `messages.session_id` has no cascade,
+        // and the sweep must never see another test's stale lease.
+        await db.$client`DELETE FROM run_outbox WHERE session_id = ${sessionId}`;
+        await db.$client`
+          DELETE FROM collab_sender_leases
+           WHERE run_id IN (SELECT id FROM runs WHERE session_id = ${sessionId})`;
+        await db.$client`
+          DELETE FROM collab_turns
+           WHERE run_id IN (SELECT id FROM runs WHERE session_id = ${sessionId})`;
+        await db.$client`DELETE FROM messages WHERE session_id = ${sessionId}`;
+        await db.$client`DELETE FROM runs WHERE session_id = ${sessionId}`;
+        await db.$client`DELETE FROM collab_rooms WHERE session_id = ${sessionId}`;
+        await db.$client`DELETE FROM sessions WHERE id = ${sessionId}`;
+      }
+      createdSessionIds.length = 0;
+    }
+  });
 
   beforeAll(async () => {
+    await migrate(TEST_DATABASE_URL!);
     db = createDb(TEST_DATABASE_URL!, { max: 12 });
     secondDb = createDb(TEST_DATABASE_URL!, { max: 12 });
     observerDb = createDb(TEST_DATABASE_URL!, { max: 4 });
@@ -261,6 +288,7 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("Collab lifecycle real Postgres (
       outboxId: newId(),
       leaseId: newId(),
     };
+    createdSessionIds.push(ids.sessionId);
     const suffix = newId().replaceAll("-", "");
     const participantId = `p${suffix}`;
     const ownerParticipantId = `p${newId().replaceAll("-", "")}`;
@@ -475,7 +503,20 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("Collab lifecycle real Postgres (
         JOIN collab_sender_leases l ON l.run_id = r.id
        WHERE r.id = ${runId}`;
     const row = rows[0]!;
-    return { ...row, generation: Number(row.generation) };
+    // Drizzle installs transparent timestamp parsers on the raw client, so
+    // raw rows carry text; normalize back to the Date contract used below.
+    const asDate = (value: unknown): Date | null =>
+      value === null || value === undefined ? null : value instanceof Date ? value : new Date(value as string);
+    return {
+      ...row,
+      generation: Number(row.generation),
+      turn_cancel: asDate(row.turn_cancel),
+      settled_at: asDate(row.settled_at),
+      published_at: asDate(row.published_at),
+      released_at: asDate(row.released_at),
+      lease_cancel: asDate(row.lease_cancel),
+      heartbeat_at: asDate(row.heartbeat_at),
+    };
   }
 
   type LockRelation = "collab_members" | "collab_rooms";
@@ -932,7 +973,9 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("Collab lifecycle real Postgres (
           SELECT l.heartbeat_at, r.status AS run_status
             FROM collab_sender_leases l JOIN runs r ON r.id = l.run_id
            WHERE l.id = ${f.leaseId}`;
-        heartbeatAtTerminal = observed[0]!.heartbeat_at;
+        heartbeatAtTerminal = observed[0]!.heartbeat_at === null
+          ? null
+          : new Date(observed[0]!.heartbeat_at as string);
         runStatusAtTerminal = observed[0]!.run_status;
       }
       return append(sessionId, type, payload);

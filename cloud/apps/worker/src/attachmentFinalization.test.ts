@@ -661,7 +661,7 @@ describe.skipIf(!TEST_DATABASE_URL)("attachment HEAD finalization and legacy lin
           await originalFinalize.call(this, {
             reservationId: ticket.attachmentId,
             actualBytes: 5,
-            actualContentType: null,
+            contentType: null,
             etag: null,
             attachment: true,
           });

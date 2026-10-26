@@ -11,6 +11,7 @@ import {
   type RestHandlerOptions,
   type RestServiceDescriptor,
 } from "./rest/engine.js";
+import { withReadEnvelope } from "./rest/descriptors/readEnvelopes.js";
 import {
   COMMERCE_INFRA_DESCRIPTORS,
   COMMERCE_INFRA_PROVIDERS,
@@ -269,7 +270,9 @@ export function createCuratedCatalog(deps: CuratedCatalogDeps): CuratedCatalog {
       default: {
         const descriptor = CURATED_DESCRIPTORS.find((candidate) => candidate.curatedId === id);
         if (descriptor === undefined) throw new Error(`unknown curated id: ${id}`);
-        return createRestHandler(descriptor, restOptions);
+        // Generic originals still get their documented read-shape check; the
+        // wrapper delegates the actual request to the same engine handler.
+        return withReadEnvelope(id, createRestHandler(descriptor, restOptions));
       }
     }
   }

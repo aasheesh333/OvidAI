@@ -91,6 +91,17 @@ export function createAgentEngine(deps: AgentEngineDeps): AgentEngine {
       const generation = (epochs.get(job.sessionId) ?? 0) + 1;
       epochs.set(job.sessionId, generation);
 
+      // A subagent CHILD run must never reach the root delivery outbox: its
+      // answer is reported through the durable subagent report path, and the
+      // port's per-run binding (userId/scheduled) belongs to the root. Strip
+      // it from the inherited deps rather than only omitting it from the
+      // spread below.
+      const { finalDelivery: rootFinalDelivery, ...engineDeps } = deps;
+      const loopDeps: LoopDeps =
+        job.isSubagent === true || rootFinalDelivery === undefined
+          ? engineDeps
+          : { ...engineDeps, finalDelivery: rootFinalDelivery };
+
       const controller = new AbortController();
       const rt: RunTime = {
         cancelled: false,
@@ -136,7 +147,10 @@ export function createAgentEngine(deps: AgentEngineDeps): AgentEngine {
               : {}),
             ...(job.roster !== undefined ? { roster: job.roster } : {}),
           },
-          { ...deps, sink: sinkFor(job.sessionId) },
+          {
+            ...loopDeps,
+            sink: sinkFor(job.sessionId),
+          },
           rt,
         );
       } catch (err) {

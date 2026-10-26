@@ -1018,6 +1018,16 @@ export const runs = {
       .where(eq(runsTable.id, runId));
   },
 
+  /** Unscoped single-pk read (worker-internal paths that already own the run). */
+  async getById(db: Db, runId: string): Promise<RunRow | null> {
+    const rows = await db
+      .select()
+      .from(runsTable)
+      .where(eq(runsTable.id, runId))
+      .limit(1);
+    return rows[0] ?? null;
+  },
+
   /**
    * Ownership-scoped fetch (owner = the run's session owner): null on unknown
    * id OR wrong owner, so the gateway maps both to the same 404 (the runs
@@ -1463,6 +1473,35 @@ export const eventMirror = {
       .onConflictDoNothing({
         target: [sessionEventMirror.sessionId, sessionEventMirror.seq],
       });
+  },
+
+  /**
+   * Delivery-replay guard: does this session already hold an event of `type`
+   * whose payload[`key`] equals `value`? The final-response outbox uses it to
+   * make `message_completed`/`run_completed` replay a no-op after a crash
+   * between the Redis append and the mirror write (a mirror hit is proof the
+   * event was observed; a miss may append once more — see runFinalDelivery.ts
+   * for the documented residual window).
+   */
+  async hasPayloadValue(
+    db: Db,
+    sessionId: string,
+    type: SessionEventType,
+    key: string,
+    value: string,
+  ): Promise<boolean> {
+    const rows = await db
+      .select({ seq: sessionEventMirror.seq })
+      .from(sessionEventMirror)
+      .where(
+        and(
+          eq(sessionEventMirror.sessionId, sessionId),
+          eq(sessionEventMirror.type, type),
+          sql`${sessionEventMirror.payload} ->> ${key} = ${value}`,
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
   },
 
   /** Events with seq strictly after lastSeq (null/invalid ⇒ from the beginning), in seq order. */

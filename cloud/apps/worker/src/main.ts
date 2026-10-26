@@ -90,6 +90,7 @@ import {
 import { StudioRunBinding } from "./studioRunBinding.js";
 import { createNotifier, createFcmPushSender } from "./notify.js";
 import { createWebPushSender } from "./webPush.js";
+import { createFinalDelivery } from "./runFinalDelivery.js";
 import { createPluginInstallProcessor } from "./pluginInstallProcessor.js";
 import { startWorkerPtyBridge } from "./ptyBridge.js";
 import { createSandboxPort, createStepLimiter } from "./sandboxAdapter.js";
@@ -111,6 +112,48 @@ import { sweepStaleRuns } from "./staleRuns.js";
 import { createColdRowScan, createStuckHibernationScan, createStuckHydrationScan } from "./storageScans.js";
 import { createUnattendedApprovalHook } from "./unattended.js";
 import { startAccountDeletionSweeper } from "./accountSweep.js";
+import { safeLogRecord, redactSensitiveText } from "@ovid/shared";
+
+/**
+ * Task 11: structured, redacted worker logging.
+ *
+ * Every production log is emitted as a single JSON line. `safeLogRecord`
+ * validates the operational event/outcome/reason codes, and
+ * `redactSensitiveText` scrubs credentials and URLs from the free-form
+ * message before it can reach stdout. A validation/redaction failure is itself
+ * logged and never thrown, so a logging bug cannot crash the worker.
+ */
+function workerLog(level: "info" | "warn" | "error", ...args: unknown[]): void {
+  try {
+    const message = args
+      .map((arg) => {
+        if (typeof arg === "string") return arg;
+        if (arg instanceof Error) return arg.message;
+        return JSON.stringify(arg);
+      })
+      .join(" ");
+    const event = message.startsWith("[scheduler]")
+      ? "scheduler.log"
+      : message.startsWith("[account]")
+        ? "account.log"
+        : "worker.log";
+    const record = safeLogRecord({ event });
+    const line = JSON.stringify({
+      level,
+      ...record,
+      message: redactSensitiveText(message),
+    });
+    process.stdout.write(line + "\n");
+  } catch {
+    process.stdout.write(
+      JSON.stringify({
+        level,
+        event: "worker.log_failed",
+        reason: "redaction_or_validation_failed",
+      }) + "\n",
+    );
+  }
+}
 
 export interface WorkerEnv {
   nodeEnv: string;
@@ -364,10 +407,10 @@ export function createProductionKeyResolver(deps: {
     deps.masterKey === null
       ? null
       : createByokKeyProvider(deps.db, createEnvelopeCrypto(deps.masterKey), {
-          log: (message, detail) => console.warn(`[worker] ${message}`, detail ?? ""),
+          log: (message, detail) => workerLog("warn", `[worker] ${message}`, detail ?? ""),
         });
   if (byok === null) {
-    console.warn(
+    workerLog("warn",
       "[worker] OVID_MASTER_KEY is not set — BYOK runs will fail (no silent fallback to Ovid's key)",
     );
   }
@@ -521,10 +564,10 @@ export function startStudioPreviewSweeper(
       try {
         const swept = await previews.sweep();
         if (swept > 0) {
-          console.log(`[worker] Studio preview sweep (${label}): terminalized ${swept} preview(s)`);
+          workerLog("info", `[worker] Studio preview sweep (${label}): terminalized ${swept} preview(s)`);
         }
       } catch (err) {
-        console.error(`[worker] Studio preview sweep (${label}) failed`, err);
+        workerLog("error", `[worker] Studio preview sweep (${label}) failed`, err);
       }
     })();
     active = current;
@@ -581,7 +624,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   // catch, but nothing here should ever be able to crash the worker — log
   // and carry on (the rejection carries no state we can act on).
   process.on("unhandledRejection", (err) => {
-    console.error("[worker] unhandled rejection (logged, not fatal)", err);
+    workerLog("error", "[worker] unhandled rejection (logged, not fatal)", err);
   });
 
   // Pool size: OVID_DB_POOL_MAX / OVID_DB_IDLE_TIMEOUT_S (capacity wave);
@@ -606,7 +649,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       ? new Redis(redisCUrl)
       : redisQ;
   if (redisC === redisQ) {
-    console.warn(
+    workerLog("warn",
       "[worker] REDIS_C_URL is not set — activity keys share REDIS_Q_URL " +
         "(cache-class fallback; spec §10 redis-c is preferred in production)",
     );
@@ -636,6 +679,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
         .split(",").map((host) => host.trim()).filter((host) => host !== ""),
     }),
   });
+  // ONE run-outbox instance for the process: the processors use their per-run
+  // binding of the same shape, and the scheduler tick + boot pass use this one
+  // for recovery. (Per-run bindings are cheap closures over these deps.)
+  const finalDelivery = createFinalDelivery({ db, events, notifier });
 
   // Shared actual-byte reservations and signed gateway grants for every
   // ordinary generated-artifact publisher. A missing gateway base URL is a
@@ -795,7 +842,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       })
     : null;
   if (previews === null) {
-    console.warn(
+    workerLog("warn",
       "[worker] Studio previews disabled — studio_previews is absent (apply migration 0041 explicitly)",
     );
   }
@@ -831,7 +878,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
           githubToken: cfg.githubToken ?? undefined,
         });
   if (mcpRuntime === null) {
-    console.warn(
+    workerLog("warn",
       "[worker] OVID_MASTER_KEY is not set — MCP servers/plugins are disabled " +
         "(curated fetch/REST tools are unavailable in this process)",
     );
@@ -847,7 +894,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   let pluginInstallsWorker: ReturnType<typeof createPluginInstallsWorker> | null =
     null;
   if (mcpRuntime === null) {
-    console.warn(
+    workerLog("warn",
       "[worker] plugin-installs worker not started — OVID_MASTER_KEY is not set",
     );
   } else {
@@ -855,7 +902,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     // persisted active/degraded rows so a restart does not take every
     // installed plugin dark until each user reinstalls.
     const rehydrated = await mcpRuntime.installer.rehydrate();
-    console.log(`[worker] rehydrated ${rehydrated} installed plugin(s)`);
+    workerLog("info", `[worker] rehydrated ${rehydrated} installed plugin(s)`);
 
     const processPluginInstall = createPluginInstallProcessor({
       db,
@@ -871,9 +918,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       processPluginInstall,
     );
     pluginInstallsWorker.on("error", (err) => {
-      console.error("[worker] plugin-installs worker error", err);
+      workerLog("error", "[worker] plugin-installs worker error", err);
     });
-    console.log("[worker] consuming plugin-installs");
+    workerLog("info", "[worker] consuming plugin-installs");
   }
 
   // P2 Task 13: the terminal-over-WS worker bridge. Started AFTER recovery —
@@ -1033,13 +1080,13 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     return hibernateWorkspace(hibernateDeps, input);
   });
   hibernateWorker.on("error", (err) => {
-    console.error("[worker] hibernate worker error", err);
+    workerLog("error", "[worker] hibernate worker error", err);
   });
   const hydrateWorker = createHydrateWorker({ url: cfg.redisQUrl }, async (job) =>
     hydrateWorkspace(hydrateDeps, hydrateJobSchema.parse(job.data)),
   );
   hydrateWorker.on("error", (err) => {
-    console.error("[worker] hydrate worker error", err);
+    workerLog("error", "[worker] hydrate worker error", err);
   });
 
   // W12 CDN/grant dependencies were composed above and are shared by every
@@ -1070,7 +1117,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     ...(cdn !== null ? { cdn } : {}),
   });
   await fileService.listen({ port: cfg.workerFilePort, host: "0.0.0.0" });
-  console.log(`[worker] internal file service listening on :${cfg.workerFilePort}`);
+  workerLog("info", `[worker] internal file service listening on :${cfg.workerFilePort}`);
 
   // P7 Task 11: the run hook — hydrate before any tool touches the
   // workspace. T9-review I3: pass the repo so awaitWarm does not need the
@@ -1213,11 +1260,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   // authoritative) before any tick can run. Deterministic jobIds make a
   // re-add after a crash a no-op.
   const mirrored = await resyncScheduleMirror({ db, queues });
-  console.log(`[scheduler] mirror resync: ${mirrored} delayed job(s)`);
+  workerLog("info", `[scheduler] mirror resync: ${mirrored} delayed job(s)`);
 
   // Settle-then-tick every OVID_SCHEDULER_TICK_MS (overlap-guarded; .unref()).
   const schedulerLoop = startSchedulerLoop(
-    { db, queues, events, system, notifier },
+    { db, queues, events, system, notifier, finalDelivery },
     { intervalMs: cfg.schedulerTickMs },
   );
   // The mirror consumer shares the production queue key layout (no prefix:
@@ -1227,12 +1274,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     createScheduleFireProcessor({ db, queues, system }),
   );
   fireWorker.on("error", (err) => {
-    console.error("[worker] schedules worker error", err);
+    workerLog("error", "[worker] schedules worker error", err);
   });
   // P4 Task 13: the agent schedule tools are registered with the P3 roster
   // through FullRunDeps.extraTools above; the approval timeoutPolicy half of
   // the P3 seam is wired via unattendedApprovalHook.
-  console.log("[scheduler] agent schedule tools registered (4)");
+  workerLog("info", "[scheduler] agent schedule tools registered (4)");
 
   // Connection OPTIONS OBJECT — a bare URL string silently spreads into
   // garbage opts and hangs (Task 7 lesson, pinned by its health test).
@@ -1252,15 +1299,35 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     }
     return parsed;
   })();
+
+  // Crash-safe final delivery: replay every run whose durable delivery intent
+  // committed but whose terminal events / completion push did not (a worker
+  // death between the answer commit and the push). This boot pass runs BEFORE
+  // the queue worker and the stale-run sweeper start, so a recovered answer is
+  // delivered before anything else can terminalize its run; the same pass then
+  // rides every scheduler tick (runSchedulerTick → recoverRunFinalDeliveries).
+  // Errors are logged, never fatal: the row stays pending for the next pass.
+  try {
+    const report = await finalDelivery.recover();
+    if (report.delivered > 0 || report.failed > 0) {
+      workerLog("info",
+        `[worker] final delivery recovery (boot): ${report.delivered} delivered, ` +
+          `${report.failed} failed, ${report.pending} pending`,
+      );
+    }
+  } catch (err) {
+    workerLog("error", "[worker] final delivery recovery (boot) failed", err);
+  }
+
   const worker = createAgentRunsWorker(
     { url: cfg.redisQUrl },
     processor,
     runConcurrency === undefined ? {} : { concurrency: runConcurrency },
   );
   worker.on("error", (err) => {
-    console.error("[worker] bullmq worker error", err);
+    workerLog("error", "[worker] bullmq worker error", err);
   });
-  console.log(
+  workerLog("info",
     `[worker] consuming agent-runs (env=${cfg.nodeEnv}, model=${cfg.defaultModel}, litellm=${cfg.litellmBaseUrl})`,
   );
 
@@ -1278,10 +1345,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
         { staleAfterMs: cfg.runStaleMs },
       );
       if (swept > 0) {
-        console.log(`[worker] stale-run sweep (${label}): terminalized ${swept} stranded run(s)`);
+        workerLog("info", `[worker] stale-run sweep (${label}): terminalized ${swept} stranded run(s)`);
       }
     } catch (err) {
-      console.error(`[worker] stale-run sweep (${label}) failed`, err);
+      workerLog("error", `[worker] stale-run sweep (${label}) failed`, err);
     }
   };
   await sweep("boot");
@@ -1300,13 +1367,13 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       stuckAfterMs: STUCK_STATE_MS,
     });
     if (reconciled.resetToWarm > 0 || reconciled.closedToCold > 0) {
-      console.log(
+      workerLog("info",
         `[worker] stuck-hibernation reconcile (boot): ${reconciled.resetToWarm} reset warm, ` +
           `${reconciled.closedToCold} closed cold`,
       );
     }
   } catch (err) {
-    console.error("[worker] stuck-hibernation reconcile (boot) failed", err);
+    workerLog("error", "[worker] stuck-hibernation reconcile (boot) failed", err);
   }
   const sweepWarm = async (label: string): Promise<void> => {
     try {
@@ -1316,13 +1383,13 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
         result.enqueuedIdle > 0 ||
         result.enqueuedPressure > 0
       ) {
-        console.log(
+        workerLog("info",
           `[worker] warm sweep (${label}): registered ${result.registered}, ` +
             `idle ${result.enqueuedIdle}, pressure ${result.enqueuedPressure}`,
         );
       }
     } catch (err) {
-      console.error(`[worker] warm sweep (${label}) failed`, err);
+      workerLog("error", `[worker] warm sweep (${label}) failed`, err);
     }
   };
   await sweepWarm("boot");
@@ -1344,10 +1411,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
         new Date(Date.now() - OAUTH_FLOW_SWEEP_GRACE_MS),
       );
       if (deleted > 0) {
-        console.log(`[worker] oauth-flow sweep (${label}): deleted ${deleted} expired flow(s)`);
+        workerLog("info", `[worker] oauth-flow sweep (${label}): deleted ${deleted} expired flow(s)`);
       }
     } catch (err) {
-      console.error(`[worker] oauth-flow sweep (${label}) failed`, err);
+      workerLog("error", `[worker] oauth-flow sweep (${label}) failed`, err);
     }
   };
   await sweepOauthFlows("boot");
@@ -1376,7 +1443,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     // loudly: deletion must not be enabled in production without it.
     const r2Deleter = createR2PrefixDeleterFromEnv(env);
     if (r2Deleter === null) {
-      console.warn(
+      workerLog("warn",
         "[account] deletion is enabled but OVID_R2_* is not configured — " +
           "workspace/browser objects under users/{uid}/ will NOT be deleted (H2)",
       );
@@ -1411,14 +1478,14 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       }),
     });
     accountSweeper = startAccountDeletionSweeper({ lifecycle, store: deletionStore });
-    console.log("[account] deletion sweeper started");
+    workerLog("info", "[account] deletion sweeper started");
     if (env.OVID_LITELLM_MASTER_KEY?.trim() === undefined || env.OVID_LITELLM_MASTER_KEY.trim() === "") {
-      console.warn(
+      workerLog("warn",
         "[account] no OVID_LITELLM_MASTER_KEY — key block/delete will fail and retry",
       );
     }
   } else {
-    console.log(
+    workerLog("info",
       "[account] deletion sweeper disabled — set OVID_ACCOUNT_FIREBASE_APP_IDS to enable it",
     );
   }
@@ -1491,11 +1558,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     return shuttingDown;
   };
   const onSignal = (signal: string): void => {
-    console.log(`[worker] ${signal} received — draining and shutting down`);
+    workerLog("info", `[worker] ${signal} received — draining and shutting down`);
     shutdown().then(
       () => process.exit(0),
       (err) => {
-        console.error("[worker] shutdown failed", err);
+        workerLog("error", "[worker] shutdown failed", err);
         process.exit(1);
       },
     );
@@ -1506,7 +1573,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
-    console.error("[worker] fatal startup error", err);
+    workerLog("error", "[worker] fatal startup error", err);
     process.exit(1);
   });
 }

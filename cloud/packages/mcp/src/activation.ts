@@ -13,6 +13,7 @@ import type { SecretRedactor } from "./egress/redactor.js";
 import type { ProviderEgress } from "./egress/providerEgress.js";
 import { createCuratedCatalogProjection, type CuratedCatalogDeps } from "./catalog.js";
 import { createRestHandler } from "./rest/engine.js";
+import { withReadEnvelope } from "./rest/descriptors/readEnvelopes.js";
 import type { NativeMcpHandler } from "./transports/native.js";
 import { PRODUCTION_PROVIDER_REGISTRY } from "./providerProduction.js";
 import type { ProviderRegistry } from "./providers/registry.js";
@@ -300,10 +301,10 @@ export function createCuratedProviderSupport(
     handlerOverrides(egress, redactor) {
       return Object.fromEntries(projection.genericDescriptors.map((descriptor) => [
         descriptor.curatedId,
-        (): NativeMcpHandler => createRestHandler(descriptor, {
+        (): NativeMcpHandler => withReadEnvelope(descriptor.curatedId, createRestHandler(descriptor, {
           providerEgress: egress,
           ...(redactor !== undefined ? { redactor } : {}),
-        }),
+        })),
       ]));
     },
   };

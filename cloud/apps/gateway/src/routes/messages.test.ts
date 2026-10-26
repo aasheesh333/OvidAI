@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { accountSettings, admitDispatches, attachments, byokKeysRepo, messages, newId, runs, runUsage, sessionState, sessions, users, type Db } from "@ovid/db";
+import { accountSettings, admitDispatches, attachments, byokKeysRepo, messages, newId, runs, runUsage, sessionState, sessions, turns, users, type Db } from "@ovid/db";
 import { AGENT_RUN_JOB_NAME } from "@ovid/queue";
 import type { ActivityTracker } from "@ovid/storage";
 import {
@@ -1307,7 +1307,7 @@ describe("Studio mode message route (repository boundary)", () => {
       createdAt: new Date(),
     } as never);
     vi.spyOn(attachments, "linkToMessage").mockResolvedValue(undefined as never);
-    vi.spyOn(runs, "create").mockResolvedValue({ id: runId, sessionId: sid } as never);
+    vi.spyOn(turns, "admit").mockResolvedValue({ runId, sessionId: sid, seq: 1 } as never);
     vi.spyOn(sessionState, "get").mockResolvedValue({
       modelPin: null,
       planMode: false,

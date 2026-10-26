@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import type { AgentRequest, AgentResponse, AgentTransport } from "@ovid/agent-core";
 import {
   RunQuotaService,
+  accountSettings,
   createDb,
   createSchedule,
   messages,
@@ -10,6 +11,7 @@ import {
   runs,
   scheduleRuns,
   schedules,
+  sessionState,
   sessions,
   users,
   type Db,
@@ -48,6 +50,26 @@ const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 // invisible to claimDue), so re-runs are exact too.
 const BASE = 1_600_000_000_000;
 const iso = (ms: number): string => new Date(ms).toISOString();
+
+/**
+ * Drizzle wraps driver failures (`Failed query: …`); the Postgres message and
+ * trigger text live on the cause chain. Read the whole chain so an injected
+ * failure is still asserted by its own message.
+ */
+function errorMessage(error: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current !== null && current !== undefined; depth += 1) {
+    if (current instanceof Error) {
+      parts.push(current.message);
+      current = (current as { cause?: unknown }).cause;
+    } else {
+      parts.push(String(current));
+      break;
+    }
+  }
+  return parts.join(" | ");
+}
 
 /** One captured queue add (which queue, job name, payload, add options). */
 interface CapturedAdd {
@@ -234,6 +256,17 @@ describe.skipIf(!TEST_DATABASE_URL)(
         // the only read-only gate on the run path.
         autonomy: "safe",
         mode: "safe",
+        // R2: producer identity + the captured nested snapshot, with the
+        // legacy top-level BYOK mirror kept EQUAL to it (here: Ovid, null).
+        source: "schedule_tick",
+        actorUserId: sched.userId,
+        provenance: "server",
+        modelContext: {
+          requestedModel: null,
+          byokKeyId: null,
+          actorUserId: sched.userId,
+        },
+        byokKeyId: null,
         schedule: { scheduleId: sched.id, scheduleRunId: srs[0]!.id, autonomy: "safe" },
       });
       expect(agentAdds[0]!.opts.jobId).toBe(srs[0]!.runId);
@@ -556,8 +589,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(settled).toBeLessThan(100); // 5 ms interval, ~100 ms window: sanity bound
     });
 
-    it("(k) H1: schedule autonomy is projected onto the run mode (safe → read-only; auto → explicit opt-in)", async () => {
-      const T0 = BASE;
+    it("(k) H1: schedule autonomy is projected onto the run mode (safe → read-only; auto → explicit opt-in)", async () => {      const T0 = BASE;
       const safe = await seedSchedule({ kind: "every", seconds: 300 }, { at: T0 });
       const auto = await seedSchedule(
         { kind: "every", seconds: 300 },
@@ -583,6 +615,430 @@ describe.skipIf(!TEST_DATABASE_URL)(
       // `auto` mode and a `safe` schedule can mutate).
       expect(dataFor(safe.id)).toMatchObject({ autonomy: "safe", mode: "safe" });
       expect(dataFor(auto.id)).toMatchObject({ autonomy: "auto", mode: "auto" });
+    });
+
+    // -----------------------------------------------------------------------
+    // R2: tick/retry capture + admit-before-add
+    // -----------------------------------------------------------------------
+    describe("R2 tick and retry admission", () => {
+      /**
+       * A quota double around the canonical service that records the shared
+       * call order with the queue, so "admit BEFORE add" is provable rather
+       * than assumed.
+       */
+      function orderedQuota(service: RunQuotaService, order: string[]) {
+        return {
+          async admitRun(input: Parameters<RunQuotaService["admitRun"]>[0]) {
+            order.push("admit");
+            return service.admitRun(input);
+          },
+          pendingSettlements: (limit?: number) => service.pendingSettlements(limit),
+          settleModelCall: (input: Parameters<RunQuotaService["settleModelCall"]>[0]) =>
+            service.settleModelCall(input),
+        };
+      }
+
+      function orderedQueues(order: string[]) {
+        const adds: CapturedAdd[] = [];
+        const queues = {
+          agentRuns: {
+            add: async (name: string, data: unknown, opts?: Record<string, unknown>) => {
+              order.push("add");
+              adds.push({ queue: "agentRuns", name, data, opts: opts ?? {} });
+              return { id: String(opts?.jobId ?? "") };
+            },
+          },
+          schedules: {
+            add: async (name: string, data: unknown, opts?: Record<string, unknown>) => {
+              adds.push({ queue: "schedules", name, data, opts: opts ?? {} });
+              return { id: String(opts?.jobId ?? "") };
+            },
+          },
+        } as unknown as QueueServices;
+        return { queues, adds };
+      }
+
+      /** Burn the owner's real Ovid day window through the canonical service. */
+      async function burnDay(actorUserId: string): Promise<void> {
+        const quota = new RunQuotaService(db, {
+          tokenCaps: { perDay: 10, perMonth: 1_000_000 },
+          usdCaps: { perDay: null, perMonth: null },
+        });
+        const session = await sessions.create(db, actorUserId);
+        createdSessionIds.push(session.id);
+        const prompt = await messages.append(db, {
+          sessionId: session.id,
+          role: "user",
+          content: "scheduler r2 burn",
+        });
+        const burn = await runs.create(db, { sessionId: session.id, promptMessageId: prompt.id });
+        expect((await quota.admitRun({
+          actorUserId,
+          source: "interactive",
+          runId: burn.id,
+          idempotencyKey: `burn:${burn.id}`,
+          billingClass: "ovid_allowance",
+        })).ok).toBe(true);
+        const reservation = await quota.reserveModelCall({
+          actorUserId,
+          runId: burn.id,
+          reservationKey: `burn:${burn.id}:model`,
+          inputTokens: 10,
+          maxOutputTokens: 0,
+          billingClass: "ovid_allowance",
+        });
+        expect(reservation.ok).toBe(true);
+        await quota.settleModelCall({
+          reservationId: (reservation as { reservationId: string }).reservationId,
+          usage: { inputTokens: 10, outputTokens: 0 },
+        });
+        await runs.finish(db, burn.id, "completed");
+      }
+
+      async function admissionFor(runId: string) {
+        return db.$client`
+          SELECT actor_user_id, source, run_id, idempotency_key, billing_class
+            FROM usage_run_admissions WHERE run_id = ${runId}`;
+      }
+
+      it("tick: admits before the queue add, enqueues the nested snapshot plus an EQUAL legacy mirror", async () => {
+        const T0 = BASE;
+        const sched = await seedSchedule({ kind: "every", seconds: 300 }, { at: T0 });
+        // Session-level capture: model pin with an effort suffix + preset
+        // temperature + a BYOK default, all read once at fire time.
+        await sessionState.patch(db, sched.sessionId, { modelPin: "gpt-5.2 · high" });
+        await accountSettings.patch(db, sched.userId, {
+          byokDefault: { keyId: "scheduler-r2-key", model: "user-provider/sched" },
+        });
+        const order: string[] = [];
+        const { queues, adds } = orderedQueues(order);
+        const { system, published } = stubSystem();
+        const canonical = new RunQuotaService(db);
+        const deps: SchedulerDeps = {
+          db,
+          queues,
+          system,
+          clock: () => new Date(T0 + 300_000),
+          quota: orderedQuota(canonical, order),
+        };
+
+        const report = await runSchedulerTick(deps);
+        expect(report).toEqual({ fired: 1, retried: 0, skipped: 0, paused: 0, deferred: 0, duplicates: 0 });
+        // Admission strictly precedes the queue add.
+        expect(order).toEqual(["admit", "add"]);
+
+        const srs = await scheduleRunsFor(sched.id);
+        const job = adds.find((a) => a.queue === "agentRuns")!.data as Record<string, unknown>;
+        const snapshot = job.modelContext as Record<string, unknown>;
+        expect(snapshot).toEqual({
+          requestedModel: "gpt-5.2 · high",
+          byokKeyId: "scheduler-r2-key",
+          byokModel: "user-provider/sched",
+          actorUserId: sched.userId,
+        });
+        // Producer identity the worker rechecks.
+        expect(job.source).toBe("schedule_tick");
+        expect(job.actorUserId).toBe(sched.userId);
+        expect(job.provenance).toBe("server");
+        // The compatibility mirror is EQUAL to the nested snapshot.
+        expect(job.byokKeyId).toBe(snapshot.byokKeyId);
+        expect(job.byokModel).toBe(snapshot.byokModel);
+        expect(job.requestedModel).toBeUndefined();
+        // Exact admission identity.
+        expect(await admissionFor(srs[0]!.runId!)).toEqual([{
+          actor_user_id: sched.userId,
+          source: "schedule_tick",
+          run_id: srs[0]!.runId,
+          idempotency_key: `run:${srs[0]!.runId}:schedule_tick`,
+          billing_class: "byok",
+        }]);
+        expect(published.filter((p) => p.event.type === "schedule_run_started")).toHaveLength(1);
+
+        // The payload is a CAPTURE: later settings changes cannot rewrite it.
+        await sessionState.patch(db, sched.sessionId, { modelPin: "mutated-model" });
+        await accountSettings.patch(db, sched.userId, {
+          byokDefault: { keyId: "mutated-key", model: "mutated/model" },
+        });
+        expect((job.modelContext as Record<string, unknown>).requestedModel).toBe("gpt-5.2 · high");
+        expect((job.modelContext as Record<string, unknown>).byokKeyId).toBe("scheduler-r2-key");
+      });
+
+      it("tick at the cap: quota_exhausted/skipped, failed run and occurrence, no queue add, no start event", async () => {
+        const T0 = BASE;
+        const sched = await seedSchedule({ kind: "every", seconds: 300 }, { at: T0 });
+        await burnDay(sched.userId);
+        const { queues, adds } = stubQueues();
+        const { system, published } = stubSystem();
+        const deps: SchedulerDeps = {
+          db,
+          queues,
+          system,
+          clock: () => new Date(T0 + 300_000),
+          quota: new RunQuotaService(db, {
+            tokenCaps: { perDay: 10, perMonth: 1_000_000 },
+            usdCaps: { perDay: null, perMonth: null },
+          }),
+        };
+
+        const report = await runSchedulerTick(deps);
+        expect(report).toEqual({ fired: 0, retried: 0, skipped: 1, paused: 0, deferred: 0, duplicates: 0 });
+        expect(adds.filter((a) => a.queue === "agentRuns")).toEqual([]);
+        expect(published.filter((p) => p.event.type === "schedule_run_started")).toEqual([]);
+
+        const srs = await scheduleRunsFor(sched.id);
+        expect(srs).toHaveLength(1);
+        expect(srs[0]!.status).toBe("failed");
+        const runRow = (await db.$client`
+          SELECT status, last_error FROM runs WHERE id = ${srs[0]!.runId}`) as Array<{
+            status: string;
+            last_error: string | null;
+          }>;
+        expect(runRow).toEqual([{ status: "failed", last_error: "quota_exhausted" }]);
+        expect(await admissionFor(srs[0]!.runId!)).toEqual([]);
+      });
+
+      it("retry at the cap: the same refusal, and the retry occurrence is not re-armed", async () => {
+        const T0 = BASE;
+        const sched = await seedSchedule(
+          { kind: "at", at: iso(T0 + 600_000) },
+          { at: T0, maxRetries: 2 },
+        );
+        const prompt = await messages.append(db, {
+          sessionId: sched.sessionId,
+          role: "user",
+          content: "first attempt",
+        });
+        const firstRun = await runs.create(db, {
+          sessionId: sched.sessionId,
+          promptMessageId: prompt.id,
+        });
+        const claimed = await scheduleRuns.claim(db, {
+          scheduleId: sched.id,
+          scheduledFor: new Date(T0 + 600_000),
+          runId: firstRun.id,
+          ranLate: false,
+          sessionId: sched.sessionId,
+          triggerKind: "at",
+        });
+        expect(claimed).not.toBeNull();
+        await runs.finish(db, firstRun.id, "failed", "model_transient_exhausted");
+        await scheduleRuns.scheduleRetry(db, claimed!.id, new Date(T0 + 700_000));
+        await schedules.update(db, sched.id, { nextRunAt: null });
+        await burnDay(sched.userId);
+
+        const order: string[] = [];
+        const { queues, adds } = orderedQueues(order);
+        const { system, published } = stubSystem();
+        const deps: SchedulerDeps = {
+          db,
+          queues,
+          system,
+          clock: () => new Date(T0 + 700_000),
+          quota: orderedQuota(
+            new RunQuotaService(db, {
+              tokenCaps: { perDay: 10, perMonth: 1_000_000 },
+              usdCaps: { perDay: null, perMonth: null },
+            }),
+            order,
+          ),
+        };
+
+        const report = await runSchedulerTick(deps);
+        expect(report).toEqual({ fired: 0, retried: 0, skipped: 1, paused: 0, deferred: 0, duplicates: 0 });
+        // Admission was attempted (and refused) before any add was considered.
+        expect(order).toEqual(["admit"]);
+        expect(adds.filter((a) => a.queue === "agentRuns")).toEqual([]);
+        expect(published.filter((p) => p.event.type === "schedule_run_started")).toEqual([]);
+
+        const srs = await scheduleRunsFor(sched.id);
+        expect(srs).toHaveLength(1);
+        expect(srs[0]!.status).toBe("failed");
+        expect(srs[0]!.retryAt).toBeNull();
+        const retryRunId = srs[0]!.runId!;
+        expect(retryRunId).not.toBe(firstRun.id);
+        const runRow = (await db.$client`
+          SELECT status, last_error FROM runs WHERE id = ${retryRunId}`) as Array<{
+            status: string;
+            last_error: string | null;
+          }>;
+        expect(runRow).toEqual([{ status: "failed", last_error: "quota_exhausted" }]);
+        expect(await admissionFor(retryRunId)).toEqual([]);
+      });
+
+      it("retry: admits under schedule_retry with its own source and idempotency key", async () => {
+        const T0 = BASE;
+        const sched = await seedSchedule(
+          { kind: "at", at: iso(T0 + 600_000) },
+          { at: T0, maxRetries: 2 },
+        );
+        const prompt = await messages.append(db, {
+          sessionId: sched.sessionId,
+          role: "user",
+          content: "first attempt",
+        });
+        const firstRun = await runs.create(db, {
+          sessionId: sched.sessionId,
+          promptMessageId: prompt.id,
+        });
+        const claimed = await scheduleRuns.claim(db, {
+          scheduleId: sched.id,
+          scheduledFor: new Date(T0 + 600_000),
+          runId: firstRun.id,
+          ranLate: false,
+          sessionId: sched.sessionId,
+          triggerKind: "at",
+        });
+        await runs.finish(db, firstRun.id, "failed", "model_transient_exhausted");
+        await scheduleRuns.scheduleRetry(db, claimed!.id, new Date(T0 + 700_000));
+        await schedules.update(db, sched.id, { nextRunAt: null });
+        await sessionState.patch(db, sched.sessionId, { modelPin: "retry/model · low" });
+
+        const order: string[] = [];
+        const { queues, adds } = orderedQueues(order);
+        const { system } = stubSystem();
+        const deps: SchedulerDeps = {
+          db,
+          queues,
+          system,
+          clock: () => new Date(T0 + 700_000),
+          quota: orderedQuota(new RunQuotaService(db), order),
+        };
+
+        const report = await runSchedulerTick(deps);
+        expect(report).toEqual({ fired: 0, retried: 1, skipped: 0, paused: 0, deferred: 0, duplicates: 0 });
+        expect(order).toEqual(["admit", "add"]);
+        const job = adds.find((a) => a.queue === "agentRuns")!.data as Record<string, unknown>;
+        expect(job.source).toBe("schedule_retry");
+        expect(job.actorUserId).toBe(sched.userId);
+        expect(job.modelContext).toEqual({
+          requestedModel: "retry/model · low",
+          byokKeyId: null,
+          actorUserId: sched.userId,
+        });
+        expect(job.byokKeyId).toBeNull();
+        expect(job.byokModel).toBeUndefined();
+        const srs = await scheduleRunsFor(sched.id);
+        expect(await admissionFor(srs[0]!.runId!)).toEqual([{
+          actor_user_id: sched.userId,
+          source: "schedule_retry",
+          run_id: srs[0]!.runId,
+          idempotency_key: `run:${srs[0]!.runId}:schedule_retry`,
+          billing_class: "ovid_allowance",
+        }]);
+      });
+
+      it("BYOK is admitted and enqueued despite an exhausted Ovid cap", async () => {
+        const T0 = BASE;
+        const sched = await seedSchedule({ kind: "every", seconds: 300 }, { at: T0 });
+        await burnDay(sched.userId);
+        await accountSettings.patch(db, sched.userId, {
+          byokDefault: { keyId: "scheduler-byok-key", model: "user-provider/sched" },
+        });
+        const { queues, adds } = stubQueues();
+        const { system, published } = stubSystem();
+        const deps: SchedulerDeps = {
+          db,
+          queues,
+          system,
+          clock: () => new Date(T0 + 300_000),
+          quota: new RunQuotaService(db, {
+            tokenCaps: { perDay: 10, perMonth: 1_000_000 },
+            usdCaps: { perDay: null, perMonth: null },
+          }),
+        };
+
+        const report = await runSchedulerTick(deps);
+        expect(report).toEqual({ fired: 1, retried: 0, skipped: 0, paused: 0, deferred: 0, duplicates: 0 });
+        const job = adds.find((a) => a.queue === "agentRuns")!.data as Record<string, unknown>;
+        expect(job.byokKeyId).toBe("scheduler-byok-key");
+        const srs = await scheduleRunsFor(sched.id);
+        expect(await admissionFor(srs[0]!.runId!)).toEqual([{
+          actor_user_id: sched.userId,
+          source: "schedule_tick",
+          run_id: srs[0]!.runId,
+          idempotency_key: `run:${srs[0]!.runId}:schedule_tick`,
+          billing_class: "byok",
+        }]);
+        expect(published.filter((p) => p.event.type === "schedule_run_started")).toHaveLength(1);
+      });
+
+      it("retry: BYOK is admitted and enqueued under schedule_retry despite an exhausted Ovid cap", async () => {
+        const T0 = BASE;
+        const sched = await seedSchedule(
+          { kind: "at", at: iso(T0 + 600_000) },
+          { at: T0, maxRetries: 2 },
+        );
+        const prompt = await messages.append(db, {
+          sessionId: sched.sessionId,
+          role: "user",
+          content: "first attempt",
+        });
+        const firstRun = await runs.create(db, {
+          sessionId: sched.sessionId,
+          promptMessageId: prompt.id,
+        });
+        const claimed = await scheduleRuns.claim(db, {
+          scheduleId: sched.id,
+          scheduledFor: new Date(T0 + 600_000),
+          runId: firstRun.id,
+          ranLate: false,
+          sessionId: sched.sessionId,
+          triggerKind: "at",
+        });
+        await runs.finish(db, firstRun.id, "failed", "model_transient_exhausted");
+        await scheduleRuns.scheduleRetry(db, claimed!.id, new Date(T0 + 700_000));
+        await schedules.update(db, sched.id, { nextRunAt: null });
+        // The owner's Ovid day cap is already spent.
+        await burnDay(sched.userId);
+        // A BYOK default makes the retry billable despite the exhausted cap.
+        await accountSettings.patch(db, sched.userId, {
+          byokDefault: { keyId: "retry-byok-key", model: "user-provider/retry" },
+        });
+
+        const order: string[] = [];
+        const { queues, adds } = orderedQueues(order);
+        const { system, published } = stubSystem();
+        const deps: SchedulerDeps = {
+          db,
+          queues,
+          system,
+          clock: () => new Date(T0 + 700_000),
+          quota: orderedQuota(
+            new RunQuotaService(db, {
+              tokenCaps: { perDay: 10, perMonth: 1_000_000 },
+              usdCaps: { perDay: null, perMonth: null },
+            }),
+            order,
+          ),
+        };
+
+        const report = await runSchedulerTick(deps);
+        expect(report).toEqual({ fired: 0, retried: 1, skipped: 0, paused: 0, deferred: 0, duplicates: 0 });
+        // Admission strictly precedes the queue add.
+        expect(order).toEqual(["admit", "add"]);
+
+        const job = adds.find((a) => a.queue === "agentRuns")!.data as Record<string, unknown>;
+        expect(job.source).toBe("schedule_retry");
+        expect(job.actorUserId).toBe(sched.userId);
+        expect(job.modelContext).toEqual({
+          requestedModel: null,
+          byokKeyId: "retry-byok-key",
+          byokModel: "user-provider/retry",
+          actorUserId: sched.userId,
+        });
+        // The legacy top-level mirror is EQUAL to the nested snapshot.
+        expect(job.byokKeyId).toBe("retry-byok-key");
+        expect(job.byokModel).toBe("user-provider/retry");
+
+        const srs = await scheduleRunsFor(sched.id);
+        expect(await admissionFor(srs[0]!.runId!)).toEqual([{
+          actor_user_id: sched.userId,
+          source: "schedule_retry",
+          run_id: srs[0]!.runId,
+          idempotency_key: `run:${srs[0]!.runId}:schedule_retry`,
+          billing_class: "byok",
+        }]);
+      });
     });
   },
 );
@@ -769,7 +1225,7 @@ describe.skipIf(!TEST_DATABASE_URL).sequential(
         await db.$client`DROP FUNCTION fail_scheduler_r1b_run_usage_insert()`;
       }
       expect(outcomeError).toBeInstanceOf(Error);
-      expect((outcomeError as Error).message).toContain("ambiguous scheduler settlement commit blocked");
+      expect(errorMessage(outcomeError)).toContain("ambiguous scheduler settlement commit blocked");
       expect(providerCalls).toBe(1);
       expect(record).not.toHaveBeenCalled();
 
@@ -954,11 +1410,13 @@ describe.skipIf(!TEST_DATABASE_URL).sequential(
       );
       const orderBase = Date.parse("2026-10-24T01:00:00.000Z");
       await db.$client`
-        UPDATE usage_quota_reservations SET created_at = ${new Date(orderBase)}
-        WHERE id = ${first.reservationId}`;
+        UPDATE usage_quota_reservations
+           SET created_at = ${new Date(orderBase).toISOString()}::timestamptz
+         WHERE id = ${first.reservationId}`;
       await db.$client`
-        UPDATE usage_quota_reservations SET created_at = ${new Date(orderBase + 1_000)}
-        WHERE id = ${second.reservationId}`;
+        UPDATE usage_quota_reservations
+           SET created_at = ${new Date(orderBase + 1_000).toISOString()}::timestamptz
+         WHERE id = ${second.reservationId}`;
       expect((await first.quota.pendingSettlements()).map((item) => item.reservationId))
         .toEqual([first.reservationId, second.reservationId]);
       const firstCountersBefore = await quotaCounters(first.actorUserId);
@@ -1118,7 +1576,7 @@ describe.skipIf(!TEST_DATABASE_URL).sequential(
       for (const [index, item] of expectedOrder.entries()) {
         await db.$client`
           UPDATE usage_quota_reservations
-             SET created_at = ${new Date(orderBase + index * 1_000)}
+             SET created_at = ${new Date(orderBase + index * 1_000).toISOString()}::timestamptz
            WHERE id = ${item.reservationId}`;
       }
       const discoveryLimits: number[] = [];
@@ -1270,7 +1728,7 @@ describe.skipIf(!TEST_DATABASE_URL).sequential(
            requested_at, request_count, deferred_count)
         VALUES
           (${batchId}, ${staged.session.id}, ${staged.actorUserId},
-           ${staged.run.id}, ${staged.run.id}, ${requestedAt}, 1, 1)`;
+           ${staged.run.id}, ${staged.run.id}, ${requestedAt.toISOString()}::timestamptz, 1, 1)`;
       await db.$client`
         INSERT INTO subagent_dispatches
           (id, batch_id, request_index, session_id, user_id,
@@ -1281,8 +1739,9 @@ describe.skipIf(!TEST_DATABASE_URL).sequential(
           (${deferredRequestId}, ${batchId}, 0, ${staged.session.id},
            ${staged.actorUserId}, ${staged.run.id}, ${staged.run.id},
            'remain deferred through scheduler recovery', 'server',
-           ${requestedAt}, ${staged.actorUserId}, 'awaiting_next_user_task',
-           'capacity_exhausted', ${BASE}, ${requestedAt})`;
+           ${requestedAt.toISOString()}::timestamptz, ${staged.actorUserId},
+           'awaiting_next_user_task', 'capacity_exhausted', ${BASE},
+           ${requestedAt.toISOString()}::timestamptz)`;
       const calls: string[] = [];
       const observingQuota: ModelCallSettlementQuota = {
         async pendingSettlements(limit = 50) {

@@ -55,6 +55,8 @@ import {
 import { createIpObservationStore } from "./ipObservations.js";
 import { createRateLimiter } from "./rateLimits.js";
 import { createSuspensionMailerFromEnv } from "./suspensionMailer.js";
+import { createGatewayObservabilityComposition } from "./observabilityComposition.js";
+import { createStdoutObservabilityExporter } from "./observabilityExporter.js";
 
 /**
  * Composition root — intentionally untested-thin (Task 10's e2e exercises the
@@ -65,13 +67,31 @@ import { createSuspensionMailerFromEnv } from "./suspensionMailer.js";
 export async function main(env: NodeJS.ProcessEnv = process.env): Promise<FastifyInstance> {
   const cfg = loadGatewayEnv(env);
 
+  // Task 11: real observability composition. The stdout exporter is the
+  // production sink; the registry and safeLogRecord run before every sink.
+  // Health probes are closures, so they can reference deps declared below.
+  const observability = createGatewayObservabilityComposition({
+    exporter: createStdoutObservabilityExporter(),
+    health: {
+      anomaly: () => ipAnomaly !== undefined,
+      mail: () =>
+        (env.OVID_RESEND_API_KEY?.trim() ?? "") !== "" &&
+        (env.OVID_SUSPENSION_FROM_EMAIL?.trim() ?? "") !== "",
+      reservation: () => collabEnabled,
+      notification: () => (env.VAPID_PUBLIC_KEY?.trim() ?? "") !== "",
+    },
+  });
+
   // Audit P1 (MCP client): a server→client request racing a close rejects
   // inside fire-and-forget promise chains, and Node's default for an
   // unhandled rejection is to kill the process. Log and carry on — installed
   // at boot (never at import; index.ts stays a pure library) so it guards
   // every promise the composed app ever starts.
-  process.on("unhandledRejection", (err) => {
-    console.error("[gateway] unhandled rejection (logged, not fatal)", err);
+  process.on("unhandledRejection", (_err) => {
+    observability.log({
+      event: "gateway.unhandled_rejection",
+      reason: "rejected_promise",
+    });
   });
 
   // P9 Task 16: OVID_SHARE_BASE_URL is the ONLY source of receipt/viewer
@@ -122,11 +142,14 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       ? createFirebaseVerifier(firebaseApp, { appCheckMode: cfg.appCheckMode })
       : createTestVerifier();
   if (cfg.authMode === "firebase" && cfg.appCheckMode !== "required") {
-    console.warn(
-      `[gateway] OVID_APPCHECK_MODE=${cfg.appCheckMode}: App Check is ` +
-        (cfg.appCheckMode === "off" ? "ignored" : "verified only when sent") +
-        " (Firebase ID tokens are still required)",
-    );
+    observability.log({
+      event: "gateway.appcheck_mode",
+      outcome: cfg.appCheckMode,
+      reason:
+        cfg.appCheckMode === "off"
+          ? "appcheck_ignored"
+          : "appcheck_optional",
+    });
   }
 
   // P9 Task 15: the legacy account lifecycle. It is opt-in through
@@ -143,11 +166,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
   let accountAdmission: CollabAccountAdmission | undefined;
   if (firebaseApp !== null && accountAppIds.size > 0) {
     if (r2Deleter === null) {
-      console.warn(
-        "[gateway] account deletion is enabled but OVID_R2_* is not configured — " +
-          "workspace/browser objects under users/{uid}/ will NOT be deleted (H2). " +
-          "Configure R2 before enabling deletion in production.",
-      );
+      observability.log({
+        event: "gateway.account.r2_deleter_missing",
+        reason: "r2_not_configured",
+      });
     }
     const admin = createFirebaseAdmin(
       firebaseApp,
@@ -205,17 +227,20 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       admission: accountAdmission,
     });
     if ((env.OVID_LITELLM_MASTER_KEY?.trim() ?? "") === "") {
-      console.warn(
-        "[gateway] account cleanup has no OVID_LITELLM_MASTER_KEY — key block/delete will fail and retry",
-      );
+      observability.log({
+        event: "gateway.account.litellm_master_key_missing",
+        reason: "missing_env",
+      });
     }
-    console.warn(
-      "[gateway] account cleanup R2 deleter is the no-op seam (P7 storage has no prefix-list primitive)",
-    );
+    observability.log({
+      event: "gateway.account.r2_deleter_noop",
+      reason: "no_prefix_list",
+    });
   } else if (cfg.authMode === "firebase") {
-    console.warn(
-      "[gateway] account lifecycle routes disabled — set OVID_ACCOUNT_FIREBASE_APP_IDS to enable them",
-    );
+    observability.log({
+      event: "gateway.account.lifecycle_disabled",
+      reason: "no_firebase_app_ids",
+    });
   }
 
   // System channel hub (P5 Task 10): ONE shared sys:{uid}:out subscription
@@ -262,10 +287,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
   const redisC =
     redisCRaw !== undefined && redisCRaw !== "" ? new Redis(redisCRaw) : redisQ;
   if (redisC === redisQ) {
-    console.warn(
-      "[gateway] REDIS_C_URL is not set — activity keys share REDIS_Q_URL " +
-        "(dev-only; production should dedicate a cache redis)",
-    );
+    observability.log({
+      event: "gateway.redis.cache_url_missing",
+      reason: "dev_only_fallback",
+    });
   }
   const activity = createActivityTracker(redisC);
   // New runtime controls start flag-off. Enabling anomaly enforcement wires the
@@ -283,11 +308,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
           keyAdmin,
           mailer: createSuspensionMailerFromEnv(env),
         }),
-        onError: (err) => {
-          console.warn(
-            "[gateway] ip anomaly observation/enforcement degraded:",
-            err,
-          );
+        onError: (_err) => {
+          observability.log({
+            event: "ip_anomaly.observation_degraded",
+            reason: "observation_failed",
+          });
         },
       })
     : undefined;
@@ -388,7 +413,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       rateLimitInternalSecret,
       trustedProxyCidrs: cfg.trustedProxyCidrs,
       onRateLimitDegraded: () => {
-        console.warn("[gateway] rate limit store degraded; request refused");
+        observability.log({
+          event: "gateway.rate_limit.degraded",
+          reason: "store_unavailable",
+        });
       },
       worker,
       connectionHealthInvocations,
@@ -422,6 +450,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
           orphanSweepMs: 30_000,
         },
       } : {}),
+      // Task 11: live observability composition — routes/health uses the
+      // health probes, and routes can emit metrics/structured logs.
+      observability,
       // P10 Task 2: the shutdown drain reaches every live WS socket through
       // this registry (installShutdownHandlers below passes closeWs).
       wsRegistry,

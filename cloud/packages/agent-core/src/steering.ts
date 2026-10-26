@@ -29,7 +29,7 @@
 // affordances with no cloud surface — only the inject-once, merge-once and
 // claim-race semantics port.
 
-import { messages, runs, type Db } from "@ovid/db";
+import { claimSteerTurn, messages, runs, type Db } from "@ovid/db";
 
 import type { EventSink } from "./ports.js";
 import type { AgentMessage } from "./types.js";
@@ -57,10 +57,22 @@ export async function drainQueuedRuns(
     // even though the engine claims the active run before the loop starts.
     if (run.id === o.activeRunId) continue;
 
-    // Race-safe claim (conditional UPDATE queued→running): false = a
-    // concurrent BullMQ delivery won this run — skip silently.
-    const claimed = await runs.claimNext(deps.db, run.id);
-    if (!claimed) continue;
+    // Race-safe, ORDERED claim (A1): only the oldest queued turn accepted
+    // after the absorber may merge, and a Stop on the absorber closes the
+    // drain instead of folding more accepted work into a stopped turn.
+    const claim = await claimSteerTurn(deps.db, {
+      sessionId: o.sessionId,
+      activeRunId: o.activeRunId,
+      runId: run.id,
+    });
+    // The absorber is no longer the oldest active turn: the queue moved under
+    // us. Stop draining rather than merge into an unproven owner.
+    if (claim.kind === "not_active" || claim.kind === "unknown") break;
+    // Stop on the absorber: nothing else may be injected into this run.
+    if (claim.kind === "stopped") break;
+    // A stopped queued turn is never merged; its own waiter/delivery owns the
+    // event-first terminal transition.
+    if (claim.kind !== "claimed") continue;
 
     // The prompt row is already persisted; load it, never re-append. A
     // missing row is an integrity anomaly the gateway's

@@ -401,6 +401,10 @@ export function createOpenAiAgentTransport(fetchImpl: EgressFetch): AgentTranspo
             stream_options: { include_usage: true },
             ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
             ...(req.maxTokens !== undefined ? { max_tokens: req.maxTokens } : {}),
+            // The router already derived the inherited effort (preset model
+            // suffix or the root snapshot); the transport only puts it on the
+            // wire. Absent = the provider's own default, never a guess.
+            ...(req.effort !== undefined ? { reasoning_effort: req.effort } : {}),
           }),
           signal,
         });

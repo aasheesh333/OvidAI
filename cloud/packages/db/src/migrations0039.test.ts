@@ -685,6 +685,165 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("0039 against isolated real Postg
     expect(identities).toEqual([{ count: 0 }]);
   });
 
+  it("incrementally backfills a populated database: new source rows after the first apply land exactly once in chronological order", async () => {
+    // The upgrade scratch is a POPULATED 0038 database already at 0039. Adding
+    // rows and re-applying the migration exercises the real backfill against
+    // non-empty source tables on both sides of the first apply.
+    const before = await upgrade.client`
+      SELECT
+        (SELECT count(*)::int FROM compaction_history_items) AS history,
+        (SELECT count(*)::int FROM compaction_checkpoints) AS checkpoints`;
+
+    const userId = newId();
+    const sessionId = newId();
+    const promptId = newId();
+    const assistantId = newId();
+    const toolId = newId();
+    const runId = newId();
+    const approvalId = `populated-approval-${newId()}`;
+    const responseId = newId();
+    const artifactId = newId();
+    const attachmentId = newId();
+    const stagedArtifactId = newId();
+    const POPULATED_SECRET = "sk-populated-0039-backfill-canary-7c41f0";
+    const early = "2026-10-20T01:00:00.000Z";
+    const late = "2026-10-20T05:00:00.000Z";
+
+    await upgrade.client`INSERT INTO users (uid, email) VALUES (${userId}, NULL)`;
+    await upgrade.client`INSERT INTO sessions (id, user_id, title)
+      VALUES (${sessionId}, ${userId}, 'populated backfill')`;
+    // Deliberately inserted out of chronological order: the migration's ORDER BY
+    // must produce legacy chronology, not insertion order.
+    await upgrade.client`INSERT INTO messages (id, session_id, role, content, created_at) VALUES
+      (${assistantId}, ${sessionId}, 'assistant', ${`populated assistant ${POPULATED_SECRET}`}, ${late}),
+      (${promptId}, ${sessionId}, 'user', 'populated root prompt', ${early}),
+      (${toolId}, ${sessionId}, 'tool', 'populated full tool result', ${early})`;
+    await upgrade.client`INSERT INTO runs (id, session_id, status, prompt_message_id)
+      VALUES (${runId}, ${sessionId}, 'running', ${promptId})`;
+    await upgrade.client`INSERT INTO session_event_mirror (session_id, seq, type, payload, ts) VALUES
+      (${sessionId}, '1-0', 'tool_terminal',
+       ${upgrade.client.json({ runId, exact: "populated event payload" })}, ${early})`;
+    await upgrade.client`INSERT INTO system_requests
+      (request_id, user_id, session_id, run_id, kind, safe_payload, sensitive, status, expires_at, version)
+      VALUES (${approvalId}, ${userId}, ${sessionId}, ${runId}, 'approval',
+        '{"tool":"run_shell","summary":"populated approval"}'::jsonb,
+        false, 'resolved', '2026-10-21T00:00:00.000Z', 1)`;
+    await upgrade.client`INSERT INTO system_request_responses
+      (response_id, request_id, user_id, request_version, client_response_id, response, response_digest)
+      VALUES (${responseId}, ${approvalId}, ${userId}, 1, ${`populated-response-${newId()}`},
+        '{"decision":"allow"}'::jsonb, ${"9".repeat(64)})`;
+    await upgrade.client`INSERT INTO workspace_objects
+      (id, user_id, session_id, kind, r2_key, bytes, sha256, content_type)
+      VALUES (${artifactId}, ${userId}, ${sessionId}, 'artifact',
+        'populated/backfill/artifact.txt', 31, ${"8".repeat(64)}, 'text/plain')`;
+    // A session-less artifact must be excluded by the backfill's WHERE clause.
+    await upgrade.client`INSERT INTO workspace_objects
+      (id, user_id, session_id, kind, r2_key, bytes, sha256, content_type)
+      VALUES (${stagedArtifactId}, ${userId}, NULL, 'artifact',
+        'populated/backfill/staged.txt', 7, ${"7".repeat(64)}, 'text/plain')`;
+    await upgrade.client`INSERT INTO attachments
+      (id, session_id, user_id, name, size, r2_key, message_id, created_at)
+      VALUES (${attachmentId}, ${sessionId}, ${userId}, 'populated.txt', 12,
+        'populated/backfill/attachment.txt', ${promptId}, ${early})`;
+    await upgrade.client`INSERT INTO session_agent_state (session_id, state) VALUES (
+      ${sessionId},
+      ${upgrade.client.json({
+        compaction: {
+          ledger: { v: 1, folded: 1 },
+          summary: `populated legacy summary ${POPULATED_SECRET}`,
+          cutoffMessageId: promptId,
+          compactedAtCount: 1,
+        },
+      })})`;
+
+    // First incremental apply: the tables already hold rows from other sessions.
+    await applyMigrationFile(upgrade.client, MIGRATION_PATH);
+
+    const items = await upgrade.client`
+      SELECT position, kind, stable_id AS "stableId", event_cursor AS "eventCursor",
+             object_ref AS "objectRef", byte_length::int AS "byteLength",
+             root_task_run_id AS "rootTaskRunId",
+             occurred_at AS "occurredAt"
+        FROM compaction_history_items
+       WHERE session_id = ${sessionId}
+       ORDER BY position`;
+    // 3 messages + 1 event + 1 approval request + 1 approval response +
+    // 1 artifact + 1 attachment + 1 legacy checkpoint + 1 legacy compaction.
+    expect(items).toHaveLength(10);
+    expect(new Set(items.map((row) => `${row.kind}:${row.stableId}`)).size).toBe(10);
+    expect(items.find((row) => row.stableId === stagedArtifactId)).toBeUndefined();
+    // Root lineage comes from the single evidenced run for each prompt row and
+    // from the run carried in the event payload. Legacy state references and
+    // workspace artifacts intentionally carry no root lineage (session-scoped
+    // evidence, not run output).
+    // Only the prompt row, the event (payload runId) and both approval rows have
+    // an evidenced root. A non-prompt message, a legacy state reference and a
+    // workspace artifact carry none — the backfill must not guess one.
+    const rooted = new Set([promptId, approvalId, responseId, attachmentId]);
+    const lineageViolations = items
+      .filter((row) => {
+        const expectedRoot = rooted.has(row.stableId) || row.kind === "event"
+          ? runId
+          : null;
+        return row.rootTaskRunId !== expectedRoot;
+      })
+      .map((row) => ({ kind: row.kind, stableId: row.stableId, root: row.rootTaskRunId }));
+    expect(lineageViolations).toEqual([]);
+    // Chronology: the early rows precede the late assistant row, regardless of
+    // the insert order above. NULL occurred_at (the two legacy references) sort
+    // last.
+    expect(items[items.length - 1]!.occurredAt).toBeNull();
+    expect(items[items.length - 2]!.occurredAt).toBeNull();
+    const lateIndex = items.findIndex((row) => row.stableId === assistantId);
+    const earlyIndexes = items
+      .map((row, index) => ({ row, index }))
+      .filter((entry) => entry.row.occurredAt !== null &&
+        new Date(entry.row.occurredAt).toISOString() === early)
+      .map((entry) => entry.index);
+    expect(earlyIndexes.length).toBe(4);
+    for (const index of earlyIndexes) expect(index).toBeLessThan(lateIndex);
+    // Exact reference form and byte length come from the real source row
+    // (the migration measures `octet_length(jsonb_build_object(...)::text)`).
+    const assistant = items.find((row) => row.stableId === assistantId)!;
+    const assistantText = (await upgrade.client`SELECT jsonb_build_object(
+      'id', id, 'sessionId', session_id, 'role', role, 'content', content,
+      'reasoning', reasoning, 'clientMsgId', client_msg_id, 'createdAt', created_at
+    )::text AS "text" FROM messages WHERE id = ${assistantId}`)[0]!.text as string;
+    expect(assistant).toMatchObject({
+      kind: "message",
+      objectRef: `postgres:messages/${assistantId}`,
+      byteLength: Buffer.byteLength(assistantText, "utf8"),
+    });
+    expect(await upgrade.client`
+      SELECT summary::text AS "summary" FROM compaction_checkpoints WHERE session_id = ${sessionId}`)
+      .toEqual([{ summary: null }]);
+    const raw = JSON.stringify(items);
+    expect(raw).not.toContain(POPULATED_SECRET);
+
+    // Every backfilled item resolves through the authorized reader. A
+    // root-scoped read returns only the five run-rooted rows; the session-scoped
+    // read returns all ten (legacy references and the artifact have no root).
+    const rootedPage = await readExactHistory(upgradeDb, {
+      sessionId, rootTaskRunId: runId, limit: 100,
+    });
+    expect(rootedPage.items).toHaveLength(5);
+    const page = await readExactHistory(upgradeDb, { sessionId, limit: 100 });
+    expect(page.items).toHaveLength(10);
+    expect(page.items.find((entry) => entry.item.stableId === assistantId)?.data)
+      .toMatchObject({ content: `populated assistant ${POPULATED_SECRET}` });
+    expect(page.items.find((entry) => entry.item.stableId === attachmentId)?.data)
+      .toMatchObject({ id: attachmentId, name: "populated.txt" });
+
+    // Second apply on the now-populated new store: nothing new, nothing lost.
+    await applyMigrationFile(upgrade.client, MIGRATION_PATH);
+    const after = await upgrade.client`
+      SELECT
+        (SELECT count(*)::int FROM compaction_history_items) AS history,
+        (SELECT count(*)::int FROM compaction_checkpoints) AS checkpoints`;
+    expect(after[0]!.history).toBe(before[0]!.history + 10);
+    expect(after[0]!.checkpoints).toBe(before[0]!.checkpoints + 1);
+  });
+
   it("enforces exact payload form, scoped recall and safe actor identity in real SQL", async () => {
     await expect(fresh.client`
       INSERT INTO compaction_history_items

@@ -37,14 +37,18 @@ interface PresignCall {
 function stubPresigner(behavior: { fail?: boolean; head?: HeadResult | null } = {}): AttachmentPresigner & {
   calls: PresignCall[];
   deleted: string[];
+  /** Every key the route actually asked storage to HEAD (ordering evidence). */
+  heads: string[];
   setHead(head: HeadResult | null): void;
 } {
   const calls: PresignCall[] = [];
   const deleted: string[] = [];
+  const heads: string[] = [];
   let currentHead = behavior.head;
   return {
     calls,
     deleted,
+    heads,
     setHead(head) {
       currentHead = head;
     },
@@ -57,7 +61,12 @@ function stubPresigner(behavior: { fail?: boolean; head?: HeadResult | null } = 
       deleted.push(key);
     },
     ...(behavior.head !== undefined
-      ? { head: async () => currentHead ?? null }
+      ? {
+          head: async (key: string) => {
+            heads.push(key);
+            return currentHead ?? null;
+          },
+        }
       : {}),
   };
 }
@@ -97,6 +106,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway attachment routes (real postgres)",
     { app: FastifyInstance; presigner: AttachmentPresigner & {
       calls: PresignCall[];
       deleted: string[];
+      heads: string[];
       setHead(head: HeadResult | null): void;
     } } {
     const presigner = stubPresigner({ fail: opts.failPresign, head: opts.head });
@@ -139,6 +149,20 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway attachment routes (real postgres)",
       url: `/cloud/v1/sessions/${sessionId}/attachments`,
       headers: headers ?? authHeaders(uid),
       payload: body as object,
+    });
+  }
+
+  function finalizeAttachment(
+    app: FastifyInstance,
+    uid: string,
+    sessionId: string,
+    attachmentId: string,
+  ) {
+    return app.inject({
+      method: "POST",
+      url: `/cloud/v1/sessions/${sessionId}/attachments/${attachmentId}/finalize`,
+      headers: authHeaders(uid),
+      payload: {},
     });
   }
 
@@ -896,6 +920,290 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway attachment routes (real postgres)",
     const standalone = await createSession(app, uid);
     const standaloneRes = await postAttachment(app, uid, standalone, { name: "free.bin", size: 1 });
     expect(standaloneRes.statusCode).toBe(201);
+  });
+
+  // Invariant: ownership and attachment identity are checked BEFORE any
+  // storage read, so a stranger can never probe another owner's object.
+  it("checks ownership before any storage HEAD: cross-owner cannot probe an object", async () => {
+    const head: HeadResult = {
+      bytes: 4,
+      contentType: "text/plain",
+      sha256Hex: null,
+      etag: "owner-only-object",
+      metadata: {},
+    };
+    const { app, presigner } = makeApp({ head });
+    const owner = testUid("att-head-owner");
+    const stranger = testUid("att-head-stranger");
+    const ownerSession = await createSession(app, owner);
+    const otherSession = await createSession(app, owner);
+    const attachmentId = newId();
+    const r2Key = `users/${owner}/sessions/${ownerSession}/uploads/${attachmentId}`;
+    await attachments.create(db, {
+      id: attachmentId,
+      sessionId: ownerSession,
+      userId: owner,
+      name: "owned.txt",
+      size: 4,
+      r2Key,
+      contentType: "text/plain",
+    });
+
+    const attempts: Array<[string, string, string, string]> = [
+      ["stranger session", stranger, ownerSession, attachmentId],
+      ["owner wrong session", owner, otherSession, attachmentId],
+      ["unknown attachment", owner, ownerSession, newId()],
+      ["unknown session", owner, newId(), attachmentId],
+      ["malformed attachment", owner, ownerSession, "not-a-uuid"],
+      ["malformed session", owner, "not-a-uuid", attachmentId],
+    ];
+    for (const [label, uid, sid, aid] of attempts) {
+      const res = await finalizeAttachment(app, uid, sid, aid);
+      expect(res.statusCode, label).toBe(404);
+      expect(res.json().error.code, label).toBe("not_found");
+    }
+    // No HEAD, no delete, no row transition happened for any refusal.
+    expect(presigner.heads).toEqual([]);
+    expect(presigner.deleted).toEqual([]);
+    expect((await attachments.getForSession(db, ownerSession, [attachmentId]))[0])
+      .toMatchObject({ uploadStatus: "pending", actualBytes: null });
+
+    // The owner is the first caller that can reach storage, once.
+    const ok = await finalizeAttachment(app, owner, ownerSession, attachmentId);
+    expect(ok.statusCode).toBe(200);
+    expect(presigner.heads).toEqual([r2Key]);
+  });
+
+  // Invariant: a declared/actual mismatch fails closed before any quota
+  // settlement. Both the size and the exact Content-Type are HEAD evidence.
+  it.each([
+    ["size", 4, "text/plain", 5, "text/plain", "attachment_size_mismatch"],
+    ["type", 4, "text/plain", 4, "application/pdf", "attachment_type_mismatch"],
+    ["declared octet-stream type", 4, "application/octet-stream", 4, "text/plain", "attachment_type_mismatch"],
+  ] as const)(
+    "refuses a declared/%s mismatch before any quota settlement",
+    async (_label, declaredSize, declaredType, headBytes, headType, code) => {
+      const { app } = makeApp({
+        head: {
+          bytes: headBytes,
+          contentType: headType,
+          sha256Hex: null,
+          etag: `mismatch-${_label}`,
+          metadata: {},
+        },
+        withStorage: true,
+      });
+      const uid = testUid(`att-mismatch-${_label.replaceAll(" ", "-")}`);
+      const sid = await createSession(app, uid);
+      const created = await postAttachment(app, uid, sid, {
+        name: "mismatch.bin",
+        size: declaredSize,
+        contentType: declaredType,
+      });
+      expect(created.statusCode).toBe(201);
+      const attachmentId = created.json().attachmentId as string;
+
+      const settle = vi.spyOn(StorageReservationStore.prototype, "finalize");
+      try {
+        const res = await finalizeAttachment(app, uid, sid, attachmentId);
+        expect(res.statusCode).toBe(409);
+        expect(res.json().error.code).toBe(code);
+        // The settlement path is never entered for a mismatched object.
+        expect(settle).not.toHaveBeenCalled();
+      } finally {
+        settle.mockRestore();
+      }
+
+      expect(await db.$client`
+        SELECT state FROM storage_reservations WHERE id = ${attachmentId}`)
+        .toEqual([{ state: "released" }]);
+      expect(await db.$client`
+        SELECT count(*)::int AS count FROM storage_reservations
+         WHERE object_id = ${attachmentId} AND state = 'finalized'`)
+        .toEqual([{ count: 0 }]);
+      // A failed upload never mints a successful-upload history fact.
+      expect(await db.$client`
+        SELECT count(*)::int AS count FROM storage_reservations
+         WHERE id = ${`upload-complete:${attachmentId}`}`)
+        .toEqual([{ count: 0 }]);
+      expect(await db.$client`
+        SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+          FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+        .toEqual([{ used: 0, reserved: 0 }]);
+      expect(await db.$client`
+        SELECT used_uploads, reserved_uploads FROM upload_window_counters
+         WHERE actor_user_id = ${uid}`)
+        .toEqual([{ used_uploads: 0, reserved_uploads: 0 }]);
+      expect((await attachments.getForSession(db, sid, [attachmentId]))[0])
+        .toMatchObject({ uploadStatus: "failed", finalizedAt: null });
+      for (const url of [
+        `/cloud/v1/sessions/${sid}/attachments/${attachmentId}/cdn-url`,
+        `/cloud/v1/artifacts/${attachmentId}/url?source=uploaded`,
+      ]) {
+        expect((await app.inject({ method: "GET", url, headers: authHeaders(uid) })).statusCode)
+          .toBe(404);
+      }
+    },
+  );
+
+  // Invariant: a finalized charge is never double-debited on retry.
+  it("replays a finalized charge idempotently with exactly one debit", async () => {
+    const head: HeadResult = {
+      bytes: 4,
+      contentType: "text/plain",
+      sha256Hex: null,
+      etag: "idempotent-etag",
+      metadata: {},
+    };
+    const { app } = makeApp({ head });
+    const uid = testUid("att-idempotent-finalize");
+    const sid = await createSession(app, uid);
+    const created = await postAttachment(app, uid, sid, {
+      name: "once.txt",
+      size: 4,
+      contentType: "text/plain",
+    });
+    const attachmentId = created.json().attachmentId as string;
+
+    const first = await finalizeAttachment(app, uid, sid, attachmentId);
+    expect(first.statusCode).toBe(200);
+    const firstBody = first.json();
+    const firstRow = (await attachments.getForSession(db, sid, [attachmentId]))[0];
+    expect(firstRow?.finalizedAt).toBeInstanceOf(Date);
+
+    for (let retry = 0; retry < 3; retry++) {
+      const replay = await finalizeAttachment(app, uid, sid, attachmentId);
+      expect(replay.statusCode, `retry ${retry}`).toBe(200);
+      expect(replay.json(), `retry ${retry}`).toEqual(firstBody);
+    }
+
+    const after = (await attachments.getForSession(db, sid, [attachmentId]))[0];
+    expect(after?.finalizedAt).toEqual(firstRow!.finalizedAt);
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 4, reserved: 0 }]);
+    expect(await db.$client`
+      SELECT state, actual_bytes::int AS actual FROM storage_reservations
+       WHERE object_id = ${attachmentId}`)
+      .toEqual([{ state: "finalized", actual: 4 }]);
+    // Exactly one rolling-window credit for one upload.
+    expect(await db.$client`
+      SELECT used_uploads, reserved_uploads FROM upload_window_counters
+       WHERE actor_user_id = ${uid}`)
+      .toEqual([{ used_uploads: 1, reserved_uploads: 0 }]);
+  });
+
+  // Invariant: a failed upload releases its reservation exactly once.
+  it("replays a failed upload release exactly once without crediting the window", async () => {
+    const { app } = makeApp({ head: null });
+    const uid = testUid("att-failed-release-once");
+    const sid = await createSession(app, uid);
+    const created = await postAttachment(app, uid, sid, { name: "gone.bin", size: 7 });
+    const attachmentId = created.json().attachmentId as string;
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const res = await finalizeAttachment(app, uid, sid, attachmentId);
+      expect(res.statusCode, `attempt ${attempt}`).toBe(409);
+      expect(res.json().error.code, `attempt ${attempt}`).toBe("attachment_not_uploaded");
+    }
+
+    // Exactly ONE reservation row for the object: retries never accumulate a
+    // second released/tombstone row and never convert it to a charge.
+    expect(await db.$client`
+      SELECT state, declared_bytes::int AS declared FROM storage_reservations
+       WHERE object_id = ${attachmentId}`)
+      .toEqual([{ state: "released", declared: 7 }]);
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 0, reserved: 0 }]);
+    expect(await db.$client`
+      SELECT used_uploads, reserved_uploads FROM upload_window_counters
+       WHERE actor_user_id = ${uid}`)
+      .toEqual([{ used_uploads: 0, reserved_uploads: 0 }]);
+    expect(await db.$client`
+      SELECT count(*)::int AS count FROM storage_reservations
+       WHERE id = ${`upload-complete:${attachmentId}`}`)
+      .toEqual([{ count: 0 }]);
+    expect((await attachments.getForSession(db, sid, [attachmentId]))[0])
+      .toMatchObject({ uploadStatus: "failed", actualBytes: null, finalizedAt: null });
+  });
+
+  // Invariant: a deleted object cannot be re-adopted by a stale attempt.
+  it("cannot re-adopt a deleted object and never resurrects a ready claim", async () => {
+    const readyHead: HeadResult = {
+      bytes: 4,
+      contentType: "text/plain",
+      sha256Hex: null,
+      etag: "deleted-later",
+      metadata: {},
+    };
+    const { app, presigner } = makeApp({ head: readyHead, withStorage: true });
+    const uid = testUid("att-deleted-object");
+    const sid = await createSession(app, uid);
+    const created = await postAttachment(app, uid, sid, {
+      name: "deleted.txt",
+      size: 4,
+      contentType: "text/plain",
+    });
+    const attachmentId = created.json().attachmentId as string;
+    expect((await finalizeAttachment(app, uid, sid, attachmentId)).statusCode).toBe(200);
+    expect(await db.$client`
+      SELECT used_bytes::int AS used FROM storage_usage_counters
+       WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 4 }]);
+
+    // The object is deleted out of band; a retry must release the charge once
+    // and must never answer "ready" for a missing object.
+    presigner.setHead(null);
+    const missing = await finalizeAttachment(app, uid, sid, attachmentId);
+    expect(missing.statusCode).toBe(409);
+    expect(missing.json().error.code).toBe("attachment_not_uploaded");
+    expect((await attachments.getForSession(db, sid, [attachmentId]))[0])
+      .toMatchObject({ uploadStatus: "failed", actualBytes: null, finalizedAt: null });
+    expect(await db.$client`
+      SELECT state FROM storage_reservations WHERE object_id = ${attachmentId}`)
+      .toEqual([{ state: "released" }]);
+    expect(await db.$client`
+      SELECT used_bytes::int AS used, reserved_bytes::int AS reserved
+        FROM storage_usage_counters WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 0, reserved: 0 }]);
+
+    // A stale attempt that re-uploads a *different* object cannot re-adopt the
+    // released identity either.
+    presigner.setHead({
+      bytes: 6,
+      contentType: "text/plain",
+      sha256Hex: null,
+      etag: "stale-reupload",
+      metadata: {},
+    });
+    const stale = await finalizeAttachment(app, uid, sid, attachmentId);
+    expect(stale.statusCode).toBe(409);
+    expect((await attachments.getForSession(db, sid, [attachmentId]))[0]?.uploadStatus)
+      .toBe("failed");
+    expect(await db.$client`
+      SELECT used_bytes::int AS used FROM storage_usage_counters
+       WHERE owner_user_id = ${uid}`)
+      .toEqual([{ used: 0 }]);
+    expect(await db.$client`
+      SELECT count(*)::int AS count FROM storage_reservations
+       WHERE object_id = ${attachmentId} AND state = 'finalized'`)
+      .toEqual([{ count: 0 }]);
+    // The repository fence also refuses a direct ready transition.
+    await expect(attachments.finalizeUpload(db, {
+      id: attachmentId,
+      sessionId: sid,
+      userId: uid,
+      actualBytes: 6,
+      actualContentType: "text/plain",
+    })).rejects.toMatchObject({ code: "attachment_failed" });
+    expect((await app.inject({
+      method: "GET",
+      url: `/cloud/v1/sessions/${sid}/attachments/${attachmentId}/cdn-url`,
+      headers: authHeaders(uid),
+    })).statusCode).toBe(404);
   });
 
   it("attachment routes answer 401 unauthenticated with the shared envelope", async () => {

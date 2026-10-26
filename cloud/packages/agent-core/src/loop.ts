@@ -47,6 +47,7 @@ import type {
   ApprovalGate,
   Compactor,
   EventSink,
+  FinalResponseDelivery,
   HookEngine,
   SandboxPort,
   SessionAgentState,
@@ -201,6 +202,12 @@ export interface LoopDeps {
   /** Worker composition binds the current root/child snapshot through async context. */
   modelContextForCurrentRun?: () => InheritedModelContext | undefined;
   runProvenanceForCurrentRun?: () => "web" | "android" | "server" | undefined;
+  /**
+   * Crash-safe final-response delivery. Present on ROOT runs only (the engine
+   * strips it for subagent child loops, whose answers are reported through the
+   * durable subagent report path). Absent → the inline finalize below.
+   */
+  finalDelivery?: FinalResponseDelivery;
   /**
    * P3 Task 16: spill oversized tool output to `.spill/` before the event /
    * tool row (default true). The P2-compat path passes false so P2's caps
@@ -1221,6 +1228,20 @@ export async function runAgentLoop(
         }
 
         // (d) finalize: persist, message_completed, terminal event, flip.
+        // With a crash-safe delivery port composed (root runs), the port owns
+        // that whole sequence: it commits the assistant row together with a
+        // durable delivery intent, then replays the events and the completion
+        // push. A crash anywhere after the commit is recovered, and a crash
+        // before it leaves neither the answer nor the intent.
+        if (deps.finalDelivery !== undefined) {
+          await deps.finalDelivery.deliver({
+            runId,
+            sessionId,
+            content,
+            completionPayload: usage === null ? { runId } : { runId, usage },
+          });
+          return { status: "completed" };
+        }
         const assistant = await messages.append(deps.db, {
           sessionId,
           role: "assistant",

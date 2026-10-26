@@ -115,7 +115,7 @@ it("is an openai-format AgentTransport", () => {
   expect(createOpenAiAgentTransport(fetch).apiFormat).toBe("openai");
 });
 
-it("POSTs the agent streaming request shape (path, auth, system rows first, tools wire shape, temperature/max_tokens)", async () => {
+it("POSTs the agent streaming request shape (path, auth, system rows first, tools wire shape, temperature/max_tokens/reasoning_effort)", async () => {
   await startMock((_req, res) => {
     sseHead(res);
     res.end("data: [DONE]\n\n");
@@ -125,6 +125,7 @@ it("POSTs the agent streaming request shape (path, auth, system rows first, tool
     tools: TOOLS,
     temperature: 0.2,
     maxTokens: 128,
+    effort: "high",
   }).promise;
 
   expect(lastRequest).toBeDefined();
@@ -145,6 +146,9 @@ it("POSTs the agent streaming request shape (path, auth, system rows first, tool
     stream_options: { include_usage: true },
     temperature: 0.2,
     max_tokens: 128,
+    // R2 wire-only delta: the router's captured effort reaches the provider
+    // body verbatim; nothing else about the body changes.
+    reasoning_effort: "high",
   });
 });
 
@@ -183,7 +187,7 @@ it("keeps a text-only user message a plain string (no content-parts regression)"
   expect(messages[1]).toEqual({ role: "user", content: "hi" });
 });
 
-it("omits the tools/temperature/max_tokens keys entirely when unset (v0 body shape)", async () => {
+it("omits the tools/temperature/max_tokens/reasoning_effort keys entirely when unset (v0 body shape)", async () => {
   await startMock((_req, res) => {
     sseHead(res);
     res.end("data: [DONE]\n\n");

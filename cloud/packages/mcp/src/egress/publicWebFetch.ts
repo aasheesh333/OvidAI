@@ -469,7 +469,18 @@ function cutoffStream(
   };
   const cancelSource = (): void => {
     try {
-      void reader.cancel().catch(() => {});
+      void reader.cancel()
+        // The transport owns this reader lock. Once cancellation settles, hand
+        // the caller's stream back unlocked so later cleanup is not a no-op.
+        .finally(() => {
+          try {
+            reader.releaseLock();
+          } catch {
+            // A still-pending read keeps the lock; the stream is already
+            // canceled, so the retained reader is inert.
+          }
+        })
+        .catch(() => {});
     } catch {
       // The dispatcher close is the socket-level cleanup backstop.
     }

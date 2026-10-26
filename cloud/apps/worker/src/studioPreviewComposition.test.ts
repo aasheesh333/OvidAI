@@ -67,6 +67,9 @@ const h = vi.hoisted(() => {
 vi.mock("@ovid/db", () => ({
   createDb: h.createDb,
   createStorageQuotaRepos: vi.fn(() => ({})),
+  RunQuotaService: class {
+    constructor(_db: unknown) {}
+  },
   createStudioPreviewPostgresStore: h.createStudioPreviewPostgresStore,
   createStudioPreviewStore: h.createStudioPreviewStore,
   assertSessionFileCapacity: vi.fn(),
@@ -153,7 +156,7 @@ vi.mock("@ovid/sandbox", () => ({
     workspacesRoot: "/test/workspaces",
     launch: "setuid",
   })),
-  resolveRootfs: vi.fn(async () => "/test/rootfs"),
+  resolveRootfs: vi.fn(async () => ({ path: "/test/rootfs", manifest: {} })),
   selectQuotaBackend: vi.fn(async () => ({})),
 }));
 vi.mock("@ovid/agent-core", () => ({

@@ -8,6 +8,7 @@ import {
 } from "../engine.js";
 import { trimToolResult, type McpToolCallResult } from "../../client.js";
 import type { NativeMcpHandler } from "../../transports/native.js";
+import { withReadEnvelope } from "./readEnvelopes.js";
 
 export const SLACK_DESCRIPTOR: RestServiceDescriptor = {
   curatedId: "slack",
@@ -130,7 +131,7 @@ export const DISCORD_DESCRIPTOR: RestServiceDescriptor = {
 };
 
 export function createDiscordHandler(options: RestHandlerOptions = {}): NativeMcpHandler {
-  return createRestHandler(DISCORD_DESCRIPTOR, options);
+  return withReadEnvelope("discord", createRestHandler(DISCORD_DESCRIPTOR, options));
 }
 
 export const TELEGRAM_DESCRIPTOR: RestServiceDescriptor = {

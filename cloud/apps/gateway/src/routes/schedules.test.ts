@@ -1,8 +1,24 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { newId, type Db } from "@ovid/db";
+import {
+  accountSettings,
+  customPresets,
+  messages,
+  newId,
+  RunQuotaService,
+  runs,
+  scheduleRuns,
+  sessionState,
+  sessions,
+  type Db,
+} from "@ovid/db";
+import {
+  agentRunJobSchema,
+  type AgentRunJob,
+} from "@ovid/queue";
 import {
   pageSchema,
+  planFor,
   scheduleDtoSchema,
   scheduleRunDtoSchema,
   scheduleRunNowResponseSchema,
@@ -644,6 +660,269 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway schedule routes (real postgres)", (
       const res = await app.inject({ ...req, headers: {} });
       expect(res.statusCode, req.url).toBe(401);
       expect(res.json()).toMatchObject({ error: { code: "unauthenticated" } });
+    }
+  });
+
+  // ---- R2: run-now root context, admission, and refusal -------------------
+
+  /** The strict queue parse of the ONE job this run-now press enqueued. */
+  function runNowJob(runId: string): { raw: unknown; job: AgentRunJob } {
+    const add = queueAdds.find((a) => a.data.runId === runId);
+    expect(add).toBeDefined();
+    // Unknown top-level keys are stripped by the plain z.object schema; the
+    // parse still validates the shape, but it cannot fail on unknown keys.
+    return { raw: add!.data, job: agentRunJobSchema.parse(add!.data) };
+  }
+
+  async function admissionRows(runId: string) {
+    return (await db.$client`
+      SELECT actor_user_id, source, run_id, idempotency_key, billing_class
+        FROM usage_run_admissions WHERE run_id = ${runId}`) as Array<Record<string, unknown>>;
+  }
+
+  /**
+   * Burn the actor's real Ovid day window through the canonical service, so a
+   * subsequent admission is refused by the production exhaustion rule rather
+   * than by a hand-written counter update. A separate session keeps the
+   * schedule's own chat free for the run-now press.
+   *
+   * The route builds its own default-capped service, so the burn must reach
+   * the actor's REAL plan ceiling (`planFor(tier).tokens.perDay`).
+   */
+  async function exhaustOvidDay(uid: string): Promise<void> {
+    const quota = new RunQuotaService(db);
+    const session = await sessions.create(db, uid);
+    const prompt = await messages.append(db, {
+      sessionId: session.id,
+      role: "user",
+      content: "r2 allowance burn",
+    });
+    const burn = await runs.create(db, {
+      sessionId: session.id,
+      promptMessageId: prompt.id,
+    });
+    const admitted = await quota.admitRun({
+      actorUserId: uid,
+      source: "interactive",
+      runId: burn.id,
+      idempotencyKey: `burn:${burn.id}`,
+      billingClass: "ovid_allowance",
+    });
+    expect(admitted.ok).toBe(true);
+    const tier = (await db.$client`
+      SELECT tier FROM users WHERE uid = ${uid}`) as Array<{ tier: string }>;
+    const cap = planFor(tier[0]?.tier).tokens.perDay;
+    const reservation = await quota.reserveModelCall({
+      actorUserId: uid,
+      runId: burn.id,
+      reservationKey: `burn:${burn.id}:model`,
+      inputTokens: cap,
+      maxOutputTokens: 0,
+      billingClass: "ovid_allowance",
+    });
+    expect(reservation.ok).toBe(true);
+    await quota.settleModelCall({
+      reservationId: (reservation as { reservationId: string }).reservationId,
+      usage: { inputTokens: cap, outputTokens: 0 },
+    });
+    await runs.finish(db, burn.id, "completed");
+    // Sanity: the day cap is genuinely spent for this actor.
+    const spent = (await db.$client`
+      SELECT used_tokens::int AS used FROM usage_quota_counters
+       WHERE actor_user_id = ${uid} AND window_kind = 'day'`) as Array<{ used: number }>;
+    expect(spent).toEqual([{ used: cap }]);
+  }
+
+  it("R2 run-now: one nested snapshot (model+effort, key, temperature, actor), no top-level duplicates, admitted once", async () => {
+    const uid = testUid("sched-r2-runnow");
+    await accountSettings.patch(db, uid, {
+      byokDefault: { keyId: "r2-runnow-key", model: "user-provider/model" },
+    });
+    const created = await createSchedule(uid);
+    await sessionState.patch(db, created.sessionId, { modelPin: "gpt-5.2 · high" });
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/cloud/v1/schedules/${created.id}/run`,
+      headers: authHeaders(uid),
+    });
+    expect(res.statusCode, res.body).toBe(202);
+    const body = scheduleRunNowResponseSchema.parse(res.json());
+
+    const { raw, job } = runNowJob(body.runId);
+    // The nested snapshot is the only model/billing authority.
+    expect(job.modelContext).toEqual({
+      requestedModel: "gpt-5.2 · high",
+      byokKeyId: "r2-runnow-key",
+      byokModel: "user-provider/model",
+      actorUserId: uid,
+    });
+    expect(job.source).toBe("schedule_run_now");
+    expect(job.actorUserId).toBe(uid);
+    // Unknown top-level keys are stripped by the queue schema before the
+    // worker sees them; the raw payload is the only place a secret could hide.
+    const rawSerialized = JSON.stringify(raw);
+    expect(rawSerialized).not.toContain("apiKey");
+    expect(rawSerialized).not.toContain("sk-");
+    // The parsed job also never carries credential material or duplicate authority.
+    const serialized = JSON.stringify(job);
+    expect(serialized).not.toContain("apiKey");
+    expect(serialized).not.toContain("sk-");
+
+    // Exact admission identity: actor/source/run/key/billing.
+    expect(await admissionRows(body.runId)).toEqual([{
+      actor_user_id: uid,
+      source: "schedule_run_now",
+      run_id: body.runId,
+      idempotency_key: `run:${body.runId}:schedule_run_now`,
+      billing_class: "byok",
+    }]);
+  });
+
+  it("R2 run-now: a custom preset supplies the model pin and temperature once", async () => {
+    const uid = testUid("sched-r2-preset");
+    await customPresets.upsert(db, uid, {
+      id: "custom-r2-preset",
+      label: "R2",
+      description: "",
+      deniedTools: [],
+      model: "preset/model · low",
+      temperature: 0.17,
+    });
+    const created = await createSchedule(uid);
+    await sessionState.patch(db, created.sessionId, {
+      presetId: "custom-r2-preset",
+      modelPin: "session-pin-ignored-by-preset",
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/cloud/v1/schedules/${created.id}/run`,
+      headers: authHeaders(uid),
+    });
+    expect(res.statusCode, res.body).toBe(202);
+    const { job } = runNowJob(scheduleRunNowResponseSchema.parse(res.json()).runId);
+    expect(job.modelContext).toEqual({
+      requestedModel: "preset/model · low",
+      byokKeyId: null,
+      temperature: 0.17,
+      actorUserId: uid,
+    });
+    expect(JSON.stringify(job)).not.toContain("session-pin-ignored-by-preset");
+  });
+
+  it("R2 run-now: Ovid exhaustion → 402 with reset metadata, terminal run+occurrence, no queue add, no start event", async () => {
+    const uid = testUid("sched-r2-ovid-denied");
+    const created = await createSchedule(uid);
+    await exhaustOvidDay(uid);
+    bus.published.length = 0;
+    const addsBefore = queueAdds.length;
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/cloud/v1/schedules/${created.id}/run`,
+      headers: authHeaders(uid),
+    });
+    expect(res.statusCode, res.body).toBe(402);
+    expect(res.json()).toMatchObject({ error: { code: "daily_limit_reached" } });
+    const resetsAt = Number(res.headers["x-ovid-resets-at"]);
+    expect(Number.isSafeInteger(resetsAt)).toBe(true);
+    expect(resetsAt).toBeGreaterThan(Date.now());
+
+    // Nothing was enqueued and nothing announced a start.
+    expect(queueAdds.length).toBe(addsBefore);
+    expect(bus.published.filter((p) => p.event.type === "schedule_run_started")).toEqual([]);
+
+    // The occurrence is terminal and its run is truthfully failed.
+    const occurrences = (await db.$client`
+      SELECT id, run_id, status FROM schedule_runs
+       WHERE schedule_id = ${created.id}`) as Array<{ id: string; run_id: string; status: string }>;
+    expect(occurrences).toHaveLength(1);
+    expect(occurrences[0]!.status).toBe("failed");
+    const runRow = (await db.$client`
+      SELECT status, last_error FROM runs WHERE id = ${occurrences[0]!.run_id}`) as Array<{
+        status: string;
+        last_error: string | null;
+      }>;
+    expect(runRow).toEqual([{ status: "failed", last_error: "quota_exceeded" }]);
+    // The refused admission left no admission row behind.
+    expect(await admissionRows(occurrences[0]!.run_id)).toEqual([]);
+  });
+
+  it("R2 run-now: exact BYOK is admitted under an exhausted Ovid cap and still bills byok", async () => {
+    const uid = testUid("sched-r2-byok-allowed");
+    await accountSettings.patch(db, uid, {
+      byokDefault: { keyId: "r2-byok-key", model: "user-provider/allowed" },
+    });
+    const created = await createSchedule(uid);
+    await exhaustOvidDay(uid);
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/cloud/v1/schedules/${created.id}/run`,
+      headers: authHeaders(uid),
+    });
+    expect(res.statusCode, res.body).toBe(202);
+    const body = scheduleRunNowResponseSchema.parse(res.json());
+    const { job } = runNowJob(body.runId);
+    expect(job.modelContext).toMatchObject({
+      byokKeyId: "r2-byok-key",
+      byokModel: "user-provider/allowed",
+      actorUserId: uid,
+    });
+    expect(await admissionRows(body.runId)).toEqual([{
+      actor_user_id: uid,
+      source: "schedule_run_now",
+      run_id: body.runId,
+      idempotency_key: `run:${body.runId}:schedule_run_now`,
+      billing_class: "byok",
+    }]);
+  });
+
+  it("R2 run-now: an enqueue failure answers 503, keeps the admitted run queued, and publishes no start", async () => {
+    const uid = testUid("sched-r2-enqueue-fail");
+    // A second app on the SAME db whose queue add fails: the occurrence and
+    // its admission are real, only the enqueue is an outage.
+    const failingQueues = stubQueues({ failAdd: true });
+    const failingApp = buildGateway({
+      db,
+      queues: failingQueues.queues,
+      verifier: stubVerifier(),
+      tickets: stubTickets(),
+      keys: stubKeys(),
+      mint: stubMint(),
+      events: noopEvents,
+      system: bus,
+    });
+    try {
+      const created = await createSchedule(uid);
+      bus.published.length = 0;
+
+      const res = await failingApp.inject({
+        method: "POST",
+        url: `/cloud/v1/schedules/${created.id}/run`,
+        headers: authHeaders(uid),
+      });
+      expect(res.statusCode, res.body).toBe(503);
+      expect(res.json()).toMatchObject({ error: { code: "unavailable" } });
+
+      expect(failingQueues.adds).toEqual([]);
+      expect(bus.published.filter((p) => p.event.type === "schedule_run_started")).toEqual([]);
+
+      // The admitted run is retained for settle's stale run_lost recovery,
+      // and the occurrence is left unsettled (still running).
+      const occurrences = (await db.$client`
+        SELECT id, run_id, status FROM schedule_runs
+         WHERE schedule_id = ${created.id}`) as Array<{ id: string; run_id: string; status: string }>;
+      expect(occurrences).toHaveLength(1);
+      expect(occurrences[0]!.status).toBe("running");
+      const runRow = (await db.$client`
+        SELECT status FROM runs WHERE id = ${occurrences[0]!.run_id}`) as Array<{ status: string }>;
+      expect(runRow).toEqual([{ status: "queued" }]);
+      // Admission happened BEFORE the enqueue attempt, so the row survives.
+      expect(await admissionRows(occurrences[0]!.run_id)).toHaveLength(1);
+    } finally {
+      await failingApp.close();
     }
   });
 });

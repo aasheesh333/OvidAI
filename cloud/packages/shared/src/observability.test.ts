@@ -166,4 +166,24 @@ describe("central redaction", () => {
     expect(redacted).not.toContain("X-Amz-Signature");
     expect(redacted).toContain("[redacted]");
   });
+
+  it("redacts VCS/cloud credential shapes that the identifier alphabet would accept", () => {
+    const pat = "ghp_AbCdEf0123456789AbCdEf0123456789AbCd";
+    const fineGrained = "github_pat_11ABCDEFG0123456789_abcdefghijklmnop";
+    const redacted = redactSensitiveText(`a=${pat} b=${fineGrained}`);
+    expect(redacted).not.toContain(pat);
+    expect(redacted).not.toContain(fineGrained);
+  });
+
+  it("refuses a credential shape used as a correlation id or an operational code", () => {
+    for (const value of [
+      "ghp_AbCdEf0123456789AbCdEf0123456789AbCd",
+      "github_pat_11ABCDEFG0123456789_abcdefghijklmnop",
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1MSJ9.c2lnbmF0dXJl",
+    ]) {
+      expect(() => correlationIds({ runId: value })).toThrow("invalid correlation id");
+      expect(() => safeLogRecord({ event: "admission.accepted", reason: value })).toThrow("invalid log reason");
+      expect(() => safeLogRecord({ event: value })).toThrow("invalid log event");
+    }
+  });
 });

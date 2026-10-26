@@ -228,33 +228,33 @@ describe("real OAuth health refresh adapter", () => {
     let bodyReadStarted!: () => void;
     const started = new Promise<void>((resolve) => { bodyReadStarted = resolve; });
     let readerCancelled = false;
-    const body = new ReadableStream<Uint8Array>({
-      start(stream) {
-        const underlying = stream.getReader();
-        let readStarted = false;
-        // Instrument the same underlying reader shape consumed by readOAuthBody:
-        // signal only when the real bounded reader is blocked in reader.read().
-        Object.defineProperty(stream, "getReader", {
-          value: () => ({
-            read: () => {
-              if (!readStarted) {
-                readStarted = true;
-                bodyReadStarted();
-              }
-              return new Promise<never>(() => {});
-            },
-            cancel: async () => {
-              readerCancelled = true;
-            },
-            releaseLock: () => underlying.releaseLock(),
-          }),
-        });
-      },
-    });
-    const wire: GuardedFetch = async () => new Response(body, {
+    // No chunks: every read stays pending until the caller aborts.
+    const response = new Response(new ReadableStream<Uint8Array>({ start() {} }), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
+    // Instrument the exact stream the adapter consumes (`response.body`);
+    // Response wraps the constructor argument, so overriding that source would
+    // never observe the real reader.
+    const body = response.body!;
+    const underlying = body.getReader();
+    let readStarted = false;
+    Object.defineProperty(body, "getReader", {
+      value: () => ({
+        read: () => {
+          if (!readStarted) {
+            readStarted = true;
+            bodyReadStarted();
+          }
+          return new Promise<never>(() => {});
+        },
+        cancel: async () => {
+          readerCancelled = true;
+        },
+        releaseLock: () => underlying.releaseLock(),
+      }),
+    });
+    const wire: GuardedFetch = async () => response;
     const { run } = setup({ fetchImpl: wire });
     const pending = run(undefined, controller.signal);
     const deadline = new Promise<"settled">((resolve) => setTimeout(() => resolve("settled"), 100));

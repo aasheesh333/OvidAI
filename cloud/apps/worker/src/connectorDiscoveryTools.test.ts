@@ -91,6 +91,10 @@ describe("McpRuntime lazy connector discovery roster", () => {
       row("vercel", VERCEL_CONNECTION, { access_token: VERCEL_SECRET }),
     ];
     const list = vi.spyOn(mcpServers, "list").mockResolvedValue(rows);
+    // Curated dispatch re-reads the connection generation immediately before a
+    // live entry is created; the runtime only receives a stub Db.
+    vi.spyOn(mcpServers, "get").mockImplementation(async (_db, id, uid) =>
+      rows.find((row) => row.id === id && row.userId === uid) ?? null);
     const tier = vi.spyOn(dbUsers, "getTier").mockResolvedValue("pro");
 
     const schemaReads: string[] = [];

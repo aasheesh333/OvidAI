@@ -75,4 +75,26 @@ describe("buildGateway", () => {
     expect(res.statusCode).toBe(404);
     expect(res.json().error.code).toBe("not_found");
   });
+
+  it("composes the client's entitlement read inside the authenticated scope", async () => {
+    // The route module existed but was registered nowhere, so every device's
+    // EntitlementClient.current() got a 404 and could never learn its plan.
+    // Unconfigured mint must be a 503 (unknown authority), never a 404 and
+    // never a fabricated Free tier.
+    const { app } = makeApp();
+    const res = await app.inject({
+      method: "GET",
+      url: "/cloud/v1/billing/entitlement",
+      headers: authHeaders("ws-user-4"),
+    });
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toMatchObject({ error: { code: "unavailable" } });
+    expect(res.headers["cache-control"]).toBe("no-store");
+
+    const unauthenticated = await app.inject({
+      method: "GET",
+      url: "/cloud/v1/billing/entitlement",
+    });
+    expect(unauthenticated.statusCode).toBe(401);
+  });
 });

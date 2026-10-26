@@ -1,9 +1,9 @@
 import { and, asc, eq, isNull, sql } from "drizzle-orm";
+import { PLANS, PLAN_TIERS, planFor } from "@ovid/shared";
 import { uuidv7 } from "uuidv7";
 import type { Db } from "./client.js";
 import {
   attachments as attachmentsTable,
-  plans as plansTable,
   projects as projectsTable,
   sessions as sessionsTable,
   users as usersTable,
@@ -40,12 +40,19 @@ export interface ProjectSummary extends ProjectRow {
 }
 
 /**
- * Per-project memory-file caps by plan. The VALUES are the owner spec's
- * (Free 80 / Go 100 / Plus 150 / Pro 250); the PLAN LIST is not duplicated —
- * plans are read live from the server plan table and ordered by `position`,
- * so W5's Free/Go/Plus/Pro rows map correctly without touching this file.
+ * Per-project file caps by plan, DERIVED from the one plan table.
+ *
+ * These used to be a literal `[80, 100, 150, 250]` indexed by the user's
+ * ordinal among the LIVE enabled `plans` rows. Two ways that enforced a
+ * number `plans.ts` never advertised: a fresh install has no plan rows at all
+ * (every tier fell back to Free's 80), and disabling or reordering a plan in
+ * /admin shifted every paid tier onto its neighbour's cap. Deriving the list
+ * from `PLANS` keeps a single source for the number; `projectFileCap` reads
+ * the tier directly and never depends on row order.
  */
-export const PROJECT_FILE_CAPS = [80, 100, 150, 250] as const;
+export const PROJECT_FILE_CAPS: readonly number[] = PLAN_TIERS.map(
+  (tier) => PLANS[tier].projectFiles,
+);
 export const MAX_PROJECT_NAME_LENGTH = 80;
 
 /** Fold the three counted buckets into the public summary shape. */
@@ -277,10 +284,13 @@ export const projectsRepo = {
 };
 
 /**
- * The caller's plan-derived project file cap. Reads the user's stored tier
- * (users.tier, which holds a plan id or legacy alias) and the LIVE plan table
- * ordered by `position`; no second plan list lives here. Unknown/missing
- * users and plans fail closed to the Free cap.
+ * The caller's plan-derived project file cap.
+ *
+ * The stored tier (`users.tier`, a plan id or a legacy alias) resolves through
+ * the canonical `plans.ts` table — the same table `/plans` and the account
+ * screen describe — so a paying account can never be held to a neighbour's
+ * cap because of row order, a disabled plan, or an unseeded install.
+ * Unknown/missing users and tiers fail closed to Free.
  */
 export async function projectFileCap(db: Db, uid: string): Promise<number> {
   const [user] = await db
@@ -288,20 +298,5 @@ export async function projectFileCap(db: Db, uid: string): Promise<number> {
     .from(usersTable)
     .where(eq(usersTable.uid, uid))
     .limit(1);
-  const plans = await db
-    .select({ id: plansTable.id, aliases: plansTable.aliases })
-    .from(plansTable)
-    .where(eq(plansTable.enabled, true))
-    .orderBy(asc(plansTable.position), asc(plansTable.id));
-  if (plans.length === 0) return PROJECT_FILE_CAPS[0];
-  const tier = (user?.tier ?? "free").trim().toLowerCase();
-  const index = plans.findIndex(
-    (plan) =>
-      plan.id.toLowerCase() === tier ||
-      (Array.isArray(plan.aliases) ? plan.aliases : []).some(
-        (alias) => typeof alias === "string" && alias.toLowerCase() === tier,
-      ),
-  );
-  const position = index >= 0 ? index : 0;
-  return PROJECT_FILE_CAPS[Math.min(position, PROJECT_FILE_CAPS.length - 1)]!;
+  return planFor(user?.tier ?? "free").projectFiles;
 }

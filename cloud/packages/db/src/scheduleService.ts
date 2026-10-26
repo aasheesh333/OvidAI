@@ -9,6 +9,7 @@ import {
 import type { Db } from "./client.js";
 import { messages, runs, sessions, users } from "./repos.js";
 import { scheduleRuns, schedules } from "./scheduleRepos.js";
+import { admitTurn } from "./turnOrdering.js";
 import type { ScheduleRow, ScheduleRunRow } from "./schema.js";
 
 /**
@@ -313,11 +314,19 @@ export async function runScheduleNow(
       role: "user",
       content: prompt,
     });
-    const run = await runs.create(tdb, { sessionId: row.sessionId, promptMessageId: message.id });
+    // Admit through the turn-ordering primitive, not `runs.create`. This
+    // takes the session advisory lock and stamps
+    // `created_at = GREATEST(clock_timestamp(), session max + 1µs)`, so the
+    // immediate run participates in the same admission order as every other
+    // turn. `defaultNow()` (transaction-start time) could otherwise place
+    // this run before a turn admitted while the transaction was open, which
+    // makes `seq` disagree with admission order and drops a legitimate run
+    // as `newer_turn_running`.
+    const run = await admitTurn(tdb, { sessionId: row.sessionId, promptMessageId: message.id });
     const scheduleRun = await scheduleRuns.claim(tdb, {
       scheduleId: row.id,
       scheduledFor: at,
-      runId: run.id,
+      runId: run.runId,
       ranLate: false,
       sessionId: row.sessionId,
       triggerKind: row.trigger.kind,
@@ -327,6 +336,6 @@ export async function runScheduleNow(
       // is the "run now" the user asked for.
       throw new ScheduleError("busy", "This schedule is starting a run right now.");
     }
-    return { schedule: row, runId: run.id, scheduleRun, prompt };
+    return { schedule: row, runId: run.runId, scheduleRun, prompt };
   });
 }

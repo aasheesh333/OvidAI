@@ -1,7 +1,8 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import {
   createDb,
+  migrate,
   newId,
   schema,
   type Db,
@@ -171,11 +172,34 @@ describe("Collab worker execution adapter (UNEXECUTED)", () => {
 describe.skipIf(!TEST_DATABASE_URL).sequential("Collab worker claim fence (UNEXECUTED)", () => {
   let db: Db;
   let secondDb: Db;
+  const createdSessionIds: string[] = [];
 
   beforeAll(async () => {
+    await migrate(TEST_DATABASE_URL!);
     db = createDb(TEST_DATABASE_URL!, { max: 12 });
     secondDb = createDb(TEST_DATABASE_URL!, { max: 12 });
   }, 60_000);
+
+  // The collab stale sweep scans every lease in the database, so this file's
+  // sessions must not outlive their test. Session deletes cascade to runs,
+  // rooms, turns and leases, but `messages` and `run_outbox` need explicit
+  // dependency-ordered deletes first.
+  afterEach(async () => {
+    for (const sessionId of createdSessionIds) {
+      await db.$client`DELETE FROM run_outbox WHERE session_id = ${sessionId}`;
+      await db.$client`
+        DELETE FROM collab_sender_leases
+         WHERE run_id IN (SELECT id FROM runs WHERE session_id = ${sessionId})`;
+      await db.$client`
+        DELETE FROM collab_turns
+         WHERE run_id IN (SELECT id FROM runs WHERE session_id = ${sessionId})`;
+      await db.$client`DELETE FROM messages WHERE session_id = ${sessionId}`;
+      await db.$client`DELETE FROM runs WHERE session_id = ${sessionId}`;
+      await db.$client`DELETE FROM collab_rooms WHERE session_id = ${sessionId}`;
+      await db.$client`DELETE FROM sessions WHERE id = ${sessionId}`;
+    }
+    createdSessionIds.length = 0;
+  });
 
   afterAll(async () => {
     await db?.$client.end({ timeout: 5 });
@@ -195,6 +219,7 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("Collab worker claim fence (UNEXE
       leaseId: newId(),
       participantId: `p${suffix}`,
     };
+    createdSessionIds.push(ids.sessionId);
     const ownerUserId = `host-${newId()}`;
     const actorUserId = `sender-${newId()}`;
     const collab: AgentRunCollab = {
@@ -369,7 +394,8 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("Collab worker claim fence (UNEXE
         JOIN collab_sender_leases l ON l.run_id = r.id
        WHERE r.id = ${f.runId}`;
     expect(rows[0]).toMatchObject({ run_status: "running", turn_status: "running" });
-    expect(rows[0]!.heartbeat_at).toEqual(T0);
+    // Drizzle's raw postgres-js client keeps timestamptz as text.
+    expect(new Date(rows[0]!.heartbeat_at as string)).toEqual(T0);
   });
 
   it("a second durable room fixture uses an independent token hash and can claim", async () => {

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Redis } from "ioredis";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   accountSettings,
   createDb,
@@ -19,6 +19,8 @@ import {
   projectsRepo,
   RunQuotaService,
   runs,
+  runDeliveryOutboxRepo,
+  schema,
   sessionState,
   sessions,
   users,
@@ -27,7 +29,9 @@ import {
 } from "@ovid/db";
 import { createRedisEventLog, type EventLog } from "@ovid/events";
 import {
+  agentRunJobSchema,
   AGENT_RUN_JOB_NAME,
+  collabAuthorityToken,
   createAgentRunsWorker,
   createQueues,
   type AgentRunJob,
@@ -72,6 +76,17 @@ import {
 } from "./liteLlm.js";
 import { createSandboxPort } from "./sandboxAdapter.js";
 import type { ModelCallQuota } from "./usageRecorder.js";
+import { buildGateway } from "@gateway/app.js";
+import {
+  authHeaders as gwAuthHeaders,
+  stubKeys as gwStubKeys,
+  stubMint as gwStubMint,
+  stubQueues as gwStubQueues,
+  stubSystemBus as gwStubSystemBus,
+  stubTickets as gwStubTickets,
+  stubVerifier as gwStubVerifier,
+} from "@gateway/test/stubs.js";
+import { scheduleDtoSchema, scheduleRunNowResponseSchema } from "@ovid/shared";
 import { createAgentRunProcessor, type RunDeps } from "./runProcessor.js";
 import {
   createFullAgentRunProcessor,
@@ -79,6 +94,7 @@ import {
   type FullRunDeps,
   type RunAttachmentStorage,
 } from "./runProcessor.js";
+
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const TEST_REDIS_URL = process.env.TEST_REDIS_URL;
@@ -233,6 +249,18 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
 
     beforeEach(() => {
       sleeps = [];
+    });
+
+    // The collab stale sweep scans every lease in the database, so a fixture
+    // lease must not outlive its test. `runs`/`sessions` cannot be removed here
+    // (other suites' FKs reference them without cascade), but the lease rows
+    // this file seeds are exactly what a global sweep would otherwise fence.
+    afterEach(async () => {
+      for (const sessionId of createdSessions) {
+        await db.$client`
+          DELETE FROM collab_sender_leases
+           WHERE run_id IN (SELECT id FROM runs WHERE session_id = ${sessionId})`;
+      }
     });
 
     afterAll(async () => {
@@ -1902,6 +1930,9 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         tools?: unknown;
         model?: string;
         max_tokens?: number;
+        temperature?: number;
+        reasoning_effort?: string;
+        apiKey?: string;
         rawBody: string;
       }>;
       close: () => Promise<void>;
@@ -1911,6 +1942,9 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         tools?: unknown;
         model?: string;
         max_tokens?: number;
+        temperature?: number;
+        reasoning_effort?: string;
+        apiKey?: string;
         rawBody: string;
       }> = [];
       const server = createServer((req, res) => {
@@ -1923,12 +1957,25 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
             tools?: unknown;
             model?: string;
             max_tokens?: number;
+            temperature?: number;
+            reasoning_effort?: string;
           };
+          const authz = req.headers.authorization;
           requests.push({
             messages: body.messages,
             tools: body.tools,
             model: body.model,
             max_tokens: body.max_tokens,
+            apiKey:
+              typeof authz === "string" && authz.startsWith("Bearer ")
+                ? authz.slice(7)
+                : undefined,
+            // R2: the root snapshot's temperature and captured effort are
+            // asserted on the REAL provider body, not just the serializer.
+            ...(body.temperature !== undefined ? { temperature: body.temperature } : {}),
+            ...(body.reasoning_effort !== undefined
+              ? { reasoning_effort: body.reasoning_effort }
+              : {}),
             rawBody,
           });
           if (behavior.contextOverflowOnce === true && requests.length === 1) {
@@ -2410,6 +2457,17 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         runId: seeded.runId,
         sessionId: seeded.sessionId,
       });
+      // The final answer and its delivery intent are ONE durable fact, and
+      // delivery is confirmed only after the push: the outbox row points at
+      // the message the client received and is `delivered`, not `pending`.
+      const delivered = await runDeliveryOutboxRepo.get(db, seeded.runId);
+      expect(delivered).toMatchObject({ status: "delivered", scheduled: false });
+      expect(delivered?.messageId).toBe(
+        (evts.find((event) => event.type === "message_completed")!.payload as {
+          messageId: string;
+        }).messageId,
+      );
+      expect(delivered?.completionPayload).toEqual({ runId: seeded.runId });
     });
 
     it("full processor: scheduled success keeps the existing schedule notification path", async () => {
@@ -2747,7 +2805,9 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       it("uses the actor's real BYOK default for manual compaction, not the owner's different default", async () => {
         const seeded = await seedRun({
           prompt: "/compact",
-          history: Array.from({ length: 12 }, (_, index) => ({
+          // Manual compaction retains the newest 24 messages and needs >=4
+          // foldable, so the seeded window must exceed the retained tail.
+          history: Array.from({ length: 32 }, (_, index) => ({
             role: index % 2 === 0 ? "user" as const : "assistant" as const,
             content: `R1b compaction history ${index}`,
           })),
@@ -3022,6 +3082,944 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
           used: 0,
           reserved: 0,
         }]);
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // R2: root context precedence + stable admission
+    // -----------------------------------------------------------------------
+    describe("R2 root context and stable admission", () => {
+      /**
+       * A real accepted-Collab job: host session, room/member/lease/outbox and
+       * the queued run, exactly as the gateway's admission transaction leaves
+       * them. `staleLease` makes the execution-time fence reject it.
+       */
+      async function durableCollabFixture(
+        opts: { staleLease?: boolean; billing?: "ovid" | "byok" } = {},
+      ) {
+        const ownerUserId = uid("r2-collab-host");
+        const actorUserId = uid("r2-collab-sender");
+        await users.ensure(db, ownerUserId, `${ownerUserId}@stub.test`);
+        await users.ensure(db, actorUserId, `${actorUserId}@stub.test`);
+        const session = await sessions.create(db, ownerUserId);
+        createdSessions.push(session.id);
+        const roomId = newId();
+        const turnId = newId();
+        const runId = newId();
+        const messageId = newId();
+        const outboxId = newId();
+        const leaseId = newId();
+        const participantId = `p${newId().replaceAll("-", "")}`;
+        const content = "hello collaborators";
+        const collab = {
+          roomId,
+          participantId,
+          membershipGeneration: 4,
+          leaseId,
+          leaseGeneration: 9,
+          outboxId,
+          rootRunId: runId,
+        };
+        const publication = {
+          outboxStatus: "published" as const,
+          outboxAttempts: 1,
+          runStatus: "queued" as const,
+          turnStatus: "queued" as const,
+          leaseGeneration: 9,
+          authorityToken: collabAuthorityToken({
+            roomId,
+            sessionId: session.id,
+            ownerUserId,
+            actorUserId,
+            participantId,
+            roomGeneration: 4,
+            membershipGeneration: 4,
+            leaseId,
+            leaseGeneration: 9,
+            rootRunId: runId,
+            turnId,
+          }),
+        };
+        // BYOK fixture by default; Ovid Collab uses Auto (requestedModel:null)
+        // with a null BYOK key so billing falls through to Ovid's allowance.
+        const ovid = opts.billing === "ovid";
+        const modelContext = ovid
+          ? {
+              requestedModel: null as string | null,
+              byokKeyId: null as string | null,
+              temperature: null as number | null,
+              actorUserId,
+            }
+          : {
+              requestedModel: "provider/model",
+              byokKeyId: "collab-accepted-key",
+              byokModel: "accepted-provider-model",
+              temperature: null as number | null,
+              actorUserId,
+            };
+        const job: AgentRunJob = {
+          runId,
+          sessionId: session.id,
+          userId: ownerUserId,
+          ownerUserId,
+          actorUserId,
+          source: "collab",
+          prompt: content,
+          tier: "free",
+          modelContext,
+          collab,
+          collabPublication: publication,
+          // Legacy top-level mirror: equal to the nested snapshot.
+          ...(modelContext.requestedModel !== null
+            ? { requestedModel: modelContext.requestedModel }
+            : {}),
+          byokKeyId: modelContext.byokKeyId,
+          ...(modelContext.byokModel !== undefined ? { byokModel: modelContext.byokModel } : {}),
+        };
+
+        const heartbeatAt = opts.staleLease === true
+          ? new Date("2020-01-01T00:00:00.000Z")
+          : new Date();
+        await db.insert(schema.collabRooms).values({
+          id: roomId,
+          tokenHash: newId().replaceAll("-", "").padEnd(64, "0").slice(0, 64),
+          sessionId: session.id,
+          ownerUserId,
+          requestId: `create-${newId()}`,
+          lifecycle: "active",
+          generation: 4,
+        });
+        await db.insert(schema.collabMembers).values([
+          {
+            roomId,
+            userId: ownerUserId,
+            participantId: `p${"f".repeat(32)}`,
+            role: "owner",
+            status: "active",
+            generation: 4,
+          },
+          {
+            roomId,
+            userId: actorUserId,
+            participantId,
+            role: "participant",
+            status: "active",
+            generation: 4,
+          },
+        ]);
+        await db.insert(schema.messages).values({
+          id: messageId,
+          sessionId: session.id,
+          role: "user",
+          content,
+        });
+        await db.insert(schema.runs).values({
+          id: runId,
+          sessionId: session.id,
+          status: "queued",
+          promptMessageId: messageId,
+        });
+        await db.insert(schema.collabTurns).values({
+          id: turnId,
+          roomId,
+          participantId,
+          actorUserId,
+          runId,
+          userMessageId: messageId,
+          idempotencyKey: `turn-${turnId}`,
+          model: modelContext.requestedModel ?? null,
+          status: "queued",
+        });
+        await db.insert(schema.collabSenderLeases).values({
+          id: leaseId,
+          roomId,
+          holderParticipantId: participantId,
+          holderUserId: actorUserId,
+          runId,
+          generation: 9,
+          roomGeneration: 4,
+          membershipGeneration: 4,
+          startedAt: heartbeatAt,
+          heartbeatAt,
+        });
+        await db.insert(schema.runOutbox).values({
+          outboxId,
+          actorUserId,
+          sessionId: session.id,
+          runId,
+          userMessageId: messageId,
+          idempotencyKey: `turn-${turnId}`,
+          status: "published",
+          attempts: 1,
+          publishedAt: null,
+          requestPayload: {
+            schemaVersion: 1,
+            idempotencyKey: `turn-${turnId}`,
+            text: content,
+            ...(modelContext.requestedModel !== undefined && modelContext.requestedModel !== null
+              ? { model: modelContext.requestedModel }
+              : {}),
+          },
+          bodyPayload: {
+            ownerUserId,
+            requestedModel: modelContext.requestedModel ?? null,
+            userId: actorUserId,
+            sessionId: session.id,
+            runId,
+            modelContext,
+            byokKeyId: modelContext.byokKeyId,
+            ...(modelContext.byokModel !== undefined
+              ? { byokModel: modelContext.byokModel }
+              : {}),
+            tier: "free",
+            queuePriority: 1,
+            collab,
+          },
+          jobId: runId,
+        });
+        return { job, ownerUserId, actorUserId, modelContext };
+      }
+
+      /** Admission input capture around the canonical service. */
+      const capturingAdmission = (service: RunQuotaService) => {
+        const inputs: Array<Parameters<RunQuotaService["admitRun"]>[0]> = [];
+        return {
+          inputs,
+          quota: {
+            async admitRun(input: Parameters<RunQuotaService["admitRun"]>[0]) {
+              inputs.push(input);
+              return service.admitRun(input);
+            },
+          },
+        };
+      };
+
+      async function burnOvidAllowance(actorUserId: string): Promise<RunQuotaService> {
+        const quota = new RunQuotaService(db, {
+          tokenCaps: { perDay: 10, perMonth: 1_000_000 },
+          usdCaps: { perDay: null, perMonth: null },
+        });
+        const burn = await seedRunForActor(actorUserId);
+        expect((await quota.admitRun({
+          actorUserId,
+          source: "interactive",
+          runId: burn.runId,
+          idempotencyKey: `burn:${burn.runId}`,
+          billingClass: "ovid_allowance",
+        })).ok).toBe(true);
+        const reservation = await quota.reserveModelCall({
+          actorUserId,
+          runId: burn.runId,
+          reservationKey: `burn:${burn.runId}:model`,
+          inputTokens: 10,
+          maxOutputTokens: 0,
+          billingClass: "ovid_allowance",
+        });
+        expect(reservation.ok).toBe(true);
+        await quota.settleModelCall({
+          reservationId: (reservation as { reservationId: string }).reservationId,
+          usage: { inputTokens: 10, outputTokens: 0 },
+        });
+        await runs.finish(db, burn.runId, "completed");
+        return quota;
+      }
+
+      /** A queued run for an EXISTING actor (separate chat from the target). */
+      async function seedRunForActor(actorUserId: string): Promise<Seeded> {
+        const session = await sessions.create(db, actorUserId);
+        createdSessions.push(session.id);
+        const promptMessage = await messages.append(db, {
+          sessionId: session.id,
+          role: "user",
+          content: `r2 actor prompt ${session.id.slice(-8)}`,
+        });
+        const run = await runs.create(db, {
+          sessionId: session.id,
+          promptMessageId: promptMessage.id,
+        });
+        return {
+          uid: actorUserId,
+          sessionId: session.id,
+          runId: run.id,
+          prompt: promptMessage.content,
+          promptMessageId: promptMessage.id,
+        };
+      }
+
+      it("worker Ovid denial: stable actor/source/run/key/billing, truthful terminal state, zero key or provider calls", async () => {
+        const actorUserId = uid("r2-denied-actor");
+        await users.ensure(db, actorUserId, `${actorUserId}@stub.test`);
+        const canonical = await burnOvidAllowance(actorUserId);
+        const target = await seedRunForActor(actorUserId);
+        const sse = await startTurnSse([textTurn("must never be requested")]);
+        const resolutions: string[] = [];
+        const keys: KeyResolver = {
+          async resolveForRun(keyUid) {
+            resolutions.push(keyUid);
+            return { kind: "litellm", key: "sk-r2", baseUrl: "" };
+          },
+        };
+        const capture = capturingAdmission(canonical);
+        const processor = createFullAgentRunProcessor(
+          makeFullDeps(sse.url, makeFakePort().port, {
+            keys,
+            admission: capture.quota,
+          }),
+        );
+        try {
+          await processor({
+            data: {
+              ...jobOf(target).data,
+              source: "schedule_tick",
+              actorUserId,
+              provenance: "server",
+              schedule: { scheduleId: "s", scheduleRunId: "sr", autonomy: "safe" },
+            },
+          });
+        } finally {
+          await processor.close();
+          await sse.close();
+        }
+
+        // Exactly one admission, with the producer's identity.
+        expect(capture.inputs).toEqual([{
+          actorUserId,
+          source: "schedule_tick",
+          runId: target.runId,
+          idempotencyKey: `run:${target.runId}:schedule_tick`,
+          billingClass: "ovid_allowance",
+        }]);
+        // No credential resolution and no provider entry.
+        expect(resolutions).toEqual([]);
+        expect(sse.requests).toEqual([]);
+        // Truthful terminal state + event.
+        expect(await runRow(target.runId)).toMatchObject({
+          status: "failed",
+          lastError: "quota_exceeded",
+        });
+        const evts = await readEvents(target.sessionId);
+        expect(types(evts)).toEqual(["run_failed"]);
+        expect(evts.at(-1)!.payload).toMatchObject({
+          code: "quota_exceeded",
+          window: "day",
+        });
+        expect(Number.isFinite(
+          Date.parse(String(evts.at(-1)!.payload.resetsAt)),
+        )).toBe(true);
+        // A refused run writes no reservation and no usage.
+        expect(await db.$client`
+          SELECT count(*)::int AS count FROM usage_quota_reservations
+           WHERE run_id = ${target.runId}`).toEqual([{ count: 0 }]);
+      });
+
+      it("present queued snapshot beats a post-enqueue preset/model change; explicit null stays Auto", async () => {
+        const seeded = await seedRun();
+        const actorUserId = seeded.uid;
+        // Post-enqueue mutations the run must NOT adopt.
+        await customPresets.upsert(db, actorUserId, {
+          id: "custom-r2-late",
+          label: "Late",
+          description: "",
+          deniedTools: [],
+          model: "late-preset-model · high",
+          temperature: 0.9,
+        });
+        await sessionState.patch(db, seeded.sessionId, {
+          presetId: "custom-r2-late",
+          modelPin: "late-session-pin",
+        });
+
+        const sse = await startTurnSse([textTurn("auto answer")]);
+        const capture = capturingAdmission(new RunQuotaService(db));
+        const processor = createFullAgentRunProcessor(
+          makeFullDeps(sse.url, makeFakePort().port, { admission: capture.quota }),
+        );
+        try {
+          await processor({
+            data: {
+              ...jobOf(seeded).data,
+              source: "interactive",
+              actorUserId,
+              modelContext: {
+                // Explicit null = Auto, and it must survive the conflict above.
+                requestedModel: null,
+                byokKeyId: null,
+                temperature: 0.17,
+                actorUserId,
+              },
+            },
+          });
+        } finally {
+          await processor.close();
+          await sse.close();
+        }
+
+        expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+        expect(sse.requests).toHaveLength(1);
+        const request = sse.requests[0]!;
+        // Auto → the fleet default, never the late preset/session pin.
+        expect(request.model).toBe("full-default-model");
+        expect(request.rawBody).not.toContain("late-preset-model");
+        expect(request.rawBody).not.toContain("late-session-pin");
+        // The captured temperature is the snapshot's, not the late preset's.
+        expect(request.temperature).toBe(0.17);
+        expect(JSON.parse(request.rawBody).temperature).toBe(0.17);
+      });
+
+      it("captured effort reaches the real SSE body as reasoning_effort alongside model and temperature", async () => {
+        const seeded = await seedRun();
+        const sse = await startTurnSse([textTurn("effort answer")]);
+        const capture = capturingAdmission(new RunQuotaService(db));
+        const processor = createFullAgentRunProcessor(
+          makeFullDeps(sse.url, makeFakePort().port, { admission: capture.quota }),
+        );
+        try {
+          await processor({
+            data: {
+              ...jobOf(seeded).data,
+              source: "interactive",
+              actorUserId: seeded.uid,
+              modelContext: {
+                requestedModel: "gpt-5.2 · high",
+                byokKeyId: null,
+                temperature: 0.17,
+                actorUserId: seeded.uid,
+              },
+            },
+          });
+        } finally {
+          await processor.close();
+          await sse.close();
+        }
+
+        expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+        expect(sse.requests).toHaveLength(1);
+        const body = JSON.parse(sse.requests[0]!.rawBody) as Record<string, unknown>;
+        expect(body.model).toBe("gpt-5.2");
+        expect(body.temperature).toBe(0.17);
+        expect(body.reasoning_effort).toBe("high");
+        // The suffix itself is never sent as the model id.
+        expect(body.model).not.toContain("·");
+      });
+
+      // Unit-level complement: the route-driven twin in schedules.test.ts
+      // exercises the real gateway/queue/worker round trip. This in-test twin
+      // keeps the identical admission contract asserted without a live route.
+      it("producer and worker admit with identical input and leave exactly one durable admission row", async () => {
+        const seeded = await seedRun();
+        const canonical = new RunQuotaService(db);
+        const capture = capturingAdmission(canonical);
+        // The producer's call (gateway run-now shape) …
+        const producerInput = {
+          actorUserId: seeded.uid,
+          source: "schedule_run_now" as const,
+          runId: seeded.runId,
+          idempotencyKey: `run:${seeded.runId}:schedule_run_now`,
+          billingClass: "ovid_allowance" as const,
+        };
+        expect((await capture.quota.admitRun(producerInput)).ok).toBe(true);
+
+        // … then the worker's recheck on the same job.
+        const sse = await startTurnSse([textTurn("admitted once")]);
+        const processor = createFullAgentRunProcessor(
+          makeFullDeps(sse.url, makeFakePort().port, { admission: capture.quota }),
+        );
+        try {
+          await processor({
+            data: {
+              ...jobOf(seeded).data,
+              source: "schedule_run_now",
+              actorUserId: seeded.uid,
+              provenance: "server",
+              modelContext: {
+                requestedModel: null,
+                byokKeyId: null,
+                actorUserId: seeded.uid,
+              },
+            },
+          });
+        } finally {
+          await processor.close();
+          await sse.close();
+        }
+
+        // Both callers called admitRun, with the SAME input (a skipped worker
+        // call would leave one entry and pass a weaker assertion).
+        expect(capture.inputs).toEqual([producerInput, producerInput]);
+        expect(await db.$client`
+          SELECT count(*)::int AS count FROM usage_run_admissions
+           WHERE run_id = ${seeded.runId}`).toEqual([{ count: 1 }]);
+        expect(sse.requests).toHaveLength(1);
+      });
+
+      it("route-driven run-now: gateway, strict queue, and full worker admit with identical identity", async () => {
+        const actorUserId = uid("r2-route-actor");
+        await users.ensure(db, actorUserId, `${actorUserId}@stub.test`);
+        // Custom preset carries the captured model + temperature.
+        await customPresets.upsert(db, actorUserId, {
+          id: "r2-route-preset",
+          label: "R2",
+          description: "",
+          deniedTools: [],
+          model: "gpt-5.2 · high",
+          temperature: 0.17,
+        });
+        await accountSettings.patch(db, actorUserId, {
+          byokDefault: { keyId: "r2-route-key", model: "user-provider/route" },
+        });
+
+        const { queues, adds } = gwStubQueues();
+        const gatewayBus = gwStubSystemBus();
+        const app = buildGateway({
+          db,
+          queues,
+          verifier: gwStubVerifier(),
+          tickets: gwStubTickets(),
+          keys: gwStubKeys(),
+          mint: gwStubMint(),
+          events,
+          system: gatewayBus,
+        });
+        try {
+          const createRes = await app.inject({
+            method: "POST",
+            url: "/cloud/v1/schedules",
+            headers: gwAuthHeaders(actorUserId),
+            payload: {
+              title: "Route",
+              description: "r2 route test",
+              trigger: { kind: "every", seconds: 300 },
+            },
+          });
+          expect(createRes.statusCode).toBe(201);
+          const schedule = scheduleDtoSchema.parse(createRes.json());
+          await sessionState.patch(db, schedule.sessionId, { presetId: "r2-route-preset" });
+
+          const runRes = await app.inject({
+            method: "POST",
+            url: `/cloud/v1/schedules/${schedule.id}/run`,
+            headers: gwAuthHeaders(actorUserId),
+          });
+          expect(runRes.statusCode).toBe(202);
+          const body = scheduleRunNowResponseSchema.parse(runRes.json());
+
+          // The raw enqueued payload is the only place a secret could hide.
+          const rawAdd = adds.find((a) => (a.data as { runId?: string }).runId === body.runId);
+          expect(rawAdd).toBeDefined();
+          const rawSerialized = JSON.stringify(rawAdd!.data);
+          expect(rawSerialized).not.toContain("apiKey");
+          expect(rawSerialized).not.toContain("sk-");
+
+          // Strict queue parse strips unknown keys and validates the contract.
+          const job = agentRunJobSchema.parse(rawAdd!.data);
+          expect(job.source).toBe("schedule_run_now");
+          expect(job.actorUserId).toBe(actorUserId);
+          expect(job.modelContext).toEqual({
+            requestedModel: "gpt-5.2 · high",
+            byokKeyId: "r2-route-key",
+            byokModel: "user-provider/route",
+            temperature: 0.17,
+            actorUserId,
+          });
+
+          // Worker recheck with a spy on the canonical admission service.
+          const sse = await startTurnSse([textTurn("route answer")]);
+          const canonical = new RunQuotaService(db);
+          const capture = capturingAdmission(canonical);
+          const keyIds: Array<string | null> = [];
+          const keys: KeyResolver = {
+            async resolveForRun(keyUid, ctx) {
+              keyIds.push(ctx.byokKeyId);
+              if (keyUid !== actorUserId || ctx.byokKeyId !== "r2-route-key") return null;
+              return {
+                kind: "byok",
+                byokKeyId: "r2-route-key",
+                providerId: "openai",
+                endpoint: sse.url,
+                apiKey: "sk-route",
+              };
+            },
+          };
+          const processor = createFullAgentRunProcessor(
+            makeFullDeps(sse.url, makeFakePort().port, { keys, admission: capture.quota }),
+          );
+          try {
+            await processor({ data: job });
+          } finally {
+            await processor.close();
+            await sse.close();
+          }
+
+          const expected = {
+            actorUserId,
+            source: "schedule_run_now",
+            runId: body.runId,
+            idempotencyKey: `run:${body.runId}:schedule_run_now`,
+            billingClass: "byok",
+          };
+          // The worker's recheck used the same identity as the producer's row.
+          expect(capture.inputs).toEqual([expected]);
+          expect(await db.$client`
+            SELECT count(*)::int AS count FROM usage_run_admissions
+             WHERE run_id = ${body.runId}`).toEqual([{ count: 1 }]);
+          expect(sse.requests).toHaveLength(1);
+          expect(sse.requests[0]!.model).toBe("user-provider/route");
+          expect(sse.requests[0]!.apiKey).toBe("sk-route");
+          expect(keyIds.every((keyId) => keyId === "r2-route-key")).toBe(true);
+          expect(await runRow(body.runId)).toMatchObject({ status: "completed" });
+        } finally {
+          await app.close();
+        }
+      });
+
+      it("route-driven run-now: root model + root auxiliary call share the captured context", async () => {
+        const actorUserId = uid("r2-aux-actor");
+        await users.ensure(db, actorUserId, `${actorUserId}@stub.test`);
+        await customPresets.upsert(db, actorUserId, {
+          id: "r2-aux-preset",
+          label: "R2 Aux",
+          description: "",
+          deniedTools: [],
+          model: "gpt-5.2 · high",
+          temperature: 0.17,
+        });
+        await accountSettings.patch(db, actorUserId, {
+          byokDefault: { keyId: "r2-aux-key", model: "user-provider/aux" },
+        });
+
+        const { queues, adds } = gwStubQueues();
+        const gatewayBus = gwStubSystemBus();
+        const app = buildGateway({
+          db,
+          queues,
+          verifier: gwStubVerifier(),
+          tickets: gwStubTickets(),
+          keys: gwStubKeys(),
+          mint: gwStubMint(),
+          events,
+          system: gatewayBus,
+        });
+        try {
+          const createRes = await app.inject({
+            method: "POST",
+            url: "/cloud/v1/schedules",
+            headers: gwAuthHeaders(actorUserId),
+            payload: {
+              title: "Aux",
+              description: "r2 aux test",
+              trigger: { kind: "every", seconds: 300 },
+            },
+          });
+          expect(createRes.statusCode).toBe(201);
+          const schedule = scheduleDtoSchema.parse(createRes.json());
+          await sessionState.patch(db, schedule.sessionId, { presetId: "r2-aux-preset" });
+
+          const runRes = await app.inject({
+            method: "POST",
+            url: `/cloud/v1/schedules/${schedule.id}/run`,
+            headers: gwAuthHeaders(actorUserId),
+          });
+          expect(runRes.statusCode).toBe(202);
+          const body = scheduleRunNowResponseSchema.parse(runRes.json());
+
+          const rawAdd = adds.find((a) => (a.data as { runId?: string }).runId === body.runId);
+          expect(rawAdd).toBeDefined();
+          const job = agentRunJobSchema.parse(rawAdd!.data);
+
+          // Mutate the user's settings AFTER the route enqueued the snapshot.
+          // These must NOT be adopted by the worker.
+          await customPresets.upsert(db, actorUserId, {
+            id: "r2-aux-preset",
+            label: "R2 Aux",
+            description: "",
+            deniedTools: [],
+            model: "mutated/model · low",
+            temperature: 0.99,
+          });
+          await accountSettings.patch(db, actorUserId, {
+            byokDefault: { keyId: "mutated-key", model: "mutated/provider" },
+          });
+          await sessionState.patch(db, schedule.sessionId, { modelPin: "mutated-pin" });
+
+          // Two provider turns: tool call then final text. Both must share the
+          // same captured root context (model, temperature, effort, key).
+          const usageChunk = (input: number, output: number) => ({
+            choices: [] as Record<string, unknown>[],
+            usage: {
+              prompt_tokens: input,
+              completion_tokens: output,
+              total_tokens: input + output,
+            },
+          });
+          const toolCallTurn = [
+            {
+              choices: [{
+                delta: {
+                  tool_calls: [{
+                    index: 0,
+                    id: "tc-aux",
+                    function: { name: "report", arguments: JSON.stringify({ summary: "x" }) },
+                  }],
+                },
+                finish_reason: null,
+              }],
+            },
+            { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+            usageChunk(10, 0),
+          ];
+          const textTurn = [
+            { choices: [{ delta: { content: "aux done" }, finish_reason: null }] },
+            { choices: [{ delta: {}, finish_reason: "stop" }] },
+            usageChunk(5, 1),
+          ];
+
+          const sse = await startTurnSse([toolCallTurn, textTurn]);
+          const canonical = new RunQuotaService(db);
+          const capture = capturingAdmission(canonical);
+          // admission proves the recheck; quota proves real reservation/run_usage identity.
+          const keyIds: Array<string | null> = [];
+          const keys: KeyResolver = {
+            async resolveForRun(keyUid, ctx) {
+              keyIds.push(ctx.byokKeyId);
+              if (keyUid !== actorUserId || ctx.byokKeyId !== "r2-aux-key") return null;
+              return {
+                kind: "byok",
+                byokKeyId: "r2-aux-key",
+                providerId: "openai",
+                endpoint: sse.url,
+                apiKey: "sk-aux",
+              };
+            },
+          };
+          const processor = createFullAgentRunProcessor(
+            makeFullDeps(sse.url, makeFakePort().port, {
+              keys,
+              admission: capture.quota,
+              quota: canonical,
+            }),
+          );
+          try {
+            await processor({ data: job });
+          } finally {
+            await processor.close();
+            await sse.close();
+          }
+
+          expect(sse.requests).toHaveLength(2);
+          for (const request of sse.requests) {
+            const parsed = JSON.parse(request.rawBody);
+            // BYOK routes the request to the captured provider model; the
+            // requested model is recorded separately in the quota/run_usage rows.
+            expect(parsed.model).toBe("user-provider/aux");
+            expect(parsed.model).not.toContain("·");
+            expect(parsed.temperature).toBe(0.17);
+            expect(parsed.reasoning_effort).toBe("high");
+            expect(request.rawBody).not.toContain("mutated");
+            expect(request.apiKey).toBe("sk-aux");
+          }
+
+          // Billing identity matches the captured BYOK context for every call.
+          expect(capture.inputs).toEqual([{
+            actorUserId,
+            source: "schedule_run_now",
+            runId: body.runId,
+            idempotencyKey: `run:${body.runId}:schedule_run_now`,
+            billingClass: "byok",
+          }]);
+          expect(await db.$client`
+            SELECT billing_class FROM usage_run_admissions
+             WHERE run_id = ${body.runId}`).toEqual([{ billing_class: "byok" }]);
+          const reservations = await db.$client`
+            SELECT billing_class, requested_model, state
+              FROM usage_quota_reservations WHERE run_id = ${body.runId}`;
+          expect(reservations).toEqual([
+            { billing_class: "byok", requested_model: "user-provider/aux", state: "settled" },
+            { billing_class: "byok", requested_model: "user-provider/aux", state: "settled" },
+          ]);
+          const usageRows = await db.$client`
+            SELECT billing_class, requested_model FROM run_usage
+             WHERE run_id = ${body.runId}`;
+          expect(usageRows).toEqual([
+            { billing_class: "byok", requested_model: "user-provider/aux" },
+            { billing_class: "byok", requested_model: "user-provider/aux" },
+          ]);
+          expect(await runRow(body.runId)).toMatchObject({ status: "completed" });
+        } finally {
+          await app.close();
+        }
+      });
+
+      it("exact BYOK is admitted under an exhausted Ovid cap and keeps byok billing", async () => {
+        const actorUserId = uid("r2-byok-actor");
+        await users.ensure(db, actorUserId, `${actorUserId}@stub.test`);
+        const canonical = await burnOvidAllowance(actorUserId);
+        const target = await seedRunForActor(actorUserId);
+        const sse = await startTurnSse([textTurn("byok answer")]);
+        const keyIds: Array<string | null> = [];
+        const keys: KeyResolver = {
+          async resolveForRun(keyUid, ctx) {
+            keyIds.push(ctx.byokKeyId);
+            if (keyUid !== actorUserId || ctx.byokKeyId !== "r2-accepted-key") return null;
+            return {
+              kind: "byok",
+              byokKeyId: "r2-accepted-key",
+              providerId: "openai",
+              endpoint: sse.url,
+              apiKey: "sk-r2-byok",
+            };
+          },
+        };
+        const capture = capturingAdmission(canonical);
+        const processor = createFullAgentRunProcessor(
+          makeFullDeps(sse.url, makeFakePort().port, { keys, admission: capture.quota }),
+        );
+        try {
+          await processor({
+            data: {
+              ...jobOf(target).data,
+              source: "interactive",
+              actorUserId,
+              modelContext: {
+                requestedModel: null,
+                byokKeyId: "r2-accepted-key",
+                byokModel: "user-provider/r2-model",
+                actorUserId,
+              },
+            },
+          });
+        } finally {
+          await processor.close();
+          await sse.close();
+        }
+
+        expect(capture.inputs).toEqual([{
+          actorUserId,
+          source: "interactive",
+          runId: target.runId,
+          idempotencyKey: `run:${target.runId}:interactive`,
+          billingClass: "byok",
+        }]);
+        expect(await runRow(target.runId)).toMatchObject({ status: "completed" });
+        // Every credential resolution used the captured BYOK identity.
+        expect(keyIds.length).toBeGreaterThanOrEqual(1);
+        expect(keyIds.every((keyId) => keyId === "r2-accepted-key")).toBe(true);
+        expect(sse.requests).toHaveLength(1);
+        expect(sse.requests[0]!.model).toBe("user-provider/r2-model");
+      });
+
+      it("an accepted Collab context is admitted under its OWN actor, not the workspace owner", async () => {
+        const fixture = await durableCollabFixture();
+        const sse = await startTurnSse([textTurn("collab answer")]);
+        const keyIds: Array<string | null> = [];
+        const keys: KeyResolver = {
+          async resolveForRun(keyUid, ctx) {
+            keyIds.push(ctx.byokKeyId);
+            if (keyUid !== fixture.actorUserId || ctx.byokKeyId !== "collab-accepted-key") {
+              return null;
+            }
+            return {
+              kind: "byok",
+              byokKeyId: "collab-accepted-key",
+              providerId: "openai",
+              endpoint: sse.url,
+              apiKey: "sk-collab",
+            };
+          },
+        };
+        const capture = capturingAdmission(new RunQuotaService(db));
+        const processor = createFullAgentRunProcessor(
+          makeFullDeps(sse.url, makeFakePort().port, { keys, admission: capture.quota }),
+        );
+        try {
+          await processor({ data: fixture.job });
+        } finally {
+          await processor.close();
+          await sse.close();
+        }
+
+        // Admission follows the captured sender, under the collab source.
+        expect(capture.inputs).toEqual([{
+          actorUserId: fixture.actorUserId,
+          source: "collab",
+          runId: fixture.job.runId,
+          idempotencyKey: `run:${fixture.job.runId}:collab`,
+          billingClass: "byok",
+        }]);
+        expect(capture.inputs[0]!.actorUserId).not.toBe(fixture.ownerUserId);
+        // The captured provider model/key ran every call (never the host's).
+        expect(keyIds.length).toBeGreaterThanOrEqual(1);
+        expect(keyIds.every((keyId) => keyId === "collab-accepted-key")).toBe(true);
+        expect(sse.requests).toHaveLength(1);
+        expect(sse.requests[0]!.model).toBe("accepted-provider-model");
+      });
+
+      it("Collab Auto with Ovid billing is admitted under the Collab actor and uses the Ovid key", async () => {
+        const fixture = await durableCollabFixture({ billing: "ovid" });
+        const sse = await startTurnSse([textTurn("collab ovid answer")]);
+        const keyIds: Array<string | null> = [];
+        const keys: KeyResolver = {
+          async resolveForRun(keyUid, ctx) {
+            keyIds.push(ctx.byokKeyId);
+            // The captured snapshot has a null BYOK key; the resolver must be
+            // asked with null and must not adopt a newly appeared default.
+            if (ctx.byokKeyId !== null) return null;
+            return { kind: "litellm", key: "sk-ovid-collab", baseUrl: "" };
+          },
+        };
+        const capture = capturingAdmission(new RunQuotaService(db));
+        const processor = createFullAgentRunProcessor(
+          makeFullDeps(sse.url, makeFakePort().port, { keys, admission: capture.quota }),
+        );
+        try {
+          await processor({ data: fixture.job });
+        } finally {
+          await processor.close();
+          await sse.close();
+        }
+
+        // Admission follows the captured sender, under the collab source, and
+        // bills Ovid because the snapshot carries no BYOK key.
+        expect(capture.inputs).toEqual([{
+          actorUserId: fixture.actorUserId,
+          source: "collab",
+          runId: fixture.job.runId,
+          idempotencyKey: `run:${fixture.job.runId}:collab`,
+          billingClass: "ovid_allowance",
+        }]);
+        expect(fixture.actorUserId).not.toBe(fixture.ownerUserId);
+        // Every credential resolution used the captured null key id.
+        expect(keyIds.length).toBeGreaterThanOrEqual(1);
+        expect(keyIds.every((keyId) => keyId === null)).toBe(true);
+        expect(sse.requests).toHaveLength(1);
+        // Auto with a null requested model → fleet default.
+        expect(sse.requests[0]!.model).toBe("full-default-model");
+        expect(sse.requests[0]!.apiKey).toBe("sk-ovid-collab");
+        expect(await runRow(fixture.job.runId)).toMatchObject({ status: "completed" });
+      });
+
+      it("a fenced Collab claim never falls through to the ordinary claim path", async () => {
+        const fixture = await durableCollabFixture({ staleLease: true });
+        const sse = await startTurnSse([textTurn("must never run")]);
+        const capture = capturingAdmission(new RunQuotaService(db));
+        const processor = createFullAgentRunProcessor(
+          makeFullDeps(sse.url, makeFakePort().port, { admission: capture.quota }),
+        );
+        try {
+          await processor({ data: fixture.job });
+        } finally {
+          await processor.close();
+          await sse.close();
+        }
+
+        // No admission, no provider call, no event: the fence terminated it.
+        expect(capture.inputs).toEqual([]);
+        expect(sse.requests).toEqual([]);
+        expect(await readEvents(fixture.job.sessionId)).toEqual([]);
+        // The run row is untouched — proof the ordinary claim path never ran.
+        expect(await runRow(fixture.job.runId)).toMatchObject({ status: "queued" });
+        expect(await db.$client`
+          SELECT count(*)::int AS count FROM usage_run_admissions
+           WHERE run_id = ${fixture.job.runId}`).toEqual([{ count: 0 }]);
       });
     });
 

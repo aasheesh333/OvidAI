@@ -6,6 +6,7 @@ import {
   AttachmentFinalizeError,
   attachmentDeclarationMismatch,
   attachments,
+  claimTurn,
   cleanupStorageObject,
   createStorageQuotaRepos,
   createPrivateMemoryStore,
@@ -14,6 +15,7 @@ import {
   messages,
   projectsRepo,
   QuotaContractError,
+  RunQuotaService,
   runUsage,
   runs,
   sessions,
@@ -21,10 +23,13 @@ import {
   type AttachmentRow,
   type Db,
   type InheritedModelContext,
+  type QuotaAdmission,
   type QuotaBillingClass,
+  type RunSource,
 } from "@ovid/db";
 import type { EventLog } from "@ovid/events";
 import { withRunCompletionNotification } from "./runCompletionNotifications.js";
+import { createFinalDelivery, type FinalDelivery } from "./runFinalDelivery.js";
 import type { AgentRunJob } from "@ovid/queue";
 import {
   RootfsUnavailable,
@@ -43,6 +48,7 @@ import {
 } from "./modelCapabilities.js";
 import {
   sanitizeAttachmentName,
+  type ByokDefault,
   type KeyResolver,
   type PrivateMemoryStore,
   type SessionEvent,
@@ -118,6 +124,7 @@ import {
 import { createRedisApprovalBridge } from "./approvalBridge.js";
 import { agentKeyFor } from "./keyResolver.js";
 import { loadRunAccountContext, runKeyAdapter } from "./runAccount.js";
+import { claimCollabRun, type CollabRunExecution } from "./collabRun.js";
 import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   TerminalModelError,
@@ -413,6 +420,12 @@ export interface RunDeps {
   transport: ModelTransport;
   /** Canonical per-call reservations; absent preserves the legacy no-quota path. */
   quota?: ModelCallQuota;
+  /**
+   * R2 canonical run admission. Optional only so legacy P1/P2 compositions
+   * stay source-compatible; when a job carries the R2 producer contract
+   * (`source`), admission defaults to the canonical service on `db`.
+   */
+  admission?: Pick<RunQuotaService, "admitRun">;
   litellmBaseUrl: string;
   defaultModel: string;
   /**
@@ -428,11 +441,16 @@ export interface RunDeps {
       code: string;
       message: string;
     }): Promise<void>;
+    /**
+     * Completion push. The reported outcome drives the run-delivery outbox:
+     * "delivered" confirms it, "retry" keeps the intent pending. A void
+     * return is the legacy best-effort contract (claim row decides).
+     */
     notifyAgentFinished?(a: {
       userId: string;
       runId: string;
       sessionId: string;
-    }): Promise<void>;
+    }): Promise<"delivered" | "retry" | void>;
   };
   /**
    * The model catalog, read once per run only when the run carries images
@@ -522,11 +540,16 @@ export interface FullRunDeps {
       code: string;
       message: string;
     }): Promise<void>;
+    /**
+     * Completion push. The reported outcome drives the run-delivery outbox:
+     * "delivered" confirms it, "retry" keeps the intent pending. A void
+     * return is the legacy best-effort contract (claim row decides).
+     */
     notifyAgentFinished?(a: {
       userId: string;
       runId: string;
       sessionId: string;
-    }): Promise<void>;
+    }): Promise<"delivered" | "retry" | void>;
   };
   /**
    * The model catalog, read once per run only when the run carries images
@@ -538,6 +561,12 @@ export interface FullRunDeps {
   keys: KeyResolver;
   /** Canonical per-call reservations and exact settlement; absent keeps legacy recording. */
   quota?: ModelCallQuota;
+  /**
+   * R2 canonical run admission (see RunDeps.admission). Absent → the
+   * canonical service on this same DB, so production has ONE quota authority
+   * without sharing an instance with the scheduler.
+   */
+  admission?: Pick<RunQuotaService, "admitRun">;
   redisQ: Redis;
   sandbox: SandboxPort;
   github: GitHubApiPort | null;
@@ -671,6 +700,87 @@ type CurrentModelRunContext = {
 };
 
 const DEFAULT_RESERVATION_OUTPUT_TOKENS = 8_192;
+
+// ---------------------------------------------------------------------------
+// R2 root identity + admission. One shared definition for every worker-side
+// recheck so the actor/source/billing class can never drift from the
+// producer's.
+// ---------------------------------------------------------------------------
+
+/**
+ * The run's initiating actor: the captured `actorUserId`, then the captured
+ * snapshot's actor, then the legacy workspace owner (`userId`).
+ */
+export function runActor(
+  job: Pick<AgentRunJob, "actorUserId" | "modelContext" | "userId">,
+): string {
+  return job.actorUserId ?? job.modelContext?.actorUserId ?? job.userId;
+}
+
+/**
+ * The run's canonical quota source. An explicit `source` always wins; only
+ * payloads that predate it fall back (a scheduler-fired job → `schedule_tick`,
+ * anything else → `interactive`).
+ */
+export function resolveRunSource(
+  job: Pick<AgentRunJob, "source" | "schedule">,
+): RunSource {
+  if (job.source !== undefined) return job.source;
+  return job.schedule !== undefined ? "schedule_tick" : "interactive";
+}
+
+/**
+ * Only an EXACT BYOK identity bypasses Ovid's allowance (while still recording
+ * telemetry). A present snapshot is authoritative — including an explicit null
+ * key, which means Ovid; only an absent snapshot consults the legacy job key
+ * and the actor's account default.
+ */
+export function runBillingClass(
+  job: Pick<AgentRunJob, "modelContext" | "byokKeyId">,
+  byokDefault: ByokDefault | null,
+): QuotaBillingClass {
+  const byokKeyId =
+    job.modelContext !== undefined
+      ? job.modelContext.byokKeyId
+      : (job.byokKeyId ?? byokDefault?.keyId ?? null);
+  return byokKeyId === null ? "ovid_allowance" : "byok";
+}
+
+/** The one canonical admission call: idempotency key exactly `run:${runId}:${source}`. */
+export function admitAgentRun(
+  quota: Pick<RunQuotaService, "admitRun">,
+  input: {
+    actorUserId: string;
+    source: RunSource;
+    runId: string;
+    billingClass: QuotaBillingClass;
+  },
+): Promise<QuotaAdmission> {
+  return quota.admitRun({
+    actorUserId: input.actorUserId,
+    source: input.source,
+    runId: input.runId,
+    idempotencyKey: `run:${input.runId}:${input.source}`,
+    billingClass: input.billingClass,
+  });
+}
+
+/** Truthful refusal event payload + terminal run state for an Ovid denial. */
+async function refuseRunForQuota(o: {
+  db: Db;
+  emit: (type: SessionEventType, payload: Record<string, unknown>) => Promise<unknown>;
+  runId: string;
+  verdict: Extract<QuotaAdmission, { ok: false }>;
+}): Promise<void> {
+  const window = o.verdict.window === "day" ? "daily" : "monthly";
+  await o.emit("run_failed", {
+    code: "quota_exceeded",
+    message: `Your plan's ${window} token allowance is exhausted.`,
+    window: o.verdict.window,
+    resetsAt: o.verdict.resetsAt.toISOString(),
+  });
+  await runs.finish(o.db, o.runId, "failed", "quota_exceeded");
+}
 
 function canonicalReservationValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalReservationValue);
@@ -1203,7 +1313,7 @@ export function createAgentRunProcessor(
 
   return async (job) => {
     const { runId, sessionId, userId } = job.data;
-    const actorUserId = job.data.actorUserId ?? userId;
+    const actorUserId = runActor(job.data);
     // P9 Task 9: per-run resolution context. A scheduler-fired job is
     // unattended even when the payload predates the explicit flag.
     const runKeyCtx = {
@@ -1225,6 +1335,14 @@ export function createAgentRunProcessor(
       await eventMirror.put(deps.db, event);
       return event;
     };
+
+    // Crash-safe final delivery for THIS run. The outbox owns the assistant
+    // row + both terminal events + the completion push, so the wrapper above
+    // never sees this run's `run_completed` (no second notification path).
+    const finalDelivery = createFinalDelivery(
+      { db: deps.db, events: deps.events, ...(deps.notifier !== undefined ? { notifier: deps.notifier } : {}) },
+      { userId, scheduled: job.data.schedule !== undefined },
+    );
 
     /**
      * P8 Task 1 cooperative-cancel terminalization (v0 path): the EXISTING
@@ -1277,8 +1395,28 @@ export function createAgentRunProcessor(
 
     // Race-safe claim: exactly one concurrent delivery flips queued → running.
     // false = duplicate/stale delivery (or already-finished run) → silent no-op.
-    const claimed = await runs.claimNext(deps.db, runId);
-    if (!claimed) return;
+    // claimTurn is the ordered/fenced form of the same transition: it refuses
+    // to execute a successor ahead of an older accepted turn, never runs a
+    // turn carrying a durable Stop flag, and fails closed on ambiguous rows.
+    const claim = await claimTurn(deps.db, { sessionId, runId });
+    if (claim.kind === "cancelled") {
+      await emit("run_failed", { code: "cancelled", message: CANCELLED_MESSAGE });
+      await runs.finish(deps.db, runId, "cancelled", CANCELLED_MESSAGE);
+      return;
+    }
+    if (claim.kind !== "claimed") {
+      // Observability only — the refusal still fails closed. An `ambiguous`
+      // verdict is a deliberate refusal (the queue inverted), but without
+      // this line the run dies later as `run_queue_wait_timeout` with no
+      // trace of the real cause, indistinguishable from a stuck queue.
+      console.warn("[runProcessor] turn claim not granted", {
+        runId,
+        sessionId,
+        verdict: claim.kind,
+        ...(claim.kind === "ambiguous" ? { reason: claim.reason } : {}),
+      });
+      return;
+    }
 
     // ---- P7 Task 11: activity + workspace hydration ----------------------
     // Bump on claim (the workspace is about to be touched), then ensure the
@@ -1304,6 +1442,27 @@ export function createAgentRunProcessor(
     }
 
     try {
+
+    // ---- R2: the compat recheck (see RunDeps.admission) -------------------
+    // The compat processor is a legacy harness seam, not the run-now
+    // authority: P1/P2 compositions carry neither `source` nor an injected
+    // authority, and must keep their exact landed contract. As soon as the
+    // producer contract IS present (`source`) or an authority is injected,
+    // admission runs here too — before key resolution and provider entry —
+    // under the same shared actor/source/billing definition.
+    if (deps.admission !== undefined || job.data.source !== undefined) {
+      const admissionQuota = deps.admission ?? new RunQuotaService(deps.db);
+      const admitted = await admitAgentRun(admissionQuota, {
+        actorUserId,
+        source: resolveRunSource(job.data),
+        runId,
+        billingClass: runBillingClass(job.data, null),
+      });
+      if (!admitted.ok) {
+        await refuseRunForQuota({ db: deps.db, emit, runId, verdict: admitted });
+        return;
+      }
+    }
 
     const resolvedKey = await deps.keys.resolveForRun(actorUserId, runKeyCtx);
     if (resolvedKey === null) {
@@ -1387,6 +1546,7 @@ export function createAgentRunProcessor(
         cancelCheckIntervalMs,
         emit,
         terminalizeCancelled,
+        finalDelivery,
       });
       return;
     }
@@ -1586,6 +1746,7 @@ export function createAgentRunProcessor(
       spillToolResults: false,
       allowUnrosteredTools: true,
       ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
+      finalDelivery,
     });
 
     await engine.run({
@@ -1627,6 +1788,8 @@ export function createAgentRunProcessor(
     cancelCheckIntervalMs: number;
     emit(type: SessionEventType, payload: Record<string, unknown>): Promise<SessionEvent>;
     terminalizeCancelled(): Promise<void>;
+    /** Crash-safe final delivery; absent → the inline finalize below. */
+    finalDelivery?: FinalDelivery;
   }): Promise<void> {
     const { runId, sessionId } = o;
     await o.emit("run_started", { runId });
@@ -1699,8 +1862,18 @@ export function createAgentRunProcessor(
 
         const content = deltas.join("");
 
-        // v0 completion path (unchanged): persist the assistant text,
-        // message_completed, run_completed.
+        // v0 completion path: persist the assistant text, message_completed,
+        // run_completed. With the crash-safe delivery composed, that whole
+        // sequence (including the durable intent) is the outbox's job.
+        if (o.finalDelivery !== undefined) {
+          await o.finalDelivery.deliverForRun({
+            runId,
+            sessionId,
+            content,
+            completionPayload: { runId },
+          });
+          return;
+        }
         const assistant = await messages.append(deps.db, {
           sessionId,
           role: "assistant",
@@ -2014,15 +2187,44 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     };
   }): Promise<void> => {
     const { runId, sessionId, userId } = job.data;
+
+    // ---- R2: Collab claim FIRST (a fenced claim never falls through) ------
+    // An accepted Collab job carries its own durable lineage. The claim is the
+    // execution-time fence: a stale/revoked delivery must terminate here and
+    // must NOT be re-read as an ordinary queued root run (which would run the
+    // host's session under the wrong authority). Non-Collab jobs skip this
+    // entirely and keep the committed claimTurn path below.
+    let collabExecution: CollabRunExecution | undefined;
+    if (job.data.source === "collab" || job.data.collab !== undefined) {
+      const claim = await claimCollabRun(deps.db, job.data);
+      if (claim.kind !== "claimed") {
+        // Fenced: the durable rows are authoritative and were already
+        // terminalized by their owner. No event, no provider call, no
+        // fallthrough to claimTurn.
+        return;
+      }
+      collabExecution = claim.execution;
+    }
+
     // The initiating actor owns model account state, credentials and usage;
     // userId remains the workspace/storage owner when those identities differ.
-    const actorUserId = job.data.actorUserId ?? userId;
+    // A Collab run's actor comes from its accepted snapshot, never the job's
+    // legacy fields.
+    const actorUserId = collabExecution?.actorUserId ?? runActor(job.data);
+    const runSource = resolveRunSource(job.data);
     const runEvents = withRunCompletionNotification(deps.events, deps.notifier, {
       runId,
       sessionId,
       userId,
       scheduled: job.data.schedule !== undefined,
     });
+    // Crash-safe final delivery for THIS root run (see runFinalDelivery.ts).
+    // The outbox appends the terminal events itself, so the wrapper above never
+    // observes this run's `run_completed` and there is exactly one notifier.
+    const finalDelivery = createFinalDelivery(
+      { db: deps.db, events: deps.events, ...(deps.notifier !== undefined ? { notifier: deps.notifier } : {}) },
+      { userId, scheduled: job.data.schedule !== undefined },
+    );
     // P9 Task 9: the per-run resolution context and the agent-core adapter.
     // Both the engine and the auxiliary model calls (hooks/compaction) ride
     // the SAME resolved key for this run.
@@ -2030,21 +2232,46 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     // read once per run. A BYOK default routes every model call of this run
     // to the user's own key (not metered on the Ovid allowance).
     const account = await loadRunAccountContext(deps.db, actorUserId);
-    const rootKeys = runKeyAdapter({
-      resolver: deps.keys,
-      ctx: {
-        unattended: job.data.unattended ?? job.data.schedule !== undefined,
-        byokKeyId: job.data.byokKeyId ?? null,
-      },
-      byokDefault: account.byokDefault,
-      ...(job.data.byokModel !== undefined ? { byokModel: job.data.byokModel } : {}),
-      defaultModel: deps.defaultModel,
-    });
-    // R1b binds usage to the queue's current initiating actor. Root queued /
-    // Collab model-snapshot precedence and stable admission remain R2 scope;
-    // an absent snapshot keeps the committed root key/model rebuild unchanged.
+    // ---- R2: the ONE root model-context selection -------------------------
+    // Precedence is object PRESENCE, not field truthiness:
+    //   accepted Collab snapshot → queued root snapshot → legacy rebuild.
+    // An explicit `requestedModel: null` inside a present object means Auto;
+    // only ABSENCE falls through to undefined, where the engine rebuilds from
+    // the session/account state it already reads (the committed legacy path,
+    // unchanged — model pin, custom preset model and temperature included).
+    const rootModelContext: InheritedModelContext | undefined =
+      collabExecution?.modelContext ?? job.data.modelContext;
+    const rootKeys = collabExecution !== undefined
+      ? runKeyAdapter({
+          resolver: deps.keys,
+          ctx: collabExecution.keySelection.ctx,
+          byokDefault: collabExecution.keySelection.byokDefault,
+          ...(collabExecution.keySelection.byokModel !== undefined
+            ? { byokModel: collabExecution.keySelection.byokModel }
+            : {}),
+          defaultModel: deps.defaultModel,
+          modelContext: collabExecution.keySelection.modelContext,
+        })
+      : runKeyAdapter({
+          resolver: deps.keys,
+          ctx: {
+            unattended: job.data.unattended ?? job.data.schedule !== undefined,
+            byokKeyId: job.data.byokKeyId ?? null,
+          },
+          byokDefault: account.byokDefault,
+          ...(job.data.byokModel !== undefined ? { byokModel: job.data.byokModel } : {}),
+          defaultModel: deps.defaultModel,
+          // A present queued snapshot freezes model selection and billing
+          // identity; an absent one keeps the committed legacy rebuild.
+          ...(job.data.modelContext !== undefined
+            ? { modelContext: job.data.modelContext }
+            : {}),
+        });
+    // Billing class follows the SAME captured identity the keys resolve from:
+    // an exact BYOK key bypasses Ovid's allowance (telemetry only), anything
+    // else — including an explicit null key — bills Ovid.
     const rootBillingClass: QuotaBillingClass =
-      rootKeys.ctx.byokKeyId === null ? "ovid_allowance" : "byok";
+      collabExecution?.billingClass ?? runBillingClass(job.data, account.byokDefault);
     const rootIdentity: CurrentModelRunContext["identity"] = {
       userId: actorUserId,
       sessionId,
@@ -2054,6 +2281,10 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     const rootContext: CurrentModelRunContext = {
       identity: rootIdentity,
       keys: rootKeys,
+      // The ONE selected root snapshot: the engine's
+      // `modelContextForCurrentRun`, the prompt-hook/compaction auxiliaries,
+      // the vision gate and usage identity all read this same object.
+      ...(rootModelContext !== undefined ? { modelContext: rootModelContext } : {}),
       ...(job.data.provenance !== undefined ? { provenance: job.data.provenance } : {}),
     };
     const keys = {
@@ -2101,18 +2332,40 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     const presetFor = account.presets;
 
     // ---- C1: the identical single-active-run-per-session contract --------
-    const turn = await waitForSessionTurn({
-      db: deps.db,
-      sessionId,
-      runId,
-      runQueueWaitMs: deps.runQueueWaitMs ?? DEFAULT_RUN_QUEUE_WAIT_MS,
-      sleep,
-      emit: (type, payload) => sinkFor(sessionId).emit(type, payload),
-    });
-    if (!turn) return;
+    // A Collab run was already claimed by the execution-time fence above (it
+    // holds the sender key/host/room/lease locks and flipped the run to
+    // running). Re-claiming here would see `already_running` and silently drop
+    // an accepted turn, so the C1 wait/claim applies to non-Collab jobs only.
+    if (collabExecution === undefined) {
+      const turn = await waitForSessionTurn({
+        db: deps.db,
+        sessionId,
+        runId,
+        runQueueWaitMs: deps.runQueueWaitMs ?? DEFAULT_RUN_QUEUE_WAIT_MS,
+        sleep,
+        emit: (type, payload) => sinkFor(sessionId).emit(type, payload),
+      });
+      if (!turn) return;
 
-    const claimed = await runs.claimNext(deps.db, runId);
-    if (!claimed) return;
+      const claim = await claimTurn(deps.db, { sessionId, runId });
+      if (claim.kind === "cancelled") {
+        const sink = sinkFor(sessionId);
+        await sink.emit("run_failed", { code: "cancelled", message: CANCELLED_MESSAGE });
+        await runs.finish(deps.db, runId, "cancelled", CANCELLED_MESSAGE);
+        return;
+      }
+      if (claim.kind !== "claimed") {
+        // Same observability contract as the compat path above: log the
+        // verdict, never change the fail-closed control flow.
+        console.warn("[runProcessor] turn claim not granted", {
+          runId,
+          sessionId,
+          verdict: claim.kind,
+          ...(claim.kind === "ambiguous" ? { reason: claim.reason } : {}),
+        });
+        return;
+      }
+    }
 
     // ---- P7 Task 11: activity + workspace hydration ----------------------
     // Identical contract to the compat path: bump on claim, hydrate before
@@ -2141,6 +2394,30 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     }
 
     try {
+
+    // ---- R2: canonical admission BEFORE key resolution/provider entry -----
+    // The producer already admitted this run under `run:${runId}:${source}`
+    // with the same actor/source/billing class, so this is normally an
+    // idempotent replay. It is still the load-bearing worker-side recheck: a
+    // job that never passed the producer gate (or a tampered/legacy payload)
+    // must be refused here, before any credential is resolved and before any
+    // provider call. A refusal finalizes the run truthfully as quota_exceeded.
+    const admissionQuota = deps.admission ?? new RunQuotaService(deps.db);
+    const admitted = await admitAgentRun(admissionQuota, {
+      actorUserId,
+      source: runSource,
+      runId,
+      billingClass: rootBillingClass,
+    });
+    if (!admitted.ok) {
+      await refuseRunForQuota({
+        db: deps.db,
+        emit: (type, payload) => sinkFor(sessionId).emit(type, payload),
+        runId,
+        verdict: admitted,
+      });
+      return;
+    }
 
     // Review I2: the user's tier drives the sandbox quota project on the
     // full path exactly as it did on the compat path. Raw DB tier text:
@@ -2252,20 +2529,16 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       const imageRows = rows.filter((r) => imageMimeTypeFor(r.name) !== null);
       if (imageRows.length > 0) {
         // The effective model mirrors the engine's own `routeFor`
-        // (loop.ts → routing.ts resolveRoute): the session PRESET's G3 model
-        // pin outranks the /model pin, the effort suffix is stripped, and an
-        // absent/AUTO alias falls back to the fleet default exactly like
-        // `agentKeyFor`. Gating on `modelPin ?? defaultModel` alone would
-        // mis-gate a preset-driven session — the route the engine actually
-        // takes can come from the preset, and the audit's latent gap was
-        // exactly that divergence between the predicted and the routed model.
-        // (Today every built-in preset pins model:null, so in practice the
-        // /model pin decides — but the mirror keeps the gate honest the day
-        // a preset carries a model.)
-        const preset = presetFor(sessionState.presetId);
+        // (loop.ts → routing.ts resolveRoute). With a captured root snapshot
+        // that snapshot IS the route input (explicit null = Auto); otherwise
+        // the session PRESET's G3 model pin outranks the /model pin. Either
+        // way the effort suffix is stripped and an absent/AUTO alias falls
+        // back to the fleet default exactly like `agentKeyFor`.
+        const preset = rootModelContext === undefined ? presetFor(sessionState.presetId) : null;
         const presetModel = preset === null ? null : preset.model;
-        const winnerRaw =
-          presetModel != null && presetModel.trim() !== ""
+        const winnerRaw = rootModelContext !== undefined
+          ? (rootModelContext.byokModel ?? rootModelContext.requestedModel ?? "")
+          : presetModel != null && presetModel.trim() !== ""
             ? presetModel
             : (sessionState.modelPin ?? "");
         const { model: requested } = parseModelEffort(winnerRaw);
@@ -2638,17 +2911,19 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       deps.images === undefined
         ? undefined
         : async () => {
-            // Mirror the engine's own route (loop.ts → resolveRoute): the
-            // preset's G3 model pin outranks /model, the effort suffix is
-            // stripped, and an absent/AUTO alias falls back to the fleet
+            // Mirror the engine's own route (loop.ts → resolveRoute): a
+            // captured root snapshot is the route input, otherwise the
+            // preset's G3 model pin outranks /model; the effort suffix is
+            // stripped and an absent/AUTO alias falls back to the fleet
             // default. The SAME resolution the attachment guard uses.
-            const current = await state.get(sessionId);
-            const preset = presetFor(current.presetId);
+            const current = rootModelContext === undefined ? await state.get(sessionId) : null;
+            const preset = current === null ? null : presetFor(current.presetId);
             const presetModel = preset === null ? null : preset.model;
-            const winnerRaw =
-              presetModel != null && presetModel.trim() !== ""
+            const winnerRaw = rootModelContext !== undefined
+              ? (rootModelContext.byokModel ?? rootModelContext.requestedModel ?? "")
+              : presetModel != null && presetModel.trim() !== ""
                 ? presetModel
-                : (current.modelPin ?? "");
+                : (current!.modelPin ?? "");
             const { model: requested } = parseModelEffort(winnerRaw);
             const model =
               requested === "" || (AUTO_ALIASES as readonly string[]).includes(requested)
@@ -2721,20 +2996,17 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     const prePass = await commandPrePass(commandRunner, sessionId, prompt);
     if (prePass.kind === "finish") {
       // The feedback IS the turn's output: persist it, complete the run, and
-      // never call the model (Dart's composer-command contract).
+      // never call the model (Dart's composer-command contract). The outbox
+      // owns the assistant row + both terminal events, exactly like a model
+      // turn's finalize, so a crash here is recoverable too.
       const sink = sinkFor(sessionId, runEvents);
       await sink.emit("run_started", { runId });
-      const assistant = await messages.append(deps.db, {
+      await finalDelivery.deliverForRun({
+        runId,
         sessionId,
-        role: "assistant",
         content: prePass.feedback,
+        completionPayload: { runId },
       });
-      await sink.emit("message_completed", {
-        messageId: assistant.id,
-        content: prePass.feedback,
-      });
-      await sink.emit("run_completed", { runId });
-      await runs.finish(deps.db, runId, "completed");
       return;
     }
     if (prePass.kind === "rewrite") prompt = prePass.prompt;
@@ -2777,6 +3049,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       modelContextForCurrentRun: () => modelRunContext.getStore()?.modelContext,
       runProvenanceForCurrentRun: () => modelRunContext.getStore()?.provenance,
       ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
+      finalDelivery,
     });
     // Late-bound seams for the subagent tools (see their construction above).
     engineRef = engine;

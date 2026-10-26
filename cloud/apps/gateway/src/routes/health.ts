@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { ServiceCheckState, ServiceStatusDto } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
+import type { GatewayOperationalHealthChecks } from "../observabilityComposition.js";
 
 // GET /cloud/v1/health — the ONLY unauthenticated route. Liveness view for
 // orchestrators: 200 when every check passes, 503 when any degrades.
@@ -35,6 +36,10 @@ async function probe(work: () => Promise<unknown>, timeoutMs = CHECK_TIMEOUT_MS)
 export interface HealthChecks {
   db: boolean;
   redisQ: boolean;
+  anomaly: boolean;
+  mail: boolean;
+  reservation: boolean;
+  notification: boolean;
 }
 
 export interface HealthResponse {
@@ -44,10 +49,10 @@ export interface HealthResponse {
 
 export function registerHealthRoutes(
   app: FastifyInstance,
-  deps: Pick<GatewayDeps, "db" | "queues" | "modelCatalog">,
+  deps: Pick<GatewayDeps, "db" | "queues" | "modelCatalog" | "observability">,
 ): void {
   app.get("/health", async (_request, reply): Promise<HealthResponse> => {
-    const [db, redisQ] = await Promise.all([
+    const [db, redisQ, operational] = await Promise.all([
       probe(() => deps.db.$client.unsafe("SELECT 1")),
       probe(async () => {
         // QueueBase exposes the underlying (ioredis) client; ping proves the
@@ -55,10 +60,21 @@ export function registerHealthRoutes(
         const client = await deps.queues.agentRuns.client;
         await (client as unknown as { ping(): Promise<unknown> }).ping();
       }),
-    ]);
+      // Operational health facts: never block the response; missing/throwing
+      // probes report false (degraded) rather than unknown.
+      deps.observability?.healthChecks().catch(() => ({})) ?? {},
+    ]) as [boolean, boolean, GatewayOperationalHealthChecks];
+    const checks: HealthChecks = {
+      db,
+      redisQ,
+      anomaly: operational.anomaly ?? false,
+      mail: operational.mail ?? false,
+      reservation: operational.reservation ?? false,
+      notification: operational.notification ?? false,
+    };
     const ok = db && redisQ;
     reply.code(ok ? 200 : 503);
-    return { status: ok ? "ok" : "degraded", checks: { db, redisQ } };
+    return { status: ok ? "ok" : "degraded", checks };
   });
 
   // Wave 4 (SE-014): GET /cloud/v1/health/status — the app's Service status

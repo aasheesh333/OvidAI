@@ -91,13 +91,22 @@ export function createGatewayObservabilityComposition(
       registry.record(validated);
       // `validated` is already a fresh closed-field object. The registry keeps
       // its own defensive copies, so exporter mutation cannot alter snapshots.
-      deps.exporter.metric(validated);
+      try {
+        deps.exporter.metric(validated);
+      } catch {
+        // Degrade: a broken sink must never break a request. The registry
+        // already holds the validated sample; the caller gets no error.
+      }
     },
     sanitizeLog: safeLogRecord,
     emitLog(record) {
       // createGatewayObservability calls safeLogRecord before this sink. Its
       // result is a fresh closed-field object, including copied correlation IDs.
-      deps.exporter.log(record);
+      try {
+        deps.exporter.log(record);
+      } catch {
+        // Degrade: a broken log sink must never break a request.
+      }
     },
   });
 

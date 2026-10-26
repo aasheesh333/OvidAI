@@ -46,6 +46,7 @@ import { registerMcpServerRoutes, type ConnectionHealthAdapter } from "./routes/
 import { registerMessageRoutes } from "./routes/messages.js";
 import { registerModelRoutes } from "./routes/models.js";
 import { registerPlanRoutes } from "./routes/plans.js";
+import { registerBillingEntitlementRoutes } from "./routes/billingEntitlement.js";
 import { registerSearchRoutes } from "./routes/search.js";
 import { registerAccountHealthRoutes } from "./routes/accountHealth.js";
 import { registerDataControlRoutes } from "./routes/dataControl.js";
@@ -77,6 +78,7 @@ import type { SystemHub } from "./systemChannel.js";
 import type { IpAnomalyGuard } from "./ipAnomalyGuard.js";
 import { registerCollabRoutes } from "./collab/routes.js";
 import type { CollabMembership } from "./collab/membership.js";
+import type { createGatewayObservabilityComposition } from "./observabilityComposition.js";
 import type { CollabProjection } from "./collab/projection.js";
 import type { CollabLongPollOptions } from "./collab/longPoll.js";
 import {
@@ -329,6 +331,12 @@ export interface GatewayDeps {
    * main() wires it when OVID_ACCOUNT_FIREBASE_APP_IDS is configured.
    */
   account?: AccountRouteDeps;
+  /**
+   * Task 11: composed observability boundary (metric registry, structured
+   * log sink, and operational health probes). OPTIONAL so test compositions
+   * stay source-compatible; main() always wires the real one.
+   */
+  observability?: ReturnType<typeof createGatewayObservabilityComposition>;
   /** Root /chat stays unmounted unless the complete opt-in composition exists. */
   collab?: {
     membership: CollabMembership;
@@ -363,11 +371,83 @@ const SECRET_REQUEST_LOG_FIELDS = new Set([
   "x-ovid-internal-token",
 ]);
 
+/**
+ * Query parameters whose VALUE is a credential. OAuth `code`/`state`, a
+ * preview `ticket`, a signed-URL signature and any token/key are bearer
+ * material: the request URL reaches the access log, so the value must not.
+ */
+const SECRET_QUERY_PARAM =
+  /^(?:code|state|ticket|token|access_token|refresh_token|id_token|key|api[_-]?key|apikey|secret|client_secret|signature|sig|password|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential)$/i;
+
+/**
+ * Path shapes whose segment IS the credential: a public share receipt and the
+ * per-share invite are unauthenticated bearer links (`/s/<token>`), and the
+ * authenticated share management routes carry the same token.
+ */
+const SECRET_PATH =
+  /^(\/(?:s|shares)\/)([^/?#]+)(.*)$/;
+
 /** Keep path/method telemetry while dropping every query on the isolated origin. */
 export function sanitizeStudioPreviewRequestLogUrl(rawUrl: string): string {
   if (!isStudioPreviewOriginPath(rawUrl)) return rawUrl;
   const path = rawUrl.split("?", 1)[0]!;
   return rawUrl.includes("?") ? `${path}?[redacted]` : path;
+}
+
+/**
+ * A query value that is itself a URL or a credential must not be logged, even
+ * under an innocuous parameter name.
+ */
+const CREDENTIAL_VALUE_SHAPE =
+  /(?:^|%3A)(?:https?(?::|\/|%3A%2F%2F)|\/\/)|X-Amz-Signature|X-Goog-Signature|Bearer\s|\beyJ|\bgh[pousr]_|\bgithub_pat_|\bsk-/i;
+
+function looksLikeCredentialValue(raw: string): boolean {
+  if (raw === "") return false;
+  let decoded = raw;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    // Compare the raw form too; a malformed escape is still not telemetry.
+  }
+  return CREDENTIAL_VALUE_SHAPE.test(decoded) || CREDENTIAL_VALUE_SHAPE.test(raw);
+}
+
+/**
+ * The request URL that may reach the access log. The preview origin loses its
+ * whole query; every other route keeps its path (safe telemetry) while the
+ * value of each credential-bearing query parameter and each share token path
+ * segment is replaced with `[redacted]`.
+ */
+export function sanitizeRequestLogUrl(rawUrl: string): string {
+  if (isStudioPreviewOriginPath(rawUrl)) return sanitizeStudioPreviewRequestLogUrl(rawUrl);
+  const queryAt = rawUrl.indexOf("?");
+  const rawPath = queryAt === -1 ? rawUrl : rawUrl.slice(0, queryAt);
+  const query = queryAt === -1 ? "" : rawUrl.slice(queryAt + 1);
+
+  const secretPath = SECRET_PATH.exec(rawPath);
+  const path = secretPath === null
+    ? rawPath
+    : `${secretPath[1]}[redacted]${secretPath[3]}`;
+
+  if (query === "") return path;
+  const redacted = query.split("&").map((pair) => {
+    const eq = pair.indexOf("=");
+    if (eq === -1) return pair;
+    const name = pair.slice(0, eq);
+    let decoded = name;
+    try {
+      decoded = decodeURIComponent(name);
+    } catch {
+      // Malformed percent-encoding still names a parameter; compare raw too.
+    }
+    return SECRET_QUERY_PARAM.test(decoded) || SECRET_QUERY_PARAM.test(name) ||
+      // A parameter whose VALUE is itself an absolute URL or a credential
+      // shape is bearer material regardless of its name (`url=`, `target=`).
+      looksLikeCredentialValue(decoded) || looksLikeCredentialValue(pair.slice(eq + 1))
+      ? `${name}=[redacted]`
+      : pair;
+  });
+  return `${path}?${redacted.join("&")}`;
 }
 
 /** Merge rather than replace caller logger/stream/serializer options. */
@@ -394,7 +474,7 @@ function studioPreviewLogger(logger: GatewayLogger): GatewayLogger {
     if (isStudioPreviewOriginPath(request.url)) {
       serialized.url = sanitizeStudioPreviewRequestLogUrl(request.url);
     } else if (typeof serialized.url === "string") {
-      serialized.url = sanitizeStudioPreviewRequestLogUrl(serialized.url);
+      serialized.url = sanitizeRequestLogUrl(serialized.url);
     }
     return serialized;
   };
@@ -408,6 +488,13 @@ function studioPreviewLogger(logger: GatewayLogger): GatewayLogger {
 }
 
 export const API_PREFIX = "/cloud/v1";
+
+/** The two public health endpoints, with or without the API prefix. */
+export function isHealthPath(rawUrl: string): boolean {
+  const path = rawUrl.split("?", 1)[0]!.replace(/\/+$/, "");
+  return path === "/health" || path === "/health/status" ||
+    path === `${API_PREFIX}/health` || path === `${API_PREFIX}/health/status`;
+}
 
 /**
  * Capped WS frame size (I2): 256 KiB per frame. The @fastify/websocket (ws)
@@ -467,6 +554,10 @@ export function buildGateway(
       trustedProxyCidrs: deps.trustedProxyCidrs,
       clock: deps.clock,
       onDegraded: deps.onRateLimitDegraded,
+      // Health stays truthful through a limiter-store outage; it is still
+      // rate-limited whenever the store works, so this is not a bypass.
+      degradeOnStoreFailure: (request: FastifyRequest) =>
+        isHealthPath(request.raw.url ?? request.url),
     };
     if ((deps.rateLimitInternalSecret?.trim() ?? "") !== "") {
       registerRateLimitInternalRoute(app, {
@@ -555,6 +646,11 @@ export function buildGateway(
       // The plan table, so the plan screen describes what the server bills
       // instead of keeping its own copy.
       registerPlanRoutes(scope, deps);
+      // The client's entitlement read: the ONLY way a device learns which
+      // plan it currently owns. Without this registration the module exists
+      // but no request can reach it (404), so Flutter's EntitlementClient
+      // can never resolve a tier.
+      registerBillingEntitlementRoutes(scope, deps);
       // P2 surfaces. Each module owns its own routes and registers nothing
       // until the capability behind it exists — wired here once so a new
       // module never has to touch this file.

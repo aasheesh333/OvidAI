@@ -275,6 +275,27 @@ describe("GET /cloud/v1/account/health", () => {
     expect(body.usage.month.tokensRemaining).toBe(50_000_000);
   });
 
+  it("scopes the allowance arithmetic to Ovid usage, exactly like the send gate", async () => {
+    // `runUsage.totals` without a billing class counts EVERY class, so a BYOK
+    // user's own-key tokens would be subtracted from their Ovid allowance on
+    // this screen while the send route (which filters `ovid_allowance`) keeps
+    // allowing sends. The screen must ask for the same class it enforces.
+    const { queries } = await read({
+      tier: "free",
+      today: { input_tokens: 10, output_tokens: 0 },
+    });
+    const usage = queries.filter((q) => q.text.includes("FROM run_usage"));
+    expect(usage).toHaveLength(2);
+    for (const query of usage) {
+      expect(query.text).toContain("billing_class");
+      // The template binds the class twice: `$n::text IS NULL OR
+      // billing_class = $m`. A NULL `$n` is the "every class" branch, so the
+      // first bound class must be the enforced one, not null.
+      expect(query.params[3]).toBe("ovid_allowance");
+      expect(query.params[4]).toBe("ovid_allowance");
+    }
+  });
+
   it("clamps an exhausted token window to zero remaining, never negative", async () => {
     const { body } = await read({
       tier: "free",

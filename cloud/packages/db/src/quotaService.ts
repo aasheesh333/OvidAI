@@ -699,6 +699,89 @@ export class RunQuotaService {
          WHERE id = ${reservationId}`);
     });
   }
+
+  /**
+   * Holds whose owning process died before the provider call could stage any
+   * usage.
+   *
+   * `releaseModelCall` is only ever called by the recorder that took the
+   * reservation, so a crash between `reserveModelCall` and the staging commit
+   * leaves a `reserved` row nobody releases. That is not merely untidy: the
+   * actor's `reserved_tokens`/`reserved_usd` stay spent forever, so the person
+   * silently loses allowance for calls they never got. `pendingSettlements`
+   * cannot see these rows (it selects staged usage only).
+   */
+  async abandonedReservations(input: {
+    now?: Date;
+    olderThanMs?: number;
+    limit?: number;
+  } = {}): Promise<Array<{ reservationId: string; actorUserId: string; runId: string }>> {
+    const now = input.now ?? this.now();
+    const olderThanMs = input.olderThanMs ?? 3_600_000;
+    const limit = input.limit ?? 100;
+    if (!Number.isFinite(now.getTime()) || !Number.isSafeInteger(olderThanMs) || olderThanMs < 0) {
+      throw new RangeError("invalid abandoned-reservation clock/window");
+    }
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
+      throw new RangeError("abandoned-reservation limit must be 1..1000");
+    }
+    const cutoff = new Date(now.getTime() - olderThanMs).toISOString();
+    // LEFT JOIN: a reservation whose run row was deleted (session deletion
+    // cascades) can never be settled by its owner either, so it is abandoned
+    // too. `runs` carries no FK to this table, so an INNER JOIN would leak
+    // exactly those holds forever.
+    const rows = (await this.db.$client`
+      SELECT r.id, r.actor_user_id, r.run_id
+        FROM usage_quota_reservations r
+        LEFT JOIN runs rn ON rn.id = r.run_id
+       WHERE r.state = 'reserved'
+         AND r.actual_input_tokens IS NULL
+         AND r.reserved_at < ${cutoff}::timestamptz
+         AND (rn.id IS NULL OR rn.status IN ('completed', 'failed', 'cancelled'))
+       ORDER BY r.reserved_at, r.id
+       LIMIT ${limit}`) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      reservationId: String(row.id),
+      actorUserId: String(row.actor_user_id),
+      runId: String(row.run_id),
+    }));
+  }
+
+  /**
+   * Release every abandoned hold, one transaction per row.
+   *
+   * Two independent conditions gate the release, so a live call is never
+   * erased: the run is already terminal (it cannot issue another call) AND the
+   * hold is older than the sweep window (no stream can still be settling it).
+   * A settlement that lands first wins — `releaseModelCall` refuses a row with
+   * staged actuals and is idempotent otherwise — so recovery is exactly once.
+   */
+  async sweepAbandonedReservations(input: {
+    now?: Date;
+    olderThanMs?: number;
+    limit?: number;
+  } = {}): Promise<Array<{ reservationId: string; actorUserId: string; runId: string }>> {
+    const released: Array<{ reservationId: string; actorUserId: string; runId: string }> = [];
+    for (const candidate of await this.abandonedReservations(input)) {
+      try {
+        await this.releaseModelCall(candidate.reservationId);
+      } catch (error) {
+        // A settle (or an explicit release) won the race after the candidate
+        // read. Neither is a reason to stop the pass or to claim a release.
+        if (
+          error instanceof QuotaContractError &&
+          (error.code === "usage_settlement_pending" ||
+            error.code === "invalid_reservation_state" ||
+            error.code === "reservation_not_found")
+        ) {
+          continue;
+        }
+        throw error;
+      }
+      released.push(candidate);
+    }
+    return released;
+  }
 }
 
 export interface StorageReservationInput {

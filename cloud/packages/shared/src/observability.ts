@@ -21,13 +21,21 @@ export const CORRELATION_KEYS = [
 export type CorrelationKey = (typeof CORRELATION_KEYS)[number];
 export type CorrelationIds = Partial<Record<CorrelationKey, string>>;
 
+/**
+ * Credential shapes that must never be accepted as an identifier or a code,
+ * even when their characters are otherwise legal. A JWT and a GitHub token are
+ * both `[A-Za-z0-9_.-]` strings, so a shape-only allowlist is not enough.
+ */
+const SECRET_SHAPE =
+  /(?:https?:|bearer\s|\bsk-|\beyJ|\bgh[pousr]_[A-Za-z0-9]{8,}|\bgithub_pat_[A-Za-z0-9_]{8,}|\bglpat-[A-Za-z0-9_-]{8,}|\bxox[baprs]-[A-Za-z0-9-]{8,}|\bAKIA[0-9A-Z]{16}\b|\b(?:token|secret|api[_-]?key|signature)=)/i;
+
 function correlationId(value: unknown): string {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
     value.length > 128 ||
     !/^[A-Za-z0-9][A-Za-z0-9_.:@-]*$/.test(value) ||
-    /(?:https?:|bearer\s|\bsk-|\beyJ|\b(?:token|secret|api[_-]?key|signature)=)/i.test(value)
+    SECRET_SHAPE.test(value)
   ) {
     // Never include the rejected value in the error: it may be the secret.
     throw new TypeError("invalid correlation id");
@@ -145,7 +153,14 @@ export interface SafeLogRecord {
 }
 
 function operationalCode(value: unknown, label: string): string {
-  if (typeof value !== "string" || !/^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/.test(value)) {
+  // Shape alone is not enough: `eyJ…`-prefixed JWTs and `ghp_…` tokens match
+  // the code alphabet. Reject credential shapes so a caller cannot smuggle a
+  // secret through event/outcome/reason.
+  if (
+    typeof value !== "string" ||
+    !/^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/.test(value) ||
+    SECRET_SHAPE.test(value)
+  ) {
     throw new TypeError(`invalid ${label}`);
   }
   return value;
@@ -177,6 +192,8 @@ export function redactSensitiveText(text: string): string {
     .replace(/https?:\/\/[^\s<>"']+/gi, "[redacted]")
     .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+/gi, "Bearer [redacted]")
     .replace(/\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\b/g, "[redacted]")
+    // VCS / chat / cloud access keys: shape-legal but always a credential.
+    .replace(/\b(?:github_pat_[A-Za-z0-9_]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|glpat-[A-Za-z0-9_-]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|AKIA[0-9A-Z]{16})\b/g, "[redacted]")
     .replace(/\b((?:api[_-]?key|access[_-]?token|token|secret|signature|sig|key)=)[^\s&]+/gi, "$1[redacted]")
     .replace(/\b(?:sk|rk|pk)-[A-Za-z0-9_-]{4,}/g, "[redacted]");
 }

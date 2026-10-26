@@ -1,11 +1,16 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import {
+  accountSettings,
   cancelSchedule,
   createSchedule,
+  customPresets,
   runScheduleNow,
+  RunQuotaService,
+  runs,
   scheduleRuns,
   schedules,
   ScheduleError,
+  sessionState,
   updateSchedule,
   users,
   type ScheduleRow,
@@ -20,7 +25,7 @@ import {
   type ScheduleRunNowResponse,
   type SystemEvent,
 } from "@ovid/shared";
-import { AGENT_RUN_JOB_NAME } from "@ovid/queue";
+import { AGENT_RUN_JOB_NAME, type AgentRunModelContext } from "@ovid/queue";
 import type { GatewayDeps } from "../app.js";
 import {
   badRequest,
@@ -94,6 +99,69 @@ function isScheduleError(err: unknown): err is ScheduleError {
 /** Fire-and-report lifecycle event on the user's system channel. */
 async function publish(deps: GatewayDeps, uid: string, event: SystemEvent): Promise<void> {
   await deps.system.publish(uid, event);
+}
+
+/**
+ * R2 run-now model/billing snapshot. Captured ONCE per accepted occurrence and
+ * used for BOTH the canonical admission and the nested queue `modelContext`, so
+ * the worker cannot see a different actor/model/key than the one admitted.
+ *
+ * The raw pin keeps its effort suffix ("gpt-5.2 · high"); the router parses it
+ * downstream. Only custom presets carry a model/temperature pin — every
+ * built-in preset is model:null, temperature:null (agent-core presets.ts), so
+ * the client's preset list is the whole pin source the gateway needs.
+ */
+async function runNowModelContext(
+  deps: GatewayDeps,
+  uid: string,
+  sessionId: string,
+): Promise<AgentRunModelContext> {
+  const [account, state, custom] = await Promise.all([
+    accountSettings.get(deps.db, uid),
+    sessionState.get(deps.db, sessionId),
+    customPresets.list(deps.db, uid),
+  ]);
+  const preset =
+    state.presetId === null ? null : (custom.find((p) => p.id === state.presetId) ?? null);
+  const presetModel = preset?.model ?? null;
+  const sessionPin = state.modelPin ?? null;
+  const requestedModel =
+    presetModel !== null && presetModel.trim() !== ""
+      ? presetModel
+      : sessionPin !== null && sessionPin.trim() !== ""
+        ? sessionPin
+        : null;
+  return {
+    requestedModel,
+    // Non-secret identity only: the key id and its provider model, never the
+    // credential. Null means Ovid's allowance bills this run.
+    byokKeyId: account.byokDefault?.keyId ?? null,
+    ...(account.byokDefault !== null ? { byokModel: account.byokDefault.model } : {}),
+    ...(preset?.temperature != null ? { temperature: preset.temperature } : {}),
+    actorUserId: uid,
+  };
+}
+
+/**
+ * The one Ovid-refusal envelope the clients already map: 402
+ * `daily_limit_reached` plus the epoch-ms `x-ovid-resets-at` countdown (the
+ * same shape `tokenCapRefusal` in messages.ts answers with).
+ */
+function quotaRefusalReply(
+  reply: FastifyReply,
+  verdict: { window: "day" | "month"; resetsAt: Date },
+): FastifyReply {
+  const window = verdict.window === "day" ? "daily" : "monthly";
+  const response = reply.code(402);
+  response.header("x-ovid-resets-at", String(verdict.resetsAt.getTime()));
+  return response.send({
+    error: {
+      code: "daily_limit_reached",
+      message:
+        `You have used your plan's ${window} token allowance for scheduled runs. ` +
+        `It resets at ${verdict.resetsAt.toISOString()}.`,
+    },
+  });
 }
 
 export function registerScheduleRoutes(app: FastifyInstance, deps: GatewayDeps): void {
@@ -186,6 +254,31 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: GatewayDeps):
     const { schedule, runId, scheduleRun, prompt } = fired;
     const autonomy = schedule.autonomy as "safe" | "auto";
     const tier = (await users.ensure(deps.db, uid, null)).tier;
+    // One capture, two consumers: canonical admission and the nested queue
+    // snapshot below. The run-now payload deliberately carries NO top-level
+    // byokKeyId/byokModel/requestedModel duplicates — the snapshot is the only
+    // model/billing authority the worker reads.
+    const modelContext = await runNowModelContext(deps, uid, schedule.sessionId);
+    const billingClass = modelContext.byokKeyId === null ? "ovid_allowance" : "byok";
+    const quota = new RunQuotaService(
+      deps.db,
+      deps.clock === undefined ? {} : { now: deps.clock },
+    );
+    const admitted = await quota.admitRun({
+      actorUserId: uid,
+      source: "schedule_run_now",
+      runId,
+      idempotencyKey: `run:${runId}:schedule_run_now`,
+      billingClass,
+    });
+    if (!admitted.ok) {
+      // The occurrence exists but the allowance does not: terminalize both
+      // rows truthfully and answer the existing 402/reset shape. Nothing is
+      // enqueued and no start event is published.
+      await runs.finish(deps.db, runId, "failed", "quota_exceeded");
+      await scheduleRuns.finish(deps.db, scheduleRun.id, "failed", "quota_exceeded");
+      return quotaRefusalReply(reply, admitted);
+    }
     try {
       await deps.queues.agentRuns.add(
         AGENT_RUN_JOB_NAME,
@@ -197,6 +290,9 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: GatewayDeps):
           tier,
           autonomy,
           mode: autonomy === "safe" ? "safe" : "auto",
+          source: "schedule_run_now",
+          actorUserId: uid,
+          modelContext,
           schedule: { scheduleId: schedule.id, scheduleRunId: scheduleRun.id, autonomy },
         },
         { jobId: runId, priority: tier === "free" ? 2 : 1 },

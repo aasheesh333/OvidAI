@@ -186,11 +186,17 @@ export interface NotifierDeps {
 }
 
 export interface Notifier {
+  /**
+   * One completion fan-out. The outcome is REPORTED, not just logged: the
+   * run-delivery outbox marks a run delivered only on "delivered", and retries
+   * a "retry". Returning nothing (void) is the legacy best-effort contract —
+   * the outbox then falls back to the delivery-claim row.
+   */
   notifyAgentFinished(a: {
     userId: string;
     runId: string;
     sessionId: string;
-  }): Promise<void>;
+  }): Promise<"delivered" | "retry" | void>;
   notifyScheduleSucceeded(a: {
     userId: string;
     scheduleId: string;
@@ -476,10 +482,19 @@ export function createNotifier(deps: NotifierDeps): Notifier {
           runId: a.runId,
           claimant,
         });
-        if (!claimed) return;
+        if (!claimed) {
+          // Another worker owns the fan-out, or it already completed. Only a
+          // delivered claim lets this caller report success.
+          const state = await notificationDeliveryClaims.state(deps.db, {
+            userId: a.userId,
+            kind,
+            runId: a.runId,
+          });
+          return state === "delivered" ? "delivered" : "retry";
+        }
       } catch (err) {
         console.error("[notify] completion claim failed; skipping duplicate-risk fan-out", err);
-        return;
+        return "retry";
       }
       const route = chatRoute(a.sessionId);
       try {
@@ -505,7 +520,7 @@ export function createNotifier(deps: NotifierDeps): Notifier {
             runId: a.runId,
             claimant,
           });
-          return;
+          return "retry";
         }
         await notificationDeliveryClaims.delivered(deps.db, {
           userId: a.userId,
@@ -513,6 +528,7 @@ export function createNotifier(deps: NotifierDeps): Notifier {
           runId: a.runId,
           claimant,
         });
+        return "delivered";
       } catch (err) {
         // A crash or transient read failure is retryable. A delivered claim is
         // never reclaimed, so replaying the durable run cannot duplicate push.
@@ -523,6 +539,7 @@ export function createNotifier(deps: NotifierDeps): Notifier {
           claimant,
         }).catch(() => {});
         console.error("[notify] completion delivery remains pending for retry", err);
+        return "retry";
       }
     },
 

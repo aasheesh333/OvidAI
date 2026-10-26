@@ -6,15 +6,17 @@ import type {
   CompactorWithManual,
   EventSink,
 } from "@ovid/agent-core";
+import { applyCheckpoint, foldBoundaryFor } from "@ovid/agent-core";
 import {
   admitDispatches,
   createDb,
   eventMirror,
-  markSubagentActivatedForRun,
   messages,
   migrate,
   newId,
+  readExactHistory,
   runs,
+  sessionState,
   sessions,
   users,
   type CompactionActor,
@@ -39,6 +41,10 @@ import {
   type WorkerCompactionBinding,
   type WorkerCompactionResolution,
 } from "./compactionRuntime.js";
+import {
+  createCompactionContinuation,
+  recoverPendingCompactionContinuations,
+} from "./compactionContinuation.js";
 
 // UNEXECUTED under HEAVY-COMMANDS-PAUSED.md. This suite was authored before the
 // implementation as the regression source. No RED/GREEN, typecheck, migration,
@@ -190,11 +196,45 @@ const fakeDb = {
   $client: { async unsafe() { return []; } },
 } as unknown as Db;
 
+/**
+ * Pure-level continuation double. The real projection is covered by the
+ * isolated-Postgres suite; these tests only need the bound-fold gate satisfied.
+ */
+function stubContinuation(
+  calls: Array<{ checkpointId: string; actor: CompactionActor }> = [],
+): {
+  sync(input: { checkpointId: string; actor: CompactionActor }): Promise<{
+    status: "applied";
+    checkpointId: string;
+    summary: string;
+    cutoffMessageId: string;
+    compactedAtCount: number;
+  }>;
+  reconcile(): Promise<null>;
+} {
+  return {
+    async sync(input) {
+      calls.push(input);
+      return {
+        status: "applied",
+        checkpointId: input.checkpointId,
+        summary: "stub summary",
+        cutoffMessageId: "stub-cutoff",
+        compactedAtCount: 1,
+      };
+    },
+    async reconcile() {
+      return null;
+    },
+  };
+}
+
 function pureRuntime(foldCheckpoint: (input: FoldCheckpointInput) => Promise<CompactionOutcome>) {
   return createWorkerCompactionRuntime({
     db: fakeDb,
     repository: { foldCheckpoint },
     fallback: FALLBACK,
+    continuation: stubContinuation(),
   });
 }
 
@@ -452,6 +492,7 @@ describe("worker compaction runtime (UNEXECUTED pure regressions)", () => {
       db: scopedDb,
       repository: { foldCheckpoint: async (input) => folded(input, "worker") },
       fallback: FALLBACK,
+      continuation: stubContinuation(),
     });
     const compactor = runtime.wrapCompactor(legacyBase(), captureBinding(async (call) => ({
       ...resolutionFor(call),
@@ -498,6 +539,7 @@ describe("worker compaction runtime (UNEXECUTED pure regressions)", () => {
       db: scopedDb,
       repository: { foldCheckpoint: async (input) => folded(input, "worker") },
       fallback: FALLBACK,
+      continuation: stubContinuation(),
     });
     const binding: WorkerCompactionBinding = {
       ...captureBinding(async (call) => ({
@@ -719,6 +761,76 @@ describe("worker compaction runtime (UNEXECUTED pure regressions)", () => {
     })).rejects.toMatchObject({ code: "invalid_fold_outcome" });
     expect(emitted).toHaveLength(0);
   });
+
+  it("fails closed when a committed fold has no continuation synchronizer bound", async () => {
+    const emitted: Emitted[] = [];
+    const runtime = createWorkerCompactionRuntime({
+      db: fakeDb,
+      repository: { foldCheckpoint: async (input) => folded(input) },
+      fallback: FALLBACK,
+    });
+    const compactor = runtime.wrapCompactor(legacyBase(), captureBinding(
+      async (call) => resolutionFor(call),
+      emitted,
+    ));
+    // The DB cursor would advance unobserved: never return folded messages.
+    await expect(compactor.maybeCompact({
+      sessionId: "main-session",
+      messages: history(),
+      windowTokens: 1_000,
+    })).rejects.toMatchObject({ code: "continuation_unprovable" });
+    expect(emitted).toHaveLength(0);
+  });
+
+  it("projects the committed checkpoint before emitting and before returning folded history", async () => {
+    const emitted: Emitted[] = [];
+    const calls: Array<{ checkpointId: string; actor: CompactionActor }> = [];
+    const runtime = createWorkerCompactionRuntime({
+      db: fakeDb,
+      repository: { foldCheckpoint: async (input) => folded(input) },
+      fallback: FALLBACK,
+      continuation: stubContinuation(calls),
+    });
+    const compactor = runtime.wrapCompactor(legacyBase(), captureBinding(
+      async (call) => resolutionFor(call),
+      emitted,
+    ));
+    const outcome = await compactor.maybeCompact({
+      sessionId: "main-session",
+      messages: history(),
+      windowTokens: 1_000,
+    });
+    expect(outcome.compacted).toBe(true);
+    expect(calls).toEqual([{ checkpointId: "fold-checkpoint", actor: mainActor() }]);
+    expect(emitted).toHaveLength(1);
+  });
+
+  it("propagates a continuation failure instead of silently returning full history", async () => {
+    const emitted: Emitted[] = [];
+    const runtime = createWorkerCompactionRuntime({
+      db: fakeDb,
+      repository: { foldCheckpoint: async (input) => folded(input) },
+      fallback: FALLBACK,
+      continuation: {
+        async sync() {
+          throw new Error("legacy state is unavailable");
+        },
+        async reconcile() {
+          return null;
+        },
+      },
+    });
+    const compactor = runtime.wrapCompactor(legacyBase(), captureBinding(
+      async (call) => resolutionFor(call),
+      emitted,
+    ));
+    await expect(compactor.maybeCompact({
+      sessionId: "main-session",
+      messages: history(),
+      windowTokens: 1_000,
+    })).rejects.toThrow("legacy state is unavailable");
+    expect(emitted).toHaveLength(0);
+  });
 });
 
 interface RealFixture {
@@ -829,12 +941,8 @@ async function seedWorker(db: Db, label: string): Promise<RealFixture> {
     },
   }]);
   expect(admitted).toMatchObject({ admission: "admitted" });
-  await markSubagentActivatedForRun(db, {
-    attemptId: admitted!.attemptId!,
-    initialChildRunId: admitted!.childRunId!,
-    currentTurnRunId: admitted!.childRunId!,
-    activatedAt: new Date("2026-10-25T11:00:00.000Z"),
-  });
+  // admitDispatches already records the running attempt (status + startedAt);
+  // the attempt's child run remains the lineage anchor for later turns.
   await runs.finish(db, admitted!.childRunId!, "completed");
 
   const followUpPrompt = await messages.append(db, {
@@ -847,12 +955,6 @@ async function seedWorker(db: Db, label: string): Promise<RealFixture> {
     promptMessageId: followUpPrompt.id,
   });
   expect(await runs.claimNext(db, followUp.id)).toBe(true);
-  await markSubagentActivatedForRun(db, {
-    attemptId: admitted!.attemptId!,
-    initialChildRunId: admitted!.childRunId!,
-    currentTurnRunId: followUp.id,
-    activatedAt: new Date("2026-10-25T11:01:00.000Z"),
-  });
 
   return {
     userId: parent.userId,
@@ -949,6 +1051,29 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("worker compaction runtime on iso
         ORDER BY seq`;
   }
 
+  /**
+   * Rebuild the next run's request context exactly as agent-core's loop does
+   * (`loop.ts:751-772`): newest-100 durable rows, then applyCheckpoint with the
+   * durable fold boundary. This is the real context, not a compactor call.
+   */
+  async function nextRunContext(fixture: RealFixture) {
+    const { rows } = await messages.page(db, fixture.sessionId, { limit: 100 });
+    const history: AgentMessage[] = [];
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+      const row = rows[index]!;
+      if (row.role === "user" || row.role === "assistant" || row.role === "system") {
+        history.push({ role: row.role, content: row.content, id: row.id });
+      }
+    }
+    const state = await sessionState.get(db, fixture.sessionId);
+    const boundary = foldBoundaryFor(state.compaction, history);
+    return {
+      state,
+      boundary,
+      messages: applyCheckpoint(state.compaction, history, boundary),
+    };
+  }
+
   it("keeps 79% untouched, folds/replays main at 80%, dedupes diagnostics, and writes no ordinary chat row", async () => {
     const contextLimit = 100_000;
     const fixture = await seedMain(db, "main-replay");
@@ -957,7 +1082,11 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("worker compaction runtime on iso
     const before = await counts(fixture);
     let usage = 79_000;
     const emitted: Emitted[] = [];
-    const runtime = createWorkerCompactionRuntime({ db, fallback: FALLBACK });
+    const runtime = createWorkerCompactionRuntime({
+      db,
+      fallback: FALLBACK,
+      continuation: createCompactionContinuation({ db }),
+    });
     const binding = realBinding({
       fixture,
       eventSessionId: fixture.parentSessionId,
@@ -1014,7 +1143,11 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("worker compaction runtime on iso
     const window = await appendCanonicalHistory(db, fixture, "worker-manual", contextLimit);
     const input = { sessionId: fixture.sessionId, messages: window, windowTokens: 100_000, foldBoundary: 0 };
     const emitted: Emitted[] = [];
-    const runtime = createWorkerCompactionRuntime({ db, fallback: FALLBACK });
+    const runtime = createWorkerCompactionRuntime({
+      db,
+      fallback: FALLBACK,
+      continuation: createCompactionContinuation({ db }),
+    });
     const binding = realBinding({
       fixture,
       eventSessionId: fixture.parentSessionId,
@@ -1077,7 +1210,11 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("worker compaction runtime on iso
     const contextLimit = 1_000_000;
     const fixture = await seedMain(db, "model-profile");
     const window = await appendCanonicalHistory(db, fixture, "model-profile", contextLimit);
-    const runtime = createWorkerCompactionRuntime({ db, fallback: FALLBACK });
+    const runtime = createWorkerCompactionRuntime({
+      db,
+      fallback: FALLBACK,
+      continuation: createCompactionContinuation({ db }),
+    });
     const compactor = runtime.wrapCompactor(legacyBase(), realBinding({
       fixture,
       eventSessionId: fixture.parentSessionId,
@@ -1094,8 +1231,9 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("worker compaction runtime on iso
     expect(outcome.contextLimit).toBe(contextLimit);
     expectRealPostFoldBudget("provider/million", contextLimit, outcome, window);
     const [checkpoint] = await scratch.client`
-      SELECT model, context_limit AS "contextLimit", output_reserve_tokens AS "outputReserveTokens",
-        provider_reserve_tokens AS "providerReserveTokens"
+      SELECT model, context_limit::int AS "contextLimit",
+        output_reserve_tokens::int AS "outputReserveTokens",
+        provider_reserve_tokens::int AS "providerReserveTokens"
       FROM compaction_checkpoints WHERE checkpoint_id = ${outcome.checkpointId!}`;
     expect(checkpoint).toEqual({
       model: "provider/million",
@@ -1112,7 +1250,11 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("worker compaction runtime on iso
     const window = await appendCanonicalHistory(db, fixture, "lineage-denial", contextLimit);
     const before = await counts(fixture);
     const emitted: Emitted[] = [];
-    const runtime = createWorkerCompactionRuntime({ db, fallback: FALLBACK });
+    const runtime = createWorkerCompactionRuntime({
+      db,
+      fallback: FALLBACK,
+      continuation: createCompactionContinuation({ db }),
+    });
     const binding = realBinding({
       fixture,
       eventSessionId: fixture.parentSessionId,
@@ -1137,5 +1279,139 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("worker compaction runtime on iso
     expect(await counts(fixture)).toEqual(before);
     expect(emitted).toHaveLength(0);
     expect(await mirrored(fixture.parentSessionId)).toHaveLength(0);
+  });
+
+  it("resumes a fold interrupted before continuation without duplicating or losing history, and the next run consumes the compacted context", async () => {
+    const contextLimit = 100_000;
+    const fixture = await seedMain(db, "crash-resume");
+    const window = await appendCanonicalHistory(db, fixture, "crash-resume", contextLimit);
+    const input = {
+      sessionId: fixture.sessionId,
+      messages: window,
+      windowTokens: 100_000,
+      foldBoundary: 0,
+    };
+    const emitted: Emitted[] = [];
+    const binding = realBinding({
+      fixture,
+      eventSessionId: fixture.parentSessionId,
+      beforeTokens: () => 80_000,
+      emitted,
+    });
+    const before = await counts(fixture);
+
+    // 1. The fold commits, then the process dies before the legacy projection
+    //    (models a crash between the checkpoint/cursor commit and sync).
+    const crashing = createWorkerCompactionRuntime({
+      db,
+      fallback: FALLBACK,
+      continuation: {
+        async sync() {
+          throw new Error("simulated crash after fold commit");
+        },
+        async reconcile() {
+          return null;
+        },
+      },
+    });
+    await expect(crashing.wrapCompactor(legacyBase(), binding).maybeCompact(input))
+      .rejects.toThrow("simulated crash after fold commit");
+
+    const afterCrash = await counts(fixture);
+    expect(afterCrash).toEqual({ ...before, cursors: 1, checkpoints: 1 });
+    expect((await sessionState.get(db, fixture.sessionId)).compaction).toBeNull();
+    // The projection precedes the diagnostic: a crash there emits nothing.
+    expect(emitted).toHaveLength(0);
+    const [committed] = await scratch.client`
+      SELECT checkpoint_id AS "checkpointId", compaction_id AS "compactionId",
+        request_digest AS "requestDigest", cutoff_message_id AS "cutoffMessageId",
+        summary, ledger_version AS "ledgerVersion"
+      FROM compaction_checkpoints WHERE session_id = ${fixture.sessionId}`;
+    expect(committed!.requestDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(committed!.cutoffMessageId).toBe(window[REAL_FOLDED_ROWS - 1]!.id);
+
+    // 2. Recovery: the scheduler tick's bounded replay patches the projection.
+    expect(await recoverPendingCompactionContinuations({ db })).toEqual({
+      recovered: 1,
+      failed: 0,
+    });
+    // A second pass is a no-op (idempotent, no count inflation).
+    expect(await recoverPendingCompactionContinuations({ db })).toEqual({
+      recovered: 0,
+      failed: 0,
+    });
+    const projected = (await sessionState.get(db, fixture.sessionId)).compaction!;
+    expect(projected).toMatchObject({
+      ledger: null,
+      compactedAtCount: 1,
+      cutoffMessageId: window[REAL_FOLDED_ROWS - 1]!.id,
+      summary: committed!.summary,
+    });
+
+    // 3. The NEXT RUN's actual context: checkpoint row + unfolded tail.
+    const next = await nextRunContext(fixture);
+    expect(next.boundary).toBe(REAL_FOLDED_ROWS + 1);
+    expect(next.messages).toHaveLength(1 + REAL_RETAINED_ROWS);
+    expect(next.messages[0]).toMatchObject({ role: "system", volatile: false });
+    expect(next.messages[0]!.content).toContain("<compacted-summary>");
+    expect(next.messages.slice(1).map((message) => message.content))
+      .toEqual(window.slice(REAL_FOLDED_ROWS).map((message) => message.content));
+    for (const folded of window.slice(0, REAL_FOLDED_ROWS)) {
+      expect(next.messages.some((message) => message.content === folded.content)).toBe(false);
+    }
+
+    // 4. No history loss: every folded row is exactly once in exact recall and
+    //    every retained row is still a durable message.
+    const page = await readExactHistory(db, { sessionId: fixture.sessionId, limit: 100 });
+    for (const row of window.slice(0, REAL_FOLDED_ROWS)) {
+      expect(page.items.filter((item) => item.item.stableId === row.id)).toHaveLength(1);
+    }
+    const durable = await scratch.client`
+      SELECT count(*)::int AS "count" FROM messages WHERE session_id = ${fixture.sessionId}`;
+    expect(durable[0]).toEqual({ count: REAL_FOLDED_ROWS + REAL_RETAINED_ROWS + 1 });
+
+    // 5. Replaying the same canonical request returns the identical checkpoint
+    //    (durable digest replay): no new rows, no double projection, and the
+    //    skipped diagnostic is emitted exactly once.
+    const runtime = createWorkerCompactionRuntime({
+      db,
+      fallback: FALLBACK,
+      continuation: createCompactionContinuation({ db }),
+    });
+    const replay = await runtime.wrapCompactor(legacyBase(), binding).maybeCompact(input);
+    expect(replay).toMatchObject({
+      compacted: true,
+      checkpointId: committed!.checkpointId,
+      compactionId: committed!.compactionId,
+      cutoffCursor: expect.any(String),
+      continuation: "continuing_existing_task",
+    });
+    expect(replay.messages[0]!.content).toBe(next.messages[0]!.content);
+    expect(await counts(fixture)).toEqual(afterCrash);
+    const [replayed] = await scratch.client`
+      SELECT request_digest AS "requestDigest", cutoff_message_id AS "cutoffMessageId"
+      FROM compaction_checkpoints WHERE checkpoint_id = ${committed!.checkpointId}`;
+    expect(replayed).toEqual({
+      requestDigest: committed!.requestDigest,
+      cutoffMessageId: committed!.cutoffMessageId,
+    });
+    expect((await sessionState.get(db, fixture.sessionId)).compaction!.compactedAtCount).toBe(1);
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]).toMatchObject({
+      sessionId: fixture.parentSessionId,
+      type: "compaction_completed",
+    });
+    const historyRows = await scratch.client`
+      SELECT kind, count(*)::int AS "count"
+      FROM compaction_history_items WHERE session_id = ${fixture.sessionId}
+      GROUP BY kind ORDER BY kind`;
+    // Exact history records the FOLDED span only (one reference per folded
+    // row); the retained tail stays canonical and is registered at its own
+    // fold. Nothing is dropped: the four folded rows are exactly four items.
+    expect(historyRows).toEqual([
+      { kind: "checkpoint", count: 1 },
+      { kind: "compaction", count: 1 },
+      { kind: "message", count: REAL_FOLDED_ROWS },
+    ]);
   });
 });

@@ -84,6 +84,28 @@ describe("createSecretRedactor", () => {
     expect(projected.ok).toBe(true);
   });
 
+  it("keeps JSON parseable when a credential value appears inside a key", () => {
+    const redactor = createSecretRedactor();
+    // A short token is the hostile case: substring replacement in a key would
+    // produce `{"commen[REDACTED]s":[]}` and break every downstream parser.
+    const projected = redactor.json({ comments: [], id: "1" }, ["t"]);
+    const roundTripped = JSON.parse(JSON.stringify(projected)) as Record<string, unknown>;
+    // The key containing the token is replaced whole, so the document stays
+    // valid JSON instead of becoming `{"commen[REDACTED]s":[]}`.
+    expect(roundTripped.id).toBe("1");
+    expect(Object.keys(roundTripped)).toHaveLength(2);
+    expect(Object.keys(roundTripped).join(" ")).not.toContain("commen");
+  });
+
+  it("replaces a whole key that does contain the credential", () => {
+    const redactor = createSecretRedactor();
+    const projected = redactor.json({ "prefix-tenant-secret-suffix": 1, safe: 2 }, ["tenant-secret"]);
+    const keys = Object.keys(projected);
+    expect(keys).toContain("safe");
+    expect(keys.join(" ")).not.toContain("tenant-secret");
+    expect(JSON.parse(JSON.stringify(projected))).toEqual(projected);
+  });
+
   it("bounds hostile recursive input instead of recursing forever", () => {
     const redactor = createSecretRedactor();
     const cyclic: Record<string, unknown> = { password: "cycle-canary" };

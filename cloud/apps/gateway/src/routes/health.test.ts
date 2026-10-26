@@ -3,6 +3,7 @@ import type { Db } from "@ovid/db";
 import type { QueueServices } from "@ovid/queue";
 import { createQueues } from "@ovid/queue";
 import { buildGateway } from "../app.js";
+import type { HealthResponse } from "./health.js";
 import { openTestDb, closeDb, TEST_DATABASE_URL, } from "../test/db.js";
 import { stubSystemBus, noopEvents, stubKeys, stubMint, stubTickets, stubVerifier } from "../test/stubs.js";
 
@@ -65,28 +66,38 @@ async function getHealth(db: Db, queues: QueueServices) {
 }
 
 describe("GET /cloud/v1/health", () => {
+  const defaultChecks = (overrides: Partial<HealthResponse["checks"]>): HealthResponse["checks"] => ({
+    db: true,
+    redisQ: true,
+    anomaly: false,
+    mail: false,
+    reservation: false,
+    notification: false,
+    ...overrides,
+  });
+
   it("all checks pass → 200 {status:'ok'} without any auth headers", async () => {
     const res = await getHealth(okDb, okQueues);
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ status: "ok", checks: { db: true, redisQ: true } });
+    expect(res.json()).toEqual({ status: "ok", checks: defaultChecks({}) });
   });
 
   it("failing db check → 503 degraded, redisQ still reported", async () => {
     const res = await getHealth(failDb, okQueues);
     expect(res.statusCode).toBe(503);
-    expect(res.json()).toEqual({ status: "degraded", checks: { db: false, redisQ: true } });
+    expect(res.json()).toEqual({ status: "degraded", checks: defaultChecks({ db: false }) });
   });
 
   it("failing redisQ check → 503 degraded", async () => {
     const res = await getHealth(okDb, failQueues);
     expect(res.statusCode).toBe(503);
-    expect(res.json()).toEqual({ status: "degraded", checks: { db: true, redisQ: false } });
+    expect(res.json()).toEqual({ status: "degraded", checks: defaultChecks({ redisQ: false }) });
   });
 
   it("broken dep objects degrade instead of throwing (503, never 500)", async () => {
     const res = await getHealth(brokenDb, {} as unknown as QueueServices);
     expect(res.statusCode).toBe(503);
-    expect(res.json()).toEqual({ status: "degraded", checks: { db: false, redisQ: false } });
+    expect(res.json()).toEqual({ status: "degraded", checks: defaultChecks({ db: false, redisQ: false }) });
   });
 
   it("hung backends hit the ~1s probe timeout instead of hanging the request", async () => {
@@ -94,7 +105,7 @@ describe("GET /cloud/v1/health", () => {
     const res = await getHealth(hangDb, hangQueues);
     const elapsed = Date.now() - started;
     expect(res.statusCode).toBe(503);
-    expect(res.json()).toEqual({ status: "degraded", checks: { db: false, redisQ: false } });
+    expect(res.json()).toEqual({ status: "degraded", checks: defaultChecks({ db: false, redisQ: false }) });
     expect(elapsed).toBeGreaterThanOrEqual(900); // both probes ran concurrently ~1s
     expect(elapsed).toBeLessThan(4000);
   });
@@ -104,7 +115,7 @@ describe("GET /cloud/v1/health", () => {
     try {
       const res = await getHealth(db, okQueues);
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ status: "ok", checks: { db: true, redisQ: true } });
+      expect(res.json()).toEqual({ status: "ok", checks: defaultChecks({}) });
     } finally {
       await closeDb(db);
     }
@@ -122,7 +133,7 @@ describe("GET /cloud/v1/health", () => {
     try {
       const res = await getHealth(okDb, queues);
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ status: "ok", checks: { db: true, redisQ: true } });
+      expect(res.json()).toEqual({ status: "ok", checks: defaultChecks({}) });
     } finally {
       await queues.agentRuns.close();
     }

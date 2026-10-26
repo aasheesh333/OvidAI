@@ -1,5 +1,5 @@
 import type { FastifyBaseLogger, FastifyInstance } from "fastify";
-import { eventMirror, runs } from "@ovid/db";
+import { eventMirror, runs, stopTurn } from "@ovid/db";
 import type { RunCancelResponse } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
 import { isUuid, notFound, sendError } from "./http.js";
@@ -47,10 +47,12 @@ export async function cancelActiveRun(
   if (await isDurableWorkerRun(deps.db, runId)) return "refused";
   if (TERMINAL_RUN_STATUSES.has(row.status)) return "cancelling";
 
-  // Conditional ownership-scoped write. null here means the run went
-  // terminal between the read above and this UPDATE (race window) — the
-  // flag then stays unset and the worker's own verdict is final.
-  if ((await runs.requestCancel(deps.db, runId, uid)) === null) return "cancelling";
+  // Conditional ownership-scoped write through the A1 Stop fence: only the
+  // exact turn named here can be flagged, and a terminal/stale/ambiguous row
+  // leaves the worker's own verdict final. `already_requested` is the normal
+  // second call (the POST route flags before delegating here).
+  const stopped = await stopTurn(deps.db, { sessionId: row.sessionId, expectedRunId: runId });
+  if (stopped.kind !== "stopped" && stopped.kind !== "already_requested") return "cancelling";
 
   // Best-effort job removal — a locked/active/missing job must never 5xx
   // the cancel call; the flag + worker check cover those cases.

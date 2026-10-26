@@ -514,6 +514,9 @@ describe("Studio preview lifecycle", () => {
   it("rejects escaping, absolute, symlinked, and undeclared definitions before spawn", async () => {
     const h = await harness();
     await symlink("/etc", join(h.workspace, "escape"));
+    // Replace the real manifest so the symlink (not EEXIST) is what the
+    // confinement check must reject.
+    await rm(join(h.workspace, "app", "package.json"), { force: true });
     await symlink("/etc/passwd", join(h.workspace, "app", "package.json"));
     await expect(h.manager.start(devRequest())).rejects.toMatchObject({ code: "invalid_path" });
     const invalid = [
@@ -935,10 +938,16 @@ describe("Studio preview lifecycle", () => {
     const before = await h.store.get(started.id);
     h.advance(15 * 60_000);
     const read = await h.manager.get({ userId: UID, sessionId: SID, id: started.id });
+    // Management reads report the effective idle deadline derived from the
+    // durable lastAccessAt; they never write a fresh access time.
+    const idleExpiry = new Date(Date.parse(before.createdAt) + 15 * 60_000).toISOString();
     expect(read).toMatchObject({
       lastAccessAt: before.lastAccessAt,
-      expiresAt: before.expiresAt,
+      expiresAt: idleExpiry,
     });
+    // The effective deadline is already the (earlier) idle deadline, not the
+    // durable absolute one, so the read cannot have slid it forward.
+    expect(Date.parse(read!.expiresAt)).toBeLessThan(Date.parse(before.expiresAt));
     expect(await h.store.get(started.id)).toMatchObject({
       lastAccessAt: before.lastAccessAt,
       expiresAt: before.expiresAt,

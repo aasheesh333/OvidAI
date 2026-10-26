@@ -35,6 +35,22 @@ import {
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 
+/** Drizzle wraps driver failures; the Postgres/trigger text lives on the cause. */
+function errorMessage(error: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current !== null && current !== undefined; depth += 1) {
+    if (current instanceof Error) {
+      parts.push(current.message);
+      current = (current as { cause?: unknown }).cause;
+    } else {
+      parts.push(String(current));
+      break;
+    }
+  }
+  return parts.join(" | ");
+}
+
 const REQ = {
   model: "auto",
   baseUrl: "http://litellm",
@@ -823,7 +839,7 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("withUsageRecording and real RunQ
     await db.$client`DROP FUNCTION fail_r1b_run_usage_insert()`;
 
     expect(outcome.error).toBeInstanceOf(Error);
-    expect((outcome.error as Error).message).toContain("ambiguous settlement commit blocked");
+    expect(errorMessage(outcome.error)).toContain("ambiguous settlement commit blocked");
     const pending = await db.$client`
       SELECT id, state, actual_input_tokens::int, actual_output_tokens::int,
              requested_model, provider_model, cost_usd::text, cost_source

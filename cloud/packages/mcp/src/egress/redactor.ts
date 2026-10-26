@@ -106,8 +106,13 @@ function project(value: unknown, secrets: readonly string[]): unknown {
     if (Array.isArray(current)) return current.map((entry) => walk(entry, depth + 1));
     const output: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(current)) {
+      // A credential value can appear inside a document *key* (short tokens,
+      // or a provider echoing a value as a field name). Partial replacement
+      // would corrupt the key and make the JSON unparseable downstream, so a
+      // key that contains a secret is replaced whole. Values still redact
+      // in place, and sensitive names still project to the marker.
       const safeKey = text(key, secrets);
-      output[safeKey] = sensitiveKey(key) ? MARKER : walk(entry, depth + 1);
+      output[safeKey === key ? key : MARKER] = sensitiveKey(key) ? MARKER : walk(entry, depth + 1);
     }
     return output;
   };

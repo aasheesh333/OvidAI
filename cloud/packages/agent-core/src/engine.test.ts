@@ -386,4 +386,60 @@ describe.skipIf(!TEST_DATABASE_URL)("createAgentEngine (real postgres)", () => {
     expect(await status(runId, userId)).toBe("failed");
     expect(deps.events.events.at(-1)!.payload).toMatchObject({ code: "model_transient_exhausted" });
   });
+
+  it("a ROOT run hands its final answer to the crash-safe delivery port", async () => {
+    const { userId, sessionId, runId } = await seed();
+    const calls: Array<{ runId: string; sessionId: string; content: string; payload: Record<string, unknown> }> = [];
+    const deps = makeDeps({ transport: textTransport("delivered answer") });
+    const engine = createAgentEngine({
+      ...deps,
+      finalDelivery: {
+        async deliver(input) {
+          calls.push(input);
+        },
+      },
+    });
+
+    await engine.run({ runId, sessionId, userId, prompt: "hello" });
+
+    expect(calls).toEqual([
+      {
+        runId,
+        sessionId,
+        content: "delivered answer",
+        completionPayload: expect.objectContaining({ runId }),
+      },
+    ]);
+    // The port owns the message row and the terminal events: the loop must not
+    // append a second answer or emit its own completion pair.
+    expect(await messages.page(db, sessionId, { limit: 50 })).toMatchObject({
+      rows: expect.not.arrayContaining([
+        expect.objectContaining({ role: "assistant" }),
+      ]),
+    });
+    expect(deps.events.events.map((event) => event.type)).not.toContain("run_completed");
+  });
+
+  it("a SUBAGENT child run never touches the root delivery port (inline finalize)", async () => {
+    const { userId, sessionId, runId } = await seed();
+    let calls = 0;
+    const deps = makeDeps({ transport: textTransport("child answer") });
+    const engine = createAgentEngine({
+      ...deps,
+      finalDelivery: {
+        async deliver() {
+          calls += 1;
+        },
+      },
+    });
+
+    // The supervisor's child loop: same engine, `isSubagent: true`.
+    await engine.run({ runId, sessionId, userId, prompt: "hello", isSubagent: true });
+
+    expect(calls).toBe(0);
+    // The child's answer still lands in its own session's transcript.
+    const { rows } = await messages.page(db, sessionId, { limit: 50 });
+    expect(rows.some((row) => row.role === "assistant" && row.content === "child answer")).toBe(true);
+    expect(await status(runId, userId)).toBe("completed");
+  });
 });

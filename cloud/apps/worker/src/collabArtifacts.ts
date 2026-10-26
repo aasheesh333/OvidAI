@@ -514,9 +514,14 @@ async function hashSource(handle: FileHandle, deadline: CollabArtifactDeadline) 
       sizeBytes += bytes.length;
       assertByteCount(sizeBytes);
     }
+  } catch (error) {
+    // Node closes the FileHandle when its read stream is destroyed, even with
+    // autoClose:false. Destroy only on failure; the successful pass must leave
+    // the handle open for the PUT stream.
+    stream.destroy();
+    throw error;
   } finally {
     deadline.signal.removeEventListener("abort", destroy);
-    stream.destroy();
   }
   return { sizeBytes, sha256Hex: hash.digest("hex") };
 }
@@ -1535,7 +1540,17 @@ export class CollabArtifactRegistrar {
         return record;
       } catch (error) {
         if (attempt !== null) {
-          await this.abandon(attempt, input, dbDeadline).catch(() => {});
+          // Compensation must run even when the caller's signal aborted the
+          // operation: a pending charge cannot be left reserved. Use a fresh
+          // bounded deadline that is not linked to the caller signal.
+          const abandonDeadline = new CollabArtifactDeadline(this.cleanupDeadlineMs);
+          try {
+            await this.abandon(attempt, input, abandonDeadline);
+          } catch {
+            // Best effort; the recovery sweep owns anything left reserved.
+          } finally {
+            abandonDeadline.close();
+          }
           await this.cleanupReleasedAttempts(input, artifactId, prepared!, grant, dbDeadline).catch(() => {});
         }
         if (error instanceof CommittedArtifact) {

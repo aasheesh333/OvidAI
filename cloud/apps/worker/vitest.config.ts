@@ -1,15 +1,25 @@
+import path from "node:path";
 import { defineConfig } from "vitest/config";
 
-// runProcessor.test.ts shares ONE dev Postgres + Redis with the rest of the
-// monorepo suites and runs a real BullMQ worker against the pinned
-// "agent-runs" queue. Serialize test FILES so migrate() calls, per-test
-// seeding and queue obliteration can never race across workers; isolation
-// comes from freshly generated session/run ids per test (gateway convention).
-// The BullMQ legs (job add → worker "completed") get a generous ceiling.
 export default defineConfig({
+  resolve: {
+    alias: {
+      // Allow the worker test suite to import the gateway app for
+      // route-driven R2 round-trip tests.
+      "@gateway": path.resolve(__dirname, "../gateway/src"),
+    },
+  },
+  server: {
+    fs: {
+      allow: [".."],
+    },
+  },
   test: {
+    globalSetup: ["./src/globalSetup.ts"],
+    // Several suites use shared real Postgres/Redis instances and real OS
+    // ports/processes; running test files in parallel causes timing flakiness
+    // and port/PID collisions. Run files serially to keep the suite stable
+    // and deterministic.
     fileParallelism: false,
-    testTimeout: 20_000,
-    hookTimeout: 30_000,
   },
 });

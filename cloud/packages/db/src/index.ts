@@ -1,5 +1,6 @@
 export * from "./client.js";
 export * from "./repos.js";
+export * from "./turnOrdering.js";
 export * from "./providerConnections.js";
 export * from "./connectionHealthStore.js";
 export * from "./subagentAdmission.js";
@@ -30,6 +31,7 @@ export * from "./studioPreviewStore.js";
 export * from "./studioPreviewPostgres.js";
 export * from "./collabRepos.js";
 export * from "./collabArtifactRecovery.js";
+export * from "./runDeliveryOutbox.js";
 // Table objects share names with the repo namespaces above (sessions, messages,
 // runs), so the schema is exported under its own namespace instead of `export *`.
 export * as schema from "./schema.js";
@@ -48,6 +50,7 @@ export type {
   ProjectRow,
   RunUsageRow,
   RunRow,
+  RunDeliveryOutboxRow,
   ScheduleRow,
   ScheduleRunRow,
   SessionEventMirrorRow,

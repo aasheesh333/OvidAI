@@ -21,7 +21,7 @@ function deps(
   overrides: Partial<WatchDeps> = {},
 ): WatchDeps {
   return {
-    fetchJson: async () => ({ status: "ok" }),
+    fetchJson: async () => ({ status: "ok", checks: { db: true, redisQ: true, anomaly: true, mail: true, reservation: true, notification: true } }),
     redisInfo: async () => ({ used_memory: "1", maxmemory: "1000" }),
     queueWaiting,
     queueOldestWaitingAgeS: async () => 0,

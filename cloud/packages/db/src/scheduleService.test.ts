@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { createDb, migrate, type Db } from "./client.js";
 import { resetPublicSchema } from "./migrationTestKit.js";
-import { newId, sessions, users as usersRepo } from "./repos.js";
+import { messages, newId, runs, sessions, users as usersRepo } from "./repos.js";
 import { schedules as schedulesTable, sessions as sessionsTable, users as usersTable } from "./schema.js";
 import type { ScheduleRow } from "./schema.js";
 import { schedules } from "./scheduleRepos.js";
@@ -13,6 +13,7 @@ import {
   ScheduleError,
   updateSchedule,
 } from "./scheduleService.js";
+import { admitTurn, claimTurn, listTurns } from "./turnOrdering.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 
@@ -465,6 +466,68 @@ describe.skipIf(!TEST_DATABASE_URL)("scheduleService against real postgres", () 
     const after = await schedules.get(db, created.id, uid);
     expect(after!.nextRunAt).toEqual(created.nextRunAt);
     expect(after!.status).toBe("pending");
+  });
+
+  it("run now: a scheduled run created while an earlier turn is active is ordered AFTER it (never dropped as newer_turn_running)", async () => {
+    const uid = await seedUser();
+    const created = await createSchedule(db, baseCreate(uid));
+
+    // The scheduling transaction is open BEFORE the competing turn is
+    // admitted, which is the exact production window: the busy guard reads at
+    // t0, a turn is admitted at t1, and the run INSERT happens at t2. A
+    // REPEATABLE READ snapshot makes that window deterministic — the guard
+    // (like the tick's `runs.activeForSession`) cannot see the turn — so the
+    // only thing under test is the INSERT timestamp rule. With `runs.create`
+    // the run would inherit `defaultNow()` = this transaction's start (t0,
+    // before the turn) and `seq` would order it ahead of an already-admitted
+    // turn; `turns.admit` stamps `clock_timestamp()` (t2) instead.
+    let earlierRunId = "";
+    const scheduled = await db.transaction(
+      async (tx) => {
+        const tdb = tx as unknown as Db;
+        await tdb.execute(sql`SELECT 1`); // establish the snapshot (t0)
+
+        // An earlier turn is admitted AND claimed (running) at t1, while the
+        // scheduling transaction is already open.
+        const prompt = await messages.append(db, {
+          sessionId: created.sessionId,
+          role: "user",
+          content: "earlier turn",
+        });
+        const earlier = await admitTurn(db, {
+          sessionId: created.sessionId,
+          promptMessageId: prompt.id,
+        });
+        earlierRunId = earlier.runId;
+        expect(
+          (await claimTurn(db, { sessionId: created.sessionId, runId: earlier.runId })).kind,
+        ).toBe("claimed");
+
+        // t2: the scheduler's own create path, inside the older transaction.
+        return runScheduleNow(tdb, { userId: uid, scheduleId: created.id, clock });
+      },
+      { isolationLevel: "repeatable read" },
+    );
+
+    // Admission order, not transaction-start order: the scheduled run is
+    // strictly newer than the turn admitted while the transaction was open.
+    const ordered = await listTurns(db, created.sessionId);
+    expect(ordered.map((turn) => turn.runId)).toEqual([earlierRunId, scheduled.runId]);
+    expect(ordered[1]!.createdAt.getTime()).toBeGreaterThan(ordered[0]!.createdAt.getTime());
+
+    // It therefore WAITS for the active turn (not_oldest) instead of being
+    // refused as an inverted queue (ambiguous/newer_turn_running), which the
+    // run processor would terminalize as run_queue_wait_timeout — a dropped,
+    // legitimate scheduled run.
+    const claim = await claimTurn(db, { sessionId: created.sessionId, runId: scheduled.runId });
+    expect(claim.kind).not.toBe("ambiguous");
+    expect(claim.kind).toBe("not_oldest");
+    if (claim.kind !== "not_oldest") throw new Error("expected not_oldest");
+    expect(claim.blocking.runId).toBe(earlierRunId);
+
+    // Hygiene: never strand the seeded rows.
+    await runs.finish(db, scheduled.runId, "cancelled");
+    await runs.finish(db, earlierRunId, "completed");
   });
 
   it("run now refuses a busy chat, a cancelled schedule, and a stranger", async () => {

@@ -101,8 +101,22 @@ export function registerAccountHealthRoutes(app: FastifyInstance, deps: GatewayD
 
     const [storage, today, month, deletion, entitlement] = await Promise.all([
       artifactVault.usage(deps.db, uid),
-      runUsage.totals(deps.db, { userId: uid, since: todaySince, until: now }),
-      runUsage.totals(deps.db, { userId: uid, since: monthSince, until: now }),
+      // Scoped to the class this screen's caps enforce. `runUsage.totals`
+      // treats an omitted class as "every class", which would subtract a
+      // BYOK user's own-key tokens from the Ovid allowance the send route
+      // actually gates on — a screen saying "none left" while sends succeed.
+      runUsage.totals(deps.db, {
+        userId: uid,
+        since: todaySince,
+        until: now,
+        billingClass: "ovid_allowance",
+      }),
+      runUsage.totals(deps.db, {
+        userId: uid,
+        since: monthSince,
+        until: now,
+        billingClass: "ovid_allowance",
+      }),
       accountDeletions.get(deps.db, uid),
       billingEntitlementClientFromEnv().entitlement(uid),
     ]);

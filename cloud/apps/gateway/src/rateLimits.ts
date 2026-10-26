@@ -377,6 +377,13 @@ export interface RateLimitHookOptions {
   trustedProxyCidrs?: readonly string[];
   clock?: () => Date;
   onDegraded?: (error: unknown) => void;
+  /**
+   * Requests for which a rate-limit STORE failure must degrade open instead of
+   * returning 503. Used only for the public health probes: a limiter outage is
+   * not a system outage, and rewriting health as `rate_limit_unavailable`
+   * would tell an operator a lie. Every other route keeps fail-closed.
+   */
+  degradeOnStoreFailure?: (request: FastifyRequest) => boolean;
 }
 
 function usesSeparateAdminAuthorization(path: string): boolean {
@@ -436,6 +443,9 @@ export function createRateLimitPreHandler(opts: RateLimitHookOptions) {
     } catch (error) {
       opts.onDegraded?.(error);
       request.log.warn({ feature: "rate_limits", status: "degraded" }, "rate limit store degraded");
+      // A health probe answers truthfully even when the limiter store is down;
+      // every other route stays fail-closed with the typed 503 below.
+      if (opts.degradeOnStoreFailure?.(request) === true) return;
       return reply.code(503).send({
         error: {
           code: "rate_limit_unavailable",

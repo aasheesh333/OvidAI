@@ -157,6 +157,24 @@ export interface SkillCatalog {           // Task 17
   load(name: string, sessionId: string): Promise<Skill | null>;
 }
 export interface EventSink { emit(type: SessionEventType, payload: Record<string, unknown>): Promise<void>; }
+/**
+ * Crash-safe final-response delivery (root runs). When composed, the loop hands
+ * the completed turn to this port instead of persisting + emitting + flipping
+ * inline: the port commits the answer with a durable delivery intent, then
+ * replays the terminal events and the completion push idempotently.
+ *
+ * The loop keeps its own inline path when the port is absent (pre-outbox
+ * compositions, subagent child loops) so no caller is forced to adopt it.
+ */
+export interface FinalResponseDelivery {
+  deliver(input: {
+    runId: string;
+    sessionId: string;
+    content: string;
+    /** Exact `run_completed` payload (runId + optional usage). */
+    completionPayload: Record<string, unknown>;
+  }): Promise<void>;
+}
 export interface GitHubApiPort {          // Task 11
   getTree(userId: string, o: { owner: string; repo: string; ref?: string; recursive?: boolean }): Promise<Array<{ path: string; type: "blob" | "tree"; size?: number }>>;
 }

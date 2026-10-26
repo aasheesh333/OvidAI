@@ -19,6 +19,7 @@ import {
   mainCompactionDiagnosticsSchema,
   subagentCompactedPayloadSchema,
 } from "@ovid/shared";
+import type { CompactionContinuation } from "./compactionContinuation.js";
 
 // contextPolicy is a dependency-free module. The package root does not export
 // it yet, so consume its built declaration/module directly rather than copying
@@ -119,6 +120,12 @@ export interface CreateWorkerCompactionRuntimeOptions {
   repository?: WorkerCompactionRepository;
   objects?: CompactionExactObjectReader;
   fallback: ConfiguredModelContextFallback;
+  /**
+   * Required for a bound production fold: projects the committed checkpoint
+   * into the legacy replay state the next run reads. A bound fold without it
+   * fails closed (the DB cursor would otherwise advance unobserved).
+   */
+  continuation?: CompactionContinuation;
 }
 
 export type WorkerCompactionOutcome = CoreCompactionOutcome & DbCompactionOutcome;
@@ -139,6 +146,7 @@ export type WorkerCompactionErrorCode =
   | "next_request_over_limit"
   | "invalid_fold_boundary"
   | "invalid_fold_outcome"
+  | "continuation_unprovable"
   | "invalid_clock";
 
 export interface WorkerCompactionRunOutcome {
@@ -463,6 +471,29 @@ export function createWorkerCompactionRuntime(options: CreateWorkerCompactionRun
       ) {
         fail("invalid_fold_outcome");
       }
+
+      // Next-run continuation (Task 9 gate 2). The fold transaction committed a
+      // checkpoint + cursor, but the next run's request is rebuilt from
+      // `session_agent_state.compaction` via applyCheckpoint/foldBoundaryFor.
+      // Project the durable checkpoint before returning folded messages: a
+      // failure here must be terminal, never "full history after the cursor
+      // advanced". `sync` is idempotent, so a crash between the fold commit and
+      // this call is recovered by `recoverPendingCompactionContinuations`.
+      const continuation = options.continuation;
+      if (continuation === undefined) fail("continuation_unprovable");
+      const synced = await continuation.sync({
+        checkpointId: outcome.checkpointId,
+        actor: prepared.resolution.actor,
+      });
+      if (
+        synced.checkpointId !== outcome.checkpointId ||
+        synced.status === "superseded" ||
+        !nonEmpty(synced.cutoffMessageId) ||
+        !nonEmpty(synced.summary)
+      ) {
+        fail("continuation_unprovable");
+      }
+
       await emitOperational(prepared.resolution, outcome);
 
       // No provider measurement exists for a newly rebuilt request. Recompute
