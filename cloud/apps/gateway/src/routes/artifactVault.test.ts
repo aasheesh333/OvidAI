@@ -277,7 +277,9 @@ describe.skipIf(!TEST_DATABASE_URL)("account Artifact Vault (real postgres + sto
       url: `/cloud/v1/artifacts/${g.id}?source=generated`,
       headers: authHeaders(uid),
     })).statusCode).toBe(404);
-    expect(remove).toHaveBeenCalledTimes(2);
+    // A repeat delete re-runs dependent-grant cleanup (the retry path for
+    // orphaned share bytes), but the source artifact bytes are removed once.
+    expect(remove.mock.calls.filter(([key]) => key === g.r2Key)).toHaveLength(1);
     expect(await quota.storageUsage(uid)).toEqual({ usedBytes: 0, reservedBytes: 0 });
   });
 

@@ -52,10 +52,12 @@ function observePool(db: Db): PoolObservation {
     },
   };
   const transaction = (query: string): boolean => /^(?:BEGIN|COMMIT|ROLLBACK)(?:\s|$)/i.test(query);
-  client.unsafe = async (query, parameters) => {
+  // Keep postgres.js's chainable pending query (drizzle calls `.values()` on
+  // it); an async wrapper would return a bare Promise and break every query.
+  client.unsafe = ((query: string, parameters?: readonly unknown[]) => {
     if (transaction(query)) observation.rootTransactions.push(query);
     return originalRootUnsafe(query, parameters);
-  };
+  }) as typeof client.unsafe;
   client.reserve = async () => {
     observation.attempts += 1;
     const reserved = await originalReserve();
@@ -64,10 +66,10 @@ function observePool(db: Db): PoolObservation {
     const originalUnsafe = reserved.unsafe.bind(reserved);
     const pidRows = await originalUnsafe("SELECT pg_backend_pid() AS pid", []) as Array<{ pid: number }>;
     if (pidRows[0] !== undefined) observation.pids.add(pidRows[0].pid);
-    reserved.unsafe = async (query, parameters) => {
+    reserved.unsafe = ((query: string, parameters?: readonly unknown[]) => {
       if (transaction(query)) observation.reservedTransactions.push(query);
       return originalUnsafe(query, parameters);
-    };
+    }) as typeof reserved.unsafe;
     const originalRelease = reserved.release.bind(reserved);
     let released = false;
     reserved.release = () => {
@@ -178,7 +180,7 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("CollabLifecycle deletion fencing
         principal: principal(owner), requestId: `final-room-${newId()}`,
       });
       await single.$client`INSERT INTO account_deletions (uid, state, delete_after, record)
-        VALUES (${owner}, 'deleting', 0, ${single.$client.json({
+        VALUES (${owner}, 'deleting', 0, ${JSON.stringify({
           uid: owner,
           request_id: "final-cleanup-0001",
           state: "deleting",

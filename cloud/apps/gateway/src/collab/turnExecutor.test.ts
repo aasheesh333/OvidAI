@@ -4,6 +4,7 @@ import {
   accountSettings,
   byokKeysRepo,
   createDb,
+  migrate,
   newId,
   schema,
   type Db,
@@ -97,6 +98,9 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("Collab canonical turn executor (
   let clock: Date;
 
   beforeAll(async () => {
+    // Migrate here: relying on an earlier test FILE to have migrated the
+    // shared database made this suite fail whenever it ran alone.
+    await migrate(TEST_DATABASE_URL!);
     db = createDb(TEST_DATABASE_URL!, { max: 16 });
     secondDb = createDb(TEST_DATABASE_URL!, { max: 16 });
   }, 60_000);
@@ -937,6 +941,9 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("Collab canonical turn executor (
   });
 
   it("heartbeat is conditional and stale recovery increments/fences without inventing timeout", async () => {
+    // recoverStaleLeases scans ALL leases; earlier tests in this file leave
+    // live leases behind and share this clock, so start from a clean slate.
+    await db.$client`DELETE FROM collab_sender_leases`;
     const f = await fixture();
     const queue = new QueueFake();
     const admitted = await executor(queue).admit({

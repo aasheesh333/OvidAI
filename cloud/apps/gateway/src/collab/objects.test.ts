@@ -300,6 +300,9 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("Collab objects through buildGate
       failDebit: 0,
       failRelease: 0,
       failDelete: 0,
+      // Key-scoped variant: a live scheduler can consume a global counter on
+      // an unrelated candidate, so seeding arms the exact key it will delete.
+      failDeleteKeys: new Set<string>(),
       pauseFinalize: null as null | { gate: Promise<void>; entered: () => void },
       pauseNextSweep: options.pauseNextSweep ?? (null as null | { gate: Promise<void>; entered: () => void }),
     };
@@ -395,6 +398,9 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("Collab objects through buildGate
         return adapter.presignGet(key, ttlSeconds, presignOptions);
       },
       delete: async (key) => {
+        if (controls.failDeleteKeys.delete(key)) {
+          throw new Error("injected delete failure");
+        }
         if (controls.failDelete > 0) {
           controls.failDelete -= 1;
           throw new Error("injected delete failure");
@@ -595,9 +601,12 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("Collab objects through buildGate
 
   async function failedArtifactAttempt(f: Fixture, idempotencyKey = "artifact-attempt-orphan") {
     const originalPut = f.storage.put;
-    f.controls.failDelete = 1;
-    f.storage.put = async (key, _body, putOptions) =>
-      originalPut(key, Buffer.from("bbbb", "utf8"), putOptions);
+    // Arm the failure for the bytes this seed writes (its key is only known at
+    // put time); a global counter would race the mounted sweep scheduler.
+    f.storage.put = async (key, _body, putOptions) => {
+      f.controls.failDeleteKeys.add(key);
+      return originalPut(key, Buffer.from("bbbb", "utf8"), putOptions);
+    };
     const input = {
       actorUserId: f.guestUid,
       ownerUserId: f.ownerUid,
@@ -1337,8 +1346,8 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("Collab objects through buildGate
          declared_bytes, reserved_at, released_at, created_at, updated_at)
       VALUES
         (${malformedReservationId}, ${f.guestUid}, ${f.ownerUid}, ${f.sessionId},
-         ${malformedKey}, 'released', 0, ${new Date(1800, 0, 1)},
-         ${new Date(1800, 0, 2)}, ${new Date(1800, 0, 1)}, ${new Date(1800, 0, 2)})`;
+         ${malformedKey}, 'released', 0, ${new Date(1800, 0, 1).toISOString()}::timestamptz,
+         ${new Date(1800, 0, 2).toISOString()}::timestamptz, ${new Date(1800, 0, 1).toISOString()}::timestamptz, ${new Date(1800, 0, 2).toISOString()}::timestamptz)`;
     const page = await listCollabObjectArtifactAttempts(db, { limit: 1 });
     expect(page.rows).toEqual([]);
     expect(page.quarantined).toBe(1);
@@ -1580,11 +1589,11 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("Collab objects through buildGate
          declared_bytes, reserved_at, created_at, updated_at)
       VALUES
         (${attemptReservationIds[0]}, ${f.guestUid}, ${f.ownerUid}, ${f.sessionId},
-         ${"users/not-canonical"}, 'reserved', 2, ${new Date(1800, 0, 1)},
-         ${new Date(1800, 0, 1)}, ${new Date(1800, 0, 1)}),
+         ${"users/not-canonical"}, 'reserved', 2, ${new Date(1800, 0, 1).toISOString()}::timestamptz,
+         ${new Date(1800, 0, 1).toISOString()}::timestamptz, ${new Date(1800, 0, 1).toISOString()}::timestamptz),
         (${attemptReservationIds[1]}, ${f.guestUid}, ${f.ownerUid}, ${f.sessionId},
-         ${"users/not-canonical"}, 'reserved', 2, ${new Date(1800, 0, 1)},
-         ${new Date(1800, 0, 1)}, ${new Date(1800, 0, 1)})`;
+         ${"users/not-canonical"}, 'reserved', 2, ${new Date(1800, 0, 1).toISOString()}::timestamptz,
+         ${new Date(1800, 0, 1).toISOString()}::timestamptz, ${new Date(1800, 0, 1).toISOString()}::timestamptz)`;
     // Canonical release subtracts declared_bytes. Model the corresponding
     // nonnegative host reservation before asking it to settle the two rows.
     await db.$client`
@@ -1655,7 +1664,7 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("Collab objects through buildGate
         declaredBytes: attempt.declaredBytes,
       });
       await db.$client`
-        UPDATE storage_reservations SET created_at = ${attempt.createdAt}
+        UPDATE storage_reservations SET created_at = ${attempt.createdAt.toISOString()}::timestamptz
          WHERE id = ${attempt.reservationId}`;
     }
     expect((await counters(f.ownerUid, f.guestUid)).storageRows)
@@ -1747,7 +1756,7 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("Collab objects through buildGate
     await firstEntered.promise;
     const old = await failedArtifactAttempt(f, "periodic-old-head-null");
     await db.$client`
-      UPDATE storage_reservations SET created_at = ${new Date(1800, 0, 1)}
+      UPDATE storage_reservations SET created_at = ${new Date(1800, 0, 1).toISOString()}::timestamptz
        WHERE id = ${old.attemptReservationId}`;
     await adapter.delete(old.key);
 
@@ -1756,7 +1765,7 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("Collab objects through buildGate
       const seed = await failedArtifactAttempt(f, key);
       newer.push(seed);
       await db.$client`
-        UPDATE storage_reservations SET created_at = ${new Date(2000, 0, index + 1)}
+        UPDATE storage_reservations SET created_at = ${new Date(2000, 0, index + 1).toISOString()}::timestamptz
          WHERE id = ${seed.attemptReservationId}`;
     }
     firstGate.resolve();
@@ -1894,15 +1903,15 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("Collab objects through buildGate
     // regardless of shared fixed NOW or UUID ordering in the same database.
     const activeAttemptId = `${active.id}:collab-attempt:1`;
     await db.$client`
-      UPDATE storage_reservations SET created_at = ${new Date(1999, 0, 1)}
+      UPDATE storage_reservations SET created_at = ${new Date(1999, 0, 1).toISOString()}::timestamptz
        WHERE id = ${activeAttemptId}`;
     for (const [index, seed] of foreign.entries()) {
       await db.$client`
-        UPDATE storage_reservations SET created_at = ${new Date(2000, 0, index + 1)}
+        UPDATE storage_reservations SET created_at = ${new Date(2000, 0, index + 1).toISOString()}::timestamptz
          WHERE id = ${seed.attemptReservationId}`;
     }
     await db.$client`
-      UPDATE storage_reservations SET created_at = ${new Date(2000, 0, 10)}
+      UPDATE storage_reservations SET created_at = ${new Date(2000, 0, 10).toISOString()}::timestamptz
        WHERE id = ${genuine.attemptReservationId}`;
 
     const all = await f.objects.listOrphanCandidates(100);

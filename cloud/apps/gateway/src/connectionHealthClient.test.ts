@@ -84,10 +84,12 @@ describe("gateway connection health worker client", () => {
     expect(requests[0]?.url).toBe(`http://worker.internal/internal/mcp/connections/${ID}`);
     expect(requests[0]?.init?.method).toBe("DELETE");
 
-    await expect(client.disconnectAuthenticated({
+    // `assertAuthenticated` throws synchronously (the methods return the
+    // request promise only on the authenticated path), so wrap the call.
+    expect(() => client.disconnectAuthenticated({
       principal: { uid: UID, authenticated: false },
       connectionId: ID,
-    })).rejects.toMatchObject({ code: "authentication_required" });
+    })).toThrow(expect.objectContaining({ code: "authentication_required" }));
     expect(requests).toHaveLength(1);
   });
 

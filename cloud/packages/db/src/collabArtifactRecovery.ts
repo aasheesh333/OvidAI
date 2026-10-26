@@ -99,7 +99,11 @@ export class CollabArtifactDeadline {
     if (this.controller.signal.aborted) abort();
     try {
       if (this.controller.signal.aborted) return await aborted;
-      const result = await Promise.race([operation(), aborted]);
+      const pending = operation();
+      // An abort can win the race while the operation is still in flight; a
+      // late rejection must be observed, never surface as unhandled.
+      void pending.catch(() => {});
+      const result = await Promise.race([pending, aborted]);
       this.throwIfAborted();
       return result;
     } catch (error) {
@@ -352,6 +356,10 @@ export async function listCollabArtifactAttemptOrphanCandidates(
       parseCollabArtifactAttemptReservationId(before.attemptReservationId) === null)) {
     throw new RangeError("invalid artifact attempt orphan cursor");
   }
+  // Bind the cursor instant as an ISO string: drizzle installs identity
+  // serializers on postgres-js, so a raw Date parameter is not encodable and
+  // every continuation page would throw instead of paging.
+  const beforeAt = before === undefined ? null : before.createdAt.toISOString();
   const query = () => db.execute(sql`
     SELECT id, actor_user_id, owner_user_id, session_id, object_id,
            declared_bytes, created_at
@@ -359,8 +367,8 @@ export async function listCollabArtifactAttemptOrphanCandidates(
      WHERE state = 'released'
        AND id ~ '^[0-9a-fA-F-]{36}:collab-attempt:[1-9][0-9]*$'
        AND object_id LIKE 'users/%/artifacts/%'
-       AND (${before?.createdAt ?? null}::timestamptz IS NULL OR
-            (created_at, id) > (${before?.createdAt ?? null}::timestamptz,
+       AND (${beforeAt}::timestamptz IS NULL OR
+            (created_at, id) > (${beforeAt}::timestamptz,
                                 ${before?.attemptReservationId ?? null}::text))
      ORDER BY created_at, id
      LIMIT ${limit + 1}`);

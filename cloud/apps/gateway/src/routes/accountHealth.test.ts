@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { PgDialect } from "drizzle-orm/pg-core";
 import type { Db } from "@ovid/db";
 import { buildGateway } from "../app.js";
 import {
@@ -91,6 +92,10 @@ function fakeDb(opts: FakeOptions = {}) {
     returning: async () => [userRow],
   };
 
+  // The storage read reconciles through drizzle's tx.execute, so record that
+  // SQL too (a raw $client-only recorder would miss the workspace_objects
+  // scoping query entirely).
+  const dialect = new PgDialect();
   const db = {
     $client: client,
     select: () => {
@@ -103,7 +108,11 @@ function fakeDb(opts: FakeOptions = {}) {
         lockingUser = false;
         return selectChain;
       },
-      execute: async () => [{ used_bytes: opts.usedBytes ?? 0, reserved_bytes: 0 }],
+      execute: async (query: Parameters<PgDialect["sqlToQuery"]>[0]) => {
+        const built = dialect.sqlToQuery(query);
+        queries.push({ text: built.sql, params: [...built.params] });
+        return [{ used_bytes: opts.usedBytes ?? 0, reserved_bytes: 0 }];
+      },
     }),
   } as unknown as Db;
 

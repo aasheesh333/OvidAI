@@ -1318,9 +1318,15 @@ describe("Studio mode message route (repository boundary)", () => {
     vi.spyOn(sessions, "touch").mockResolvedValue(undefined as never);
 
     const { queues, adds } = stubQueues();
+    // The send route fences durable worker children with one scoped query
+    // (`isDurableWorkerSession`); this unit fixture is not a real db, so the
+    // stub answers "not a durable child".
+    const db = Object.assign({} as Db, {
+      $client: async () => [],
+    });
     const app = buildGateway({
       system: stubSystemBus(),
-      db: {} as Db,
+      db,
       queues,
       verifier: stubVerifier(),
       tickets: stubTickets(),

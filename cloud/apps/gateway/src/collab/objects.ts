@@ -2468,7 +2468,9 @@ export function registerCollabObjectRoutes(app: FastifyInstance, deps: CollabObj
       const context = await roomContext(request, service);
       const attachmentId = objectId(request, "attachmentId");
       strictQuery(request, []);
-      return deps.objects.withAttachmentLock(attachmentId, async () => {
+      // `await` so a rejection inside the lock callback is caught by the
+      // try/catch above (a bare `return` promise escapes it as a 500).
+      return await deps.objects.withAttachmentLock(attachmentId, async () => {
         const row = await deps.objects.getAttachment({
           sessionId: context.sessionId,
           ownerUid: context.ownerUserId,

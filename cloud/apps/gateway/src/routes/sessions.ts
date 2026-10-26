@@ -141,7 +141,8 @@ export function registerSessionRoutes(app: FastifyInstance, deps: GatewayDeps): 
     const seen = new Set<string>();
     for (let pass = 0; pass < 10; pass++) {
       const active = await runs.activeForSession(deps.db, id);
-      if (active === null || !seen.add(active.id)) break;
+      if (active === null || seen.has(active.id)) break;
+      seen.add(active.id);
       const status = await cancelActiveRun(deps, request.log, request.principal.uid, active.id);
       // Keep the shared helper's refusal terminal for DELETE too: never fall
       // through to soft-delete a child whose active run could not be cancelled.

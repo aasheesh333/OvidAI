@@ -207,26 +207,24 @@ describe("gateway worker-owned connection health composition", () => {
       let bodyReadStarted!: () => void;
       const started = new Promise<void>((resolve) => { bodyReadStarted = resolve; });
       let readerCancelled = false;
-      const body = new ReadableStream<Uint8Array>({
-        start(stream) {
-          const underlying = stream.getReader();
-          let readStarted = false;
-          Object.defineProperty(stream, "getReader", {
-            value: () => ({
-              read: () => {
-                if (!readStarted) {
-                  readStarted = true;
-                  bodyReadStarted();
-                }
-                return new Promise<never>(() => {});
-              },
-              cancel: async () => {
-                readerCancelled = true;
-              },
-              releaseLock: () => underlying.releaseLock(),
-            }),
-          });
-        },
+      const body = new ReadableStream<Uint8Array>({ start() {} });
+      // `start` receives the controller, not the stream; override getReader on
+      // the stream itself so the abort path's reader.cancel() is observable.
+      let readStarted = false;
+      Object.defineProperty(body, "getReader", {
+        value: () => ({
+          read: () => {
+            if (!readStarted) {
+              readStarted = true;
+              bodyReadStarted();
+            }
+            return new Promise<never>(() => {});
+          },
+          cancel: async () => {
+            readerCancelled = true;
+          },
+          releaseLock: () => {},
+        }),
       });
       const oauth = createOAuthFlow({
         db: {} as Db,

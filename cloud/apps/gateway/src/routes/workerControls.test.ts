@@ -297,7 +297,9 @@ describe.skipIf(!TEST_DATABASE_URL)("authenticated worker-control route fencing 
       pinned_at: null,
       deleted_at: null,
     });
-    expect(before.session[0]!.updated_at).toBeInstanceOf(Date);
+    // Raw postgres.js reads return timestamptz as text (drizzle installs
+    // transparent parsers), so assert a parseable timestamp, not a Date.
+    expect(Number.isNaN(new Date(String(before.session[0]!.updated_at)).getTime())).toBe(false);
     expect(before.sessionAgentState).toEqual([
       { state: { subagentParentSessionId: seeded.parentSessionId } },
     ]);

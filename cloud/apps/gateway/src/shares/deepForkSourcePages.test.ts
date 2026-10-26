@@ -238,7 +238,7 @@ function combinedFixture(): CombinedFixture {
       messageId: message.id,
       content: "DUPLICATE_CLIENT_TEXT",
       reasoning: "PRIVATE_EVENT_REASONING",
-    }, Number(message.id.slice(-12), 16));
+    }, parseInt(message.id.slice(-12), 16));
   }
   emit("tool_started", {
     runId: "run-active",

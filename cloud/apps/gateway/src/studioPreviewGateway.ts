@@ -192,50 +192,53 @@ function managementError(reply: FastifyReply, error: unknown): FastifyReply {
   return previewUnavailable(reply);
 }
 
-function originError(reply: FastifyReply, error: unknown): FastifyReply {
+function originError(reply: FastifyReply, error: unknown, head = false): FastifyReply {
+  // HEAD responses must never carry a body (RFC 9110 §9.3.2), including errors.
+  const fail = (status: number, code: string, message: string): FastifyReply =>
+    head ? reply.code(status).send() : sendError(reply, status, code, message);
   if (error instanceof PreviewProxyError) {
     switch (error.code) {
       case "bad_headers":
-        return sendError(reply, 400, error.code, "Preview request headers are invalid.");
+        return fail(400, error.code, "Preview request headers are invalid.");
       case "bad_path":
-        return sendError(reply, 400, error.code, "Preview path is invalid.");
+        return fail(400, error.code, "Preview path is invalid.");
       case "method_not_allowed":
-        return sendError(reply, 405, error.code, "Only GET and HEAD are allowed for preview content.");
+        return fail(405, error.code, "Only GET and HEAD are allowed for preview content.");
       case "not_found":
-        return originNotFound(reply);
+        return fail(404, "not_found", "Preview not found.");
       case "hmr_denied":
-        return sendError(reply, 403, error.code, "Preview HMR access is not allowed.");
+        return fail(403, error.code, "Preview HMR access is not allowed.");
       case "redirect_denied":
-        return sendError(reply, 502, error.code, "Preview upstream redirects are not allowed.");
+        return fail(502, error.code, "Preview upstream redirects are not allowed.");
       case "response_too_large":
-        return sendError(reply, 413, error.code, "Preview response is too large.");
+        return fail(413, error.code, "Preview response is too large.");
       case "upstream_timeout":
-        return sendError(reply, 504, error.code, "Preview upstream timed out.");
+        return fail(504, error.code, "Preview upstream timed out.");
       case "upstream_unavailable":
-        return sendError(reply, 502, error.code, "Preview upstream is unavailable.");
+        return fail(502, error.code, "Preview upstream is unavailable.");
       case "registration_unavailable":
-        return previewUnavailable(reply);
+        return fail(503, "preview_unavailable", "Studio previews are temporarily unavailable.");
     }
   }
   if (error instanceof StudioPreviewWorkerHttpError) {
-    if (error.status === 404) return originNotFound(reply);
+    if (error.status === 404) return fail(404, "not_found", "Preview not found.");
     if (error.status === 400 || error.code === "bad_path" || error.code === "bad_headers") {
-      return sendError(reply, 400, "bad_request", "Preview request is invalid.");
+      return fail(400, "bad_request", "Preview request is invalid.");
     }
     if (error.status === 405) {
-      return sendError(reply, 405, "method_not_allowed", "Only GET and HEAD are allowed for preview content.");
+      return fail(405, "method_not_allowed", "Only GET and HEAD are allowed for preview content.");
     }
     if (error.status === 413 || error.code === "response_too_large") {
-      return sendError(reply, 413, "response_too_large", "Preview response is too large.");
+      return fail(413, "response_too_large", "Preview response is too large.");
     }
     if (error.code === "redirect_denied") {
-      return sendError(reply, 502, error.code, "Preview upstream redirects are not allowed.");
+      return fail(502, error.code, "Preview upstream redirects are not allowed.");
     }
     if (error.code === "upstream_timeout") {
-      return sendError(reply, 504, error.code, "Preview upstream timed out.");
+      return fail(504, error.code, "Preview upstream timed out.");
     }
   }
-  return previewUnavailable(reply);
+  return fail(503, "preview_unavailable", "Studio previews are temporarily unavailable.");
 }
 
 async function ownedWorker(
@@ -667,7 +670,7 @@ export function registerStudioPreviewOriginRoot(
         }
         return await proxyDev(request, reply, config, origins, worker, binding, path);
       } catch (error) {
-        return originError(reply, error);
+        return originError(reply, error, request.method === "HEAD");
       }
     };
 

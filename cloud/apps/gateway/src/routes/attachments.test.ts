@@ -6,7 +6,7 @@ import {
   type AttachmentUploadResponse,
 } from "@ovid/shared";
 import { buildGateway } from "../app.js";
-import type { HeadResult } from "@ovid/storage";
+import type { HeadResult, StorageAdapter } from "@ovid/storage";
 import type { AttachmentPresigner } from "./attachments.js";
 import { createMigrationScratch, type MigrationScratch } from "../../../../packages/db/src/migrationTestKit.js";
 import { TEST_DATABASE_URL, testUid } from "../test/db.js";
@@ -87,7 +87,13 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway attachment routes (real postgres)",
    * Fresh gateway per test with the fake presigner injected (or deliberately
    * absent when `noPresigner` — the loud-fallback pin).
    */
-  function makeApp(opts: { noPresigner?: boolean; failPresign?: boolean; head?: HeadResult | null } = {}):
+  function makeApp(opts: {
+    noPresigner?: boolean;
+    failPresign?: boolean;
+    head?: HeadResult | null;
+    /** Compose the artifact vault/CDN routes with a storage adapter. */
+    withStorage?: boolean;
+  } = {}):
     { app: FastifyInstance; presigner: AttachmentPresigner & {
       calls: PresignCall[];
       deleted: string[];
@@ -104,6 +110,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway attachment routes (real postgres)",
       mint: stubMint(),
       events: noopEvents,
       ...(opts.noPresigner ? {} : { presigner }),
+      ...(opts.withStorage === true ? { storage: presigner as unknown as StorageAdapter } : {}),
     });
     built.push(app);
     return { app, presigner };
@@ -352,7 +359,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway attachment routes (real postgres)",
       etag: "etag-1",
       metadata: {},
     };
-    const { app } = makeApp({ head });
+    const { app } = makeApp({ head, withStorage: true });
     const uid = testUid("att-quota");
     const sid = await createSession(app, uid);
     const created = await postAttachment(app, uid, sid, { name: "actual.txt", size: 11 });
@@ -541,7 +548,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway attachment routes (real postgres)",
           BEGIN
             -- Let the reservation's pending → failed update commit. Fail only
             -- the later route status write (ready/failed → failed).
-            IF NEW.id = '${attachmentId}'::uuid
+            IF NEW.id = '${attachmentId}'::text
                AND NEW.upload_status = 'failed'
                AND OLD.upload_status IN ('ready', 'failed') THEN
               RAISE EXCEPTION 'injected missing-HEAD status-write failure';
@@ -577,7 +584,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway attachment routes (real postgres)",
 
   // UNEXECUTED round-1 regression: late bytes never revive a released row.
   it("fences late PUT finalization, worker ready, and both download routes", async () => {
-    const { app, presigner } = makeApp({ head: null });
+    const { app, presigner } = makeApp({ head: null, withStorage: true });
     const uid = testUid("att-late-put");
     const sid = await createSession(app, uid);
     const created = await postAttachment(app, uid, sid, { name: "late.txt", size: 4 });

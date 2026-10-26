@@ -311,7 +311,9 @@ describe("bounded registered HTTP proxy primitive", () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(input), init });
-      return typeof response === "function" ? response() : response;
+      // A Response body can be consumed once; the fixture must hand each
+      // request its own clone (the template itself is never consumed).
+      return typeof response === "function" ? response() : response.clone();
     }) as typeof fetch;
     const access = registrationAccess(live(), behavior);
     return {
