@@ -17,8 +17,9 @@ import 'package:flutter_test/flutter_test.dart';
 /// Locate a usable Python 3 interpreter, or return `null`.
 ///
 /// The generator is pure Python stdlib and is required to render the SVGs that
-/// this test compares against the app registry. Tests are skipped when no Python
-/// toolchain is available.
+/// this test compares against the app registry. A missing interpreter is a
+/// hard failure, never a silent pass: a parity guard that can be disabled by an
+/// absent toolchain is not a guard.
 String? _findPython() {
   for (final name in const ['python3', 'python']) {
     try {
@@ -82,6 +83,12 @@ List<String> _registryIds() {
 void main() {
   group('Figma parity', () {
     setUpAll(() {
+      if (_python == null) {
+        fail(
+          'The Figma parity guard needs a Python 3 interpreter to generate its '
+          'sheets. Install python3 (the generator is stdlib-only) and re-run.',
+        );
+      }
       _generateSheet(dark: false);
       _generateSheet(dark: true);
     });
