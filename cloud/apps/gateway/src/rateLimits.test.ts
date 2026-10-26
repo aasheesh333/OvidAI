@@ -36,6 +36,7 @@ const CAPACITIES: ReadonlyArray<{
 }> = [
   { className: "send", uid: 20, ip: 120, windowSeconds: 60 },
   { className: "ticket", uid: 30, ip: 180, windowSeconds: 60 },
+  { className: "devices", uid: 10, ip: 60, windowSeconds: 60 },
   { className: "attachments", uid: 60, ip: 360, windowSeconds: 60 },
   { className: "connections", uid: 20, ip: 120, windowSeconds: 60 },
   { className: "plugin_source", uid: 5, ip: 30, windowSeconds: 60 },
@@ -225,6 +226,12 @@ describe("rate limit degradation and route classes", () => {
     ["POST", "/cloud/v1/sessions/abc/messages", "send"],
     ["GET", "/cloud/v1/sessions/abc/messages", "default"],
     ["POST", "/cloud/v1/auth/ticket", "ticket"],
+    ["POST", "/cloud/v1/devices", "devices"],
+    ["DELETE", "/cloud/v1/devices", "devices"],
+    ["POST", "/cloud/v1/devices/", "devices"],
+    ["GET", "/cloud/v1/devices", "default"],
+    ["PATCH", "/cloud/v1/devices", "default"],
+    ["POST", "/cloud/v1/devices/abc", "default"],
     ["POST", "/cloud/v1/sessions/abc/attachments", "attachments"],
     ["POST", "/cloud/v1/sessions/abc/attachments/id/finalize", "attachments"],
     ["PATCH", "/cloud/v1/mcp/connections/id", "connections"],
@@ -316,13 +323,15 @@ describe("gateway rate-limit registration", () => {
     const limiter = recordingLimiter();
     const { app } = makeApp(limiter);
     const cases: ReadonlyArray<{
-      method: "GET" | "POST" | "PATCH";
+      method: "DELETE" | "GET" | "POST" | "PATCH";
       url: string;
       className: RateLimitClass;
       authenticated?: boolean;
     }> = [
       { method: "POST", url: `/cloud/v1/sessions/${SESSION}/messages`, className: "send" },
       { method: "POST", url: "/cloud/v1/auth/ticket", className: "ticket" },
+      { method: "POST", url: "/cloud/v1/devices", className: "devices" },
+      { method: "DELETE", url: "/cloud/v1/devices", className: "devices" },
       { method: "POST", url: `/cloud/v1/sessions/${SESSION}/attachments`, className: "attachments" },
       { method: "PATCH", url: "/cloud/v1/mcp/connections/abc", className: "connections" },
       { method: "POST", url: "/cloud/v1/plugins/install", className: "plugin_source" },
@@ -395,6 +404,32 @@ describe("gateway rate-limit registration", () => {
       error: { code: "rate_limited", message: "Too many requests. Try again shortly." },
     });
     expect(tickets.minted).toEqual([]);
+  });
+
+  it("device mutations are rejected by their dedicated bucket before route side effects", async () => {
+    const limiter = recordingLimiter({ allowed: false });
+    const { app } = makeApp(limiter);
+
+    for (const request of [
+      { method: "POST" as const, payload: { token: "t", platform: "android" } },
+      { method: "DELETE" as const, payload: { token: "t" } },
+    ]) {
+      const res = await app.inject({
+        method: request.method,
+        url: "/cloud/v1/devices",
+        headers: authHeaders("device-denied"),
+        payload: request.payload,
+      });
+      expect(res.statusCode).toBe(429);
+      expect(res.headers["retry-after"]).toBe("17");
+      expect(res.json()).toEqual({
+        error: { code: "rate_limited", message: "Too many requests. Try again shortly." },
+      });
+    }
+
+    expect(limiter.calls).toHaveLength(2);
+    expect(limiter.calls.map((call) => call.class)).toEqual(["devices", "devices"]);
+    expect(limiter.calls.map((call) => call.uid)).toEqual(["device-denied", "device-denied"]);
   });
 
   it("a store failure is a degraded 503 and never a healthy allow", async () => {
