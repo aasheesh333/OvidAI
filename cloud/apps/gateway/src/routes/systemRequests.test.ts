@@ -23,6 +23,7 @@ import { buildGateway, type GatewayDeps } from "../app.js";
 import { closeDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
 import {
   createMigrationScratch,
+  migrateThrough,
   type MigrationScratch,
 } from "../../../../packages/db/src/migrationTestKit.js";
 import {
@@ -187,6 +188,85 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("gateway durable system request r
       FIXTURE.requests.pendingApproval,
       FIXTURE.requests.sensitiveElicitation,
     ]);
+  });
+
+  it("returns a safe not_configured 503 when migration 0033's tables are absent", async () => {
+    const missing = await createMigrationScratch(
+      TEST_DATABASE_URL!,
+      "gateway_system_requests_missing",
+    );
+    let missingDb: Db | undefined;
+    try {
+      // Apply the real migration chain only through 0030: base auth/session
+      // tables exist, while 0033's request and response tables do not.
+      await migrateThrough(missing.url, 30);
+      missingDb = createDb(missing.url, { max: 2 });
+      expect(await missingDb.$client`
+        SELECT
+          to_regclass('public.system_requests') AS requests,
+          to_regclass('public.system_request_responses') AS responses
+      `).toEqual([{ requests: null, responses: null }]);
+      const missingOwner = testUid("system-request-not-configured");
+      // users.ensure uses the current schema's RETURNING projection, which
+      // includes columns added after migration 0030. Seed through the base
+      // table shape so this fixture reaches the route's configured check.
+      await missingDb.$client`
+        INSERT INTO users (uid) VALUES (${missingOwner})
+      `;
+      const ownedSession = await sessions.create(missingDb, missingOwner, "No migration 0033");
+      const app = makeApp({ db: missingDb });
+
+      const unauthenticated = await app.inject({
+        method: "GET",
+        url: `/cloud/v1/sessions/${ownedSession.id}/system-requests`,
+      });
+      expect(unauthenticated.statusCode).toBe(401);
+
+      const foreignOwner = await app.inject({
+        method: "GET",
+        url: `/cloud/v1/sessions/${ownedSession.id}/system-requests`,
+        headers: authHeaders(testUid("system-request-not-configured-other")),
+      });
+      expect(foreignOwner.statusCode).toBe(404);
+      expect(foreignOwner.json()).toEqual({
+        error: { code: "not_found", message: "Session not found." },
+      });
+
+      const malformedSession = await app.inject({
+        method: "GET",
+        url: "/cloud/v1/sessions/not-a-uuid/system-requests",
+        headers: authHeaders(missingOwner),
+      });
+      expect(malformedSession.statusCode).toBe(404);
+      expect(malformedSession.json()).toEqual({
+        error: { code: "not_found", message: "Session not found." },
+      });
+
+      const list = await app.inject({
+        method: "GET",
+        url: `/cloud/v1/sessions/${ownedSession.id}/system-requests`,
+        headers: authHeaders(missingOwner),
+      });
+      const respond = await postResponse(
+        app,
+        FIXTURE.requests.pendingApproval.requestId,
+        missingOwner,
+        respondBody(FIXTURE.identicalReplay.attempt),
+      );
+      for (const response of [list, respond]) {
+        expect(response.statusCode).toBe(503);
+        expect(response.json()).toEqual({
+          error: {
+            code: "not_configured",
+            message: "System requests are not configured on this deployment.",
+          },
+        });
+        expect(response.body).not.toMatch(/relation|system_request(?:s|_)/i);
+      }
+    } finally {
+      await closeDb(missingDb);
+      await missing.close();
+    }
   });
 
   it("POST returns the canonical non-secret receipt and structurally identical replay without claiming resolution", async () => {

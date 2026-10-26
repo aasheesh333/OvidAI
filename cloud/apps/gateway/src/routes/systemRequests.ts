@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
+import { sql } from "drizzle-orm";
 import {
   createSystemRequestStore,
   sessions,
@@ -33,6 +34,25 @@ function mapSystemRequestError(reply: FastifyReply, error: unknown): FastifyRepl
   return sendError(reply, ERROR_STATUS[error.code], error.code, error.message);
 }
 
+async function systemRequestsConfigured(db: GatewayDeps["db"]): Promise<boolean> {
+  const rows = await db.execute(sql<{ configured: boolean }>`
+    SELECT
+      to_regclass('public.system_requests') IS NOT NULL
+      AND to_regclass('public.system_request_responses') IS NOT NULL
+        AS configured
+  `);
+  return rows[0]?.configured === true;
+}
+
+function notConfigured(reply: FastifyReply): FastifyReply {
+  return sendError(
+    reply,
+    503,
+    "not_configured",
+    "System requests are not configured on this deployment.",
+  );
+}
+
 /** Authenticated, owner-scoped HTTP access to migration 0033's durable requests. */
 export function registerSystemRequestRoutes(app: FastifyInstance, deps: GatewayDeps): void {
   const store = createSystemRequestStore(
@@ -46,6 +66,7 @@ export function registerSystemRequestRoutes(app: FastifyInstance, deps: GatewayD
     if (!isUuid(sessionId)) return notFound(reply);
     const session = await sessions.get(deps.db, sessionId, uid);
     if (session === null) return notFound(reply);
+    if (!(await systemRequestsConfigured(deps.db))) return notConfigured(reply);
     const pending = await store.listPending({ userId: uid, sessionId });
     return systemRequestDtoSchema.array().parse(pending);
   });
@@ -54,6 +75,7 @@ export function registerSystemRequestRoutes(app: FastifyInstance, deps: GatewayD
     const parsed = respondBodySchema.safeParse(request.body);
     if (!parsed.success) return zodBadRequest(reply, parsed.error);
     const { requestId } = request.params as { requestId: string };
+    if (!(await systemRequestsConfigured(deps.db))) return notConfigured(reply);
     try {
       const receipt = await store.respond({
         userId: request.principal.uid,
