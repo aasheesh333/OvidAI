@@ -18,6 +18,12 @@ import { sessionEventMirror } from "./schema.js";
 export const SUBAGENT_ROSTER_DEFAULT_LIMIT = 50;
 export const SUBAGENT_ROSTER_MAX_LIMIT = 200;
 export const SUBAGENT_ROSTER_MAX_CURSOR_CHARS = 4096;
+/**
+ * `{"v":1,"identity":""}` is 21 ASCII bytes. The wire cursor is base64url of
+ * JSON, so 3051 ASCII identity characters occupy the remaining 4075 bytes and
+ * encode to exactly 4096 characters.
+ */
+export const SUBAGENT_ROSTER_MAX_CURSOR_IDENTITY_CHARS = 3051;
 /** A bounded read cannot pin the gateway or turn a hostile session into an OOM. */
 export const SUBAGENT_ROSTER_MAX_EVENTS = 20_000;
 export const SUBAGENT_ROSTER_PROMPT_CHARS = 200;
@@ -81,11 +87,23 @@ function compareSeq(a: string, b: string): number {
   return 0;
 }
 
-export function encodeSubagentRosterCursor(identity: string): string {
-  if (identity.length === 0 || identity.length > SUBAGENT_ROSTER_MAX_CURSOR_CHARS) {
-    throw new RangeError("Invalid subagent roster cursor identity");
+function cursorForIdentity(identity: string): string | null {
+  if (
+    identity.length === 0 ||
+    identity.length > SUBAGENT_ROSTER_MAX_CURSOR_IDENTITY_CHARS
+  ) {
+    return null;
   }
-  return Buffer.from(JSON.stringify({ v: 1, identity }), "utf8").toString("base64url");
+  const cursor = Buffer.from(JSON.stringify({ v: 1, identity }), "utf8").toString("base64url");
+  // Character bounds alone cannot prove the byte/encoded bound for non-ASCII
+  // identities. Never mint a cursor the response contract would reject.
+  return cursor.length <= SUBAGENT_ROSTER_MAX_CURSOR_CHARS ? cursor : null;
+}
+
+export function encodeSubagentRosterCursor(identity: string): string {
+  const cursor = cursorForIdentity(identity);
+  if (cursor === null) throw new RangeError("Invalid subagent roster cursor identity");
+  return cursor;
 }
 
 /** Strict opaque cursor decoder. Missing, malformed and oversized values are null. */
@@ -97,10 +115,10 @@ export function decodeSubagentRosterCursor(value: string): string | null {
       identity?: unknown;
     };
     if (parsed.v !== 1 || typeof parsed.identity !== "string") return null;
-    if (parsed.identity.length === 0 || parsed.identity.length > SUBAGENT_ROSTER_MAX_CURSOR_CHARS) {
-      return null;
-    }
-    return parsed.identity;
+    const identity = parsed.identity;
+    // Reject non-canonical encodings and identities whose UTF-8 expansion would
+    // exceed the same wire bound enforced by the encoder.
+    return cursorForIdentity(identity) === value ? identity : null;
   } catch {
     return null;
   }

@@ -12,6 +12,7 @@ import {
 export type RateLimitClass =
   | "send"
   | "ticket"
+  | "devices"
   | "attachments"
   | "connections"
   | "plugin_source"
@@ -56,6 +57,7 @@ const DAY = 86_400_000;
 export const RATE_LIMIT_POLICIES: Readonly<Record<RateLimitClass, RateLimitPolicy>> = {
   send: { uid: 20, ip: 120, windowMs: MINUTE },
   ticket: { uid: 30, ip: 180, windowMs: MINUTE },
+  devices: { uid: 10, ip: 60, windowMs: MINUTE },
   attachments: { uid: 60, ip: 360, windowMs: MINUTE },
   connections: { uid: 20, ip: 120, windowMs: MINUTE },
   plugin_source: { uid: 5, ip: 30, windowMs: MINUTE },
@@ -80,6 +82,7 @@ export function rateLimitClassFor(method: string, rawPath: string): RateLimitCla
   const verb = method.toUpperCase();
   if (path === "/v1/reports" || path === "/cloud/v1/reports") return "reports";
   if (path === "/cloud/v1/auth/ticket") return "ticket";
+  if (path === "/cloud/v1/devices" && (verb === "POST" || verb === "DELETE")) return "devices";
   if (path.includes("/attachments")) return "attachments";
   if (path.includes("/mcp/connections") || path === "/cloud/ws") return "connections";
   if (path === "/cloud/v1/plugins/install") return "plugin_source";

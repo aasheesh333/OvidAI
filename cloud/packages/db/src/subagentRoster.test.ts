@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { subagentSessionProjectionSchema } from "@ovid/shared";
 
 import {
   createDb,
@@ -11,6 +12,8 @@ import {
   paginateSubagentRoster,
   decodeSubagentRosterCursor,
   encodeSubagentRosterCursor,
+  SUBAGENT_ROSTER_MAX_CURSOR_CHARS,
+  SUBAGENT_ROSTER_MAX_CURSOR_IDENTITY_CHARS,
   type Db,
   readSubagentRosterSession,
 } from "./index.js";
@@ -170,6 +173,79 @@ describe("client-compatible subagent roster projection", () => {
     const cursor = encodeSubagentRosterCursor("request-a");
     expect(decodeSubagentRosterCursor(cursor)).toBe("request-a");
     expect(decodeSubagentRosterCursor("not-a-cursor")).toBeNull();
+  });
+
+  it("rejects base64 padding and trailing-bit cursor aliases through canonical re-encoding", () => {
+    const identity = "request-a";
+    const canonical = encodeSubagentRosterCursor(identity);
+    const canonicalBytes = Buffer.from(canonical, "base64url").toString("utf8");
+    const padded = `${canonical}==`;
+    const extraChar = `${canonical}A`;
+
+    expect(padded).not.toBe(canonical);
+    expect(extraChar).not.toBe(canonical);
+    expect(Buffer.from(padded, "base64url").toString("utf8")).toBe(canonicalBytes);
+    expect(Buffer.from(extraChar, "base64url").toString("utf8")).toBe(canonicalBytes);
+    expect(decodeSubagentRosterCursor(canonical)).toBe(identity);
+    expect(decodeSubagentRosterCursor(padded)).toBeNull();
+    expect(decodeSubagentRosterCursor(extraChar)).toBeNull();
+  });
+
+  it("rejects a cursor with noncanonical JSON spacing despite an identical identity", () => {
+    const noncanonical = Buffer.from(JSON.stringify(
+      { v: 1, identity: "request-a" },
+      null,
+      2,
+    ), "utf8").toString("base64url");
+
+    expect(JSON.parse(Buffer.from(noncanonical, "base64url").toString("utf8")))
+      .toEqual({ v: 1, identity: "request-a" });
+    expect(noncanonical).not.toBe(encodeSubagentRosterCursor("request-a"));
+    expect(decodeSubagentRosterCursor(noncanonical)).toBeNull();
+  });
+
+  it("accepts exactly the maximum wire-sized cursor and its response schema", () => {
+    const identity = "x".repeat(SUBAGENT_ROSTER_MAX_CURSOR_IDENTITY_CHARS);
+    const cursor = encodeSubagentRosterCursor(identity);
+    expect(cursor).toHaveLength(SUBAGENT_ROSTER_MAX_CURSOR_CHARS);
+    expect(decodeSubagentRosterCursor(cursor)).toBe(identity);
+    expect(subagentSessionProjectionSchema.safeParse({
+      counts: subagentCounts([]),
+      items: [],
+      nextCursor: cursor,
+    }).success).toBe(true);
+  });
+
+  it("fails closed for identities and cursors beyond the wire bound", () => {
+    expect(() => encodeSubagentRosterCursor(
+      "x".repeat(SUBAGENT_ROSTER_MAX_CURSOR_IDENTITY_CHARS + 1),
+    )).toThrow(RangeError);
+    const oversized = Buffer.from(JSON.stringify({
+      v: 1,
+      identity: "x".repeat(SUBAGENT_ROSTER_MAX_CURSOR_IDENTITY_CHARS + 1),
+    }), "utf8").toString("base64url");
+    expect(oversized.length).toBeGreaterThan(SUBAGENT_ROSTER_MAX_CURSOR_CHARS);
+    expect(decodeSubagentRosterCursor(oversized)).toBeNull();
+  });
+
+  it("continues across a maximum-length nextCursor without skipping a child", () => {
+    const identity = "x".repeat(SUBAGENT_ROSTER_MAX_CURSOR_IDENTITY_CHARS);
+    const long = started("1001-0", CHILD_A, CHILD_RUN_A);
+    long.payload.requestId = identity;
+    const all = projectSubagentLifecycle([
+      started("1000-0", CHILD_B, CHILD_RUN_B),
+      long,
+    ]);
+    expect(all[0]!.requestId).toBe(identity);
+
+    const first = paginateSubagentRoster(all, { limit: 1 });
+    expect(first.items[0]!.requestId).toBe(identity);
+    expect(first.nextCursor).toHaveLength(SUBAGENT_ROSTER_MAX_CURSOR_CHARS);
+    expect(subagentSessionProjectionSchema.safeParse(first).success).toBe(true);
+
+    const second = paginateSubagentRoster(all, { limit: 1, after: first.nextCursor });
+    expect(second.items[0]!.childSessionId).toBe(CHILD_B);
+    expect(second.nextCursor).toBeNull();
   });
 
   it("uses distinct roster error classes instead of a broad RangeError boundary", () => {
