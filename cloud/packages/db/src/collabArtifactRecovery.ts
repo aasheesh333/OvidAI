@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { Readable } from "node:stream";
 import { sql } from "drizzle-orm";
 import type { Db } from "./client.js";
 import { StorageReservationStore } from "./quotaService.js";
@@ -175,8 +176,10 @@ export async function verifyCollabArtifactObject(
     await deadline.run(() => storage.head(key)),
     expected,
   );
-  const stream = await deadline.run(() => storage.get(key));
-  if (stream === null) throw new CollabArtifactStorageError("artifact_unavailable");
+  const opened = await deadline.run(() => storage.get(key));
+  if (opened === null) throw new CollabArtifactStorageError("artifact_unavailable");
+  // Every adapter returns a Node stream; destroy() is the deadline seam.
+  const stream = opened as Readable;
   const hash = createHash("sha256");
   let sizeBytes = 0;
   const destroy = () => stream.destroy();

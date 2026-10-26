@@ -382,7 +382,7 @@ export function collabRunAdmissionInput(input: {
     sessionId: input.authorization.sessionId,
     idempotencyKey: request.idempotencyKey,
     content: request.text,
-    requestPayload: request,
+    requestPayload: { ...request },
     bodyPayload: {
       ownerUserId: input.authorization.ownerUserId,
       requestedModel: request.model ?? null,

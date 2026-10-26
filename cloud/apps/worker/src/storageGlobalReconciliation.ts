@@ -716,7 +716,8 @@ export async function inspectGlobalStoragePage(
       return true;
     }
   };
-  if (execution.signal?.aborted === true) {
+  const isAborted = (): boolean => execution.signal?.aborted === true;
+  if (isAborted()) {
     return createGlobalStorageDryRunReport({ options, page: abortedPage(options, "aborted"), observedAt });
   }
   if (deadlineExceeded()) {
@@ -724,7 +725,7 @@ export async function inspectGlobalStoragePage(
   }
 
   let page = validatePage(options, await execution.readPage({ options, observedAt, deadlineExceeded }));
-  if (execution.signal?.aborted === true) {
+  if (isAborted()) {
     page = { ...page, reportCompleteForApproval: false, stopReason: "aborted" };
   } else if (deadlineExceeded()) {
     page = { ...page, reportCompleteForApproval: false, stopReason: "deadline" };

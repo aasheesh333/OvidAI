@@ -1277,7 +1277,9 @@ export function projectApprovedPluginRuntime(
     if (candidate.userId !== input.userId) deny("owner_mismatch");
     if (candidate.active === false) continue;
     if (!hasOnlyKeys(candidate, CONTRIBUTION_KEYS)) deny("unapproved_field");
-    const row = projectApprovedContribution(candidate);
+    // Fields are validated at runtime inside the projection; the record was
+    // already key-checked above, so the cast cannot widen what reaches it.
+    const row = projectApprovedContribution(candidate as unknown as PersistedContribution);
     if (row === null) deny("unreviewed");
     if (!row.active) continue;
     const installation = installations.get(row.installationId);
@@ -1289,7 +1291,8 @@ export function projectApprovedPluginRuntime(
     if (count > APPROVED_RUNTIME_LIMITS.maxPerKind) deny("limit_exceeded");
     counts.set(row.kind, count);
 
-    const parsed = parseContribution(row, candidate.data, installation);
+    // projectApprovedContribution proved `data` is a record.
+    const parsed = parseContribution(row, row.data as Record<string, unknown>, installation);
     validateGrants(parsed, installation);
     const value = parsed.value;
     switch (value.kind) {

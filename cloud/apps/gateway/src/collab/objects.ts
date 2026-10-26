@@ -1198,7 +1198,10 @@ export function createCollabObjectStore(
       let debitFailed = false;
       const updated = await db.transaction(async (transaction) => {
         const tx = transaction as unknown as Db;
-        await lockReservationUsers(tx, input.expectedReservation);
+        // Users, then attachment, then reservation. The non-locking read only
+        // supplies the two uids; lockReservation below stays the authority.
+        const known = await readReservation(tx, input.id);
+        if (known !== null) await lockReservationUsers(tx, known);
         const current = await lockAttachment(tx, input.id);
         if (current === null || !sameAttachmentVersion(current, input.expected)) return false;
         await tx.update(schema.attachments).set({
@@ -1231,7 +1234,8 @@ export function createCollabObjectStore(
     async deleteFailedAttachment(input) {
       return db.transaction(async (transaction) => {
         const tx = transaction as unknown as Db;
-        await lockReservationUsers(tx, input.expectedReservation);
+        const known = await readReservation(tx, input.id);
+        if (known !== null) await lockReservationUsers(tx, known);
         const current = await lockAttachment(tx, input.id);
         if (current === null || !sameAttachmentVersion(current, input.expected) ||
             current.uploadStatus !== "failed") return false;
@@ -2164,7 +2168,7 @@ async function mintUrl(
 ): Promise<{ schemaVersion: 1; url: string; expiresAt: string }> {
   const { deps } = service;
   const ttlSeconds = deps.downloadTtlSeconds ?? DEFAULT_PRESIGN_TTL_SECONDS;
-  const contentType = sanitizeCdnContentType(input.contentType) ?? "application/octet-stream";
+  const contentType = sanitizeCdnContentType(input.contentType ?? undefined) ?? "application/octet-stream";
   const options: PresignGetOptions | undefined = isActiveCdnContentType(contentType)
     ? { disposition: "attachment", filename: input.name, contentType }
     : undefined;

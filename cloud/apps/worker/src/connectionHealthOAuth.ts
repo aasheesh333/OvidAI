@@ -49,7 +49,8 @@ function tokenMaterial(value: unknown): SealedTokenMaterial | null {
       (candidate.expiresAt !== null && typeof candidate.expiresAt !== "number") ||
       (candidate.clientSecret !== null && typeof candidate.clientSecret !== "string") ||
       (candidate.resource !== null && typeof candidate.resource !== "string")) return null;
-  return candidate as SealedTokenMaterial;
+  // Every field was validated above; the record is structurally the material.
+  return candidate as unknown as SealedTokenMaterial;
 }
 
 const OAUTH_REFRESH_HEADER_TIMEOUT_MS = 30_000;

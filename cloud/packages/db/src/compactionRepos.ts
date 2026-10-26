@@ -1002,6 +1002,10 @@ export function toolCallHistoryPayload(
   result: string,
 ): ToolCallHistoryPayload {
   const status = terminalStatus(result);
+  const omitToolCalls = (value: CompactionMessage): Omit<CompactionMessage, "toolCalls"> => {
+    const { toolCalls: _omitted, ...rest } = value;
+    return rest;
+  };
   return {
     id: call.id,
     name: call.name,
@@ -1010,7 +1014,9 @@ export function toolCallHistoryPayload(
     result,
     error: status === "error" ? result : null,
     idempotencyKey: call.id,
-    assistant: { ...message, toolCalls: undefined },
+    // The payload's assistant copy deliberately omits toolCalls; spreading it
+    // back as `undefined` would re-add an omitted key.
+    assistant: omitToolCalls(message),
   };
 }
 

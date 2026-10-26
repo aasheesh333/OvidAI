@@ -2,7 +2,7 @@ import { pathToFileURL } from "node:url";
 import { hostname } from "node:os";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { Redis } from "ioredis";
-import { assertSessionFileCapacity, createDb, createStorageQuotaRepos, RunQuotaService, createStudioPreviewPostgresStore, createStudioPreviewStore, dbPoolOptionsFromEnv, byokKeysRepo, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, imagesRepo, mcpOauthFlows, mcpServers as mcpServersRepo, messages as messagesRepo, runs as runsRepo, sharesRepo, users, workspaceObjects as workspaceObjectsRepo, type Db } from "@ovid/db";
+import { assertSessionFileCapacity, createDb, createStorageQuotaRepos, RunQuotaService, createStudioPreviewPostgresStore, createStudioPreviewStore, dbPoolOptionsFromEnv, byokKeysRepo, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, imagesRepo, mcpOauthFlows, mcpServers as mcpServersRepo, messages as messagesRepo, runs as runsRepo, sharesRepo, users, workspaceObjects as workspaceObjectsRepo, type Db, type DbOrTx } from "@ovid/db";
 import {
   createCloudCleanup,
   createFirebaseAdmin,
@@ -50,6 +50,7 @@ import {
   sweepWorkspaces,
   type HibernateDeps,
   type HydrateDeps,
+  type ArtifactProjectCapacity,
   type WarmConfig,
   type WarmDeps,
 } from "@ovid/storage";
@@ -692,7 +693,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
               eventMirror: eventMirrorRepo,
               quota: artifactQuota,
               grantFactory: artifactGrantFactory,
-              assertProjectFileCapacity: assertSessionFileCapacity,
+              assertProjectFileCapacity: projectFileCapacity,
               ...(cdn !== null ? { cdn } : {}),
             },
             {
@@ -741,6 +742,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   const stepLimit = createStepLimiter(toolStepLimit);
 
   const sandboxConfig = loadSandboxConfig(env);
+  // The storage contract takes a HydrateDbLike handle; the canonical quota
+  // reader takes the worker's Db/DbOrTx. One adapter keeps every call site on
+  // the single real implementation.
+  const projectFileCapacity: ArtifactProjectCapacity = (capacityDb, userId, sessionId, additional) =>
+    assertSessionFileCapacity(capacityDb as unknown as DbOrTx, userId, sessionId, additional);
+
   const rootfs = await resolveRootfs(sandboxConfig.rootfsPath);
   const cgroups = createCgroupManager(sandboxConfig);
   await cgroups.init(); // leaf-first bootstrap (no-internal-process rule)
@@ -783,7 +790,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
           cgroups,
           launcher,
           config: sandboxConfig,
-          rootfs,
+          rootfs: rootfs.path,
         }),
       })
     : null;
@@ -920,7 +927,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
         manager.workspaceDir(userId, sessionId),
       quota: artifactQuota,
       grantFactory: artifactGrantFactory,
-      assertProjectFileCapacity: assertSessionFileCapacity,
+      assertProjectFileCapacity: projectFileCapacity,
       ...(cdn !== null ? { cdn } : {}),
     }),
   });
@@ -1059,7 +1066,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     workspaceObjects: workspaceObjectsRepo,
     quota: artifactQuota,
     grantFactory: artifactGrantFactory,
-    assertProjectFileCapacity: assertSessionFileCapacity,
+    assertProjectFileCapacity: projectFileCapacity,
     ...(cdn !== null ? { cdn } : {}),
   });
   await fileService.listen({ port: cfg.workerFilePort, host: "0.0.0.0" });

@@ -217,8 +217,8 @@ export interface StudioPreviewTouchResult {
 export interface StudioPreviewManager {
   start(request: StudioPreviewStartRequest): Promise<StudioPreviewRecord>;
   stop(request: StudioPreviewRef): Promise<StudioPreviewRecord | null>;
-  get(request: StudioPreviewOwner): Promise<StudioPreviewRecord[]>;
   get(request: StudioPreviewRef): Promise<StudioPreviewRecord | null>;
+  get(request: StudioPreviewOwner): Promise<StudioPreviewRecord[]>;
   /** Explicit authorized content/HMR access; ordinary management reads never touch. */
   touch(request: StudioPreviewTouchRequest): Promise<StudioPreviewRecord | null>;
   /** Private gateway access also needs the DB boolean; false may be only throttling. */

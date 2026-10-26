@@ -36,10 +36,11 @@ function correlationId(value: unknown): string {
 }
 
 /** Copies only known correlation labels and validates every retained value. */
-export function correlationIds(input: Record<string, unknown>): CorrelationIds {
+export function correlationIds(input: object): CorrelationIds {
+  const record = input as Record<string, unknown>;
   const out: CorrelationIds = {};
   for (const key of CORRELATION_KEYS) {
-    const value = input[key];
+    const value = record[key];
     if (value !== undefined) out[key] = correlationId(value);
   }
   return out;

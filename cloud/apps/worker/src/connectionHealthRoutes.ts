@@ -58,7 +58,7 @@ export function registerConnectionHealthRoutes(
     },
   );
 
-  app.get<{ Params: { id: string }>(
+  app.get<{ Params: { id: string } }>(
     "/internal/mcp/connections/:id/health",
     async (request, reply) => {
       if (deps.invocations === undefined) return unavailable(reply);
@@ -73,7 +73,7 @@ export function registerConnectionHealthRoutes(
     },
   );
 
-  app.delete<{ Params: { id: string }>(
+  app.delete<{ Params: { id: string } }>(
     "/internal/mcp/connections/:id",
     async (request, reply) => {
       if (deps.invocations === undefined) return unavailable(reply);

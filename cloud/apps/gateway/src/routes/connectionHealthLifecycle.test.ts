@@ -107,7 +107,7 @@ describe("gateway worker-owned connection health composition", () => {
     }));
     const invocations: ConnectionHealthInvocations = {
       checkAuthenticated: vi.fn(async () => transition()),
-      getAuthenticated: vi.fn(async () => health({ healthState: "refreshing" }),
+      getAuthenticated: vi.fn(async () => health({ healthState: "refreshing" })),
       disconnectAuthenticated,
       checkSelectedOperation: vi.fn(async () => {
         throw new Error("gateway must not use selected lazy snapshots");

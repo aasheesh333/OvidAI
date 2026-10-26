@@ -557,6 +557,11 @@ export interface FullRunDeps {
     sessionId: string;
     userId: string;
     text: string;
+    /** Captured initiating actor; the run keeps its billing identity. */
+    actorUserId?: string;
+    source?: "parent_wake";
+    provenance?: "web" | "android" | "server";
+    modelContext?: AgentRunJob["modelContext"];
   }) => Promise<void>;
   sleep?: (ms: number) => Promise<void>;
   /**

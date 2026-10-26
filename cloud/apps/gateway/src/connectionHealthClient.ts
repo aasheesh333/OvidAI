@@ -114,7 +114,7 @@ export function createConnectionHealthClient(
   const fetchImpl = cfg.fetchImpl ?? globalThis.fetch;
   const timeoutMs = cfg.timeoutMs ?? 70_000;
 
-  async function request<T>(
+  async function send<T>(
     method: "GET" | "POST" | "DELETE",
     uid: string,
     connectionId: string,
@@ -154,15 +154,15 @@ export function createConnectionHealthClient(
   return {
     checkAuthenticated(request) {
       assertAuthenticated(request.principal.authenticated);
-      return request("POST", request.principal.uid, request.connectionId, request.operationId, parseTransition);
+      return send("POST", request.principal.uid, request.connectionId, request.operationId, parseTransition);
     },
     getAuthenticated(request) {
       assertAuthenticated(request.principal.authenticated);
-      return request("GET", request.principal.uid, request.connectionId, undefined, parseConnection);
+      return send("GET", request.principal.uid, request.connectionId, undefined, parseConnection);
     },
     disconnectAuthenticated(request) {
       assertAuthenticated(request.principal.authenticated);
-      return request("DELETE", request.principal.uid, request.connectionId, undefined, parseConnection);
+      return send("DELETE", request.principal.uid, request.connectionId, undefined, parseConnection);
     },
     async checkSelectedOperation(_request: SelectedConnectionHealthRequest): Promise<HealthTransition> {
       // Lazy snapshots are worker-local and never traverse this gateway client.

@@ -316,9 +316,6 @@ function projectConnectionHealthFacts(
     case "disabled":
       // An enabled row cannot truthfully project disabled.
       return unavailableProjection(connection);
-    case "revoked":
-      // Handled above; this branch documents exhaustiveness for future states.
-      return { ...connection, healthState: "revoked" };
   }
 }
 

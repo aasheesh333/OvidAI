@@ -119,7 +119,7 @@ export function registerArtifactRoutes(app: FastifyInstance, deps: GatewayDeps):
     const ttlSeconds = deps.presignTtlSeconds ?? DEFAULT_PRESIGN_TTL_SECONDS;
     // NEVER log the URL — it is a bearer capability until expiresAt. Active
     // content is always an attachment, even on this legacy short-URL route.
-    const contentType = sanitizeCdnContentType(head.contentType ?? row.contentType) ?? "application/octet-stream";
+    const contentType = sanitizeCdnContentType(head.contentType ?? row.contentType ?? undefined) ?? "application/octet-stream";
     const url = await deps.storage.presignGet(
       row.r2Key,
       ttlSeconds,

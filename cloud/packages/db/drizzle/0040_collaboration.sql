@@ -88,7 +88,7 @@ BEGIN
       ('collab_invites_code_hash_check',
        'CHECK ((code_hash ~ ''^[0-9a-f]{64}$''::text))'),
       ('collab_invites_uses_check',
-       'CHECK ((max_uses >= 1) AND (max_uses <= 50) AND (uses >= 0) AND (uses <= max_uses))'),
+       'CHECK ((((max_uses >= 1) AND (max_uses <= 50)) AND (uses >= 0) AND (uses <= max_uses)))'),
       ('collab_invites_generation_check', 'CHECK ((issued_generation >= 1))')
     ) AS required(constraint_name, definition)
   LOOP
@@ -127,7 +127,7 @@ BEGIN
     canonical_ok := false;
   END IF;
   FOR expected IN
-    SELECT index_name, format(index_definition, current_schema())
+    SELECT index_name, format(index_definition, current_schema()) AS index_definition
     FROM (VALUES
       ('collab_invites_pkey',
        'CREATE UNIQUE INDEX collab_invites_pkey ON %s.collab_invites USING btree (id)'),
@@ -218,9 +218,9 @@ BEGIN
       ('collab_invites_pkey', 'PRIMARY KEY (invite_id)'),
       ('collab_invites_code_hash_key', 'UNIQUE (code_hash)'),
       ('collab_invites_max_uses_check',
-       'CHECK ((max_uses >= 1) AND (max_uses <= 9))'),
-      ('collab_invites_uses_check',
-       'CHECK ((uses >= 0) AND (uses <= max_uses))'),
+       'CHECK (((max_uses >= 1) AND (max_uses <= 9)))'),
+      ('collab_invites_check',
+       'CHECK (((uses >= 0) AND (uses <= max_uses)))'),
       ('collab_invites_revoked_check', 'CHECK ((revoked = ANY (ARRAY[0, 1])))')
     ) AS required(constraint_name, definition)
   LOOP
@@ -248,7 +248,7 @@ BEGIN
     legacy_ok := false;
   END IF;
   FOR expected IN
-    SELECT index_name, format(index_definition, current_schema())
+    SELECT index_name, format(index_definition, current_schema()) AS index_definition
     FROM (VALUES
       ('collab_invites_pkey',
        'CREATE UNIQUE INDEX collab_invites_pkey ON %s.collab_invites USING btree (invite_id)'),

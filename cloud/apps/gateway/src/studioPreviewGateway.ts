@@ -109,9 +109,10 @@ function privateHeaders(reply: FastifyReply): void {
     .header("referrer-policy", "no-referrer");
 }
 
-function safeRouteError(reply: FastifyReply, error: FastifyError): FastifyReply {
+function safeRouteError(reply: FastifyReply, error: unknown): FastifyReply {
   privateHeaders(reply);
-  const status = typeof error.statusCode === "number" ? error.statusCode : 500;
+  const statusCode = (error as { statusCode?: unknown } | null)?.statusCode;
+  const status = typeof statusCode === "number" ? statusCode : 500;
   if (status === 404) return originNotFound(reply);
   if (status === 413) {
     return sendError(reply, 413, "payload_too_large", "Preview request is too large.");

@@ -478,13 +478,16 @@ export function createBillingRemoteAuthority(deps: BillingRemoteAuthorityDeps) {
       if (pending === null) throw new BillingRemoteUnresolvedError();
       return unresolved(pending);
     }
-    if (effectOf(desired) === "generate" && createdTarget === null && after.target !== undefined &&
-        !(await billingRemote.bindCreatedTarget(authorityDb(), desired, after.target))) {
+    // Only a "live" readback carries a target; the match above already proved
+    // one exists for a generate effect.
+    const afterTarget = after.state === "live" ? after.target : undefined;
+    if (effectOf(desired) === "generate" && createdTarget === null && afterTarget !== undefined &&
+        !(await billingRemote.bindCreatedTarget(authorityDb(), desired, afterTarget))) {
       throw new BillingRemoteUnresolvedError();
     }
     const completedOperation = createdTarget === null ? current : { ...current, createdTarget };
     await completeExisting(completedOperation, "readback");
-    const resultTarget = createdTarget ?? after.target;
+    const resultTarget = createdTarget ?? afterTarget;
     return {
       status: "completed",
       ...(sent.response === undefined ? {} : { response: sent.response }),

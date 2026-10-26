@@ -331,10 +331,12 @@ export function createWorkerCompactionRuntime(options: CreateWorkerCompactionRun
     binding?: WorkerCompactionBinding,
   ): WorkerCompactor {
     if (binding === undefined) return base;
+    // Nested closures below cannot rely on parameter narrowing.
+    const bound = binding;
 
     const compacting = new Set<string>();
     const emitted = new Set<string>();
-    const now = binding.now ?? (() => new Date());
+    const now = bound.now ?? (() => new Date());
 
     async function prepare(
       input: WorkerCompactionResolveInput,
@@ -345,7 +347,7 @@ export function createWorkerCompactionRuntime(options: CreateWorkerCompactionRun
     }> {
       let resolution: WorkerCompactionResolution | null;
       try {
-        resolution = await binding.resolve(input);
+        resolution = await bound.resolve(input);
       } catch (error) {
         if (error instanceof WorkerCompactionError) throw error;
         fail("compaction_context_unavailable");
@@ -400,7 +402,7 @@ export function createWorkerCompactionRuntime(options: CreateWorkerCompactionRun
       };
       const emissionKey = JSON.stringify(identity);
       if (emitted.has(emissionKey)) return;
-      if (binding.idempotentSink === undefined && await alreadyMirrored(identity)) {
+      if (bound.idempotentSink === undefined && await alreadyMirrored(identity)) {
         emitted.add(emissionKey);
         return;
       }
@@ -435,12 +437,12 @@ export function createWorkerCompactionRuntime(options: CreateWorkerCompactionRun
       }
       // Deliberately no messages.append / ordinary-chat writer. Strict schemas
       // exclude raw prompts, reasoning, request bodies, thoughts, and secrets.
-      if (binding.idempotentSink !== undefined) {
-        await binding.idempotentSink.emitOnce(identity, payload);
+      if (bound.idempotentSink !== undefined) {
+        await bound.idempotentSink.emitOnce(identity, payload);
       } else {
         // Sequential suppression only: concurrent wrappers can both pass the
         // lookup, and an append/mirror partial-sink failure can replay a duplicate.
-        await binding.sink.emit(type, payload);
+        await bound.sink.emit(type, payload);
       }
       emitted.add(emissionKey);
     }

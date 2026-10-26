@@ -1166,7 +1166,7 @@ export class CollabArtifactRegistrar {
         // Re-read the row/highest generation only after an empty reserved page.
         continue;
       }
-      if (result.kind !== "wait" && result.kind !== "drain") return result;
+      if (result.kind !== "wait") return result;
       await deadline.sleep(Math.min(
         25,
         Math.max(1, waitUntil - Date.now()),
