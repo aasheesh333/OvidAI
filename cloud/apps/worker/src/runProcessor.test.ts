@@ -17,6 +17,7 @@ import {
   migrate,
   newId,
   projectsRepo,
+  RunQuotaService,
   runs,
   sessionState,
   sessions,
@@ -70,6 +71,7 @@ import {
   type ToolCall,
 } from "./liteLlm.js";
 import { createSandboxPort } from "./sandboxAdapter.js";
+import type { ModelCallQuota } from "./usageRecorder.js";
 import { createAgentRunProcessor, type RunDeps } from "./runProcessor.js";
 import {
   createFullAgentRunProcessor,
@@ -1892,6 +1894,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
     async function startTurnSse(
       turns: Array<Array<Record<string, unknown>>>,
       chooseTurn?: (messages: Array<ChatMessage & { tool_call_id?: string }>) => number | undefined,
+      behavior: { contextOverflowOnce?: boolean } = {},
     ): Promise<{
       url: string;
       requests: Array<{
@@ -1899,6 +1902,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         tools?: unknown;
         model?: string;
         max_tokens?: number;
+        rawBody: string;
       }>;
       close: () => Promise<void>;
     }> {
@@ -1907,12 +1911,14 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         tools?: unknown;
         model?: string;
         max_tokens?: number;
+        rawBody: string;
       }> = [];
       const server = createServer((req, res) => {
         const chunks: Buffer[] = [];
         req.on("data", (c: Buffer) => chunks.push(c));
         req.on("end", () => {
-          const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+          const rawBody = Buffer.concat(chunks).toString("utf8");
+          const body = JSON.parse(rawBody) as {
             messages: ChatMessage[];
             tools?: unknown;
             model?: string;
@@ -1923,7 +1929,13 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
             tools: body.tools,
             model: body.model,
             max_tokens: body.max_tokens,
+            rawBody,
           });
+          if (behavior.contextOverflowOnce === true && requests.length === 1) {
+            res.writeHead(400, { "content-type": "application/json" });
+            res.end(JSON.stringify({ error: { message: "context length exceeded" } }));
+            return;
+          }
           const selected = chooseTurn?.(body.messages);
           const turn = turns[selected ?? Math.min(requests.length - 1, turns.length - 1)]!;
           res.writeHead(200, { "content-type": "text/event-stream" });
@@ -1992,6 +2004,26 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       { choices: [{ delta: { content: text }, finish_reason: null }] },
       { choices: [{ delta: {}, finish_reason: "stop" }] },
     ];
+
+    const measuredUsage = (o: {
+      input: number;
+      output: number;
+      cacheRead?: number;
+      providerModel?: string;
+      costUsd?: string;
+    }): Record<string, unknown> => ({
+      choices: [],
+      ...(o.providerModel !== undefined ? { model: o.providerModel } : {}),
+      usage: {
+        prompt_tokens: o.input,
+        completion_tokens: o.output,
+        total_tokens: o.input + o.output,
+        ...(o.cacheRead !== undefined
+          ? { prompt_tokens_details: { cached_tokens: o.cacheRead } }
+          : {}),
+        ...(o.costUsd !== undefined ? { cost: Number(o.costUsd) } : {}),
+      },
+    });
 
     const CONNECTOR_SECRET = "run-processor-provider-plaintext-canary";
 
@@ -2454,6 +2486,543 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
           cache_read_tokens: 1200,
         },
       ]);
+    });
+
+    describe("R1b worker usage runtime (UNEXECUTED)", () => {
+      const keyedQuota = (service: RunQuotaService, keys: string[]): ModelCallQuota => ({
+        async reserveModelCall(input) {
+          keys.push(input.reservationKey);
+          return service.reserveModelCall(input);
+        },
+        settleModelCall: (input) => service.settleModelCall(input),
+        releaseModelCall: (reservationId) => service.releaseModelCall(reservationId),
+      });
+
+      it("reserves before the real root SSE call, settles exact root facts, and stops the next call on exhaustion", async () => {
+        const seeded = await seedRun();
+        const sbx = makeFakePort({ exitCode: 0, stdout: "hi\n", stderr: "" });
+        const sse = await startTurnSse([
+          [
+            ...toolCallTurn("r1b-root-tool", "run_shell", { command: "echo hi" }),
+            measuredUsage({
+              input: 2,
+              output: 1,
+              cacheRead: 1,
+              providerModel: "provider/root-actual",
+              costUsd: "0.0000000007",
+            }),
+          ],
+          [...textTurn("must not be requested"), measuredUsage({ input: 90, output: 90 })],
+        ]);
+        const reservationKeys: string[] = [];
+        const order: string[] = [];
+        let canonical: RunQuotaService | undefined;
+        const quota: ModelCallQuota = {
+          async reserveModelCall(input) {
+            expect(sse.requests).toHaveLength(reservationKeys.length === 0 ? 0 : 1);
+            reservationKeys.push(input.reservationKey);
+            order.push("reserve");
+            // The first call is admitted exactly at its bounded allowance. Its
+            // small actual settlement then leaves insufficient room for the
+            // next bounded request, without any hand-written counter update.
+            const allowance = input.inputTokens + input.maxOutputTokens;
+            canonical ??= new RunQuotaService(db, {
+              tokenCaps: { perDay: allowance, perMonth: allowance },
+              usdCaps: { perDay: null, perMonth: null },
+            });
+            return canonical.reserveModelCall(input);
+          },
+          async settleModelCall(input) {
+            expect(sse.requests).toHaveLength(1);
+            order.push("settle");
+            return canonical!.settleModelCall(input);
+          },
+          releaseModelCall: (reservationId) => canonical!.releaseModelCall(reservationId),
+        };
+        const processor = createFullAgentRunProcessor(
+          makeFullDeps(sse.url, sbx.port, { quota }),
+        );
+        try {
+          await processor({
+            data: { ...jobOf(seeded).data, maxOutputTokens: 1 },
+          });
+        } finally {
+          await processor.close();
+          await sse.close();
+        }
+
+        expect(order).toEqual(["reserve", "settle", "reserve"]);
+        expect(sse.requests).toHaveLength(1);
+        expect(sse.requests[0]!.max_tokens).toBe(1);
+        expect(reservationKeys).toHaveLength(2);
+        expect(reservationKeys[1]).not.toBe(reservationKeys[0]);
+        expect(await runRow(seeded.runId)).toMatchObject({
+          status: "failed",
+          lastError: "quota_exceeded",
+        });
+        expect((await readEvents(seeded.sessionId)).at(-1)?.payload).toMatchObject({
+          code: "quota_exceeded",
+        });
+        const reservations = (await db.$client`
+          SELECT id, actor_user_id, session_id::text, run_id::text, state,
+                 actual_input_tokens::int, actual_output_tokens::int,
+                 actual_cache_read_tokens::int, requested_model, provider_model,
+                 cost_usd::text, cost_source, billing_class
+            FROM usage_quota_reservations
+           WHERE run_id = ${seeded.runId}`) as Array<Record<string, unknown>>;
+        expect(reservations).toHaveLength(1);
+        expect(reservations[0]).toMatchObject({
+          actor_user_id: seeded.uid,
+          session_id: seeded.sessionId,
+          run_id: seeded.runId,
+          state: "settled",
+          actual_input_tokens: 2,
+          actual_output_tokens: 1,
+          actual_cache_read_tokens: 1,
+          requested_model: "full-default-model",
+          provider_model: "provider/root-actual",
+          cost_usd: "0.0000000007",
+          cost_source: "litellm",
+          billing_class: "ovid_allowance",
+        });
+        expect(await db.$client`
+          SELECT user_id, session_id::text, run_id::text, model, requested_model,
+                 provider_model, input_tokens::int, output_tokens::int,
+                 cache_read_tokens::int, cache_write_tokens::int,
+                 cost_usd::text, cost_source, billing_class
+            FROM run_usage
+           WHERE quota_reservation_id = ${reservations[0]!.id}`).toEqual([{
+          user_id: seeded.uid,
+          session_id: seeded.sessionId,
+          run_id: seeded.runId,
+          model: "full-default-model",
+          requested_model: "full-default-model",
+          provider_model: "provider/root-actual",
+          input_tokens: 2,
+          output_tokens: 1,
+          cache_read_tokens: 1,
+          cache_write_tokens: 0,
+          cost_usd: "0.0000000007",
+          cost_source: "litellm",
+          billing_class: "ovid_allowance",
+        }]);
+      });
+
+      it("settles distinct identical prompt-hook calls separately under the live actor, never the host", async () => {
+        const seeded = await seedRun();
+        const actorUserId = uid("r1b-hook-actor");
+        await users.ensure(db, actorUserId, `${actorUserId}@stub.test`);
+        const sharedRule = "Allow this R1b prompt unless it contains a forbidden marker.";
+        const sbx = makeFakePort(undefined, {
+          ".dsh/hooks.json": JSON.stringify([
+            {
+              event: "UserPromptSubmit",
+              type: "prompt",
+              prompt: sharedRule,
+              id: "r1b-hook-a",
+            },
+            {
+              event: "UserPromptSubmit",
+              type: "prompt",
+              prompt: sharedRule,
+              id: "r1b-hook-b",
+            },
+          ]),
+        });
+        const sse = await startTurnSse([
+          [
+            ...textTurn("allow first"),
+            measuredUsage({ input: 7, output: 2, providerModel: "provider/hook" }),
+          ],
+          [
+            ...textTurn("allow second"),
+            measuredUsage({ input: 7, output: 2, providerModel: "provider/hook" }),
+          ],
+          [
+            ...textTurn("root answer"),
+            measuredUsage({ input: 11, output: 4, providerModel: "provider/root" }),
+          ],
+        ]);
+        const keyActors: string[] = [];
+        const keys: KeyResolver = {
+          async resolveForRun(keyUid) {
+            keyActors.push(keyUid);
+            return { kind: "litellm", key: "sk-full-test", baseUrl: "" };
+          },
+        };
+        const canonical = new RunQuotaService(db, {
+          tokenCaps: { perDay: 1_000_000, perMonth: 10_000_000 },
+          usdCaps: { perDay: null, perMonth: null },
+        });
+        const reservationKeys: string[] = [];
+        const processor = createFullAgentRunProcessor(
+          makeFullDeps(sse.url, sbx.port, {
+            keys,
+            quota: keyedQuota(canonical, reservationKeys),
+          }),
+        );
+        try {
+          await processor({
+            data: { ...jobOf(seeded).data, actorUserId },
+          });
+        } finally {
+          await processor.close();
+          await sse.close();
+        }
+
+        expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+        expect(sse.requests).toHaveLength(3);
+        // Distinct hook IDs intentionally produce the same provider body. Only
+        // the invocation scope may separate their durable reservation identity.
+        expect(sse.requests[0]!.rawBody).toBe(sse.requests[1]!.rawBody);
+        expect(JSON.stringify(sse.requests[0]!.messages)).toContain(sharedRule);
+        expect(sse.requests[2]!.messages.at(-1)).toEqual({ role: "user", content: seeded.prompt });
+        expect(sse.requests[2]!.rawBody).not.toBe(sse.requests[0]!.rawBody);
+        expect(reservationKeys).toHaveLength(3);
+        expect(reservationKeys[1]).not.toBe(reservationKeys[0]);
+        expect(new Set(reservationKeys).size).toBe(3);
+        expect(keyActors.length).toBeGreaterThanOrEqual(3);
+        expect(keyActors.every((keyUid) => keyUid === actorUserId)).toBe(true);
+        expect(keyActors).not.toContain(seeded.uid);
+
+        const settlements = (await db.$client`
+          SELECT r.reservation_key, r.state, count(u.id)::int AS settlements
+            FROM usage_quota_reservations AS r
+            LEFT JOIN run_usage AS u ON u.quota_reservation_id = r.id
+           WHERE r.run_id = ${seeded.runId}
+           GROUP BY r.id, r.reservation_key, r.state, r.created_at
+           ORDER BY r.created_at, r.id`) as Array<Record<string, unknown>>;
+        expect(settlements).toHaveLength(3);
+        expect(new Set(settlements.map((row) => String(row.reservation_key))).size).toBe(3);
+        for (const row of settlements) {
+          expect(row).toMatchObject({ state: "settled", settlements: 1 });
+        }
+        expect(await db.$client`
+          SELECT user_id, session_id::text, run_id::text, model, provider_model,
+                 input_tokens::int, output_tokens::int, billing_class
+            FROM run_usage
+           WHERE run_id = ${seeded.runId}
+           ORDER BY created_at, id`).toEqual([
+          {
+            user_id: actorUserId,
+            session_id: seeded.sessionId,
+            run_id: seeded.runId,
+            model: "full-default-model",
+            provider_model: "provider/hook",
+            input_tokens: 7,
+            output_tokens: 2,
+            billing_class: "ovid_allowance",
+          },
+          {
+            user_id: actorUserId,
+            session_id: seeded.sessionId,
+            run_id: seeded.runId,
+            model: "full-default-model",
+            provider_model: "provider/hook",
+            input_tokens: 7,
+            output_tokens: 2,
+            billing_class: "ovid_allowance",
+          },
+          {
+            user_id: actorUserId,
+            session_id: seeded.sessionId,
+            run_id: seeded.runId,
+            model: "full-default-model",
+            provider_model: "provider/root",
+            input_tokens: 11,
+            output_tokens: 4,
+            billing_class: "ovid_allowance",
+          },
+        ]);
+        // This is a usage-identity oracle only: R2 still owns Collab claim,
+        // stable admission, and actor-specific credential/model precedence.
+        expect(await db.$client`
+          SELECT count(*)::int AS count FROM run_usage
+           WHERE run_id = ${seeded.runId} AND user_id = ${seeded.uid}`).toEqual([{ count: 0 }]);
+        expect(await db.$client`
+          SELECT DISTINCT actor_user_id FROM usage_quota_reservations
+           WHERE run_id = ${seeded.runId}`).toEqual([{ actor_user_id: actorUserId }]);
+      });
+
+      it("uses the actor's real BYOK default for manual compaction, not the owner's different default", async () => {
+        const seeded = await seedRun({
+          prompt: "/compact",
+          history: Array.from({ length: 12 }, (_, index) => ({
+            role: index % 2 === 0 ? "user" as const : "assistant" as const,
+            content: `R1b compaction history ${index}`,
+          })),
+        });
+        const actorUserId = uid("r1b-compaction-actor");
+        await users.ensure(db, actorUserId, `${actorUserId}@stub.test`);
+        const ownerKeyId = newId();
+        const actorKeyId = newId();
+        const ownerDefault = { keyId: ownerKeyId, model: "owner-byok-default-model" };
+        const actorDefault = { keyId: actorKeyId, model: "actor-byok-default-model" };
+        await accountSettings.patch(db, seeded.uid, { byokDefault: ownerDefault });
+        await accountSettings.patch(db, actorUserId, { byokDefault: actorDefault });
+        expect((await accountSettings.get(db, seeded.uid)).byokDefault).toEqual(ownerDefault);
+        expect((await accountSettings.get(db, actorUserId)).byokDefault).toEqual(actorDefault);
+
+        const sse = await startTurnSse([[
+          ...textTurn("short R1b compaction summary"),
+          measuredUsage({ input: 17, output: 3, providerModel: "provider/compaction" }),
+        ]]);
+        const resolutions: Array<{ userId: string; keyId: string | null | undefined }> = [];
+        const keys: KeyResolver = {
+          async resolveForRun(keyUid, ctx) {
+            resolutions.push({ userId: keyUid, keyId: ctx.byokKeyId });
+            // Strict per-user escrow behavior: an actor presenting the owner's
+            // key ID fails instead of being accepted by a permissive fake.
+            const expectedKeyId = keyUid === actorUserId
+              ? actorKeyId
+              : keyUid === seeded.uid
+                ? ownerKeyId
+                : null;
+            if (expectedKeyId === null || ctx.byokKeyId !== expectedKeyId) return null;
+            return {
+              kind: "byok",
+              byokKeyId: expectedKeyId,
+              providerId: "openai",
+              endpoint: sse.url,
+              apiKey: keyUid === actorUserId ? "sk-r1b-actor" : "sk-r1b-owner",
+            };
+          },
+        };
+        const canonical = new RunQuotaService(db, {
+          tokenCaps: { perDay: 1_000_000, perMonth: 10_000_000 },
+          usdCaps: { perDay: null, perMonth: null },
+        });
+        const reservationKeys: string[] = [];
+        const processor = createFullAgentRunProcessor(
+          makeFullDeps(sse.url, makeFakePort().port, {
+            keys,
+            quota: keyedQuota(canonical, reservationKeys),
+          }),
+        );
+        const job = {
+          data: {
+            ...jobOf(seeded).data,
+            actorUserId,
+            // Deliberately no job byokKeyId/byokModel: accountSettings must
+            // supply the initiating actor's default, never the owner's.
+          },
+        };
+        expect(job.data.byokKeyId).toBeUndefined();
+        expect(job.data.byokModel).toBeUndefined();
+        try {
+          await processor(job);
+        } finally {
+          await processor.close();
+          await sse.close();
+        }
+
+        expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+        expect(resolutions).toEqual([{ userId: actorUserId, keyId: actorKeyId }]);
+        expect(resolutions.some((entry) => entry.userId === seeded.uid)).toBe(false);
+        expect(resolutions.some((entry) => entry.keyId === ownerKeyId)).toBe(false);
+        expect(sse.requests).toHaveLength(1);
+        expect(sse.requests[0]!.model).toBe(actorDefault.model);
+        expect(sse.requests[0]!.model).not.toBe(ownerDefault.model);
+        expect(sse.requests[0]!.max_tokens).toBe(8192);
+        expect(reservationKeys).toHaveLength(1);
+        expect(await db.$client`
+          SELECT actor_user_id, billing_class, state
+            FROM usage_quota_reservations
+           WHERE run_id = ${seeded.runId}`).toEqual([{
+          actor_user_id: actorUserId,
+          billing_class: "byok",
+          state: "settled",
+        }]);
+        expect(await db.$client`
+          SELECT user_id, session_id::text, run_id::text, model, provider_model,
+                 input_tokens::int, output_tokens::int, billing_class
+            FROM run_usage
+           WHERE run_id = ${seeded.runId}`).toEqual([{
+          user_id: actorUserId,
+          session_id: seeded.sessionId,
+          run_id: seeded.runId,
+          model: actorDefault.model,
+          provider_model: "provider/compaction",
+          input_tokens: 17,
+          output_tokens: 3,
+          billing_class: "byok",
+        }]);
+        expect(await db.$client`
+          SELECT count(*)::int AS count FROM run_usage
+           WHERE run_id = ${seeded.runId} AND user_id = ${seeded.uid}`).toEqual([{ count: 0 }]);
+        expect(await db.$client`
+          SELECT count(*)::int AS count FROM usage_quota_counters
+           WHERE actor_user_id IN (${actorUserId}, ${seeded.uid})`).toEqual([{ count: 0 }]);
+        expect((await assistantRows(seeded.sessionId)).some((row) =>
+          row.content.startsWith("Session compacted")
+        )).toBe(true);
+      });
+
+      it("reuses a coordinated key for a reconstructed retry and keeps exact settlement replay singular", async () => {
+        const seeded = await seedRun();
+        const sse = await startTurnSse(
+          [
+            textTurn("unused overflow response"),
+            [
+              ...textTurn("replayed root answer"),
+              measuredUsage({ input: 13, output: 2, providerModel: "provider/replay" }),
+            ],
+          ],
+          undefined,
+          { contextOverflowOnce: true },
+        );
+        const canonical = new RunQuotaService(db, {
+          tokenCaps: { perDay: 1_000_000, perMonth: 10_000_000 },
+          usdCaps: { perDay: null, perMonth: null },
+        });
+        const reservationKeys: string[] = [];
+        const processor = createFullAgentRunProcessor(
+          makeFullDeps(sse.url, makeFakePort().port, {
+            quota: keyedQuota(canonical, reservationKeys),
+          }),
+        );
+        try {
+          await processor(jobOf(seeded));
+        } finally {
+          await processor.close();
+          await sse.close();
+        }
+
+        expect(await runRow(seeded.runId)).toMatchObject({ status: "completed", attempts: 2 });
+        expect(sse.requests).toHaveLength(2);
+        // The loop rebuilt the AgentRequest after its overflow boundary; the
+        // provider bodies remain the same logical call, so object identity is
+        // deliberately insufficient as the reservation authority.
+        expect(sse.requests[0]).toEqual(sse.requests[1]);
+        expect(reservationKeys).toHaveLength(2);
+        expect(reservationKeys[1]).toBe(reservationKeys[0]);
+        const reservations = (await db.$client`
+          SELECT id, state FROM usage_quota_reservations
+           WHERE run_id = ${seeded.runId}`) as Array<{ id: string; state: string }>;
+        expect(reservations).toHaveLength(1);
+        expect(reservations[0]!.state).toBe("settled");
+        await canonical.settleModelCall({
+          reservationId: reservations[0]!.id,
+          usage: {
+            inputTokens: 13,
+            outputTokens: 2,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            requestedModel: "full-default-model",
+            providerModel: "provider/replay",
+            billingClass: "ovid_allowance",
+          },
+        });
+        expect(await db.$client`
+          SELECT count(*)::int AS count FROM run_usage
+           WHERE run_id = ${seeded.runId}`).toEqual([{ count: 1 }]);
+      });
+
+      it("bounds and releases the legacy v0 reservation while preserving the no-quota control", async () => {
+        const seeded = await seedRun();
+        const sse = await startTurnSse([textTurn("legacy quota ok")]);
+        const canonical = new RunQuotaService(db, {
+          tokenCaps: { perDay: 1_000_000, perMonth: 10_000_000 },
+          usdCaps: { perDay: null, perMonth: null },
+        });
+        const order: string[] = [];
+        const quota: ModelCallQuota = {
+          async reserveModelCall(input) {
+            order.push(`reserve:${sse.requests.length}`);
+            return canonical.reserveModelCall(input);
+          },
+          settleModelCall: (input) => canonical.settleModelCall(input),
+          async releaseModelCall(reservationId) {
+            order.push(`release:${sse.requests.length}`);
+            return canonical.releaseModelCall(reservationId);
+          },
+        };
+        try {
+          await createAgentRunProcessor(
+            makeDeps(createOpenAiTransport(), { litellmBaseUrl: sse.url, quota }),
+          )(jobOf(seeded));
+        } finally {
+          await sse.close();
+        }
+
+        expect(order).toEqual(["reserve:0", "release:1"]);
+        expect(sse.requests).toHaveLength(1);
+        expect(sse.requests[0]!.max_tokens).toBe(8192);
+        expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+        expect(await db.$client`
+          SELECT state FROM usage_quota_reservations
+           WHERE run_id = ${seeded.runId}`).toEqual([{ state: "released" }]);
+        expect(await db.$client`
+          SELECT count(*)::int AS count FROM run_usage
+           WHERE run_id = ${seeded.runId}`).toEqual([{ count: 0 }]);
+
+        const legacy = await seedRun();
+        const legacySse = await startTurnSse([textTurn("legacy default ok")]);
+        try {
+          await createAgentRunProcessor(
+            makeDeps(createOpenAiTransport(), { litellmBaseUrl: legacySse.url }),
+          )(jobOf(legacy));
+        } finally {
+          await legacySse.close();
+        }
+        expect(legacySse.requests).toHaveLength(1);
+        expect(legacySse.requests[0]!.model).toBe("ovid-default-model");
+        expect(legacySse.requests[0]!.max_tokens).toBeUndefined();
+        expect(await runRow(legacy.runId)).toMatchObject({ status: "completed" });
+        expect(await db.$client`
+          SELECT count(*)::int AS count FROM usage_quota_reservations
+           WHERE run_id = ${legacy.runId}`).toEqual([{ count: 0 }]);
+      });
+
+      it("settles a real compat v0 quota refusal as run_failed without provider entry or a job throw", async () => {
+        const seeded = await seedRun();
+        const sse = await startTurnSse([textTurn("must never reach SSE")]);
+        // Any real request exceeds this canonical daily cap. The service,
+        // rather than a hand-written quota fake, returns the typed refusal.
+        const quota = new RunQuotaService(db, {
+          tokenCaps: { perDay: 1, perMonth: 1_000 },
+          usdCaps: { perDay: null, perMonth: null },
+        });
+        try {
+          const processing = createAgentRunProcessor(
+            makeDeps(createOpenAiTransport(), { litellmBaseUrl: sse.url, quota }),
+          )(jobOf(seeded));
+          await expect(processing).resolves.toBeUndefined();
+        } finally {
+          await sse.close();
+        }
+
+        expect(sse.requests).toHaveLength(0);
+        const evts = await readEvents(seeded.sessionId);
+        expect(types(evts)).toEqual(["run_started", "run_failed"]);
+        const failed = evts.at(-1)!;
+        expect(failed.payload).toEqual({
+          code: "quota_exceeded",
+          message: "Model allowance exhausted.",
+          window: "day",
+          resetsAt: expect.any(String),
+        });
+        expect(Number.isFinite(Date.parse(String(failed.payload.resetsAt)))).toBe(true);
+        expect(await runRow(seeded.runId)).toMatchObject({
+          status: "failed",
+          lastError: "quota_exceeded",
+          attempts: 1,
+        });
+        expect(await db.$client`
+          SELECT count(*)::int AS count FROM usage_quota_reservations
+           WHERE run_id = ${seeded.runId}`).toEqual([{ count: 0 }]);
+        expect(await db.$client`
+          SELECT count(*)::int AS count FROM run_usage
+           WHERE run_id = ${seeded.runId}`).toEqual([{ count: 0 }]);
+        expect(await db.$client`
+          SELECT coalesce(sum(used_tokens), 0)::int AS used,
+                 coalesce(sum(reserved_tokens), 0)::int AS reserved
+            FROM usage_quota_counters
+           WHERE actor_user_id = ${seeded.uid}`).toEqual([{
+          used: 0,
+          reserved: 0,
+        }]);
+      });
     });
 
     it("full processor: the five subagent tools are registered (fix I-1)", async () => {

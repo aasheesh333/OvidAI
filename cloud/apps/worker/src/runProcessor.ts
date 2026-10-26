@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
   AttachmentFinalizeError,
@@ -13,11 +14,14 @@ import {
   messages,
   projectsRepo,
   QuotaContractError,
+  runUsage,
   runs,
   sessions,
   userPreferences,
   type AttachmentRow,
   type Db,
+  type InheritedModelContext,
+  type QuotaBillingClass,
 } from "@ovid/db";
 import type { EventLog } from "@ovid/events";
 import { withRunCompletionNotification } from "./runCompletionNotifications.js";
@@ -44,7 +48,7 @@ import {
   type SessionEvent,
   type SessionEventType,
 } from "@ovid/shared";
-import type { AgentImage } from "@ovid/agent-core";
+import { ModelQuotaExceededError, type AgentImage } from "@ovid/agent-core";
 import type { ActivityTracker, HeadResult } from "@ovid/storage";
 import type { Redis } from "ioredis";
 import {
@@ -125,7 +129,13 @@ import {
   type ToolCall,
 } from "./liteLlm.js";
 import { createSandboxPort } from "./sandboxAdapter.js";
-import { usageFor, withUsageRecording } from "./usageRecorder.js";
+import {
+  usageFor,
+  withLegacyQuotaReservations,
+  withUsageRecording,
+  type ModelCallQuota,
+  type UsageRecordingIdentity,
+} from "./usageRecorder.js";
 import { unattendedTimeoutPolicy, type UnattendedApprovalHook } from "./unattended.js";
 import { adaptAgentTools } from "./tools/agentToolAdapter.js";
 import type { ImageCapabilities, ImageTooling, ImageVisionGuard } from "./tools/imageTools.js";
@@ -401,6 +411,8 @@ export interface RunDeps {
    */
   keys: KeyResolver;
   transport: ModelTransport;
+  /** Canonical per-call reservations; absent preserves the legacy no-quota path. */
+  quota?: ModelCallQuota;
   litellmBaseUrl: string;
   defaultModel: string;
   /**
@@ -524,6 +536,8 @@ export interface FullRunDeps {
 
   /** P9 Task 9: see RunDeps.keys. */
   keys: KeyResolver;
+  /** Canonical per-call reservations and exact settlement; absent keeps legacy recording. */
+  quota?: ModelCallQuota;
   redisQ: Redis;
   sandbox: SandboxPort;
   github: GitHubApiPort | null;
@@ -640,6 +654,60 @@ export interface FullAgentRunProcessor {
   ): Promise<void>;
   /** Closes the approval bridge's subscription (graceful shutdown). */
   close(): Promise<void>;
+}
+
+type CurrentModelRunContext = {
+  identity: UsageRecordingIdentity & { billingClass: QuotaBillingClass };
+  keys: ReturnType<typeof runKeyAdapter>;
+  modelContext?: InheritedModelContext;
+  provenance?: "web" | "android" | "server";
+  /** Separates two intentionally identical auxiliary invocations in one run. */
+  reservationScope?: string;
+};
+
+const DEFAULT_RESERVATION_OUTPUT_TOKENS = 8_192;
+
+function canonicalReservationValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalReservationValue);
+  if (value !== null && typeof value === "object") {
+    const source = value as Record<string, unknown>;
+    const result: Record<string, unknown> = {};
+    for (const key of Object.keys(source).sort()) {
+      if (source[key] !== undefined) result[key] = canonicalReservationValue(source[key]);
+    }
+    return result;
+  }
+  return value;
+}
+
+/**
+ * One logical-call identity shared by every provider decorator. It survives
+ * request reconstruction and wrapper boundaries instead of depending on a
+ * decorator-local WeakMap sequence. Credentials are excluded from the digest;
+ * current actor/session/run/billing identity and optional auxiliary invocation
+ * scope prevent cross-run or repeated-hook collisions.
+ */
+function modelCallReservationKey(
+  request: object,
+  identity: UsageRecordingIdentity,
+  reservationScope?: string,
+): string {
+  const replay = { ...(request as Record<string, unknown>) };
+  delete replay.apiKey;
+  // Match the decorators' bounded request even when one wrapper sees the
+  // original request and another sees the already-bounded reconstruction.
+  replay.maxTokens = (replay.maxTokens as number | undefined) ?? DEFAULT_RESERVATION_OUTPUT_TOKENS;
+  const digest = createHash("sha256").update(JSON.stringify(canonicalReservationValue({
+    identity: [
+      identity.userId,
+      identity.sessionId,
+      identity.runId,
+      identity.billingClass ?? "ovid_allowance",
+    ],
+    reservationScope: reservationScope ?? null,
+    request: replay,
+  }))).digest("hex");
+  return `${identity.runId}:model-call:${digest}`;
 }
 
 /** Model-call retry policy (spec §6.1): 5 attempts, backoff 3/9/27/60 s between them. */
@@ -1130,6 +1198,7 @@ export function createAgentRunProcessor(
 
   return async (job) => {
     const { runId, sessionId, userId } = job.data;
+    const actorUserId = job.data.actorUserId ?? userId;
     // P9 Task 9: per-run resolution context. A scheduler-fired job is
     // unattended even when the payload predates the explicit flag.
     const runKeyCtx = {
@@ -1231,7 +1300,7 @@ export function createAgentRunProcessor(
 
     try {
 
-    const resolvedKey = await deps.keys.resolveForRun(userId, runKeyCtx);
+    const resolvedKey = await deps.keys.resolveForRun(actorUserId, runKeyCtx);
     if (resolvedKey === null) {
       await emit("run_failed", { code: "key_not_minted" });
       await runs.finish(deps.db, runId, "failed", "key_not_minted");
@@ -1242,6 +1311,20 @@ export function createAgentRunProcessor(
       resolvedKey.kind === "litellm"
         ? resolvedKey.baseUrl || deps.litellmBaseUrl
         : resolvedKey.endpoint;
+    const billingClass: QuotaBillingClass = resolvedKey.kind === "byok" ? "byok" : "ovid_allowance";
+    const legacyTransport = deps.quota === undefined
+      ? transport
+      : withLegacyQuotaReservations(transport, {
+          userId: actorUserId,
+          runId,
+          quota: deps.quota,
+          billingClass,
+          reservationKey: (request, identity) => modelCallReservationKey(request, {
+            ...identity,
+            sessionId,
+            billingClass,
+          }),
+        });
 
     // Runtime legacy-guard (see RunDeps): the P1 spine e2e constructs the
     // pre-P2 RunDeps shape and must stay green unmodified — without
@@ -1295,6 +1378,7 @@ export function createAgentRunProcessor(
         history,
         apiKey,
         baseUrl: keyBaseUrl,
+        transport: legacyTransport,
         cancelCheckIntervalMs,
         emit,
         terminalizeCancelled,
@@ -1441,12 +1525,13 @@ export function createAgentRunProcessor(
 
     // The engine's openai leg is P2's legacy transport adapted onto the
     // canonical seam; the anthropic leg is never selected (the LiteLLM
-    // resolver always yields kind "litellm").
-    const legacy = adaptLegacyTransport(transport);
+    // resolver always yields kind "litellm"). Legacy quota admission happens
+    // before this adapter, so the usage recorder below must not reserve twice.
+    const legacy = adaptLegacyTransport(legacyTransport);
 
     // Cancel polling needs the live engine; the engine needs the transport.
     let engine: ReturnType<typeof createAgentEngine> | undefined;
-    const polled = withCancelPolling(withUsageRecording(legacy, usageFor(deps.db, userId, sessionId, runId)), {
+    const polled = withCancelPolling(withUsageRecording(legacy, usageFor(deps.db, actorUserId, sessionId, runId)), {
       intervalMs: cancelCheckIntervalMs,
       isCancelRequested: () => runs.isCancelRequested(deps.db, runId),
       onCancel: async () => {
@@ -1462,8 +1547,8 @@ export function createAgentRunProcessor(
       sink: { async emit() {} },
       state: createPostgresSessionStateStore(deps.db),
       keys: {
-        async resolve(uid, requestedModel) {
-          const key = await deps.keys.resolveForRun(uid, runKeyCtx);
+        async resolve(_uid, requestedModel) {
+          const key = await deps.keys.resolveForRun(actorUserId, runKeyCtx);
           return key === null ? null : agentKeyFor(key, requestedModel, deps.defaultModel);
         },
       },
@@ -1533,6 +1618,7 @@ export function createAgentRunProcessor(
     apiKey: string;
     /** P9 Task 9: the resolved route origin (LiteLLM or a BYOK endpoint). */
     baseUrl: string;
+    transport: ModelTransport;
     cancelCheckIntervalMs: number;
     emit(type: SessionEventType, payload: Record<string, unknown>): Promise<SessionEvent>;
     terminalizeCancelled(): Promise<void>;
@@ -1570,7 +1656,7 @@ export function createAgentRunProcessor(
       };
 
       try {
-        const result = await transport.stream(
+        const result = await o.transport.stream(
           {
             baseUrl: o.baseUrl,
             apiKey: o.apiKey,
@@ -1635,6 +1721,17 @@ export function createAgentRunProcessor(
           return;
         }
 
+        if (err instanceof ModelQuotaExceededError) {
+          await o.emit("run_failed", {
+            code: "quota_exceeded",
+            message: err.message,
+            window: err.window,
+            resetsAt: err.resetsAt.toISOString(),
+          });
+          await runs.finish(deps.db, runId, "failed", "quota_exceeded");
+          return;
+        }
+
         if (err instanceof TransientModelError) {
           if (attempt >= MAX_MODEL_ATTEMPTS) {
             await o.emit("run_failed", { code: "model_transient_exhausted" });
@@ -1680,6 +1777,9 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
   const windowTokens = deps.windowTokens ?? DEFAULT_WINDOW_TOKENS;
 
   const state = createPostgresSessionStateStore(deps.db);
+  // Shared transports and auxiliary closures are per processor, while the
+  // authoritative actor/session/run/key selection is per async execution.
+  const modelRunContext = new AsyncLocalStorage<CurrentModelRunContext>();
 
   const sinkFor = (sessionId: string, events = deps.events) => ({
     async emit(type: SessionEventType, payload: Record<string, unknown>): Promise<void> {
@@ -1909,6 +2009,9 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     };
   }): Promise<void> => {
     const { runId, sessionId, userId } = job.data;
+    // The initiating actor owns model account state, credentials and usage;
+    // userId remains the workspace/storage owner when those identities differ.
+    const actorUserId = job.data.actorUserId ?? userId;
     const runEvents = withRunCompletionNotification(deps.events, deps.notifier, {
       runId,
       sessionId,
@@ -1921,8 +2024,8 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     // Wave 4 (SE-004 / SE-007): the user's BYOK default and custom presets,
     // read once per run. A BYOK default routes every model call of this run
     // to the user's own key (not metered on the Ovid allowance).
-    const account = await loadRunAccountContext(deps.db, userId);
-    const keys = runKeyAdapter({
+    const account = await loadRunAccountContext(deps.db, actorUserId);
+    const rootKeys = runKeyAdapter({
       resolver: deps.keys,
       ctx: {
         unattended: job.data.unattended ?? job.data.schedule !== undefined,
@@ -1932,6 +2035,64 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       ...(job.data.byokModel !== undefined ? { byokModel: job.data.byokModel } : {}),
       defaultModel: deps.defaultModel,
     });
+    // R1b binds usage to the queue's current initiating actor. Root queued /
+    // Collab model-snapshot precedence and stable admission remain R2 scope;
+    // an absent snapshot keeps the committed root key/model rebuild unchanged.
+    const rootBillingClass: QuotaBillingClass =
+      rootKeys.ctx.byokKeyId === null ? "ovid_allowance" : "byok";
+    const rootIdentity: CurrentModelRunContext["identity"] = {
+      userId: actorUserId,
+      sessionId,
+      runId,
+      billingClass: rootBillingClass,
+    };
+    const rootContext: CurrentModelRunContext = {
+      identity: rootIdentity,
+      keys: rootKeys,
+      ...(job.data.provenance !== undefined ? { provenance: job.data.provenance } : {}),
+    };
+    const keys = {
+      resolve(_uid: string, requestedModel: string) {
+        const current = modelRunContext.getStore();
+        // The loop's uid remains the workspace owner for tools/storage. Model
+        // credentials instead follow the live initiating actor, including a
+        // manual compaction that runs before engine.run establishes a store.
+        const actorUserId = current?.identity.userId ?? rootIdentity.userId;
+        return (current?.keys ?? rootKeys).resolve(actorUserId, requestedModel);
+      },
+    };
+    const recording = usageFor(deps.db, rootIdentity.userId, sessionId, runId);
+    const currentUsageIdentity = () => modelRunContext.getStore()?.identity ?? rootIdentity;
+    const recordTransport = (base: AgentTransport): AgentTransport => withUsageRecording(base, {
+      ...recording,
+      // The legacy recorder remains best-effort when quota is absent, but it
+      // still carries the same live BYOK/Ovid class as the canonical path.
+      record: (row) => runUsage.record(deps.db, {
+        ...row,
+        billingClass: currentUsageIdentity().billingClass,
+      }),
+      billingClass: rootBillingClass,
+      current: currentUsageIdentity,
+      ...(deps.quota !== undefined ? { quota: deps.quota } : {}),
+      reservationKey: (request, identity) => modelCallReservationKey(
+        request,
+        identity,
+        modelRunContext.getStore()?.reservationScope,
+      ),
+    });
+    const recordedOpenai = recordTransport(openai);
+    const recordedAnthropic = recordTransport(anthropic);
+    const auxiliaryOpenai = recordedOpenai;
+    const auxiliaryAnthropic = recordedAnthropic;
+    let auxiliaryCallSequence = 0;
+    const withAuxiliaryCall = <T>(kind: string, call: () => Promise<T>): Promise<T> => {
+      const current = modelRunContext.getStore() ?? rootContext;
+      auxiliaryCallSequence += 1;
+      return modelRunContext.run({
+        ...current,
+        reservationScope: `${kind}:${auxiliaryCallSequence}`,
+      }, call);
+    };
     const presetFor = account.presets;
 
     // ---- C1: the identical single-active-run-per-session contract --------
@@ -2182,13 +2343,15 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     // returns null (fail-open, the pinned hook contract).
     const promptEvaluator = async (prompt: string): Promise<string | null> => {
       try {
-        const preset = presetFor(sessionState.presetId);
+        const inherited = modelRunContext.getStore()?.modelContext;
+        const preset = inherited === undefined ? presetFor(sessionState.presetId) : null;
         const route = await resolveRoute(
           {
-            userId,
-            requestedModel: sessionState.modelPin,
-            preset:
-              preset === null
+            userId: inherited?.actorUserId ?? userId,
+            requestedModel: inherited !== undefined ? inherited.requestedModel : sessionState.modelPin,
+            preset: inherited !== undefined
+              ? { model: null, temperature: inherited.temperature ?? null }
+              : preset === null
                 ? null
                 : { model: preset.model, temperature: preset.temperature },
           },
@@ -2199,14 +2362,14 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
           },
         );
         if (route === null) return null;
-        const transport = route.transportKind === "anthropic" ? anthropic : openai;
+        const transport = route.transportKind === "anthropic" ? auxiliaryAnthropic : auxiliaryOpenai;
         // The anthropic transport appends `/v1/messages`; a `/v1`-suffixed
         // route base would double it (the loop's T5-C1 carry).
         const baseUrl =
           route.transportKind === "anthropic"
             ? route.baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "")
             : route.baseUrl;
-        const response = await transport.stream(
+        const response = await withAuxiliaryCall("prompt-hook", () => transport.stream(
           {
             model: route.model,
             baseUrl,
@@ -2230,7 +2393,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
           },
           { onTextDelta() {} },
           new AbortController().signal,
-        );
+        ));
         return response.content;
       } catch {
         return null;
@@ -2345,7 +2508,44 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
         if (engineRef === undefined) {
           throw new Error("subagent dispatch before the run engine is ready");
         }
-        await engineRef.run(childJob);
+        const inherited = childJob.modelContext;
+        const parent = modelRunContext.getStore();
+        // Pre-F compatibility only: the committed legacy supervisor omits this
+        // snapshot and therefore keeps rootKeys/legacy routing byte-for-byte.
+        // A supplied snapshot gets its own actor/key/billing binding without
+        // importing any durable-supervisor or admission API.
+        const childKeys = inherited === undefined
+          ? rootKeys
+          : runKeyAdapter({
+              resolver: deps.keys,
+              ctx: {
+                unattended: childJob.unattended ?? runUnattended,
+                byokKeyId: inherited.byokKeyId,
+              },
+              byokDefault: account.byokDefault,
+              defaultModel: deps.defaultModel,
+              modelContext: inherited,
+            });
+        const childActorUserId = inherited?.actorUserId ?? rootIdentity.userId;
+        const childContext: CurrentModelRunContext = {
+          identity: {
+            // The legacy supervisor carries the workspace owner in childJob.userId.
+            // With no snapshot, retain the root initiating actor so rootKeys and
+            // usage cannot mix the actor's default key with the owner's identity.
+            userId: childActorUserId,
+            sessionId: childJob.sessionId,
+            runId: childJob.runId,
+            billingClass: childKeys.ctx.byokKeyId === null ? "ovid_allowance" : "byok",
+          },
+          keys: childKeys,
+          ...(inherited !== undefined ? { modelContext: inherited } : {}),
+          ...(childJob.provenance !== undefined
+            ? { provenance: childJob.provenance }
+            : parent?.provenance !== undefined
+              ? { provenance: parent.provenance }
+              : {}),
+        };
+        await modelRunContext.run(childContext, () => engineRef!.run(childJob));
       },
       async cancel(sessionIdToCancel, reason) {
         return (await engineRef?.cancel(sessionIdToCancel, reason)) ?? false;
@@ -2394,15 +2594,16 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       userId,
       runId,
       summarize: async (i) => {
-        const key = await keys.resolve(userId, "");
+        const inherited = modelRunContext.getStore()?.modelContext;
+        const key = await keys.resolve(inherited?.actorUserId ?? userId, "");
         if (key === null) return null;
         const baseUrl =
           key.kind === "byok-anthropic"
             ? key.baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "")
             : key.baseUrl;
         const transport =
-          key.kind === "byok-anthropic" ? anthropic : openai;
-        const res = await transport.stream(
+          key.kind === "byok-anthropic" ? auxiliaryAnthropic : auxiliaryOpenai;
+        const res = await withAuxiliaryCall("compaction", () => transport.stream(
           {
             model: key.model,
             baseUrl,
@@ -2414,7 +2615,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
           },
           { onTextDelta() {} },
           new AbortController().signal,
-        );
+        ));
         return res.content;
       },
     });
@@ -2538,7 +2739,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     // THIS run's token).
     let engine: ReturnType<typeof createAgentEngine> | undefined;
     const wrap = (base: AgentTransport): AgentTransport =>
-      withCancelPolling(withUsageRecording(base, usageFor(deps.db, userId, sessionId, runId)), {
+      withCancelPolling(base, {
         intervalMs: DEFAULT_CANCEL_CHECK_INTERVAL_MS,
         isCancelRequested: () => runs.isCancelRequested(deps.db, runId),
         onCancel: async () => {
@@ -2554,7 +2755,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       sink: { async emit() {} },
       state,
       keys,
-      transports: { openai: wrap(openai), anthropic: wrap(anthropic) },
+      transports: { openai: wrap(recordedOpenai), anthropic: wrap(recordedAnthropic) },
       litellmBaseUrl: deps.litellmBaseUrl,
       defaultModel: deps.defaultModel,
       registry,
@@ -2568,12 +2769,15 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       memoryEnabled,
       githubConnected,
       presets: presetFor,
+      modelContextForCurrentRun: () => modelRunContext.getStore()?.modelContext,
+      runProvenanceForCurrentRun: () => modelRunContext.getStore()?.provenance,
       ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
     });
     // Late-bound seams for the subagent tools (see their construction above).
     engineRef = engine;
+    const runningEngine = engine;
 
-    await engine.run({
+    await modelRunContext.run(rootContext, () => runningEngine.run({
       runId,
       sessionId,
       userId,
@@ -2601,7 +2805,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       unattended: runUnattended,
       ...(job.data.autonomy !== undefined ? { autonomy: job.data.autonomy } : {}),
       mode,
-    });
+    }));
     } finally {
       // P5 Task 11 I4: a run's per-run MCP stdio/legacy-SSE connection must
       // not outlive the run. This finally covers every terminal path inside
