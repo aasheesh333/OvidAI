@@ -259,9 +259,13 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("transactional storage quota repo
       actorUserId, ownerUserId, sessionId, attachmentId: newId(), declaredBytes: 1,
     });
     expect(second.ok).toBe(true);
-    expect(await service.reserveUpload({
-      actorUserId, ownerUserId, sessionId, attachmentId: newId(), declaredBytes: 1,
-    })).toMatchObject({ ok: false, scope: "upload" });
+    // The two finalized internal share rows above are NOT actor uploads: the
+    // counter still reflects only the one real upload plus the live reservation.
+    // If either internal row leaked into the window this would read 3/1.
+    expect(await scratch.client`
+      SELECT used_uploads, reserved_uploads FROM upload_window_counters
+       WHERE actor_user_id = ${actorUserId}`)
+      .toEqual([{ used_uploads: 1, reserved_uploads: 1 }]);
   });
 
   // UNEXECUTED round-1 regression under the heavy-command pause.
@@ -353,10 +357,15 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("transactional storage quota repo
       r2Key: `legacy/${attachmentId}`,
       contentType: "text/plain",
     });
-    const finalizedAt = "2020-01-02T03:04:05.000Z";
+    // Legacy rows predate 0038, but their reserved_at must still fall inside the
+    // injected 24h upload window (NOW-24h .. NOW) to be counted as a real
+    // upload. Use timestamps before NOW rather than the wall clock.
+    const createdAt = "2026-10-24T09:00:00.000Z";
+    const finalizedAt = "2026-10-24T10:00:00.000Z";
     await db.$client`
       UPDATE attachments SET upload_status = 'ready', actual_bytes = 11,
-        actual_content_type = 'text/plain', finalized_at = ${finalizedAt}::timestamptz
+        actual_content_type = 'text/plain', finalized_at = ${finalizedAt}::timestamptz,
+        created_at = ${createdAt}::timestamptz
        WHERE id = ${attachmentId}`;
     expect(await repos().reserveUpload({
       actorUserId, ownerUserId, sessionId, attachmentId,
@@ -490,7 +499,7 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("transactional storage quota repo
       etag: null,
       attachment: true,
     })).rejects.toMatchObject({ code: "attachment_not_found" });
-    expect(await service.releaseUpload({ reservationId: attachmentId })).resolves.toBeUndefined();
+    expect(await service.releaseUpload({ reservationId: attachmentId })).toBeUndefined();
     expect(await storageUsage(db, ownerUserId)).toEqual({ usedBytes: 0, reservedBytes: 0 });
   });
 

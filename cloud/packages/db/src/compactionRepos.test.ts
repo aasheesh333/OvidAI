@@ -166,8 +166,12 @@ async function parentWorkerEventFixture(db: Db, label: string) {
   };
   const seq = "1-0";
   const payload = { runId: admission!.childRunId!, attemptId: actor.attemptId, label };
+  // Raw postgres.js json Parameters are unusable here: drizzle's driver
+  // replaces the json/jsonb serializers on the shared client with an identity
+  // function (so drizzle can own JSON mapping), which makes `sql.json(obj)`
+  // reach Bind as an object and throw. Bind the serialized text explicitly.
   await db.$client`INSERT INTO session_event_mirror (session_id, seq, type, payload, ts)
-    VALUES (${fixture.sessionId}, ${seq}, 'tool_terminal', ${db.$client.json(payload)}, now())`;
+    VALUES (${fixture.sessionId}, ${seq}, 'tool_terminal', ${JSON.stringify(payload)}::jsonb, now())`;
   const item: ExactHistoryItem = {
     stableId: seq,
     kind: "event",

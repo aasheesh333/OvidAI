@@ -61,6 +61,30 @@ export async function migrateThrough(databaseUrl: string, throughIdx: number): P
   }
 }
 
+/**
+ * Restore the shared test database to "nothing applied yet" so the next
+ * `migrate()` replays every generated migration from scratch.
+ *
+ * Test files share ONE database (TEST_DATABASE_URL) and run serially, so a
+ * file that wants a pristine schema must drop everything an earlier file left
+ * behind. Enumerating table names rots: newer migrations added collab_*,
+ * compaction_*, subagent_*, studio_previews, … and the stale lists silently
+ * skipped them. Worse, dropping `users` cascades away FKs that 0040's exact
+ * preflight still requires, so a later `migrate()` fails with
+ * `collab_invites_incompatible` (P0001). Dropping the whole `public` schema is
+ * the only reset that cannot go stale.
+ */
+export async function resetPublicSchema(databaseUrl: string): Promise<void> {
+  const admin = postgres(databaseUrl, { max: 1, onnotice: () => {} });
+  try {
+    await admin.unsafe(`DROP SCHEMA IF EXISTS drizzle CASCADE`);
+    await admin.unsafe(`DROP SCHEMA IF EXISTS public CASCADE`);
+    await admin.unsafe(`CREATE SCHEMA public`);
+  } finally {
+    await admin.end({ timeout: 5 });
+  }
+}
+
 export interface MigrationScratch {
   name: string;
   url: string;

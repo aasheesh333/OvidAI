@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq, inArray, sql } from "drizzle-orm";
-import postgres from "postgres";
 import type { SessionEvent } from "@ovid/shared";
 import { createDb, migrate, type Db } from "./client.js";
+import { resetPublicSchema } from "./migrationTestKit.js";
 import { eventMirror, messages, mcpOauthFlows, newId, runs, sessions, users as usersRepo } from "./repos.js";
 import {
   mcpOauthFlows as mcpOauthFlowsTable,
@@ -26,28 +26,7 @@ describe.skipIf(!TEST_DATABASE_URL)("repos against real postgres", () => {
   beforeAll(async () => {
     const url = TEST_DATABASE_URL!;
     // onnotice: swallow server NOTICEs ("table … does not exist, skipping") on fresh DBs
-    const admin = postgres(url, { max: 1, onnotice: () => {} });
-    try {
-      // Drop the drizzle journal schema too, so migrate() re-applies the
-      // generated SQL from scratch on every run (idempotent across runs).
-      await admin.unsafe(`DROP SCHEMA IF EXISTS drizzle CASCADE`);
-      // The sandbox-uid pool sequence (migration 0001) is NOT owned by the
-      // users table, so DROP TABLE users leaves it behind — drop it too, or
-      // the re-applied migration's CREATE SEQUENCE would collide with it.
-      await admin.unsafe(`DROP SEQUENCE IF EXISTS users_sandbox_uid_seq CASCADE`);
-      // Every table any migration creates (P8-T3 rerunnability invariant) —
-      // includes the P9 Task 2 money & accounts tables.
-      await admin.unsafe(
-        `DROP TABLE IF EXISTS browser_credentials, studio_repos, private_memory_files, schedules, schedule_runs, devices, notifications, grants, file_manifests, workspace_objects, attachments, session_event_mirror, session_agent_state, runs, messages, sessions, users,` +
-          ` plans, mint_settings, user_plan_overrides, mint_audit, billing_purchases, image_jobs,` +
-          ` image_deleted_accounts, image_cards, image_card_history, image_probe_log, image_probe_state,` +
-          ` shares, share_forks, reports, account_deletions, byok_keys,` +
-          ` mcp_servers, mcp_oauth_tokens, mcp_oauth_flows, plugins, plugin_grants, run_usage,` +
-          ` notification_delivery_claims, push_subscriptions, private_memory_files, projects CASCADE`,
-      );
-    } finally {
-      await admin.end({ timeout: 5 });
-    }
+    await resetPublicSchema(url);
     await migrate(url);
     db = createDb(url);
   }, 60_000);

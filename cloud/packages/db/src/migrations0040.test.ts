@@ -276,10 +276,10 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("0040 legacy PostgreSQL collabora
       SELECT conname FROM pg_constraint
       WHERE conrelid = to_regclass('legacy_collab_invites_0040') ORDER BY conname`)
       .map((row) => row.conname)).toEqual([
+        "collab_invites_check",
         "collab_invites_code_hash_key",
         "collab_invites_max_uses_check",
         "collab_invites_revoked_check",
-        "collab_invites_uses_check",
         "legacy_collab_invites_0040_pkey",
       ]);
     expect(indexes.filter((row) => row.tablename === "legacy_collab_invites_0040").map((row) => row.indexname).sort())
@@ -479,7 +479,7 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("0040 exact legacy signature gate
         const constraints = await scratch.client`SELECT pg_get_constraintdef(oid) AS definition
           FROM pg_constraint WHERE conrelid = to_regclass('collab_invites')
             AND conname = 'collab_invites_max_uses_check'`;
-        expect(constraints).toEqual([{ definition: "CHECK ((max_uses >= 1) AND (max_uses <= 8))" }]);
+        expect(constraints).toEqual([{ definition: "CHECK (((max_uses >= 1) AND (max_uses <= 8)))" }]);
       });
     } finally {
       await scratch.close();

@@ -359,6 +359,8 @@ describe.skipIf(!TEST_DATABASE_URL).sequential("0039 against isolated real Postg
       sessionId: session.id, role: "user", content: "fresh canonical root",
     });
     const root = await runs.create(freshDb, { sessionId: session.id, promptMessageId: rootMessage.id });
+    // Exact history writes require a running main root (stale_root otherwise).
+    expect(await runs.claimNext(freshDb, root.id)).toBe(true);
     const legacy = await fresh.client`INSERT INTO messages (id, session_id, role, content)
       VALUES (${newId()}, ${session.id}, 'tool', 'fresh old-shaped tool row') RETURNING id, content`;
     const item = {

@@ -728,6 +728,11 @@ export const messages = {
       const resetLegacyCompaction = json?.compaction != null && (cutoff === null || removed);
       const messageCut = opts.keepAnchor === true ? sql`m.id > ${fromId}` : sql`m.id >= ${fromId}`;
       const eventsFrom = opts.eventsFrom ?? anchor.createdAt;
+      // postgres.js cannot bind a raw Date inside a drizzle `sql` template:
+      // drizzle's postgres-js driver installs identity serializers for every
+      // date type on the shared client, so a Date parameter reaches Bind as an
+      // object and throws. Bind an ISO string and cast it explicitly instead.
+      const eventsFromIso = eventsFrom.toISOString();
       const legacyStateRef = `postgres:session_agent_state/${sessionId}#compaction`;
       const fencedRows = await tx.execute(sql`
         SELECT (
@@ -764,7 +769,7 @@ export const messages = {
             SELECT 1
               FROM session_event_mirror e
              WHERE e.session_id = ${sessionId}
-               AND e.ts >= ${eventsFrom}
+               AND e.ts >= ${eventsFromIso}::timestamptz
                AND EXISTS (
                  SELECT 1 FROM compaction_history_items h
                   -- Child-scoped worker history may reference this parent

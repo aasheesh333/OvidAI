@@ -375,7 +375,7 @@ describe.skipIf(!TEST_DATABASE_URL)("provider connections against isolated real 
       disconnectGeneration: 0,
     });
     const simultaneous = await db.$client.unsafe(
-      "SELECT user_id, name FROM mcp_servers WHERE id = ANY($1::uuid[])",
+      "SELECT user_id, name FROM mcp_servers WHERE id = ANY($1::text[])",
       [[occupied.connectionId, other.connectionId]],
     );
     expect(simultaneous).toEqual(expect.arrayContaining([

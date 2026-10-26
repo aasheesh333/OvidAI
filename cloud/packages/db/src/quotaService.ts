@@ -793,6 +793,9 @@ async function reconcileLegacyAttachmentTx(
        ${input.sessionId}, ${input.objectId}, 'released', 0,
        ${now.toISOString()}::timestamptz, ${now.toISOString()}::timestamptz,
        ${now.toISOString()}::timestamptz, ${now.toISOString()}::timestamptz)`);
+  // Materialize the owner's zero ledger row: the released tombstone is real
+  // storage activity, and readers must see an explicit 0/0, not a missing row.
+  await storageCounter(tx, input.ownerUserId);
   await tx.update(attachments).set({
     uploadStatus: "failed",
     actualBytes: null,

@@ -655,14 +655,15 @@ describe("one shared current-generation classifier (UNEXECUTED)", () => {
   );
 
   it("fails closed on cross-kind same-ID conflicts and bounded host overflow", async () => {
-    const failed = attachment("shared-id", {
+    // Ids must stay inside cursor("attachment")'s ("", "row-zz"] keyset.
+    const failed = attachment("row-shared-id", {
       upload_status: "failed",
       actual_bytes: null,
       finalized_at: null,
     });
-    const workspaceConflict = workspace("shared-id");
+    const workspaceConflict = workspace("row-shared-id");
     const released = reservation("reservation-a", {
-      object_id: "shared-id",
+      object_id: "row-shared-id",
       state: "released",
       actual_bytes: null,
       finalized_at: null,
@@ -994,9 +995,17 @@ describe("one shared current-generation classifier (UNEXECUTED)", () => {
     expect(collab.history.actorProvenance).not.toBe("owner_actor_policy");
   });
 
-  it.each(["object", "owner", "actor", "session"] as const)(
+  it.each([
+    // A history object address that disagrees with its original reservation is
+    // an internally inconsistent evidence set (raw vs derived current address),
+    // not a foreign identity: it stays unresolved so no approval can consume it.
+    ["object", "unresolved", "raw_current_identity_mismatch"],
+    ["owner", "foreign_identity", "history_identity_mismatch"],
+    ["actor", "foreign_identity", "history_identity_mismatch"],
+    ["session", "foreign_identity", "history_identity_mismatch"],
+  ] as const)(
     "rejects original/history %s identity disagreement",
-    (field) => {
+    (field, disposition, reason) => {
       const original = reservation("artifact-1", {
         state: "released",
         actual_bytes: null,
@@ -1040,8 +1049,8 @@ describe("one shared current-generation classifier (UNEXECUTED)", () => {
         reservations: [original, history],
       }));
       expect(result.classification).toMatchObject({
-        disposition: "foreign_identity",
-        reason: "history_identity_mismatch",
+        disposition,
+        reason,
       });
     },
   );
