@@ -1,4 +1,9 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyReply, FastifyRequest } from "fastify";
+
+function sha256(value: string): Buffer {
+  return createHash("sha256").update(value).digest();
+}
 
 /**
  * The one authentication fence shared by every internal file-service route.
@@ -6,12 +11,14 @@ import type { FastifyReply, FastifyRequest } from "fastify";
  * neither accepted nor required on this hop.
  */
 export function createInternalServiceAuth(internalToken: string) {
+  const internalTokenDigest = sha256(internalToken);
+
   return async function internalServicePreHandler(
     req: FastifyRequest,
     reply: FastifyReply,
   ): Promise<FastifyReply | undefined> {
     const token = req.headers["x-ovid-internal-token"];
-    if (typeof token !== "string" || token !== internalToken) {
+    if (typeof token !== "string" || !timingSafeEqual(sha256(token), internalTokenDigest)) {
       return reply.code(401).send({
         error: { code: "unauthenticated", message: "Missing or invalid internal token." },
       });
