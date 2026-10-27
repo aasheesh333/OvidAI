@@ -356,10 +356,12 @@ void main() {
         }
         return http.Response(
           jsonEncode(<String, dynamic>{
-            'items': <Map<String, dynamic>>[
+            'events': <Map<String, dynamic>>[
               <String, dynamic>{
-                'id': 'raw',
-                'value': <String, dynamic>{'redacted': true},
+                'sessionId': 'session-1',
+                'seq': '7',
+                'type': 'tool_completed',
+                'payload': <String, dynamic>{'redacted': true},
               },
             ],
             'nextCursor': null,
@@ -376,7 +378,11 @@ void main() {
 
       final page = await api.showRaw('session-1');
 
-      expect(page.entries.single.value, <String, dynamic>{'redacted': true});
+      expect(page.entries.single.id, '7');
+      expect(
+        (page.entries.single.value as Map)['payload'],
+        <String, dynamic>{'redacted': true},
+      );
       expect(mints, 2);
       expect(authorization, <String>[
         'Bearer test-token-1',

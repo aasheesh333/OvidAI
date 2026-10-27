@@ -4,6 +4,24 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 
 const fixtureName = 'system-requests-v1.json';
+
+/// See operation_fixtures_test.dart: the canonical/mirror check needs the
+/// Backend and Web checkouts, which a Flutter-only CI job does not have.
+final String _backendRoot =
+    Platform.environment['OVID_BACKEND_ROOT'] ?? '../OvidBackend';
+final String _webRoot = Platform.environment['OVID_WEB_ROOT'] ?? '../OvidWeb';
+final String? _paritySkip = () {
+  final missing = <String>[
+    if (!Directory('$_backendRoot/cloud/packages/shared/contracts/fixtures')
+        .existsSync())
+      '$_backendRoot/cloud/packages/shared/contracts/fixtures',
+    if (!Directory('$_webRoot/web/test/fixtures').existsSync())
+      '$_webRoot/web/test/fixtures',
+  ];
+  return missing.isEmpty
+      ? null
+      : 'Cross-repo fixture mirrors unavailable: ${missing.join(', ')}';
+}();
 const requestKeys = <String>{
   'requestId',
   'userId',
@@ -43,15 +61,16 @@ void main() {
     'canonical, Flutter, and Web system request fixtures are byte-identical',
     () {
       final canonical = File(
-        '../OvidBackend/cloud/packages/shared/contracts/fixtures/$fixtureName',
+        '$_backendRoot/cloud/packages/shared/contracts/fixtures/$fixtureName',
       ).readAsBytesSync();
       final flutter = File('test/fixtures/$fixtureName').readAsBytesSync();
       final web = File(
-        '../OvidWeb/web/test/fixtures/$fixtureName',
+        '$_webRoot/web/test/fixtures/$fixtureName',
       ).readAsBytesSync();
       expect(flutter, orderedEquals(canonical));
       expect(web, orderedEquals(canonical));
     },
+    skip: _paritySkip,
   );
 
   test(

@@ -225,7 +225,7 @@ class HarnessTest(unittest.TestCase):
                 self.gate.HostAudio({})
 
     def test_evidence_store_refuses_raw_audio_screenshots_and_unknown_payloads(self):
-        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             store = self.gate.AudioEvidenceStore.create(Path(directory) / "evidence")
             for name in ("microphone.wav", "tts.pcm", "screen.png", "server-raw.json"):
                 with self.subTest(name=name):
@@ -234,7 +234,7 @@ class HarnessTest(unittest.TestCase):
             store.close()
 
     def test_missing_opt_in_writes_only_sanitized_blocked_report(self):
-        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             out = root / "evidence"
             secret_path = root / "private-apk-and-account-name.apk"
@@ -317,7 +317,7 @@ class StimulusFixtureTest(unittest.TestCase):
         return path
 
     def test_all_five_languages_are_pinned_without_retaining_paths_or_text(self):
-        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             manifest = self.make_manifest(root)
             cases = self.gate.load_stimuli(manifest)
@@ -328,7 +328,7 @@ class StimulusFixtureTest(unittest.TestCase):
             self.gate.close_stimuli(cases)
 
     def test_missing_language_and_same_inode_mutation_are_rejected(self):
-        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             manifest = self.make_manifest(root)
             decoded = json.loads(manifest.read_text())

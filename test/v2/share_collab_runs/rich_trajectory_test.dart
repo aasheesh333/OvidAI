@@ -710,7 +710,7 @@ void main() {
                   'byteLength': 20,
                 },
                 'offset': call == 0 ? 0 : 120,
-                'data': 'chunk-$call',
+                'data': '"chunk-$call"',
                 'nextOffset': call == 0 ? 120 : null,
               },
             ],

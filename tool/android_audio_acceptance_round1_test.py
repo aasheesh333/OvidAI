@@ -328,7 +328,7 @@ class Round1RegressionTest(unittest.TestCase):
         cls.gate = load_harness()
 
     def test_store_report_writes_exclude_report_and_emit_schema_valid_json(self):
-        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             store = self.gate.AudioEvidenceStore.create(Path(directory) / "evidence")
             report = self.gate._new_report("fixture-avd")
             self.gate._write_report(store, report)
@@ -341,7 +341,7 @@ class Round1RegressionTest(unittest.TestCase):
             store.close()
 
     def test_schema_invalid_pass_is_downgraded_and_cannot_exit_zero(self):
-        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             store = self.gate.AudioEvidenceStore.create(Path(directory) / "evidence")
             for name in ARTIFACTS:
                 store.write_atomic(name, b"fixture sanitized artifact")

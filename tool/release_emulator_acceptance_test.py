@@ -623,7 +623,7 @@ class HarnessTest(unittest.TestCase):
         self.assertIsNotNone(self.gate.correlate_content_intent(notification(), PENDING_INTENTS))
 
     def test_missing_artifact_writes_sanitized_failed_report(self):
-        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             out = root / "evidence"
             rc = self.gate.main([
@@ -645,7 +645,7 @@ class ApkBindingTest(unittest.TestCase):
         cls.gate = load_harness()
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(dir="/tmp/opencode")
+        self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.apk = self.root / "candidate.apk"
         self.apk.write_bytes(b"ORIGINAL-INSPECTED-APK")
@@ -764,7 +764,7 @@ class OutputSecurityTest(unittest.TestCase):
         cls.gate = load_harness()
 
     def test_reused_output_is_refused_and_stale_artifact_is_not_reused(self):
-        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             out = root / "evidence"
             out.mkdir()
@@ -777,7 +777,7 @@ class OutputSecurityTest(unittest.TestCase):
             self.assertEqual((out / "logcat.redacted.txt").read_text(), "STALE-EVIDENCE")
 
     def test_output_symlink_cannot_write_into_external_directory(self):
-        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             external = root / "external"
             external.mkdir()
@@ -793,7 +793,7 @@ class OutputSecurityTest(unittest.TestCase):
             self.assertFalse((external / "release-emulator-acceptance.json").exists())
 
     def test_artifact_symlink_is_not_followed_and_write_is_exclusive(self):
-        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             external = root / "canary.txt"
             external.write_text("DO-NOT-TOUCH")
@@ -806,7 +806,7 @@ class OutputSecurityTest(unittest.TestCase):
             store.close()
 
     def test_output_realpath_swap_is_detected_before_write(self):
-        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             out = root / "evidence"
             store = self.gate.EvidenceStore.create(out)
@@ -821,7 +821,7 @@ class OutputSecurityTest(unittest.TestCase):
             store.close()
 
     def test_report_enumerates_only_files_created_by_this_store(self):
-        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             store = self.gate.EvidenceStore.create(root / "evidence")
             store.write_atomic("logcat.redacted.txt", b"safe")
@@ -854,7 +854,7 @@ class DeviceCleanupTest(unittest.TestCase):
         return device, commands
 
     def test_malformed_dump_still_deletes_and_verifies_remote_xml(self):
-        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             device, commands = self.make_device(Path(directory))
             with self.assertRaises(self.gate.HarnessError):
                 device._dump_ui()
@@ -865,7 +865,7 @@ class DeviceCleanupTest(unittest.TestCase):
             self.assertNotIn("/sdcard/", dumps[0][-1])
 
     def test_failed_delete_verification_is_not_silent(self):
-        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             device, commands = self.make_device(Path(directory), fail_delete_verify=True)
             with self.assertRaisesRegex(self.gate.HarnessError, "cleanup"):
                 device._dump_ui()
@@ -873,7 +873,7 @@ class DeviceCleanupTest(unittest.TestCase):
             self.assertTrue(hasattr(device, "cleanup"))
 
     def test_final_cleanup_retries_every_tracked_path(self):
-        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             device, commands = self.make_device(Path(directory))
             device.remote_ui_paths.add("/data/local/tmp/ovid-release-ui-0123456789abcdef0123456789abcdef.xml")
             device.cleanup()
@@ -884,7 +884,7 @@ class DeviceCleanupTest(unittest.TestCase):
 
 class ShellInterfaceTest(unittest.TestCase):
     def test_shell_interface_fails_closed_and_writes_report(self):
-        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             out = root / "shell-evidence"
             env = {

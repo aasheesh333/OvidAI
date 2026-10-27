@@ -633,10 +633,16 @@ class TrajectoryRoot {
 }
 
 class _Record {
-  _Record(this.json, this.page);
+  _Record(this.json, this.page, {this.rootStep = false});
 
   final Map<String, dynamic> json;
   final Map<String, dynamic> page;
+
+  /// True when this record came from a serialized [TrajectoryRoot.mainSteps].
+  /// A root already carries its projected workers, so re-folding must keep
+  /// these steps as chronology without letting raw parent lifecycle rebuild
+  /// worker rows from them.
+  final bool rootStep;
 
   String get key {
     final sessionId = _string(json['sessionId']) ?? '';
@@ -800,7 +806,11 @@ TrajectoryRoot foldTrajectoryPages(Iterable<Object?> pages) {
       earlierCursor = rawPage.earlierCursor ?? earlierCursor;
       for (final step in rawPage.mainSteps) {
         final json = _stepJson(step);
-        final record = _Record(json, const <String, dynamic>{});
+        final record = _Record(
+          json,
+          const <String, dynamic>{},
+          rootStep: true,
+        );
         recordsByKey.putIfAbsent(record.key, () => record);
       }
       continue;
@@ -895,9 +905,23 @@ TrajectoryRoot foldTrajectoryPages(Iterable<Object?> pages) {
     if (summary['startKnown'] == false) worker.data['startKnown'] = false;
   }
 
+  // A raw page's roster may arrive after the event page. Register every
+  // summary alias before consuming records so a known worker's lifecycle
+  // merges into its roster row instead of being discarded as an unknown
+  // phantom when the canonical roster is authoritative.
+  for (final summary in summaries) {
+    mergeFor(summary);
+  }
+
   for (final record in records) {
     final json = record.json;
     final type = _string(json['type']) ?? '';
+    if (record.rootStep && type.startsWith('subagent_')) {
+      // A folded root already carries the workers projected from this
+      // chronology. These steps stay in main history but must not rebuild
+      // worker rows (or invent ones without aliases) on a later fold.
+      continue;
+    }
     if (_canonicalMainStep(record) && type.startsWith('subagent_')) {
       // Canonical parent lifecycle DTOs are main chronology only. They carry
       // no child-scoped activity stream and cannot create worker rows/cursors.

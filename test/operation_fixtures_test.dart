@@ -10,6 +10,27 @@ const fixtureNames = [
   'account-health.json',
 ];
 
+/// Canonical fixtures live in the Backend checkout and are mirrored into the
+/// Web checkout. Neither sibling repository exists in the Flutter-only CI
+/// checkout, so the cross-repo byte-parity assertion is skipped there with an
+/// explicit reason instead of failing on a missing path. Set
+/// OVID_BACKEND_ROOT / OVID_WEB_ROOT to point at the checkouts elsewhere.
+final String _backendRoot =
+    Platform.environment['OVID_BACKEND_ROOT'] ?? '../OvidBackend';
+final String _webRoot = Platform.environment['OVID_WEB_ROOT'] ?? '../OvidWeb';
+final String? _paritySkip = () {
+  final missing = <String>[
+    if (!Directory('$_backendRoot/cloud/packages/shared/contracts/fixtures')
+        .existsSync())
+      '$_backendRoot/cloud/packages/shared/contracts/fixtures',
+    if (!Directory('$_webRoot/web/test/fixtures').existsSync())
+      '$_webRoot/web/test/fixtures',
+  ];
+  return missing.isEmpty
+      ? null
+      : 'Cross-repo fixture mirrors unavailable: ${missing.join(', ')}';
+}();
+
 Map<String, dynamic> map(Object? value) =>
     (value! as Map).cast<String, dynamic>();
 
@@ -132,19 +153,23 @@ class AccountHealthDto {
 }
 
 void main() {
-  test('all four fixtures have byte-identical canonical and Web mirrors', () {
-    for (final name in fixtureNames) {
-      final canonical = File(
-        '../OvidBackend/cloud/packages/shared/contracts/fixtures/operations/$name',
-      ).readAsBytesSync();
-      final flutter = File('test/fixtures/operations/$name').readAsBytesSync();
-      final web = File(
-        '../OvidWeb/web/test/fixtures/operations/$name',
-      ).readAsBytesSync();
-      expect(flutter, orderedEquals(canonical), reason: 'Flutter $name');
-      expect(web, orderedEquals(canonical), reason: 'Web $name');
-    }
-  });
+  test(
+    'all four fixtures have byte-identical canonical and Web mirrors',
+    () {
+      for (final name in fixtureNames) {
+        final canonical = File(
+          '$_backendRoot/cloud/packages/shared/contracts/fixtures/operations/$name',
+        ).readAsBytesSync();
+        final flutter = File('test/fixtures/operations/$name').readAsBytesSync();
+        final web = File(
+          '$_webRoot/web/test/fixtures/operations/$name',
+        ).readAsBytesSync();
+        expect(flutter, orderedEquals(canonical), reason: 'Flutter $name');
+        expect(web, orderedEquals(canonical), reason: 'Web $name');
+      }
+    },
+    skip: _paritySkip,
+  );
 
   test(
     'notification DTOs accept additive fields and retain all channel metadata',
