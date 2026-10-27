@@ -59,7 +59,7 @@ def archive(entries):
     return output.getvalue()
 
 
-def manifest_proto(target, compiled_debuggable=None):
+def manifest_proto(target, compiled_debuggable=None, play_overlay=False):
     # AAPT Resources.proto XmlNode/XmlElement/XmlAttribute wire format.
     def field(number, value):
         length = len(value)
@@ -76,9 +76,10 @@ def manifest_proto(target, compiled_debuggable=None):
             body += field(5, child)
         return field(1, body)
 
+    app_children = [element('meta-data', [('name', 'google_analytics_adid_collection_enabled')])] if play_overlay else []
     return element('manifest', [('package', 'com.dhanuk.ovidai')], [
         element('uses-sdk', [('minSdkVersion', '24'), ('targetSdkVersion', str(target))]),
-        element('application'),
+        element('application', children=app_children),
     ])
 
 
@@ -268,13 +269,14 @@ class ReleaseInventoryTest(unittest.TestCase):
 
     def run_bundle_gate(self, target=36, certificate='a' * 64, mode='production',
                         manifest_target=None, debuggable=None, relro_end=32768,
-                        profile=None, bootstrap=False):
+                        profile=None, bootstrap=False, play_overlay=False):
         manifest_target = target if manifest_target is None else manifest_target
         with tempfile.TemporaryDirectory() as directory:
             artifact = Path(directory) / 'fixture.aab'
             output = Path(directory) / 'report.json'
             artifact.write_bytes(archive([
-                ('base/manifest/AndroidManifest.xml', manifest_proto(manifest_target, debuggable)),
+                ('base/manifest/AndroidManifest.xml',
+                 manifest_proto(manifest_target, debuggable, play_overlay)),
                 ('base/lib/arm64-v8a/libflutter.so', elf(relro_end=relro_end)),
             ] + ([('base/lib/arm64-v8a/libovid_bootstrap.so',
                    archive([('bin/bash', elf(relro_end=relro_end))]))] if bootstrap else [])))
@@ -321,9 +323,25 @@ class ReleaseInventoryTest(unittest.TestCase):
         self.assertEqual(summary['bootstrap_payload_elfs'], 0)
 
     def test_production_play_profile_passes_without_bootstrap(self):
-        code, report = self.run_bundle_gate(profile='play', bootstrap=False)
+        code, report = self.run_bundle_gate(profile='play', bootstrap=False,
+                                            play_overlay=True)
         self.assertEqual((code, report['errors']), (0, []))
         self.assertEqual(report['profile'], 'play')
+        self.assertTrue(report['distribution_profile']['play_manifest_overlay_present'])
+
+    def test_production_play_profile_requires_actual_overlay(self):
+        code, report = self.run_bundle_gate(profile='play', bootstrap=False,
+                                            play_overlay=False)
+        self.assertEqual(code, 1)
+        self.assertTrue(any('missing the actual Play manifest overlay' in error
+                            for error in report['errors']))
+
+    def test_sideload_profile_requires_overlay_absence(self):
+        code, report = self.run_bundle_gate(profile='sideload', mode='release',
+                                            play_overlay=True)
+        self.assertEqual(code, 1)
+        self.assertTrue(any('sideload artifact contains the actual Play manifest overlay' in error
+                            for error in report['errors']))
 
     def test_production_play_profile_rejects_bootstrap_payload(self):
         code, report = self.run_bundle_gate(profile='play', bootstrap=True)

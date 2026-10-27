@@ -432,6 +432,9 @@ def main():
         if args.profile == 'sideload' and play_overlay:
             report['errors'].append(
                 'sideload artifact contains the actual Play manifest overlay')
+        if args.profile == 'play' and not play_overlay:
+            report['errors'].append(
+                'play artifact is missing the actual Play manifest overlay')
         if manifest['package'] != 'com.dhanuk.ovidai' or manifest['min_sdk'] != args.expected_min or manifest['target_sdk'] != args.expected_target:
             report['errors'].append('artifact package/minSdk/targetSdk differs from explicit inventory contract')
         if strict and manifest['debuggable']:

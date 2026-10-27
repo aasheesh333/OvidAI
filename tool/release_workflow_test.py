@@ -65,6 +65,10 @@ def _needs(job):
 
 
 class ReleaseWorkflowTest(unittest.TestCase):
+    def test_release_version_advances_past_known_play_build(self):
+        pubspec = (Path(__file__).resolve().parents[1] / "pubspec.yaml").read_text()
+        self.assertRegex(pubspec, r"(?m)^version: 1\.0\.0\+4$")
+
     def test_parses_without_duplicate_keys(self):
         # Raises ConstructorError on a duplicate key -> workflow-file failure.
         doc = _workflow()
@@ -85,7 +89,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
         for name in (
             "Build signed release APK + AAB",
             "Upload release APK",
-            "Upload release AAB (static gates only; not Play qualified on push)",
+            "Upload release AAB",
         ):
             _step("release", name)
         self.assertIn("flutter build appbundle --release", _step("release", "Build signed release APK + AAB")["run"])
@@ -98,10 +102,12 @@ class ReleaseWorkflowTest(unittest.TestCase):
         step = _step("detect", "Detect release signing availability")
         self.assertEqual(step["id"], "signing")
         self.assertEqual(detect["outputs"]["release_signing"], "${{ steps.signing.outputs.release_signing }}")
+        self.assertEqual(detect["outputs"]["production_profile"], "${{ steps.signing.outputs.production_profile }}")
         self.assertIn('>> "$GITHUB_OUTPUT"', step["run"])
         self.assertEqual(step["env"]["KEYSTORE_B64"], "${{ secrets.ANDROID_KEYSTORE_BASE64 }}")
         release = _job("release")
         self.assertEqual(release["env"]["release_signing"], "${{ needs.detect.outputs.release_signing }}")
+        self.assertEqual(release["env"]["production_profile"], "${{ needs.detect.outputs.production_profile }}")
         self.assertIn("needs.detect.outputs.release_signing == 'true'", release["if"])
         for job in ("release", "debug-apk"):
             self.assertNotIn("env.", _job(job)["if"], job)
@@ -115,7 +121,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
         debug = _job("debug-apk")
         self.assertEqual(_needs("debug-apk"), ["detect"])
         self.assertIn("needs.detect.outputs.release_signing != 'true'", debug["if"])
-        self.assertIn("inputs.production_release != true", debug["if"])
+        self.assertIn("needs.detect.outputs.production_profile != 'true'", debug["if"])
         gate = _step("debug-apk", "Gate debug APK inventory")["run"]
         # The on-device sandbox is gone: every build targets API 36.
         self.assertIn("--mode debug --expected-target 36", gate)
@@ -148,10 +154,10 @@ class ReleaseWorkflowTest(unittest.TestCase):
         names = [step.get("name") for step in release["steps"]]
         # Production signing is prepared and validated before compilation.
         production_prepare = names.index("Prepare release signing")
-        self.assertEqual(release["steps"][production_prepare]["if"], "inputs.production_release == true")
+        self.assertEqual(release["steps"][production_prepare]["if"], "env.production_profile == 'true'")
         self.assertIn("python3 tool/release_prepare.py", release["steps"][production_prepare]["run"])
         push_prepare = [step for step in release["steps"] if step.get("name") == "Prepare release signing"][1]
-        self.assertEqual(push_prepare["if"], "env.release_signing == 'true' && inputs.production_release != true")
+        self.assertEqual(push_prepare["if"], "env.release_signing == 'true' && env.production_profile != 'true'")
         build = names.index("Build signed release APK + AAB")
         # The bootstrap packaging step is gone with the on-device sandbox;
         # the remaining secret/flag guards still have to precede compilation.
@@ -164,10 +170,10 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("--dart-define=OVID_RELEASE_FLAGS_CHECK=true", guard)
         self.assertIn('--dart-define=OVID_ACCOUNT_ENABLED="$OVID_ACCOUNT_ENABLED"', guard)
         self.assertEqual(_step("release", "Validate production key before release compilation")["if"],
-                         "inputs.production_release == true")
+                         "env.production_profile == 'true'")
         cleanup = _step("release", "Remove injected release credentials")
         self.assertEqual(cleanup["if"],
-                         "always() && (inputs.production_release == true || env.release_signing == 'true')")
+                         "always() && (env.production_profile == 'true' || env.release_signing == 'true')")
         self.assertEqual(names[-1], "Remove injected release credentials")
 
     def test_production_dispatch_keeps_api36_gate(self):
@@ -191,11 +197,11 @@ class ReleaseWorkflowTest(unittest.TestCase):
         # uploaded for every signed release build, before credential cleanup.
         names = [step.get("name") for step in _steps("release")]
         symbols = _step("release", "Upload Dart symbols (split-debug-info)")
-        self.assertEqual(symbols["if"], "env.release_signing == 'true'")
+        self.assertEqual(symbols["if"], "env.release_signing == 'true' || env.production_profile == 'true'")
         self.assertEqual(symbols["with"]["path"], "build/symbols/")
         self.assertEqual(symbols["with"]["if-no-files-found"], "error")
         mapping = _step("release", "Upload R8 mapping")
-        self.assertEqual(mapping["if"], "env.release_signing == 'true'")
+        self.assertEqual(mapping["if"], "env.release_signing == 'true' || env.production_profile == 'true'")
         self.assertIn("build/app/outputs/mapping/release/", mapping["with"]["path"])
         self.assertEqual(mapping["with"]["if-no-files-found"], "error")
         build = names.index("Build signed release APK + AAB")
@@ -205,17 +211,63 @@ class ReleaseWorkflowTest(unittest.TestCase):
             self.assertRegex(_step("release", name)["uses"], r"@[0-9a-f]{40}$")
 
     def test_push_builds_signed_full_release(self):
-        # Every push builds the signed full-feature (sideload) release APK + AAB when the
-        # signing secret exists; the Play profile only applies to production_release.
+        # Every push builds a signed APK + AAB when the keystore secret exists.
+        # The release branch gets the production Play profile; other branches
+        # retain a signed sideload candidate.
         detect = _step("detect", "Detect release signing availability")
         self.assertIn('"${{ github.event_name }}" = "push"', detect["run"])
         build = _step("release", "Build signed release APK + AAB")
-        self.assertIn('if [ "${{ inputs.production_release }}" = "true" ]; then play_define=', build["run"])
+        self.assertIn('if [ "$production_profile" = "true" ]; then play_define=', build["run"])
+
+    def test_release_branch_push_selects_production_play_profile(self):
+        detect = _step("detect", "Detect release signing availability")["run"]
+        self.assertIn('refs/heads/feat/ovid-si-rebuild', detect)
+        self.assertIn('production_profile=true', detect)
+        self.assertIn('if [ "$production_profile" = "true" ]; then\n  release_signing=true', detect)
+        release = _job("release")
+        self.assertIn("needs.detect.outputs.production_profile == 'true'", release["if"])
+        build = _step("release", "Build signed release APK + AAB")["run"]
+        self.assertIn('--dart-define=OVID_PLAY_BUILD=true', build)
+        self.assertIn('--dart-define=OVID_PRODUCTION=true', build)
+        self.assertIn('--dart-define=OVID_APPCHECK=false', build)
+        for name in (
+            "Guard release feature flags",
+            "Build signed release APK + AAB",
+            "Gate release artifacts",
+            "Upload release APK",
+            "Upload release AAB",
+            "Upload Dart symbols (split-debug-info)",
+            "Upload R8 mapping",
+        ):
+            self.assertIn("env.production_profile == 'true'", _step("release", name)["if"], name)
+        gate = _step("release", "Gate release artifacts")["run"]
+        self.assertIn('if [ "$production_profile" = "true" ]; then mode=production; target=36; profile=play;', gate)
+        self.assertIn('else mode=release; target=36; profile=sideload;', gate)
+
+    def test_other_branch_push_remains_sideload(self):
+        detect = _step("detect", "Detect release signing availability")["run"]
+        self.assertIn('refs/heads/feat/ovid-si-rebuild', detect)
+        self.assertNotIn('refs/heads/feat/ovid-cloud', detect.split('production_profile=true', 1)[1])
+
+    def test_release_branch_push_requires_production_signing_inputs(self):
+        release = _job("release")
+        prepare = _step("release", "Prepare release signing")
+        self.assertEqual(prepare["if"], "env.production_profile == 'true'")
+        for secret in (
+            "${{ secrets.ANDROID_KEYSTORE_BASE64 }}",
+            "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}",
+            "${{ secrets.ANDROID_KEY_ALIAS }}",
+            "${{ secrets.ANDROID_KEY_PASSWORD }}",
+            "${{ secrets.GOOGLE_SERVICES_JSON }}",
+        ):
+            self.assertIn(secret, prepare["env"].values())
+        self.assertIn("python3 tool/release_prepare.py", prepare["run"])
+        self.assertIn("needs.detect.outputs.production_profile == 'true'", release["if"])
 
     def test_no_production_only_gate_on_push_release(self):
         # The push release path must not require inputs.production_release.
         self.assertEqual(_step("release", "Build signed release APK + AAB").get("if"),
-                         "env.release_signing == 'true'")
+                         "env.release_signing == 'true' || env.production_profile == 'true'")
         self.assertNotEqual(_job("release")["if"].strip(), "inputs.production_release == true")
 
     def test_flutter_tests_use_bounded_complete_batches(self):
