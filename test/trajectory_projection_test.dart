@@ -300,6 +300,29 @@ void main() {
     },
   );
 
+  test('runtime stays unknown without start evidence', () {
+    final worker = TrajectoryWorker(
+      logicalWorkerId: 'worker-unproven',
+      status: 'running',
+      startedAt: DateTime.utc(2026, 10, 24, 12),
+      startKnown: false,
+    );
+    expect(
+      workerRuntimeDuration(worker, now: DateTime.utc(2026, 10, 24, 13)),
+      isNull,
+    );
+    final running = TrajectoryWorker(
+      logicalWorkerId: 'worker-proven',
+      status: 'running',
+      startedAt: DateTime.utc(2026, 10, 24, 12),
+      startKnown: true,
+    );
+    expect(
+      workerRuntimeDuration(running, now: DateTime.utc(2026, 10, 24, 13)),
+      const Duration(hours: 1),
+    );
+  });
+
   test(
     'full steps stay chronological and render only unknown values as dashes',
     () {
@@ -511,68 +534,287 @@ void main() {
     },
   );
 
-  test('raw owner view redacts PAT and signed URL canaries recursively', () {
-    // Deliberately assembled at runtime: no credential-shaped literal is
-    // persisted in this test, source, command lines, or successful logs.
-    final pat = <String>['github', 'pat', 'fixture', 'canary'].join('_');
-    final signedUrl = Uri(
-      scheme: 'https',
-      host: 'objects.example.invalid',
-      path: '/history.json',
-      queryParameters: <String, String>{'X-Amz-Signature': pat},
-    ).toString();
-    final secretObject = <String, dynamic>{
-      'authorization': 'Bearer $pat',
-      'nested': <String, dynamic>{'download': signedUrl},
-      'providerBaseUrl': 'https://provider.example.invalid/v1',
+  test(
+    'raw owner view redacts PAT keys and signed URL canaries recursively',
+    () {
+      // Deliberately assembled at runtime: no credential-shaped literal is
+      // persisted in this test, source, command lines, or successful logs.
+      final pat = <String>['github', 'pat', 'fixture', 'canary'].join('_');
+      final signedUrl = Uri(
+        scheme: 'https',
+        host: 'objects.example.invalid',
+        path: '/history.json',
+        queryParameters: <String, String>{'X-Amz-Signature': pat},
+      ).toString();
+      final secondPat = <String>['github', 'pat', 'other', 'canary'].join('_');
+      final secretObject = <String, dynamic>{
+        'authorization': 'Bearer $pat',
+        pat: 'secret-bearing property name',
+        secondPat: 'second secret property value',
+        'nested': <String, dynamic>{'download': signedUrl},
+        'providerBaseUrl': 'https://provider.example.invalid/v1',
+      };
+      final page = RawTrajectoryPage.fromJson(<String, dynamic>{
+        'chunks': <Map<String, dynamic>>[
+          <String, dynamic>{
+            'item': <String, dynamic>{
+              'stableId': 'raw-1',
+              'kind': 'compaction',
+              'sessionId': 'session-1',
+              'rootTaskRunId': 'root-main',
+              'logicalWorkerId': null,
+              'attemptId': 'attempt-main',
+              'eventCursor': '40',
+              'inlinePayload': secretObject,
+              'byteLength': 100,
+            },
+            'offset': 0,
+            'data': jsonEncode(secretObject),
+            'nextOffset': null,
+          },
+        ],
+        'nextCursor': 'raw-next',
+        'truncated': true,
+      });
+
+      final projected = page.displayText;
+      expect(projected.contains(pat), isFalse);
+      expect(projected.contains(secondPat), isFalse);
+      expect(projected.contains('secret-bearing property name'), isTrue);
+      expect(projected.contains('second secret property value'), isTrue);
+      expect(projected.contains('X-Amz-Signature'), isFalse);
+      expect(projected.contains('provider.example.invalid'), isFalse);
+      expect(projected.contains('[redacted]'), isTrue);
+      expect(page.nextCursor, 'raw-next');
+      expect(page.truncated, isTrue);
+
+      final credentialIdentifiers = RawTrajectoryPage.fromJson(
+        <String, dynamic>{
+          'items': <Map<String, dynamic>>[
+            <String, dynamic>{'id': signedUrl, 'value': 'safe'},
+          ],
+          'nextCursor': pat,
+        },
+      );
+      // Boolean assertions keep even a failing redaction test from printing the
+      // generated canary into evidence logs.
+      expect(credentialIdentifiers.nextCursor == null, isTrue);
+      expect(credentialIdentifiers.entries.single.id == 'raw-0', isTrue);
+      expect(credentialIdentifiers.displayText.contains(pat), isFalse);
+      expect(
+        credentialIdentifiers.displayText.contains('X-Amz-Signature'),
+        isFalse,
+      );
+    },
+  );
+
+  test('second raw redactor closes token JWT cookie header and thought gaps', () {
+    final jwt = <String>[
+      'eyJ',
+      'header',
+      'payload',
+      'signature',
+    ].map((part) => '${part}Value').join('.');
+    final page = RawTrajectoryPage.fromJson(<String, dynamic>{
+      'items': <Map<String, dynamic>>[
+        <String, dynamic>{
+          'id': 'sensitive-fixture',
+          'value': <String, dynamic>{
+            'sessionToken': 'session-secret',
+            'X-Figma-Token': 'figma-secret',
+            'ordinaryJwt': jwt,
+            'headers':
+                'Cookie: cookie-secret\nX-Figma-Token: figma-secret\nAuthorization: Bearer bearer-secret',
+            'thoughts': 'private thought',
+            'reasoning': 'private reasoning',
+            'ordinary': 'keep this text',
+          },
+        },
+      ],
+      'nextCursor': null,
+    });
+
+    final projected = page.displayText;
+    expect(projected.contains('session-secret'), isFalse);
+    expect(projected.contains('figma-secret'), isFalse);
+    expect(projected.contains(jwt), isFalse);
+    expect(projected.contains('cookie-secret'), isFalse);
+    expect(projected.contains('bearer-secret'), isFalse);
+    expect(projected.contains('private thought'), isFalse);
+    expect(projected.contains('private reasoning'), isFalse);
+    expect(projected.contains('ordinary'), isTrue);
+    expect(projected.contains('keep this text'), isTrue);
+    expect(projected.contains('[redacted]'), isTrue);
+  });
+
+  test('fragmented canonical raw chunks fail closed without showing slices', () {
+    String jwtPart(Object value) =>
+        base64Url.encode(utf8.encode(jsonEncode(value))).replaceAll('=', '');
+    final jwt =
+        '${jwtPart(<String, dynamic>{'alg': 'none', 'typ': 'JWT'})}.'
+        '${jwtPart(<String, dynamic>{'sub': 'fixture-user'})}.'
+        '${base64Url.encode(utf8.encode('fixture-signature')).replaceAll('=', '')}';
+    final fragments = <String>[
+      '{"sessionToken":"session-secret",',
+      '"thoughts":"private-thought",',
+      '"headers":"Cookie: cookie-secret\\nX-Figma-Token: figma-secret",',
+      '"splitCanary":"split-',
+      'secret"}',
+    ];
+    Map<String, dynamic> item() => <String, dynamic>{
+      'stableId': 'fragmented-1',
+      'kind': 'tool_call',
+      'sessionId': 'session-1',
+      'rootTaskRunId': 'root-1',
+      'logicalWorkerId': null,
+      'attemptId': null,
+      'eventCursor': 'cursor-1',
+      'objectRef': 'objects/exact/1',
+      'byteLength': 100,
     };
+    Map<String, dynamic> chunk(int offset, String data, int? nextOffset) =>
+        <String, dynamic>{
+          'item': item(),
+          'offset': offset,
+          'data': data,
+          'nextOffset': nextOffset,
+        };
     final page = RawTrajectoryPage.fromJson(<String, dynamic>{
       'chunks': <Map<String, dynamic>>[
-        <String, dynamic>{
-          'item': <String, dynamic>{
-            'stableId': 'raw-1',
-            'kind': 'compaction',
-            'sessionId': 'session-1',
-            'rootTaskRunId': 'root-main',
-            'logicalWorkerId': null,
-            'attemptId': 'attempt-main',
-            'eventCursor': '40',
-            'inlinePayload': secretObject,
-            'byteLength': 100,
-          },
-          'offset': 0,
-          'data': jsonEncode(secretObject),
-          'nextOffset': null,
-        },
+        for (var i = 0; i < fragments.length; i++)
+          chunk(i, fragments[i], i + 1),
+        chunk(90, jsonEncode(<String, dynamic>{'jwt': jwt}), 91),
+        chunk(91, jsonEncode('"sessionToken":"primitive-secret"'), 92),
+        chunk(92, jsonEncode(<String, dynamic>{'ordinary': 'keep'}), null),
       ],
       'nextCursor': 'raw-next',
       'truncated': true,
     });
 
     final projected = page.displayText;
-    expect(projected.contains(pat), isFalse);
-    expect(projected.contains('X-Amz-Signature'), isFalse);
-    expect(projected.contains('provider.example.invalid'), isFalse);
-    expect(projected.contains('[redacted]'), isTrue);
-    expect(page.nextCursor, 'raw-next');
-    expect(page.truncated, isTrue);
-
-    final credentialIdentifiers = RawTrajectoryPage.fromJson(<String, dynamic>{
-      'items': <Map<String, dynamic>>[
-        <String, dynamic>{'id': signedUrl, 'value': 'safe'},
-      ],
-      'nextCursor': pat,
-    });
-    // Boolean assertions keep even a failing redaction test from printing the
-    // generated canary into evidence logs.
-    expect(credentialIdentifiers.nextCursor == null, isTrue);
-    expect(credentialIdentifiers.entries.single.id == 'raw-0', isTrue);
-    expect(credentialIdentifiers.displayText.contains(pat), isFalse);
-    expect(
-      credentialIdentifiers.displayText.contains('X-Amz-Signature'),
-      isFalse,
-    );
+    for (final secret in <String>[
+      'session-secret',
+      'private-thought',
+      'cookie-secret',
+      'figma-secret',
+      'split-secret',
+      'primitive-secret',
+      jwt,
+    ]) {
+      expect(projected.contains(secret), isFalse);
+    }
+    final withheld = page.entries.where((entry) {
+      final value = entry.value;
+      return value is Map && value['withheld'] == true;
+    }).toList();
+    expect(withheld, hasLength(fragments.length + 1));
+    for (final entry in withheld) {
+      expect((entry.value as Map)['data'], isNull);
+    }
+    expect(projected.contains('withheld'), isTrue);
+    expect(projected.contains('ordinary'), isTrue);
+    expect(projected.contains('keep'), isTrue);
+    expect(projected.contains('raw-next'), isTrue);
+    expect(projected.contains('truncated'), isTrue);
   });
+
+  test(
+    'complete JSON redacts exact sensitive primitives and fragmented slices stay withheld',
+    () {
+      const jwt = 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJmaXh0dXJlIn0.c2lnbmF0dXJl';
+      final firstPat = <String>['github', 'pat', 'first', 'canary'].join('_');
+      final secondPat = <String>['github', 'pat', 'second', 'canary'].join('_');
+      Map<String, dynamic> item() => <String, dynamic>{
+        'stableId': 'complete-1',
+        'kind': 'message',
+        'sessionId': 'session-1',
+        'rootTaskRunId': 'root-1',
+        'logicalWorkerId': null,
+        'attemptId': null,
+        'eventCursor': 'cursor-1',
+        'inlinePayload': <String, dynamic>{'safe': true},
+        'byteLength': 100,
+      };
+      Map<String, dynamic> chunk(int offset, Object? data, int? nextOffset) =>
+          <String, dynamic>{
+            'item': item(),
+            'offset': offset,
+            'data': data,
+            'nextOffset': nextOffset,
+          };
+      final complete = <String, dynamic>{
+        'thought': 'private-singular-thought',
+        'privateThought': 'private-camel-thought',
+        'inputTokens': 42,
+        'nested': <Object?>[
+          <String, dynamic>{'token': 'primitive-token'},
+          <Object?>['"sessionToken":"primitive-session"', jwt],
+        ],
+        firstPat: 'first secret property value',
+        secondPat: 'second secret property value',
+        'ordinary': 'keep this content',
+      };
+      final page = RawTrajectoryPage.fromJson(<String, dynamic>{
+        'chunks': <Map<String, dynamic>>[
+          chunk(0, jsonEncode(complete), 1),
+          chunk(1, jsonEncode('"token":"primitive-token"'), 2),
+          chunk(2, jsonEncode('"sessionToken":"primitive-session"'), 3),
+          chunk(3, jsonEncode(jwt), 4),
+          chunk(4, jsonEncode('"inputTokens":7'), 5),
+          chunk(5, '{"thought":"fragment-secret"', 6),
+          chunk(6, jsonEncode(<String, dynamic>{'ordinary': 'keep'}), null),
+        ],
+        'nextCursor': 'raw-next',
+        'truncated': true,
+      });
+
+      final completeData = (page.entries[0].value as Map)['data'] as String;
+      final projected = jsonDecode(completeData) as Map<String, dynamic>;
+      expect(projected['thought'], '[redacted]');
+      expect(projected['privateThought'], '[redacted]');
+      expect(projected['inputTokens'], 42);
+      expect(projected['nested'][0], <String, dynamic>{'token': '[redacted]'});
+      expect(projected['nested'][1], <Object?>['[redacted]', '[redacted]']);
+      expect(
+        projected.keys.where((key) => key.startsWith('[redacted]')),
+        hasLength(2),
+      );
+      expect(projected['ordinary'], 'keep this content');
+
+      final token = page.entries[1].value as Map;
+      final session = page.entries[2].value as Map;
+      final primitiveJwt = page.entries[3].value as Map;
+      final benignCount = page.entries[4].value as Map;
+      final fragment = page.entries[5].value as Map;
+      expect(token['withheld'], isTrue);
+      expect(token['data'], isNull);
+      expect(session['withheld'], isTrue);
+      expect(session['data'], isNull);
+      expect(jsonDecode(primitiveJwt['data'] as String), '[redacted]');
+      expect(benignCount['withheld'], isNull);
+      expect(jsonDecode(benignCount['data'] as String), '"inputTokens":7');
+      expect(fragment['withheld'], isTrue);
+      expect(fragment['data'], isNull);
+
+      final display = page.displayText;
+      for (final secret in <String>[
+        jwt,
+        firstPat,
+        secondPat,
+        'primitive-token',
+        'primitive-session',
+        'private-singular-thought',
+        'private-camel-thought',
+        'fragment-secret',
+      ]) {
+        expect(display.contains(secret), isFalse);
+      }
+      expect(display.contains('keep this content'), isTrue);
+      expect(display.contains('ordinary'), isTrue);
+      expect(display.contains('raw-next'), isTrue);
+      expect(display.contains('truncated'), isTrue);
+    },
+  );
 
   test(
     'normalized sensitive keys and embedded encoded signed URLs never project',
@@ -796,4 +1038,58 @@ void main() {
       );
     },
   );
+
+  test('parent lifecycle sequence never advances a child stream cursor', () {
+    final root = foldTrajectoryPages([
+      <String, dynamic>{
+        'workers': <Map<String, dynamic>>[
+          <String, dynamic>{
+            'logicalWorkerId': 'worker-1',
+            'childSessionId': 'child-session',
+            'childRunId': 'child-run',
+            'status': 'running',
+            'startKnown': true,
+            'startedAt': '2026-10-24T12:00:05.000Z',
+            'lastCursor': 'child-stream-4',
+          },
+        ],
+      },
+      <String, dynamic>{
+        'events': <Map<String, dynamic>>[
+          _event('10', 'subagent_started', <String, dynamic>{
+            'runId': 'root-run',
+            'logicalWorkerId': 'worker-1',
+            'childSessionId': 'child-session',
+            'childRunId': 'child-run',
+            'startedAt': '2026-10-24T12:00:05.000Z',
+          }),
+          _event('11', 'subagent_completed', <String, dynamic>{
+            'runId': 'root-run',
+            'logicalWorkerId': 'worker-1',
+            'childSessionId': 'child-session',
+            'childRunId': 'child-run',
+            'status': 'completed',
+            'endedAt': '2026-10-24T12:10:05.000Z',
+          }),
+          _event('12', 'subagent_compacted', <String, dynamic>{
+            'runId': 'child-run',
+            'workerId': 'worker-1',
+            'compactionId': 'compaction-1',
+            'checkpointId': 'checkpoint-1',
+            'model': 'fixture',
+            'contextLimit': 128000,
+            'beforeTokens': 102400,
+            'afterTokens': 24000,
+            'usageSource': 'measured',
+            'continuation': 'continuing_existing_task',
+          }),
+        ],
+      },
+    ]);
+
+    final worker = root.workers.single;
+    expect(worker.logicalWorkerId, 'worker-1');
+    expect(worker.lastCursor, 'child-stream-4');
+    expect(worker.lastCursor, isNot(anyOf('10', '11', '12')));
+  });
 }

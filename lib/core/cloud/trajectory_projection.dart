@@ -170,6 +170,7 @@ class TrajectoryStep {
     this.requestedModel,
     this.providerModel,
     this.usage = const TrajectoryUsage(),
+    this.canonicalMain = false,
   });
 
   final String cursor;
@@ -190,6 +191,11 @@ class TrajectoryStep {
   final String? requestedModel;
   final String? providerModel;
   final TrajectoryUsage usage;
+
+  /// True only for server-provided canonical main-step DTOs. Preserved through
+  /// TrajectoryRoot serialization so re-folding never turns parent lifecycle
+  /// into worker activity. actorKind=worker compaction can still be canonical.
+  final bool canonicalMain;
 
   String get filesLabel => _listLabel(files);
   String get diffsLabel => _listLabel(diffs);
@@ -232,6 +238,7 @@ class TrajectoryStep {
       requestedModel: _string(merged['requestedModel']),
       providerModel: _string(merged['providerModel'] ?? merged['model']),
       usage: TrajectoryUsage.fromJson(_map(merged['usage'] ?? merged)),
+      canonicalMain: merged['canonicalMain'] == true,
     );
   }
 }
@@ -579,11 +586,11 @@ String _status(Object? value) {
   };
 }
 
-/// Runtime is measured only from a real start. Terminal runtime additionally
-/// requires a real end; a running row may use the caller's clock.
+/// Runtime is measured only when startKnown proves a real start. Terminal
+/// runtime additionally requires a real end; a running row may use the clock.
 Duration? workerRuntimeDuration(TrajectoryWorker worker, {DateTime? now}) {
   final started = worker.startedAt;
-  if (started == null) return null;
+  if (!worker.startKnown || started == null) return null;
   final end =
       worker.endedAt ??
       (worker.status == 'running' ? (now ?? DateTime.now().toUtc()) : null);
@@ -610,6 +617,7 @@ class TrajectoryRoot {
     this.diagnostics = const <CompactionMetadataDto>[],
     this.nextCursor,
     this.earlierCursor,
+    this.canonicalRoster = false,
   });
 
   final TrajectoryCounts counts;
@@ -618,6 +626,10 @@ class TrajectoryRoot {
   final List<CompactionMetadataDto> diagnostics;
   final String? nextCursor;
   final String? earlierCursor;
+
+  /// Whether [workers] came from the canonical `/subagents` roster rather
+  /// than the durable-event fallback.
+  final bool canonicalRoster;
 }
 
 class _Record {
@@ -695,6 +707,7 @@ Map<String, dynamic> _stepJson(TrajectoryStep step) => <String, dynamic>{
   'preview': step.preview,
   'requestedModel': step.requestedModel,
   'providerModel': step.providerModel,
+  'canonicalMain': step.canonicalMain,
   'usage': <String, Object?>{
     'inputTokens': step.usage.inputTokens,
     'outputTokens': step.usage.outputTokens,
@@ -734,6 +747,10 @@ void _copyKnown(
   }
 }
 
+bool _canonicalMainStep(_Record record) =>
+    record.json['canonicalMain'] == true &&
+    _string(record.page['childSessionId']) == null;
+
 int _compareRecords(_Record a, _Record b) {
   final aSeq = '${a.json['seq'] ?? ''}';
   final bSeq = '${b.json['seq'] ?? ''}';
@@ -758,7 +775,7 @@ int _compareRecords(_Record a, _Record b) {
   return aSeq.compareTo(bSeq);
 }
 
-/// Folds canonical summary DTOs, full-step DTOs and existing event pages.
+/// Folds canonical summary DTOs, optional full-step DTOs and event pages.
 /// Events are deduplicated by `(sessionId,seq)` before chronological folding,
 /// so an older page may arrive after a completion without regressing it.
 TrajectoryRoot foldTrajectoryPages(Iterable<Object?> pages) {
@@ -769,9 +786,11 @@ TrajectoryRoot foldTrajectoryPages(Iterable<Object?> pages) {
   final diagnostics = <CompactionMetadataDto>[];
   String? nextCursor;
   String? earlierCursor;
+  var hasCanonicalRoster = false;
 
   for (final rawPage in pages) {
     if (rawPage is TrajectoryRoot) {
+      hasCanonicalRoster = hasCanonicalRoster || rawPage.canonicalRoster;
       counts = rawPage.counts;
       snapshotSummaries.addAll([
         for (final worker in rawPage.workers) _workerJson(worker),
@@ -794,6 +813,11 @@ TrajectoryRoot foldTrajectoryPages(Iterable<Object?> pages) {
           (summary.containsKey('total') ? summary : null),
     );
     if (countsJson.isNotEmpty) counts = TrajectoryCounts.fromJson(countsJson);
+    if (page.containsKey('workers') ||
+        page.containsKey('items') ||
+        summary.containsKey('items')) {
+      hasCanonicalRoster = true;
+    }
     summaries.addAll(
       _maps(page['workers'] ?? page['items'] ?? summary['items']),
     );
@@ -805,6 +829,7 @@ TrajectoryRoot foldTrajectoryPages(Iterable<Object?> pages) {
       final normalized = <String, dynamic>{
         ...step,
         'ts': step['ts'] ?? step['timestamp'],
+        'canonicalMain': _string(page['childSessionId']) == null,
       };
       final record = _Record(normalized, page);
       if (record.key.endsWith('\u0000')) continue;
@@ -820,6 +845,9 @@ TrajectoryRoot foldTrajectoryPages(Iterable<Object?> pages) {
         'seq': event['seq'] ?? payload['seq'],
         'ts': event['ts'] ?? payload['ts'],
         'payload': payload,
+        // Raw payloads cannot claim canonical-main provenance. Only canonical
+        // step pages/serialized roots may carry that marker.
+        'canonicalMain': false,
       };
       if (_string(page['childSessionId']) != null) {
         normalized['childSessionId'] = page['childSessionId'];
@@ -870,6 +898,25 @@ TrajectoryRoot foldTrajectoryPages(Iterable<Object?> pages) {
   for (final record in records) {
     final json = record.json;
     final type = _string(json['type']) ?? '';
+    if (_canonicalMainStep(record) && type.startsWith('subagent_')) {
+      // Canonical parent lifecycle DTOs are main chronology only. They carry
+      // no child-scoped activity stream and cannot create worker rows/cursors.
+      continue;
+    }
+    if (type.startsWith('subagent_') &&
+        _string(record.page['childSessionId']) == null &&
+        hasCanonicalRoster) {
+      final aliases = _workerAliases(json).toSet();
+      final known = workerMerges.any(
+        (worker) => worker.aliases.any(aliases.contains),
+      );
+      if (!known) {
+        // The canonical roster is authoritative. Parent-scoped raw lifecycle
+        // events are a legacy fallback only when that roster is unavailable;
+        // they must not add a phantom worker beside a complete roster.
+        continue;
+      }
+    }
     if (type == 'compaction_completed') {
       try {
         diagnostics.add(CompactionMetadataDto.fromJson(json));
@@ -944,12 +991,15 @@ TrajectoryRoot foldTrajectoryPages(Iterable<Object?> pages) {
       worker.data['lastActivity'] =
           _string(json['lastActivity'] ?? json['name']) ?? type;
       worker.data['lastActivityAt'] = json['lastActivityAt'] ?? json['ts'];
-      if (_string(record.page['nextCursor']) != null) {
-        worker.data['lastCursor'] = record.page['nextCursor'];
-      } else if (_string(json['seq']) != null) {
-        worker.data['lastCursor'] = json['seq'];
-      }
-      if (_string(record.page['childSessionId']) != null) {
+      final childSessionId = _string(record.page['childSessionId']);
+      if (childSessionId != null) {
+        // Parent lifecycle events carry the parent session's seq. That seq is
+        // not a valid child-stream cursor and must never advance lastCursor.
+        if (_string(record.page['nextCursor']) != null) {
+          worker.data['lastCursor'] = record.page['nextCursor'];
+        } else if (_string(json['seq']) != null) {
+          worker.data['lastCursor'] = json['seq'];
+        }
         final steps = _maps(worker.data['steps']);
         final duplicate = steps.any((step) {
           final sameSession = step['sessionId'] == json['sessionId'];
@@ -1059,7 +1109,8 @@ TrajectoryRoot foldTrajectoryPages(Iterable<Object?> pages) {
   final mainSteps = <TrajectoryStep>[
     for (final record in records)
       if (_string(record.json['type']) != 'compaction_completed' &&
-          _string(record.json['type']) != 'subagent_compacted')
+          (_string(record.json['type']) != 'subagent_compacted' ||
+              _canonicalMainStep(record)))
         if (!workerEventKeys.contains(record.key) ||
             _string(record.json['actorKind']) == 'main' ||
             record.page['childSessionId'] == null)
@@ -1074,6 +1125,7 @@ TrajectoryRoot foldTrajectoryPages(Iterable<Object?> pages) {
     diagnostics: diagnostics,
     nextCursor: nextCursor,
     earlierCursor: earlierCursor,
+    canonicalRoster: hasCanonicalRoster,
   );
 }
 
@@ -1097,8 +1149,8 @@ class RawTrajectoryEntry {
 }
 
 /// A page from the authenticated, owner-authorized server-redacted raw view.
-/// The projection also redacts at this trust boundary so an accidental server
-/// regression cannot put a credential into a widget or accessibility tree.
+/// The second boundary redacts structured content and withholds non-decodable
+/// fragments instead of guessing across credentials or JSON properties.
 @immutable
 class RawTrajectoryPage {
   const RawTrajectoryPage({
@@ -1129,11 +1181,17 @@ class RawTrajectoryPage {
     }
     for (final chunk in _maps(json['chunks'])) {
       final item = _map(chunk['item']);
+      final projected = _redactRawChunkData(chunk['data']);
       final value = <String, dynamic>{
         'item': _redact(item),
         'offset': _int(chunk['offset']),
-        'data': _redactText(chunk['data']),
+        'data': projected.data,
         'nextOffset': _int(chunk['nextOffset']),
+        if (projected.withheld) ...<String, Object?>{
+          'withheld': true,
+          'withholdReason':
+              'Fragmented raw content cannot be safely projected.',
+        },
       };
       entries.add(
         RawTrajectoryEntry(
@@ -1174,6 +1232,17 @@ final RegExp _bearerPattern = RegExp(
   r'Bearer\s+[^\s,;]+',
   caseSensitive: false,
 );
+final RegExp _jwtPattern = RegExp(
+  r'\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\b',
+);
+final RegExp _headerPattern = RegExp(
+  r'(^|\r?\n)\s*([A-Za-z][A-Za-z0-9-]*)\s*:\s*[^\r\n]+',
+  multiLine: true,
+);
+final RegExp _namedSecretPattern = RegExp(
+  r'\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|signature|sig|key)=)[^\s&]+',
+  caseSensitive: false,
+);
 
 const Set<String> _secretKeys = <String>{
   'authorization',
@@ -1196,6 +1265,12 @@ const Set<String> _secretKeys = <String>{
   'xamzcredential',
   'xamzsecuritytoken',
   'googsignature',
+  'thought',
+  'thoughts',
+  'thinking',
+  'reasoning',
+  'privatethought',
+  'privatethoughts',
 };
 
 String _keyName(String key) =>
@@ -1212,22 +1287,37 @@ bool _sensitiveKey(String key) {
       normalized.endsWith('privatekey') ||
       normalized.endsWith('signature') ||
       normalized.endsWith('credential') ||
+      normalized.endsWith('token') ||
       normalized == 'providerbaseurl' ||
       normalized == 'baseurl';
 }
 
 Object? _redact(Object? value) {
   if (value is Map) {
-    return <String, Object?>{
-      for (final entry in value.entries)
-        if (_sensitiveKey('${entry.key}'))
-          '${entry.key}': '[redacted]'
-        else
-          '${entry.key}': _redact(entry.value),
-    };
+    final entries = <MapEntry<String, Object?>>[];
+    final used = <String>{};
+    for (final entry in value.entries) {
+      final originalKey = '${entry.key}';
+      final baseKey = _redactString(originalKey);
+      var projectedKey = baseKey;
+      var suffix = 1;
+      while (!used.add(projectedKey)) {
+        projectedKey = '$baseKey-${suffix++}';
+      }
+      entries.add(
+        MapEntry<String, Object?>(
+          projectedKey,
+          _sensitiveKey(originalKey) ? '[redacted]' : _redact(entry.value),
+        ),
+      );
+    }
+    return Map<String, Object?>.fromEntries(entries);
   }
   if (value is List) return <Object?>[for (final item in value) _redact(item)];
-  if (value is String) return _redactString(value);
+  if (value is String) {
+    if (_sensitiveJsonPrimitive(value)) return '[redacted]';
+    return _redactString(value);
+  }
   return value;
 }
 
@@ -1238,6 +1328,31 @@ Object? _redactText(Object? value) {
     return jsonEncode(_redact(decoded));
   } catch (_) {
     return _redactString(value);
+  }
+}
+
+/// A fragment of serialized JSON is not a safe structured projection boundary.
+/// Keep complete decodable chunks on the full redactor; withhold every other
+/// slice rather than leaking sensitive properties or split credentials.
+final RegExp _jsonPropertyPrefix = RegExp(
+  r'^\s*\{?\s*"([A-Za-z][A-Za-z0-9_-]*)"\s*:',
+);
+
+bool _sensitiveJsonPrimitive(String value) {
+  final match = _jsonPropertyPrefix.firstMatch(value);
+  return match != null && _sensitiveKey(match.group(1)!);
+}
+
+({Object? data, bool withheld}) _redactRawChunkData(Object? value) {
+  if (value is! String) return (data: _redactText(value), withheld: false);
+  try {
+    final decoded = jsonDecode(value);
+    if (decoded is String && _sensitiveJsonPrimitive(decoded)) {
+      return (data: null, withheld: true);
+    }
+    return (data: _redactText(value), withheld: false);
+  } catch (_) {
+    return (data: null, withheld: true);
   }
 }
 
@@ -1253,7 +1368,14 @@ final RegExp _encodedUrlPattern = RegExp(
 String _redactString(String value) {
   final masked = value
       .replaceAll(_patPattern, '[redacted]')
-      .replaceAll(_bearerPattern, 'Bearer [redacted]');
+      .replaceAll(_bearerPattern, 'Bearer [redacted]')
+      .replaceAll(_jwtPattern, '[redacted]')
+      .replaceAllMapped(_headerPattern, (match) {
+        final key = match.group(2)!;
+        return _sensitiveKey(key)
+            ? '${match.group(1)}$key: [redacted]'
+            : match.group(0)!;
+      });
   final encodedSafe = masked.replaceAllMapped(_encodedUrlPattern, (match) {
     final encoded = match.group(0)!;
     try {
@@ -1263,14 +1385,19 @@ String _redactString(String value) {
       return '[redacted]';
     }
   });
-  return encodedSafe.replaceAllMapped(_plainUrlPattern, (match) {
-    final candidate = match.group(0)!;
-    final uri = Uri.tryParse(candidate);
-    if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
-      return _redactWholeUri(candidate) ? '[redacted]' : candidate;
-    }
-    return _redactUri(uri, fallback: candidate);
-  });
+  return encodedSafe
+      .replaceAllMapped(_plainUrlPattern, (match) {
+        final candidate = match.group(0)!;
+        final uri = Uri.tryParse(candidate);
+        if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+          return _redactWholeUri(candidate) ? '[redacted]' : candidate;
+        }
+        return _redactUri(uri, fallback: candidate);
+      })
+      .replaceAllMapped(
+        _namedSecretPattern,
+        (match) => '${match.group(1)}[redacted]',
+      );
 }
 
 bool _redactWholeUri(String value) {

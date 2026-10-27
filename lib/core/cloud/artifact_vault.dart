@@ -33,18 +33,18 @@ class VaultArtifact {
   });
 
   factory VaultArtifact.fromJson(Map<String, dynamic> j) => VaultArtifact(
-        id: j['id'] as String,
-        sessionId: j['sessionId'] as String,
-        sessionTitle: j['sessionTitle'] as String?,
-        name: j['name'] as String,
-        origin: j['origin'] as String? ?? 'generated',
-        category: j['category'] as String? ?? 'other',
-        contentType: j['contentType'] as String? ?? 'application/octet-stream',
-        sizeBytes: (j['sizeBytes'] as num?)?.toInt() ?? 0,
-        createdAt:
-            DateTime.tryParse(j['createdAt'] as String? ?? '') ?? DateTime.now(),
-        availability: j['availability'] as String? ?? 'unverified',
-      );
+    id: j['id'] as String,
+    sessionId: j['sessionId'] as String,
+    sessionTitle: j['sessionTitle'] as String?,
+    name: j['name'] as String,
+    origin: j['origin'] as String? ?? 'generated',
+    category: j['category'] as String? ?? 'other',
+    contentType: j['contentType'] as String? ?? 'application/octet-stream',
+    sizeBytes: (j['sizeBytes'] as num?)?.toInt() ?? 0,
+    createdAt:
+        DateTime.tryParse(j['createdAt'] as String? ?? '') ?? DateTime.now(),
+    availability: j['availability'] as String? ?? 'unverified',
+  );
 
   /// The gateway row id — the mint route's :id input.
   final String id;
@@ -67,25 +67,25 @@ class VaultArtifact {
   /// later mint can prove the artifact still belongs to the current account.
   /// `url`/`path` stay null: preview, download and share mint fresh URLs.
   SessionArtifact toSessionArtifact(String? accountId) => SessionArtifact(
-        id: id,
-        name: name,
-        sessionId: sessionId,
-        sessionTitle: sessionTitle ?? '',
-        time: createdAt,
-        origin: origin == 'uploaded'
-            ? ArtifactOrigin.uploaded
-            : ArtifactOrigin.generated,
-        kind: switch (category) {
-          'image' => ArtifactKind.image,
-          'html' => ArtifactKind.html,
-          'code' => ArtifactKind.code,
-          'document' => ArtifactKind.document,
-          _ => ArtifactKind.other,
-        },
-        size: sizeBytes,
-        cloudArtifactId: id,
-        cloudAccountId: accountId,
-      );
+    id: id,
+    name: name,
+    sessionId: sessionId,
+    sessionTitle: sessionTitle ?? '',
+    time: createdAt,
+    origin: origin == 'uploaded'
+        ? ArtifactOrigin.uploaded
+        : ArtifactOrigin.generated,
+    kind: switch (category) {
+      'image' => ArtifactKind.image,
+      'html' => ArtifactKind.html,
+      'code' => ArtifactKind.code,
+      'document' => ArtifactKind.document,
+      _ => ArtifactKind.other,
+    },
+    size: sizeBytes,
+    cloudArtifactId: id,
+    cloudAccountId: accountId,
+  );
 }
 
 /// One page of the inventory (GET /artifacts answer shape).
@@ -94,12 +94,12 @@ class VaultPage {
   const VaultPage({required this.items, this.nextCursor});
 
   factory VaultPage.fromJson(Map<String, dynamic> j) => VaultPage(
-        items: [
-          for (final item in (j['items'] as List? ?? <dynamic>[]))
-            if (item is Map<String, dynamic>) VaultArtifact.fromJson(item),
-        ],
-        nextCursor: j['nextCursor'] as String?,
-      );
+    items: [
+      for (final item in (j['items'] as List? ?? <dynamic>[]))
+        if (item is Map<String, dynamic>) VaultArtifact.fromJson(item),
+    ],
+    nextCursor: j['nextCursor'] as String?,
+  );
 
   final List<VaultArtifact> items;
   final String? nextCursor;
@@ -116,7 +116,7 @@ class VaultPage {
 /// guest-only view that must never mix with the cloud corpus.
 class ArtifactVaultClient {
   ArtifactVaultClient({this.accountId, CloudRestClient? rest})
-      : _rest = rest ?? CloudRestClient.I;
+    : _rest = rest ?? CloudRestClient.I;
 
   /// The current account id, or null when signed out.
   final String? Function()? accountId;
@@ -142,14 +142,17 @@ class ArtifactVaultClient {
     int limit = 30,
   }) async {
     if (currentAccountId() == null) return VaultPage.empty;
-    final json = await _rest.getJson('/artifacts', query: <String, String>{
-      if (source != null && source.isNotEmpty) 'source': source,
-      if (category != null && category.isNotEmpty) 'type': category,
-      if (search != null && search.isNotEmpty) 'q': search,
-      if (sessionId != null && sessionId.isNotEmpty) 'sessionId': sessionId,
-      if (cursor != null && cursor.isNotEmpty) 'cursor': cursor,
-      'limit': '$limit',
-    });
+    final json = await _rest.getJson(
+      '/artifacts',
+      query: <String, String>{
+        if (source != null && source.isNotEmpty) 'source': source,
+        if (category != null && category.isNotEmpty) 'type': category,
+        if (search != null && search.isNotEmpty) 'q': search,
+        if (sessionId != null && sessionId.isNotEmpty) 'sessionId': sessionId,
+        if (cursor != null && cursor.isNotEmpty) 'cursor': cursor,
+        'limit': '$limit',
+      },
+    );
     return VaultPage.fromJson(json);
   }
 
@@ -161,7 +164,10 @@ class ArtifactVaultClient {
   /// account (or a signed-out caller) throws `(409, account_changed)` and no
   /// request leaves the device — a slow account switch can never leak one
   /// account's capability into another's UI.
-  Future<MintedArtifactUrl> mintUrl(SessionArtifact artifact) async {
+  Future<MintedArtifactUrl> mintUrl(
+    SessionArtifact artifact, {
+    bool download = false,
+  }) async {
     final current = currentAccountId();
     if (current == null || artifact.cloudAccountId != current) {
       throw CloudApiException(
@@ -178,14 +184,17 @@ class ArtifactVaultClient {
         message: 'This file has no cloud identity.',
       );
     }
-    return MintedArtifactUrl.fromJson(await _rest.getJson(
-      '/artifacts/$id/url',
-      query: <String, String>{
-        'source': artifact.origin == ArtifactOrigin.uploaded
-            ? 'uploaded'
-            : 'generated',
-      },
-    ));
+    return MintedArtifactUrl.fromJson(
+      await _rest.getJson(
+        '/artifacts/$id/url',
+        query: <String, String>{
+          'source': artifact.origin == ArtifactOrigin.uploaded
+              ? 'uploaded'
+              : 'generated',
+          if (download) 'download': '1',
+        },
+      ),
+    );
   }
 
   /// W12: prefer the signed CDN capability, falling back to the canonical
@@ -197,7 +206,8 @@ class ArtifactVaultClient {
   /// `attachment` disposition (share / open-with); previews stay inline.
   ///
   /// Fallback rules:
-  ///  - `cdn_not_configured` / `storage_not_configured` (503) → canonical
+  ///  - `cdn_not_configured` / `cdn_grant_not_configured` /
+  ///    `storage_not_configured` (503) → canonical
   ///    `mintUrl`, so a deployment without the CDN behaves exactly as before;
   ///  - typed object verdicts (`artifact_unavailable`, `artifact_incomplete`,
   ///    `artifact_storage_unavailable`) are rethrown: the canonical mint would
@@ -225,21 +235,25 @@ class ArtifactVaultClient {
     final source = artifact.origin == ArtifactOrigin.uploaded
         ? 'uploaded'
         : 'generated';
-    if (_cdnUnavailable) return mintUrl(artifact);
+    if (_cdnUnavailable) return mintUrl(artifact, download: download);
     try {
-      return MintedArtifactUrl.fromJson(await _rest.getJson(
-        '/artifacts/$id/cdn-url',
-        query: <String, String>{
-          'source': source,
-          if (download) 'download': '1',
-        },
-      ));
+      return MintedArtifactUrl.fromJson(
+        await _rest.getJson(
+          '/artifacts/$id/cdn-url',
+          query: <String, String>{
+            'source': source,
+            if (download) 'download': '1',
+          },
+        ),
+      );
     } on CloudApiException catch (e) {
-      final cdnDisabled = e.code == 'cdn_not_configured' ||
+      final cdnDisabled =
+          e.code == 'cdn_not_configured' ||
+          e.code == 'cdn_grant_not_configured' ||
           e.code == 'storage_not_configured';
       if (cdnDisabled) {
         _cdnUnavailable = true;
-        return mintUrl(artifact);
+        return mintUrl(artifact, download: download);
       }
       rethrow;
     }
@@ -251,8 +265,7 @@ class ArtifactVaultClient {
   Future<MintedArtifactUrl> mintPreferredUrl(
     SessionArtifact artifact, {
     bool download = false,
-  }) =>
-      mintCdnUrl(artifact, download: download);
+  }) => mintCdnUrl(artifact, download: download);
 }
 
 /// Change-notifier driving the Vault screen: fixed pages with an explicit
@@ -268,8 +281,8 @@ class ArtifactVaultController extends ChangeNotifier {
     required this.client,
     ValueListenable<String?>? accountChanges,
     ValueListenable<bool>? online,
-  })  : _accountChanges = accountChanges,
-        _online = online {
+  }) : _accountChanges = accountChanges,
+       _online = online {
     _account = accountChanges?.value;
     if (accountChanges != null) accountChanges.addListener(_onAccountChanged);
     if (online != null) online.addListener(_onOnlineChanged);

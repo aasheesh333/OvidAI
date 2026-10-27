@@ -172,6 +172,51 @@ class _RouteApi extends TrajectoryApi {
   }
 }
 
+class _DiagnosticsOnlyApi extends TrajectoryApi {
+  _DiagnosticsOnlyApi()
+    : super(
+        CloudRestClient(
+          headers: CloudHeaders.forTest(),
+          restBase: 'http://test',
+        ),
+      );
+
+  final List<String?> before = <String?>[];
+
+  @override
+  Future<TrajectoryRoot> root(String sessionId, {String? before}) async {
+    this.before.add(before);
+    return foldTrajectoryPages(<Object?>[
+      <String, dynamic>{
+        'earlierCursor': 'root-before-1',
+        'events': <Map<String, dynamic>>[
+          <String, dynamic>{
+            'sessionId': 'session-1',
+            'seq': '40',
+            'type': 'compaction_completed',
+            'ts': '2026-10-24T12:10:00.000Z',
+            'payload': <String, dynamic>{
+              'type': 'compaction_completed',
+              'actorKind': 'main',
+              'sessionId': 'session-1',
+              'runId': 'root-1',
+              'compactionId': 'compaction-main-1',
+              'checkpointId': 'checkpoint-main-1',
+              'ts': '2026-10-24T12:10:00.000Z',
+              'model': 'fixture-medium',
+              'contextLimit': 32000,
+              'beforeTokens': 25600,
+              'afterTokens': 6000,
+              'usageSource': 'deterministic_fallback',
+              'continuation': 'continuing_existing_task',
+            },
+          },
+        ],
+      },
+    ]);
+  }
+}
+
 void main() {
   testWidgets(
     'live canonical route loads rich data and fetches raw only on action',
@@ -263,6 +308,7 @@ void main() {
       expect(find.text('Open transcript'), findsOneWidget);
       expect(find.text('Log unavailable'), findsOneWidget);
       expect(find.text('Compaction'), findsOneWidget);
+      expect(find.text('Compacted at'), findsOneWidget);
       expect(find.text('compaction-worker-1'), findsOneWidget);
       expect(find.text('102400'), findsOneWidget);
       expect(find.text('24000'), findsOneWidget);
@@ -349,6 +395,80 @@ void main() {
       await tester.pump();
       await tester.pump();
       expect(after, <String?>[null, 'raw-next']);
+    },
+  );
+
+  testWidgets('canonical main diagnostics retain timestamp without thoughts', (
+    tester,
+  ) async {
+    final root = foldTrajectoryPages(<Object?>[
+      _root(),
+      <String, dynamic>{
+        'events': <Map<String, dynamic>>[
+          <String, dynamic>{
+            'sessionId': 'session-1',
+            'seq': '40',
+            'type': 'compaction_completed',
+            'ts': '2026-10-24T12:10:00.000Z',
+            'payload': <String, dynamic>{
+              'type': 'compaction_completed',
+              'actorKind': 'main',
+              'sessionId': 'session-1',
+              'runId': 'root-1',
+              'compactionId': 'compaction-main-1',
+              'checkpointId': 'checkpoint-main-1',
+              'ts': '2026-10-24T12:10:00.000Z',
+              'model': 'fixture-medium',
+              'contextLimit': 32000,
+              'beforeTokens': 25600,
+              'afterTokens': 6000,
+              'usageSource': 'deterministic_fallback',
+              'continuation': 'continuing_existing_task',
+              'thoughts': 'never project',
+            },
+          },
+        ],
+      },
+    ]);
+    await pumpAt(
+      tester,
+      RunTrajectoryPage(
+        data: V2RunTrajectoryPageData(
+          title: 'Canonical run',
+          runLabel: '',
+          trajectory: root,
+        ),
+      ),
+      size: const Size(900, 1200),
+    );
+
+    expect(find.text('Compaction diagnostics'), findsOneWidget);
+    expect(find.text('compaction-main-1'), findsOneWidget);
+    expect(find.textContaining('2026-10-24T12:10'), findsWidgets);
+    expect(find.text('never project'), findsNothing);
+  });
+
+  testWidgets(
+    'diagnostics-only host offers Load earlier instead of empty state',
+    (tester) async {
+      final api = _DiagnosticsOnlyApi();
+      await pumpAt(
+        tester,
+        CanonicalTrajectoryPage(
+          api: api,
+          sessionId: 'session-1',
+          title: 'Diagnostics only',
+        ),
+        size: const Size(900, 1200),
+      );
+
+      expect(find.text('No trajectory events yet'), findsNothing);
+      expect(find.text('Compaction diagnostics'), findsOneWidget);
+      expect(find.text('Load earlier events'), findsOneWidget);
+      await tester.tap(find.text('Load earlier events'));
+      await tester.pump();
+      await tester.pump();
+      expect(api.before, <String?>[null, 'root-before-1']);
     },
   );
 
@@ -485,6 +605,79 @@ void main() {
         find.byKey(const ValueKey<String>('trajectory-raw-content')),
       );
       expect(raw.data!.contains('compaction-main-1'), isTrue);
+    },
+  );
+
+  testWidgets(
+    'final raw page hides continuation and keeps earlier truncation',
+    (tester) async {
+      var calls = 0;
+      Map<String, dynamic> chunk(int offset, String data, int? nextOffset) =>
+          <String, dynamic>{
+            'item': <String, dynamic>{
+              'stableId': 'same-entry',
+              'kind': 'message',
+              'sessionId': 'session-1',
+              'rootTaskRunId': 'root-1',
+              'logicalWorkerId': null,
+              'attemptId': null,
+              'eventCursor': 'cursor-1',
+              'inlinePayload': <String, dynamic>{'safe': true},
+              'byteLength': 20,
+            },
+            'offset': offset,
+            'data': data,
+            'nextOffset': nextOffset,
+          };
+      await pumpAt(
+        tester,
+        RunTrajectoryPage(
+          data: V2RunTrajectoryPageData(
+            title: 'Raw chunks',
+            runLabel: '',
+            trajectory: _root(),
+          ),
+          onShowRaw: (after) async {
+            calls += 1;
+            return RawTrajectoryPage.fromJson(<String, dynamic>{
+              'chunks': <Map<String, dynamic>>[
+                if (calls == 1)
+                  chunk(0, 'chunk-0', 120)
+                else
+                  chunk(120, 'chunk-1', null),
+              ],
+              'nextCursor': calls == 1 ? 'next' : null,
+              'truncated': calls == 1,
+            });
+          },
+        ),
+        size: const Size(900, 1200),
+      );
+
+      await tester.tap(find.text('Show raw'));
+      await tester.pump();
+      await tester.pump();
+      expect(
+        find.text(
+          'Raw history continues on the next page; nothing is clipped.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Truncated by server'), findsOneWidget);
+
+      await tester.ensureVisible(find.text('Load more raw'));
+      await tester.tap(find.text('Load more raw'));
+      await tester.pump();
+      await tester.pump();
+      expect(
+        find.text(
+          'Raw history continues on the next page; nothing is clipped.',
+        ),
+        findsNothing,
+      );
+      expect(find.text('Load more raw'), findsNothing);
+      expect(find.text('Truncated by server'), findsOneWidget);
+      expect(calls, 2);
     },
   );
 

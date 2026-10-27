@@ -339,6 +339,9 @@ jobs:
       - name: Test release inventory gates
         run: python3 -m unittest discover -s tool -p '*_test.py'
 
+      - name: Test embedded static rich-content policy
+        run: node android/app/src/test/js/static_rich_content_policy_test.js
+
       - name: Resolve dependencies
         run: flutter pub get --enforce-lockfile
 

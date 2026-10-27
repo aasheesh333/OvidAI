@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import 'cloud_rest.dart';
+import 'models.dart';
 import 'trajectory_projection.dart';
 
 @immutable
@@ -27,12 +28,43 @@ class TrajectoryApi {
   static const int rootPageSize = 200;
   static const int rawPageSize = 50;
 
+  /// Canonical worker roster when the gateway supports it. An older gateway
+  /// answers 404 and still has the durable event mirror, so that is a
+  /// capability fallback rather than a trajectory failure.
+  Future<Map<String, dynamic>?> _allWorkers(String sessionId) async {
+    final id = Uri.encodeComponent(sessionId);
+    final items = <Map<String, dynamic>>[];
+    final seen = <String>{};
+    SubagentCounts? counts;
+    String? after;
+    try {
+      do {
+        final json = await _rest.getJson(
+          '/sessions/$id/subagents',
+          query: <String, String>{'limit': '$rootPageSize', 'after': ?after},
+        );
+        final page = SubagentSessionProjection.fromJson(json);
+        counts ??= page.counts;
+        items.addAll(page.items);
+        after = page.nextCursor;
+        if (after != null && !seen.add(after)) {
+          throw StateError('Subagent pagination did not advance.');
+        }
+      } while (after != null);
+    } on CloudApiException catch (error) {
+      if (error.status == 404) return null;
+      rethrow;
+    }
+    return <String, dynamic>{
+      'counts': counts.toJson(),
+      'items': items,
+      'nextCursor': null,
+    };
+  }
+
   Future<TrajectoryRoot> root(String sessionId, {String? before}) async {
     final id = Uri.encodeComponent(sessionId);
-    final summary = await _rest.getJson(
-      '/sessions/$id/subagents',
-      query: <String, String>{'limit': '$rootPageSize'},
-    );
+    final summary = await _allWorkers(sessionId);
     final events = await _rest.getJson(
       '/sessions/$id/events',
       query: <String, String>{
@@ -53,7 +85,7 @@ class TrajectoryApi {
       }
     }
     return foldTrajectoryPages(<Object?>[
-      summary,
+      ?summary,
       <String, dynamic>{'events': decoded, 'earlierCursor': earlierCursor},
     ]);
   }
@@ -88,13 +120,30 @@ class TrajectoryApi {
   ];
 
   /// Raw history is fetched only when the caller explicitly invokes this
-  /// method. There is no local raw-event substitute and no mutation method.
+  /// method. The committed gateway exposes its durable event mirror at
+  /// `/events`; there is no local substitute and no mutation method.
   Future<RawTrajectoryPage> showRaw(String sessionId, {String? after}) async {
     final json = await _rest.getJson(
-      '/sessions/${Uri.encodeComponent(sessionId)}/history/raw',
+      '/sessions/${Uri.encodeComponent(sessionId)}/events',
       query: <String, String>{'limit': '$rawPageSize', 'after': ?after},
     );
-    return RawTrajectoryPage.fromJson(json);
+    final events = _events(json);
+    final last = events.isEmpty ? null : events.last['seq'];
+    final repeatedBound =
+        after != null && events.any((event) => '${event['seq']}' == after);
+    return RawTrajectoryPage.fromJson(<String, dynamic>{
+      'items': <Map<String, dynamic>>[
+        for (final event in events)
+          <String, dynamic>{'id': '${event['seq'] ?? ''}', 'value': event},
+      ],
+      'nextCursor':
+          events.length >= rawPageSize &&
+              last != null &&
+              '$last' != after &&
+              !repeatedBound
+          ? '$last'
+          : null,
+    });
   }
 }
 
@@ -145,6 +194,9 @@ class TrajectoryController extends ChangeNotifier {
     if (!value) {
       _timer?.cancel();
       _timer = null;
+      // Fence an in-flight expansion: no late hidden result may mutate root.
+      _expansionGeneration += 1;
+      _expanding = null;
       return;
     }
     if (changed) unawaited(refresh());
@@ -163,7 +215,7 @@ class TrajectoryController extends ChangeNotifier {
     _notify();
     try {
       final page = await api.root(sessionId);
-      if (_disposed) return;
+      if (_disposed || !_visible) return;
       final previousEarlierCursor = _root.earlierCursor;
       final merged = foldTrajectoryPages(<Object?>[_root, page]);
       _root = _withEarlierCursor(
@@ -209,7 +261,9 @@ class TrajectoryController extends ChangeNotifier {
         _disposed ||
         before == null ||
         loadingEarlier ||
-        _root.mainSteps.isEmpty && _root.workers.isEmpty) {
+        _root.mainSteps.isEmpty &&
+            _root.workers.isEmpty &&
+            _root.diagnostics.isEmpty) {
       return;
     }
     if (_attemptedEarlierBounds.contains(before)) {
@@ -222,7 +276,7 @@ class TrajectoryController extends ChangeNotifier {
     _notify();
     try {
       final page = await api.root(sessionId, before: before);
-      if (!_disposed) {
+      if (!_disposed && _visible) {
         _attemptedEarlierBounds.add(before);
         final merged = foldTrajectoryPages(<Object?>[_root, page]);
         _root = _withEarlierCursor(
@@ -247,19 +301,26 @@ class TrajectoryController extends ChangeNotifier {
     return cursor;
   }
 
-  TrajectoryRoot _withEarlierCursor(TrajectoryRoot root, String? cursor) =>
-      TrajectoryRoot(
-        counts: root.counts,
-        mainSteps: root.mainSteps,
-        workers: root.workers,
-        diagnostics: root.diagnostics,
-        nextCursor: root.nextCursor,
-        earlierCursor: cursor,
-      );
+  TrajectoryRoot _withEarlierCursor(TrajectoryRoot root, String? cursor) {
+    final diagnostics = <String, CompactionMetadataDto>{};
+    for (final diagnostic in root.diagnostics) {
+      diagnostics['${diagnostic.sessionId}:${diagnostic.compactionId}'] =
+          diagnostic;
+    }
+    return TrajectoryRoot(
+      counts: root.counts,
+      mainSteps: root.mainSteps,
+      workers: root.workers,
+      diagnostics: diagnostics.values.toList(growable: false),
+      nextCursor: root.nextCursor,
+      earlierCursor: cursor,
+      canonicalRoster: root.canonicalRoster,
+    );
+  }
 
   Future<void> expandWorker(TrajectoryWorker worker) {
     final childSessionId = worker.childSessionId;
-    if (childSessionId == null || worker.isDeferred || _disposed) {
+    if (childSessionId == null || worker.isDeferred || !_visible || _disposed) {
       return Future<void>.value();
     }
     final key = worker.logicalWorkerId ?? worker.childRunId ?? childSessionId;
@@ -275,32 +336,38 @@ class TrajectoryController extends ChangeNotifier {
 
   Future<void> _loadExpanded() async {
     final key = _expandedKey;
-    if (key == null || _disposed) return;
+    if (key == null || !_visible || _disposed) return;
     final generation = _expansionGeneration;
     final worker = _workerForKey(key);
     final childSessionId = worker?.childSessionId;
     if (worker == null || childSessionId == null || worker.isDeferred) return;
     try {
-      final page = await api.workerEvents(
+      final childFuture = api.workerEvents(
         childSessionId,
         after: worker.lastCursor,
       );
-      if (_disposed ||
+      final parentFuture = api.root(sessionId);
+      final page = await childFuture;
+      final parent = await parentFuture;
+      if (!_visible ||
+          _disposed ||
           generation != _expansionGeneration ||
           _expandedKey != key) {
         return;
       }
-      _root = foldTrajectoryPages(<Object?>[
+      final merged = foldTrajectoryPages(<Object?>[
         _root,
+        parent,
         <String, dynamic>{
           'events': page.events,
           'childSessionId': childSessionId,
           'nextCursor': page.nextCursor,
         },
       ]);
+      _root = _withEarlierCursor(merged, _root.earlierCursor);
       _notify();
     } catch (_) {
-      if (!_disposed && generation == _expansionGeneration) {
+      if (_visible && !_disposed && generation == _expansionGeneration) {
         error = 'We could not load this worker activity.';
         _notify();
       }

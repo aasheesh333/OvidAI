@@ -1,22 +1,29 @@
 import 'dart:async';
 
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-
 import 'package:ovid_ai/core/voice_cache_store.dart';
 import 'package:ovid_ai/core/voice_capability.dart';
 import 'package:ovid_ai/core/voice_playback_controller.dart';
 import 'package:ovid_ai/core/voice_reply_service.dart';
+import 'package:ovid_ai/ui/design/o_theme.dart';
+import 'package:ovid_ai/ui/v2/chat/live_chat_page.dart';
 
-class _FakeEngine implements VoicePlaybackEngine {
+class _FakePlaybackEngine implements VoicePlaybackEngine {
   final _events = StreamController<VoiceUtteranceEvent>.broadcast();
-  final calls = <String>[];
-  String? lastStopped;
-  String? activeUtteranceId;
+  final starts = <({String id, String text, String? locale, int offset})>[];
+  final pauses = <String>[];
+  final resumes = <String>[];
+  var stops = 0;
+  var accept = true;
+  var acceptedLocale = 'en-IN';
+  var startBeforeResumeReturns = false;
+  var delayStops = false;
+  final pendingStops = <Completer<void>>[];
 
   @override
   Stream<VoiceUtteranceEvent> get utteranceEvents => _events.stream;
-
-  void emit(VoiceUtteranceEvent event) => _events.add(event);
 
   @override
   Future<VoiceUtteranceAcceptance?> startUtterance({
@@ -25,196 +32,346 @@ class _FakeEngine implements VoicePlaybackEngine {
     String? localeId,
     int offset = 0,
   }) async {
-    calls.add('start:$utteranceId:$text:$localeId:$offset');
-    activeUtteranceId = utteranceId;
-    return VoiceUtteranceAcceptance(utteranceId: utteranceId, localeId: localeId ?? 'en-IN');
+    starts.add((id: utteranceId, text: text, locale: localeId, offset: offset));
+    if (!accept) return null;
+    return VoiceUtteranceAcceptance(
+      utteranceId: utteranceId,
+      localeId: acceptedLocale,
+    );
   }
 
   @override
   Future<bool> pauseUtterance(String utteranceId) async {
-    calls.add('pause:$utteranceId');
+    pauses.add(utteranceId);
     return true;
   }
 
   @override
   Future<bool> resumeUtterance(String utteranceId) async {
-    calls.add('resume:$utteranceId');
+    resumes.add(utteranceId);
+    if (startBeforeResumeReturns) {
+      _events.add(VoiceUtteranceEvent.start(utteranceId));
+      await Future<void>.delayed(Duration.zero);
+    }
     return true;
   }
 
   @override
   Future<void> stop() async {
-    lastStopped = activeUtteranceId;
-    calls.add('stop');
+    stops++;
+    if (delayStops) {
+      final pending = Completer<void>();
+      pendingStops.add(pending);
+      await pending.future;
+    }
   }
 
-  void dispose() => _events.close();
+  Future<void> emit(VoiceUtteranceEvent event) async {
+    _events.add(event);
+    await Future<void>.delayed(Duration.zero);
+  }
+
+  Future<void> close() => _events.close();
 }
 
-class _NoopCache implements VoiceCacheStore {
+class _FakeVoiceCache extends VoiceCacheStore {
   final positions = <String, int>{};
-
-  @override
-  Future<void> clear() async {}
+  final removals = <String>[];
 
   @override
   Future<int?> positionFor(String messageId) async => positions[messageId];
 
   @override
-  Future<void> removePosition(String messageId) async => positions.remove(messageId);
+  Future<void> savePosition({
+    required String messageId,
+    required int character,
+  }) async {
+    positions[messageId] = character;
+  }
 
   @override
-  Future<void> savePosition({required String messageId, required int character}) async {
-    positions[messageId] = character;
+  Future<void> removePosition(String messageId) async {
+    removals.add(messageId);
+    positions.remove(messageId);
   }
 }
 
-Future<void> _pump() => Future<void>.delayed(Duration.zero);
-
 void main() {
-  test('play drives the engine and transitions through starting to playing', () async {
-    final engine = _FakeEngine();
-    final controller = VoicePlaybackController(engine: engine, releaseEnabled: true);
-    final states = <VoicePlaybackState>[];
-    controller.addListener(() => states.add(controller.state));
+  TestWidgetsFlutterBinding.ensureInitialized();
 
-    await controller.play(messageId: 'm1', text: 'Hello world', localeId: 'en-IN');
+  late _FakePlaybackEngine engine;
+  late VoicePlaybackController controller;
+
+  setUp(() {
+    engine = _FakePlaybackEngine();
+    controller = VoicePlaybackController(engine: engine, releaseEnabled: true);
+  });
+
+  tearDown(() async {
+    controller.dispose();
+    await engine.close();
+  });
+
+  test('play waits for activation and speaks the exact final answer', () async {
+    const answer =
+        '  **Exact answer.**\nKeep [links](https://x.invalid) and code.  ';
+
+    expect(engine.starts, isEmpty);
+    expect(controller.state.phase, VoicePlaybackPhase.idle);
+
+    await controller.play(
+      messageId: 'assistant-1',
+      text: answer,
+      localeId: 'en-IN',
+    );
+
+    expect(engine.starts, hasLength(1));
+    expect(engine.starts.single.text, answer);
+    expect(engine.starts.single.locale, 'en-IN');
     expect(controller.state.phase, VoicePlaybackPhase.starting);
-
-    engine.emit(const VoiceUtteranceEvent.start('ovid-answer-1'));
-    await _pump();
-    expect(controller.state.phase, VoicePlaybackPhase.playing);
-    expect(controller.state.utteranceId, 'ovid-answer-1');
+    expect(controller.state.text, answer);
     expect(controller.state.acceptedLocaleId, 'en-IN');
+    expect(controller.state.totalCharacters, answer.length);
 
-    engine.dispose();
-    controller.dispose();
-  });
-
-  test('pause while playing stops the engine and persists the offset', () async {
-    final engine = _FakeEngine();
-    final cache = _NoopCache();
-    final controller = VoicePlaybackController(engine: engine, cache: cache, releaseEnabled: true);
-    await controller.play(messageId: 'm1', text: 'Hello world', localeId: 'en-IN');
-    engine.emit(const VoiceUtteranceEvent.start('ovid-answer-1'));
-    await _pump();
-    engine.emit(const VoiceUtteranceEvent.progress('ovid-answer-1', start: 3, end: 5));
-    await _pump();
-    expect(controller.state.spokenCharacters, 3);
-
-    await controller.pause();
-    expect(controller.state.phase, VoicePlaybackPhase.paused);
-    expect(cache.positions['m1'], 3);
-    expect(engine.calls, contains('pause:ovid-answer-1'));
-
-    engine.dispose();
-    controller.dispose();
-  });
-
-  test('resume from paused transitions back to playing on a start callback', () async {
-    final engine = _FakeEngine();
-    final controller = VoicePlaybackController(engine: engine, releaseEnabled: true);
-    await controller.play(messageId: 'm1', text: 'Hello world', localeId: 'en-IN');
-    engine.emit(const VoiceUtteranceEvent.start('ovid-answer-1'));
-    await controller.pause();
-
-    await controller.resume();
-    engine.emit(const VoiceUtteranceEvent.start('ovid-answer-1'));
-    await _pump();
+    final id = engine.starts.single.id;
+    await engine.emit(VoiceUtteranceEvent.start(id));
     expect(controller.state.phase, VoicePlaybackPhase.playing);
-
-    engine.dispose();
-    controller.dispose();
+    expect(controller.state.messageId, 'assistant-1');
   });
 
-  test('pause when not playing is a no-op', () async {
-    final engine = _FakeEngine();
-    final controller = VoicePlaybackController(engine: engine, releaseEnabled: true);
-    await controller.pause();
-    expect(controller.state.phase, VoicePlaybackPhase.idle);
-    expect(engine.calls, isEmpty);
+  test('unsupported locale cannot start actual playback', () async {
+    engine.accept = false;
 
-    engine.dispose();
-    controller.dispose();
-  });
+    await controller.play(
+      messageId: 'assistant-1',
+      text: 'Final answer',
+      localeId: 'ta-IN',
+    );
 
-  test('resume when paused is a no-op', () async {
-    final engine = _FakeEngine();
-    final controller = VoicePlaybackController(engine: engine, releaseEnabled: true);
-    await controller.resume();
-    expect(controller.state.phase, VoicePlaybackPhase.idle);
-    expect(engine.calls, isEmpty);
-
-    engine.dispose();
-    controller.dispose();
-  });
-
-  test('error event transitions to unavailable', () async {
-    final engine = _FakeEngine();
-    final controller = VoicePlaybackController(engine: engine, releaseEnabled: true);
-    await controller.play(messageId: 'm1', text: 'Hello world', localeId: 'en-IN');
-    engine.emit(const VoiceUtteranceEvent.error('ovid-answer-1'));
-    await _pump();
     expect(controller.state.phase, VoicePlaybackPhase.unavailable);
     expect(controller.state.reason, kVoicePlaybackUnavailableMessage);
-
-    engine.dispose();
-    controller.dispose();
+    expect(controller.state.playing, isFalse);
+    expect(controller.state.acceptedLocaleId, isNull);
+    expect(engine.pauses, isEmpty);
+    expect(engine.resumes, isEmpty);
   });
 
-  test('stop while playing cancels the active utterance and clears state', () async {
-    final engine = _FakeEngine();
-    final controller = VoicePlaybackController(engine: engine, releaseEnabled: true);
-    await controller.play(messageId: 'm1', text: 'Hello world', localeId: 'en-IN');
-    engine.emit(const VoiceUtteranceEvent.start('ovid-answer-1'));
-    await _pump();
+  test(
+    'pause and resume retain actual utterance progress and answer text',
+    () async {
+      const answer = '0123456789 exact final answer';
+      await controller.play(messageId: 'a1', text: answer);
+      final id = engine.starts.single.id;
+      await engine.emit(VoiceUtteranceEvent.start(id));
+      await engine.emit(VoiceUtteranceEvent.progress(id, start: 4, end: 9));
+      final playing = controller.state;
+
+      await controller.pause();
+      expect(engine.pauses, <String>[id]);
+      expect(controller.state.phase, VoicePlaybackPhase.paused);
+      expect(controller.state.spokenCharacters, 4);
+      expect(controller.state.text, answer);
+
+      await controller.resume();
+      expect(engine.resumes, <String>[id]);
+      expect(controller.state.phase, VoicePlaybackPhase.starting);
+      await engine.emit(VoiceUtteranceEvent.start(id));
+      await engine.emit(VoiceUtteranceEvent.progress(id, start: 9, end: 15));
+      expect(controller.state.phase, VoicePlaybackPhase.playing);
+      expect(controller.state.spokenCharacters, 9);
+      expect(controller.state.text, answer);
+      expect(
+        playing.spokenCharacters,
+        4,
+        reason: 'old snapshots stay immutable',
+      );
+    },
+  );
+
+  test('late native start cannot undo an explicit pause', () async {
+    await controller.play(messageId: 'a1', text: 'Exact final answer');
+    final id = engine.starts.single.id;
+    await engine.emit(VoiceUtteranceEvent.start(id));
+    await controller.pause();
+
+    await engine.emit(VoiceUtteranceEvent.start(id));
+
+    expect(controller.state.phase, VoicePlaybackPhase.paused);
+  });
+
+  test('resume does not regress an already started native utterance', () async {
+    await controller.play(messageId: 'a1', text: 'Exact final answer');
+    final id = engine.starts.single.id;
+    await engine.emit(VoiceUtteranceEvent.start(id));
+    await controller.pause();
+    engine.startBeforeResumeReturns = true;
+
+    await controller.resume();
+
+    expect(controller.state.phase, VoicePlaybackPhase.playing);
+  });
+
+  test('stop is terminal and ignores late native callbacks', () async {
+    await controller.play(messageId: 'a1', text: 'Final answer');
+    final id = engine.starts.single.id;
+    await engine.emit(VoiceUtteranceEvent.start(id));
+    await engine.emit(VoiceUtteranceEvent.progress(id, start: 3, end: 5));
+
     await controller.stop();
+    expect(engine.stops, greaterThanOrEqualTo(1));
     expect(controller.state.phase, VoicePlaybackPhase.stopped);
-    expect(engine.lastStopped, 'ovid-answer-1');
+    final stopped = controller.state;
+    await engine.emit(VoiceUtteranceEvent.progress(id, start: 5, end: 7));
+    await engine.emit(VoiceUtteranceEvent.done(id));
 
-    engine.dispose();
-    controller.dispose();
+    expect(identical(controller.state, stopped), isTrue);
+    expect(controller.state.playing, isFalse);
   });
 
-  test('starting a new utterance stops the previous one', () async {
-    final engine = _FakeEngine();
-    final controller = VoicePlaybackController(engine: engine, releaseEnabled: true);
-    await controller.play(messageId: 'm1', text: 'First', localeId: 'en-IN');
-    engine.emit(const VoiceUtteranceEvent.start('ovid-answer-1'));
-    await _pump();
-    await controller.play(messageId: 'm2', text: 'Second', localeId: 'hi-IN');
-    expect(engine.lastStopped, 'ovid-answer-1');
-    expect(controller.state.utteranceId, 'ovid-answer-2');
+  test(
+    'delayed old stop cannot stop a newer play or clear its cache',
+    () async {
+      controller.dispose();
+      final cache = _FakeVoiceCache();
+      controller = VoicePlaybackController(
+        engine: engine,
+        cache: cache,
+        releaseEnabled: true,
+      );
+      await controller.play(messageId: 'old', text: 'Old answer');
+      final oldId = engine.starts.single.id;
+      await engine.emit(VoiceUtteranceEvent.start(oldId));
+      engine.delayStops = true;
 
-    engine.dispose();
-    controller.dispose();
-  });
+      final oldStop = controller.stop();
+      await Future<void>.delayed(Duration.zero);
+      final newPlay = controller.play(messageId: 'new', text: 'New answer');
+      await Future<void>.delayed(Duration.zero);
+      engine.pendingStops.single.complete();
+      await Future.wait(<Future<void>>[oldStop, newPlay]);
 
-  test('completed utterance removes cached position', () async {
-    final engine = _FakeEngine();
-    final cache = _NoopCache();
-    cache.positions['m1'] = 5;
-    final controller = VoicePlaybackController(engine: engine, cache: cache, releaseEnabled: true);
-    await controller.play(messageId: 'm1', text: 'Hello world', localeId: 'en-IN');
-    engine.emit(const VoiceUtteranceEvent.start('ovid-answer-1'));
-    engine.emit(const VoiceUtteranceEvent.done('ovid-answer-1'));
-    await _pump();
-    expect(controller.state.phase, VoicePlaybackPhase.completed);
-    expect(cache.positions.containsKey('m1'), isFalse);
+      expect(controller.state.messageId, 'new');
+      expect(controller.state.phase, VoicePlaybackPhase.starting);
+      expect(controller.state.text, 'New answer');
+      expect(engine.starts.last.text, 'New answer');
+      expect(cache.removals, isNot(contains('new')));
+    },
+  );
 
-    engine.dispose();
-    controller.dispose();
-  });
+  test(
+    'older delayed play completion cannot replace the newest play',
+    () async {
+      await controller.play(messageId: 'a', text: 'Answer A');
+      engine.delayStops = true;
 
-  test('release disabled reports unavailable without touching the engine', () async {
-    final engine = _FakeEngine();
-    final controller = VoicePlaybackController(engine: engine, releaseEnabled: false);
-    await controller.play(messageId: 'm1', text: 'Hello world', localeId: 'en-IN');
-    expect(controller.state.phase, VoicePlaybackPhase.unavailable);
-    expect(controller.state.reason, kOvidVoiceUnavailableMessage);
-    expect(engine.calls, isEmpty);
+      final playB = controller.play(messageId: 'b', text: 'Answer B');
+      final playC = controller.play(messageId: 'c', text: 'Answer C');
+      await Future<void>.delayed(Duration.zero);
+      expect(engine.pendingStops, hasLength(2));
 
-    engine.dispose();
-    controller.dispose();
+      engine.pendingStops[1].complete();
+      await Future<void>.delayed(Duration.zero);
+      engine.pendingStops[0].complete();
+      await Future.wait(<Future<void>>[playB, playC]);
+
+      expect(controller.state.messageId, 'c');
+      expect(controller.state.text, 'Answer C');
+      expect(engine.starts.map((start) => start.text), <String>[
+        'Answer A',
+        'Answer C',
+      ]);
+    },
+  );
+
+  test(
+    'release gate refuses play without touching the native engine',
+    () async {
+      final gated = VoicePlaybackController(engine: engine);
+      addTearDown(gated.dispose);
+
+      await gated.play(messageId: 'a1', text: 'Final answer');
+
+      expect(engine.starts, isEmpty);
+      expect(gated.state.phase, VoicePlaybackPhase.unavailable);
+      expect(gated.state.reason, kOvidVoiceUnavailableMessage);
+    },
+  );
+
+  test(
+    'native adapter reports accepted locale and utterance progress',
+    () async {
+      const channel = MethodChannel('ovid/native');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'ttsSpeak') {
+          expect((call.arguments as Map)['text'], '  Exact final answer  ');
+          expect((call.arguments as Map)['locale'], 'hi-IN');
+          return <String, Object?>{
+            'accepted': true,
+            'utteranceId': 'native-1',
+            'locale': 'hi-IN',
+          };
+        }
+        return null;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      final events = StreamController<Map<String, Object?>>.broadcast();
+      addTearDown(events.close);
+      final service = VoiceReplyService(
+        channel: channel,
+        nativeEvents: events.stream,
+        releaseEnabled: true,
+      );
+
+      final acceptance = await service.startUtterance(
+        utteranceId: 'native-1',
+        text: '  Exact final answer  ',
+        localeId: 'hi-IN',
+      );
+      expect(acceptance?.localeId, 'hi-IN');
+
+      final future = service.utteranceEvents.first;
+      events.add(<String, Object?>{
+        'source': 'tts',
+        'type': 'progress',
+        'utteranceId': 'native-1',
+        'start': 7,
+        'end': 12,
+      });
+      final progress = await future;
+      expect(progress.type, VoiceUtteranceEventType.progress);
+      expect(progress.start, 7);
+      expect(progress.end, 12);
+    },
+  );
+
+  testWidgets('assistant audio starts only from the play control', (
+    tester,
+  ) async {
+    const answer = '**Exact final assistant text**, not a generated summary.';
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: OTheme.light(),
+        home: V2LiveChatPage(
+          data: const V2LiveChatData(
+            items: <V2LiveChatItem>[
+              V2LiveAssistantMessage(id: 'a1', markdown: answer),
+            ],
+          ),
+          onVoicePlay: (id) =>
+              controller.play(messageId: id, text: answer, localeId: 'en-IN'),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(engine.starts, isEmpty);
+
+    await tester.tap(find.bySemanticsLabel('Play answer'));
+    await tester.pump();
+
+    expect(engine.starts, hasLength(1));
+    expect(engine.starts.single.id, isNotEmpty);
+    expect(engine.starts.single.text, answer);
   });
 }

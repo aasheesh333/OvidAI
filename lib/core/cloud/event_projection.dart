@@ -28,7 +28,7 @@
 /// | `plan_mode_changed{planMode}` | [TranscriptProjection.planMode] |
 /// | `subagent_started{childSessionId,childRunId,agentType,prompt}` | links the running `dispatch_agent` row to its child session (the live activity card) |
 /// | `subagent_completed{childRunId,status}` | that card's final state |
-/// | `compaction_completed{folded,retained}` | a `MsgKind.compact` row |
+/// | `compaction_completed{folded,retained}` | legacy minimal event: a `MsgKind.compact` row; rich actor diagnostics: no ordinary-chat row |
 /// | `workspace_hibernated` / `workspace_hydrated` | the "Waking your workspace…" phase of the next run |
 /// | `system_note{code,message?}` | a turn-tail row with plain-language copy for known codes; a note with nothing to say renders NOTHING (CH-018) |
 /// | `approval_requested` / `approval_resolved` | [TranscriptProjection.pendingApproval] |
@@ -487,8 +487,9 @@ class TranscriptProjection extends ChangeNotifier {
     final noise = live.content;
     if (noise.isNotEmpty) {
       final startedAt = _runStartedAt;
-      int? elapsedMs =
-          startedAt == null ? null : now.difference(startedAt).inMilliseconds;
+      int? elapsedMs = startedAt == null
+          ? null
+          : now.difference(startedAt).inMilliseconds;
       if (elapsedMs != null && elapsedMs < 0) elapsedMs = 0;
       final thought = Message(
         role: 'assistant',
@@ -524,7 +525,7 @@ class TranscriptProjection extends ChangeNotifier {
 class EventTranscriptProjector {
   /// [clock] is injectable so tests can pin `elapsedMs` deterministically.
   EventTranscriptProjector(this.target, {DateTime Function()? clock})
-      : _clock = clock ?? _systemClock;
+    : _clock = clock ?? _systemClock;
 
   final TranscriptProjection target;
   final DateTime Function() _clock;
@@ -595,7 +596,8 @@ class EventTranscriptProjector {
     var ri = 0;
     var ei = 0;
     while (ri < rows.length || ei < events.length) {
-      final takeRow = ei >= events.length ||
+      final takeRow =
+          ei >= events.length ||
           (ri < rows.length && !rows[ri].time.isAfter(events[ei].ts));
       if (takeRow) {
         final row = rows[ri++];
@@ -675,7 +677,14 @@ class EventTranscriptProjector {
       case 'subagent_completed':
         _onSubagentCompleted(p);
       case 'compaction_completed':
-        _onCompactionCompleted(p, event.seq);
+        // Rich main/worker operational diagnostics never become ordinary chat
+        // rows. The legacy minimal row remains for old installed projections;
+        // rich metadata is visible only in Trajectory diagnostics/Show raw.
+        if (_str(p, 'actorKind') == null &&
+            p['compactionId'] == null &&
+            p['checkpointId'] == null) {
+          _onCompactionCompleted(p, event.seq);
+        }
       case 'workspace_hibernated':
         target._workspaceAsleep = true;
       case 'workspace_hydrated':
@@ -700,13 +709,15 @@ class EventTranscriptProjector {
     target._setStatusLine(null);
     target._runStartedAt = now;
     if (target._workspaceAsleep) target._setWaking(true);
-    target._appendLiveBubble(Message(
-      role: 'assistant',
-      kind: MsgKind.streaming,
-      thinking: true,
-      content: '',
-      time: now,
-    ));
+    target._appendLiveBubble(
+      Message(
+        role: 'assistant',
+        kind: MsgKind.streaming,
+        thinking: true,
+        content: '',
+        time: now,
+      ),
+    );
   }
 
   void _onRunStarted(Map<String, dynamic> payload) {
@@ -797,8 +808,9 @@ class EventTranscriptProjector {
       if (active) {
         target._replaceExistingMessage(messageId, finalized);
       } else {
-        final idx =
-            target.messages.indexWhere((m) => m.privateSyncId == messageId);
+        final idx = target.messages.indexWhere(
+          (m) => m.privateSyncId == messageId,
+        );
         if (target.messages[idx].content != finalized.content) {
           target.messages[idx] = finalized;
           target._changed = true;
@@ -816,15 +828,18 @@ class EventTranscriptProjector {
     final attempt = _int(payload, 'attempt');
     final nextBackoffMs = _int(payload, 'nextBackoffMs');
     if (attempt == null || nextBackoffMs == null) return;
-    target._resetLiveBubble(Message(
-      role: 'assistant',
-      kind: MsgKind.streaming,
-      thinking: true,
-      content: '',
-      time: _now(),
-    ));
+    target._resetLiveBubble(
+      Message(
+        role: 'assistant',
+        kind: MsgKind.streaming,
+        thinking: true,
+        content: '',
+        time: _now(),
+      ),
+    );
     target._setStatusLine(
-        'Retrying in ${nextBackoffMs ~/ 1000}s… (attempt $attempt)');
+      'Retrying in ${nextBackoffMs ~/ 1000}s… (attempt $attempt)',
+    );
   }
 
   void _terminal({required String toolState}) {
@@ -848,25 +863,27 @@ class EventTranscriptProjector {
     final copy = code == null || code == 'cancelled'
         ? null
         : cloudErrorCopy(code, message: message);
-    target._appendMessage(Message(
-      role: 'assistant',
-      kind: MsgKind.turnTail,
-      // CH-019: plain language from the shared copy table — never a raw
-      // snake_case code or provider exception text. A user stop keeps the
-      // server's own words.
-      content: code == 'cancelled'
-          ? (message ?? humanText(code!))
-          : copy == null
-              ? (message ?? '')
-              : copy.text,
-      // The ONE surface of a run-level failure (CH-019): the row knows its
-      // code (Retry / Pick model) and keeps the raw text behind "Details".
-      toolName: code == 'cancelled' ? 'run_cancelled' : 'run_failed',
-      toolSummary: code,
-      toolDetail: copy?.detail,
-      toolState: code == 'cancelled' ? 'stopped' : 'error',
-      time: _now(),
-    ));
+    target._appendMessage(
+      Message(
+        role: 'assistant',
+        kind: MsgKind.turnTail,
+        // CH-019: plain language from the shared copy table — never a raw
+        // snake_case code or provider exception text. A user stop keeps the
+        // server's own words.
+        content: code == 'cancelled'
+            ? (message ?? humanText(code!))
+            : copy == null
+            ? (message ?? '')
+            : copy.text,
+        // The ONE surface of a run-level failure (CH-019): the row knows its
+        // code (Retry / Pick model) and keeps the raw text behind "Details".
+        toolName: code == 'cancelled' ? 'run_cancelled' : 'run_failed',
+        toolSummary: code,
+        toolDetail: copy?.detail,
+        toolState: code == 'cancelled' ? 'stopped' : 'error',
+        time: _now(),
+      ),
+    );
   }
 
   /// The full processor's terminal for a user-initiated cancel: folds as
@@ -978,8 +995,9 @@ class EventTranscriptProjector {
         : content;
     if ((row.toolSummary ?? '').isEmpty && content.trim().isNotEmpty) {
       final first = content.trim().split('\n').first;
-      row.toolSummary =
-          first.length > 120 ? '${first.substring(0, 119)}…' : first;
+      row.toolSummary = first.length > 120
+          ? '${first.substring(0, 119)}…'
+          : first;
     }
     target._changed = true;
   }
@@ -1144,9 +1162,9 @@ class EventTranscriptProjector {
       kind: MsgKind.compact,
       content: folded > 0
           ? 'Summarized $folded earlier message${folded == 1 ? '' : 's'} to '
-              'keep the conversation within the model\'s memory'
+                'keep the conversation within the model\'s memory'
           : 'Summarized earlier messages to keep the conversation within the '
-              'model\'s memory',
+                'model\'s memory',
       privateSyncId: 'compact:$seq',
       time: _now(),
     );
@@ -1168,8 +1186,7 @@ class EventTranscriptProjector {
       case 'run_merged':
         return 'Your follow-up was added to the running task.';
       case 'command_blocked':
-        return _str(payload, 'message') ??
-            'A command was blocked for safety.';
+        return _str(payload, 'message') ?? 'A command was blocked for safety.';
       case 'hook_block_ignored':
       case 'compaction_summary_failed':
       case 'hook_notification':
@@ -1194,12 +1211,14 @@ class EventTranscriptProjector {
   void _onSystemNote(Map<String, dynamic> payload) {
     final text = systemNoteText(payload);
     if (text == null) return;
-    target._appendMessage(Message(
-      role: 'assistant',
-      kind: MsgKind.turnTail,
-      content: text,
-      time: _now(),
-    ));
+    target._appendMessage(
+      Message(
+        role: 'assistant',
+        kind: MsgKind.turnTail,
+        content: text,
+        time: _now(),
+      ),
+    );
   }
 
   void _onApprovalRequested(Map<String, dynamic> payload) {
@@ -1207,15 +1226,19 @@ class EventTranscriptProjector {
     final tool = _str(payload, 'tool');
     if (approvalId == null || approvalId.isEmpty || tool == null) return;
     final rawExpiresAt = payload['expiresAt'];
-    target._setPendingApproval(CloudApprovalPrompt(
-      approvalId: approvalId,
-      tool: tool,
-      kind: _str(payload, 'kind') ?? 'tool',
-      summary: _str(payload, 'summary') ?? '',
-      detail: _str(payload, 'detail') ?? '',
-      allowAlways: payload['allowAlways'] == true,
-      expiresAt: rawExpiresAt is String ? DateTime.tryParse(rawExpiresAt) : null,
-    ));
+    target._setPendingApproval(
+      CloudApprovalPrompt(
+        approvalId: approvalId,
+        tool: tool,
+        kind: _str(payload, 'kind') ?? 'tool',
+        summary: _str(payload, 'summary') ?? '',
+        detail: _str(payload, 'detail') ?? '',
+        allowAlways: payload['allowAlways'] == true,
+        expiresAt: rawExpiresAt is String
+            ? DateTime.tryParse(rawExpiresAt)
+            : null,
+      ),
+    );
   }
 
   void _onApprovalResolved(Map<String, dynamic> payload) {
@@ -1260,8 +1283,7 @@ class EventTranscriptProjector {
   static (int, int) _seqParts(String seq) {
     final dash = seq.indexOf('-');
     final ms = int.tryParse(dash == -1 ? seq : seq.substring(0, dash)) ?? 0;
-    final idx =
-        int.tryParse(dash == -1 ? '0' : seq.substring(dash + 1)) ?? 0;
+    final idx = int.tryParse(dash == -1 ? '0' : seq.substring(dash + 1)) ?? 0;
     return (ms, idx);
   }
 }

@@ -78,9 +78,9 @@ class _ConversationShareSheetState extends State<ConversationShareSheet> {
       widget.collaboration ?? AppState.I.collaboration;
 
   Future<void> _signIn() async {
-    await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => const AuthScreen()),
-    );
+    await Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => const AuthScreen()));
     if (!mounted) return;
     final factory = widget.serviceFactory;
     setState(() {
@@ -139,30 +139,27 @@ class _ModeChooser extends StatelessWidget {
   @override
   Widget build(BuildContext context) => SingleChildScrollView(
     child: Column(
-    crossAxisAlignment: CrossAxisAlignment.stretch,
-    mainAxisSize: MainAxisSize.min,
-    children: [
-      Text(
-        'Pick how people can use the link.',
-        style: AetherType.bodyMuted,
-      ),
-      const SizedBox(height: 12),
-      _ModeCard(
-        icon: Icons.visibility_outlined,
-        title: 'Read only',
-        body:
-            'Anyone with the link can read this chat. Update the link to share newer messages.',
-        onTap: () => onPick(ShareMode.readOnly),
-      ),
-      const SizedBox(height: 10),
-      _ModeCard(
-        icon: Icons.groups_outlined,
-        title: 'Collab',
-        body:
-            'Up to $maxActiveMembers people (you included) chat live in this session. Messages show each author\'s name, and every person\'s turns use their own model and account.',
-        onTap: () => onPick(ShareMode.collab),
-      ),
-    ],
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text('Pick how people can use the link.', style: AetherType.bodyMuted),
+        const SizedBox(height: 12),
+        _ModeCard(
+          icon: Icons.visibility_outlined,
+          title: 'Read only',
+          body:
+              'Anyone with the link can read this chat. Update the link to share newer messages.',
+          onTap: () => onPick(ShareMode.readOnly),
+        ),
+        const SizedBox(height: 10),
+        _ModeCard(
+          icon: Icons.groups_outlined,
+          title: 'Collab',
+          body:
+              'Up to $maxActiveMembers people (you included) chat live in this session. Messages show each author\'s name, and every person\'s turns use their own model and account.',
+          onTap: () => onPick(ShareMode.collab),
+        ),
+      ],
     ),
   );
 }
@@ -249,9 +246,7 @@ class _CollabPanelState extends State<_CollabPanel> {
   }
 
   Future<void> _start(CollaborationProduction controller) => _run(() async {
-    await controller.startFromConversation(
-      sourceSessionId: widget.session.id,
-    );
+    await controller.startFromConversation(sourceSessionId: widget.session.id);
   });
 
   void _open(CollaborationProduction controller) {
@@ -293,13 +288,18 @@ class _CollabPanelState extends State<_CollabPanel> {
       );
     }
     final current = controller.sessionToken;
-    final mine = current != null &&
+    final mine =
+        current != null &&
         controller.isOwner &&
         controller.sourceSessionId == widget.session.id;
     if (!FirebaseService.I.isSignedIn && widget.controller == null) {
-      children.add(_SignInCard(onSignIn: widget.onSignIn, what: 'start a live session'));
+      children.add(
+        _SignInCard(onSignIn: widget.onSignIn, what: 'start a live session'),
+      );
     } else if (!controller.available) {
-      children.add(Text('Getting your account ready…', style: AetherType.bodyMuted));
+      children.add(
+        Text('Getting your account ready…', style: AetherType.bodyMuted),
+      );
     } else if (mine) {
       final link = controller.shareLink;
       final members = controller.state?.activeMembers.length ?? 1;
@@ -318,8 +318,10 @@ class _CollabPanelState extends State<_CollabPanel> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text('The link was revoked. Members who joined stay in the session.',
-                    style: AetherType.bodyMuted),
+                Text(
+                  'The link was revoked. Members who joined stay in the session.',
+                  style: AetherType.bodyMuted,
+                ),
                 const SizedBox(height: 8),
                 AetherGhostButton(
                   label: 'Create new link',
@@ -363,7 +365,7 @@ class _CollabPanelState extends State<_CollabPanel> {
               ),
               const SizedBox(height: 8),
               Text(
-                'Collab uses this chat\'s existing server history; no local history is uploaded.',
+                'The server shares this chat\'s existing history. Each person chooses a model and is billed to their own account; no provider key is shared with other members.',
                 style: AetherType.caption.copyWith(height: 1.5),
               ),
             ],
@@ -403,7 +405,11 @@ class _SignInCard extends StatelessWidget {
           style: AetherType.bodyMuted,
         ),
         const SizedBox(height: 10),
-        AetherPrimaryButton(label: 'Sign in', icon: Icons.login, onPressed: onSignIn),
+        AetherPrimaryButton(
+          label: 'Sign in',
+          icon: Icons.login,
+          onPressed: onSignIn,
+        ),
       ],
     ),
   );
@@ -429,7 +435,11 @@ class _LinkCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) => AetherCard(
     title: Text(label, style: AetherType.title),
-    trailing: AetherPill(label: pill, color: Aether.success, icon: Icons.group_outlined),
+    trailing: AetherPill(
+      label: pill,
+      color: Aether.success,
+      icon: Icons.group_outlined,
+    ),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -449,16 +459,19 @@ class _LinkCard extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 12),
-        SelectableText(url, style: AetherType.mono.copyWith(color: Aether.text)),
+        SelectableText(
+          url,
+          style: AetherType.mono.copyWith(color: Aether.text),
+        ),
         const SizedBox(height: 12),
         _ShareActions(
           busy: busy,
           onCopy: () async {
             await Clipboard.setData(ClipboardData(text: url));
             if (context.mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Link copied')),
-              );
+              ScaffoldMessenger.of(
+                context,
+              ).showSnackBar(const SnackBar(content: Text('Link copied')));
             }
           },
           onShare: () => showNativeShare(
@@ -594,9 +607,9 @@ class _ReadOnlyPanelState extends State<_ReadOnlyPanel> {
       setState(() {
         _shares = [updated, ..._shares.where((s) => s.id != updated.id)];
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Link updated')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Link updated')));
     });
   }
 
@@ -652,186 +665,179 @@ class _ReadOnlyPanelState extends State<_ReadOnlyPanel> {
     }
 
     return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (_busy)
-            const Padding(
-              padding: EdgeInsets.only(bottom: 12),
-              child: LinearProgressIndicator(minHeight: 2),
-            ),
-          Expanded(
-            child: ListView(
-              padding: EdgeInsets.zero,
-              children: [
-                if (activeShare != null)
-                  _ActiveShareCard(
-                    share: activeShare,
-                    busy: _busy,
-                    onCopy: () => _copy(activeShare),
-                    onShare: () => _share(activeShare),
-                    onUpdate: _snapshot.withinLimits
-                        ? () => _update(activeShare)
-                        : null,
-                    onRevoke: () => _revoke(activeShare),
-                  )
-                else
-                  AetherCard(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Create a read-only link',
-                          style: AetherType.title,
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          'Anyone with the link can read this chat as it is now. Use Update link later to share newer messages.',
-                          style: AetherType.bodyMuted,
-                        ),
-                        const SizedBox(height: 10),
-                        Text(
-                          'Only the messages below are shared. Thinking, tools, internal context, detected credentials, attachments and session metadata are excluded. Review the text for personal information.',
-                          style: AetherType.caption.copyWith(height: 1.5),
-                        ),
-                        if (!available) ...[
-                          const SizedBox(height: 12),
-                          Text(
-                            'Sharing is unavailable: deployment is not configured.',
-                            style: AetherType.body.copyWith(
-                              color: Aether.warn,
-                            ),
-                          ),
-                        ],
-                        if (_loaded && _shares.isEmpty)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 10),
-                            child: Text(
-                              'No active links for this session.',
-                              style: AetherType.bodyMuted,
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                if (_error != null) ...[
-                  const SizedBox(height: 12),
-                  AetherCard(
-                    color: Aether.danger.withValues(alpha: 0.06),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Icon(
-                              Icons.error_outline,
-                              size: 16,
-                              color: Aether.danger,
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                _error!,
-                                style: AetherType.body.copyWith(
-                                  color: Aether.danger,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                        if (!_loaded)
-                          AetherGhostButton(
-                            label: 'Retry',
-                            icon: Icons.refresh,
-                            onPressed: available && !_busy ? _refresh : null,
-                          ),
-                      ],
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 14),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (_busy)
+          const Padding(
+            padding: EdgeInsets.only(bottom: 12),
+            child: LinearProgressIndicator(minHeight: 2),
+          ),
+        Expanded(
+          child: ListView(
+            padding: EdgeInsets.zero,
+            children: [
+              if (activeShare != null)
+                _ActiveShareCard(
+                  share: activeShare,
+                  busy: _busy,
+                  onCopy: () => _copy(activeShare),
+                  onShare: () => _share(activeShare),
+                  onUpdate: _snapshot.withinLimits
+                      ? () => _update(activeShare)
+                      : null,
+                  onRevoke: () => _revoke(activeShare),
+                )
+              else
                 AetherCard(
-                  title: Text(
-                    activeShare == null
-                        ? 'Preview · ${_snapshot.messages.length} messages'
-                        : 'Current chat (not yet shared) · ${_snapshot.messages.length} messages',
-                  ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      for (final message in _snapshot.messages)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 12),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                message.role == 'user' ? 'You' : 'Assistant',
-                                style: AetherType.label,
-                              ),
-                              const SizedBox(height: 4),
-                              Text(message.content, style: AetherType.body),
-                            ],
-                          ),
-                        ),
-                      if (!_snapshot.withinLimits)
+                      Text('Create a read-only link', style: AetherType.title),
+                      const SizedBox(height: 6),
+                      Text(
+                        'Anyone with the link can read this chat as it is now. Use Update link later to share newer messages.',
+                        style: AetherType.bodyMuted,
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        'Only the messages below are shared. Thinking, tools, internal context, detected credentials, attachments and session metadata are excluded. Review the text for personal information.',
+                        style: AetherType.caption.copyWith(height: 1.5),
+                      ),
+                      if (!available) ...[
+                        const SizedBox(height: 12),
                         Text(
-                          'No shareable text, or snapshot exceeds the 500-message / 200 KB / 20,000-character-per-message limit.',
-                          style: AetherType.caption.copyWith(
-                            color: Aether.warn,
+                          'Sharing is unavailable: deployment is not configured.',
+                          style: AetherType.body.copyWith(color: Aether.warn),
+                        ),
+                      ],
+                      if (_loaded && _shares.isEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 10),
+                          child: Text(
+                            'No active links for this session.',
+                            style: AetherType.bodyMuted,
                           ),
                         ),
                     ],
                   ),
                 ),
-                const SizedBox(height: 14),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
+              if (_error != null) ...[
+                const SizedBox(height: 12),
+                AetherCard(
+                  color: Aether.danger.withValues(alpha: 0.06),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            Icons.error_outline,
+                            size: 16,
+                            color: Aether.danger,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              _error!,
+                              style: AetherType.body.copyWith(
+                                color: Aether.danger,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (!_loaded)
+                        AetherGhostButton(
+                          label: 'Retry',
+                          icon: Icons.refresh,
+                          onPressed: available && !_busy ? _refresh : null,
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+              const SizedBox(height: 14),
+              AetherCard(
+                title: Text(
+                  activeShare == null
+                      ? 'Preview · ${_snapshot.messages.length} messages'
+                      : 'Current chat (not yet shared) · ${_snapshot.messages.length} messages',
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Existing links', style: AetherType.label),
-                    AetherGhostButton(
-                      label: 'Refresh',
-                      icon: Icons.refresh,
-                      onPressed: available && !_busy ? _refresh : null,
-                    ),
+                    for (final message in _snapshot.messages)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              message.role == 'user' ? 'You' : 'Assistant',
+                              style: AetherType.label,
+                            ),
+                            const SizedBox(height: 4),
+                            Text(message.content, style: AetherType.body),
+                          ],
+                        ),
+                      ),
+                    if (!_snapshot.withinLimits)
+                      Text(
+                        'No shareable text, or snapshot exceeds the 500-message / 200 KB / 20,000-character-per-message limit.',
+                        style: AetherType.caption.copyWith(color: Aether.warn),
+                      ),
                   ],
                 ),
-                if (_loaded && _shares.isEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 8),
-                    child: Text(
-                      'No active links for this session.',
-                      style: AetherType.bodyMuted,
-                    ),
+              ),
+              const SizedBox(height: 14),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text('Existing links', style: AetherType.label),
+                  AetherGhostButton(
+                    label: 'Refresh',
+                    icon: Icons.refresh,
+                    onPressed: available && !_busy ? _refresh : null,
                   ),
-                for (final share in _shares.skip(activeShare == null ? 0 : 1))
-                  Padding(
-                    padding: const EdgeInsets.only(top: 10),
-                    child: _ShareLinkRow(
-                      share: share,
-                      busy: _busy,
-                      onCopy: () => _copy(share),
-                      onRevoke: () => _revoke(share),
-                    ),
+                ],
+              ),
+              if (_loaded && _shares.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(
+                    'No active links for this session.',
+                    style: AetherType.bodyMuted,
                   ),
-              ],
-            ),
+                ),
+              for (final share in _shares.skip(activeShare == null ? 0 : 1))
+                Padding(
+                  padding: const EdgeInsets.only(top: 10),
+                  child: _ShareLinkRow(
+                    share: share,
+                    busy: _busy,
+                    onCopy: () => _copy(share),
+                    onRevoke: () => _revoke(share),
+                  ),
+                ),
+            ],
           ),
-          const SizedBox(height: 12),
-          AetherPrimaryButton(
-            label: 'Create link',
-            icon: Icons.link,
-            onPressed:
-                available &&
-                    _loaded &&
-                    !_busy &&
-                    _snapshot.withinLimits &&
-                    _shares.isEmpty
-                ? _create
-                : null,
-          ),
-        ],
+        ),
+        const SizedBox(height: 12),
+        AetherPrimaryButton(
+          label: 'Create link',
+          icon: Icons.link,
+          onPressed:
+              available &&
+                  _loaded &&
+                  !_busy &&
+                  _snapshot.withinLimits &&
+                  _shares.isEmpty
+              ? _create
+              : null,
+        ),
+      ],
     );
   }
 }
@@ -937,18 +943,11 @@ class _ShareLinkRow extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SelectableText(
-            share.url.toString(),
-            style: AetherType.body,
-          ),
+          SelectableText(share.url.toString(), style: AetherType.body),
           const SizedBox(height: 6),
           Text('Expires $expires', style: AetherType.caption),
           const SizedBox(height: 10),
-          _ShareActions(
-            busy: busy,
-            onCopy: onCopy,
-            onRevoke: onRevoke,
-          ),
+          _ShareActions(busy: busy, onCopy: onCopy, onRevoke: onRevoke),
         ],
       ),
     );
@@ -992,7 +991,10 @@ class _ShareActions extends StatelessWidget {
       ];
       // Each label needs its scaled text, icon, gap and button padding.
       final actionWidth =
-          180 * buttons.length * MediaQuery.textScalerOf(context).scale(14) / 14;
+          180 *
+          buttons.length *
+          MediaQuery.textScalerOf(context).scale(14) /
+          14;
       if (constraints.maxWidth < actionWidth) {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,

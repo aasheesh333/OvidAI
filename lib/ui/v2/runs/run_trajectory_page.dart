@@ -548,10 +548,70 @@ class _RunTrajectoryPageState extends State<RunTrajectoryPage> {
               else
                 for (var i = 0; i < root.workers.length; i++)
                   _richWorker(root.workers[i], i, root.workers.length),
+              if (root.diagnostics.isNotEmpty) ...<Widget>[
+                const SizedBox(height: OSpace.l),
+                Text(
+                  'Compaction diagnostics',
+                  style: OType.overline.copyWith(
+                    color: OColors.of(context).textMuted,
+                  ),
+                ),
+                const SizedBox(height: OSpace.s),
+                for (var i = 0; i < root.diagnostics.length; i++)
+                  _richDiagnostic(
+                    root.diagnostics[i],
+                    i,
+                    root.diagnostics.length,
+                  ),
+              ],
             ],
           ),
         ),
       ],
+    );
+  }
+
+  Widget _richDiagnostic(
+    CompactionMetadataDto diagnostic,
+    int index,
+    int total,
+  ) {
+    final item = V2TimelineItem(
+      id: 'diagnostic-${diagnostic.sessionId}-${diagnostic.compactionId}',
+      title: diagnostic.compactionId,
+      description: diagnostic.actorKind == 'worker'
+          ? 'Worker compaction diagnostics'
+          : 'Main compaction diagnostics',
+      timeLabel: diagnostic.timestamp.toLocal().toIso8601String(),
+      statusLabel: 'Diagnostics',
+      details: <V2TimelineDetail>[
+        V2TimelineDetail(label: 'Checkpoint', value: diagnostic.checkpointId),
+        V2TimelineDetail(label: 'Model', value: diagnostic.model),
+        V2TimelineDetail(
+          label: 'Context limit',
+          value: '${diagnostic.contextLimit}',
+        ),
+        V2TimelineDetail(
+          label: 'Before tokens',
+          value: '${diagnostic.beforeTokens}',
+        ),
+        V2TimelineDetail(
+          label: 'After tokens',
+          value: '${diagnostic.afterTokens}',
+        ),
+        V2TimelineDetail(label: 'Usage source', value: diagnostic.usageSource),
+        V2TimelineDetail(label: 'Continuation', value: diagnostic.continuation),
+      ],
+    );
+    return V2TimelineRow(
+      key: ValueKey<String>(
+        'diagnostic-${diagnostic.sessionId}-${diagnostic.compactionId}',
+      ),
+      item: item,
+      index: index,
+      total: total,
+      isLast: index == total - 1,
+      positionLabel: 'Compaction diagnostic ${index + 1} of $total',
     );
   }
 
@@ -722,6 +782,10 @@ class _RunTrajectoryPageState extends State<RunTrajectoryPage> {
       ),
       if (compaction != null) ...<V2TimelineDetail>[
         V2TimelineDetail(label: 'Compaction', value: compaction.compactionId),
+        V2TimelineDetail(
+          label: 'Compacted at',
+          value: compaction.timestamp.toLocal().toIso8601String(),
+        ),
         V2TimelineDetail(label: 'Model', value: compaction.model),
         V2TimelineDetail(
           label: 'Context limit',
@@ -895,7 +959,8 @@ class _RunTrajectoryPageState extends State<RunTrajectoryPage> {
   static bool _hasContent(V2RunTrajectoryPageData data) =>
       data.subagents.isNotEmpty ||
       (data.trajectory?.mainSteps.isNotEmpty ?? false) ||
-      (data.trajectory?.workers.isNotEmpty ?? false);
+      (data.trajectory?.workers.isNotEmpty ?? false) ||
+      (data.trajectory?.diagnostics.isNotEmpty ?? false);
 
   static String _identityOf(V2RunTrajectoryPageData data) {
     if (data.subagents.isNotEmpty) return data.subagents.first.id;
@@ -940,7 +1005,7 @@ class _RawTrajectoryDialogState extends State<_RawTrajectoryDialog> {
           page.entries.where((entry) => known.add(entry.dedupeKey)),
         );
         _nextCursor = page.nextCursor;
-        _truncated = page.truncated;
+        _truncated = _truncated || page.truncated;
         _loading = false;
       });
     } catch (_) {
@@ -951,6 +1016,8 @@ class _RawTrajectoryDialogState extends State<_RawTrajectoryDialog> {
       });
     }
   }
+
+  bool get _hasContinuation => _nextCursor != null;
 
   @override
   Widget build(BuildContext context) {
@@ -983,6 +1050,13 @@ class _RawTrajectoryDialogState extends State<_RawTrajectoryDialog> {
                 const Padding(
                   padding: EdgeInsets.only(top: OSpace.s),
                   child: Text('Truncated by server'),
+                ),
+              if (_hasContinuation)
+                const Padding(
+                  padding: EdgeInsets.only(top: OSpace.s),
+                  child: Text(
+                    'Raw history continues on the next page; nothing is clipped.',
+                  ),
                 ),
               if (_error != null)
                 Padding(

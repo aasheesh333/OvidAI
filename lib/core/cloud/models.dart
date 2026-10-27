@@ -97,18 +97,18 @@ class ProjectDto {
   });
 
   factory ProjectDto.fromJson(Map<String, dynamic> j) => ProjectDto(
-        id: j['id'] as String,
-        name: j['name'] as String,
-        createdAt: DateTime.parse(j['createdAt'] as String),
-        updatedAt: DateTime.parse(j['updatedAt'] as String),
-        sessionCount: (j['sessionCount'] as num?)?.toInt() ?? 0,
-        fileCount: (j['fileCount'] as num?)?.toInt() ?? 0,
-        fileCap: (j['fileCap'] as num?)?.toInt() ?? 80,
-        fileBytes: (j['fileBytes'] as num?)?.toInt() ?? 0,
-        fileBreakdown: ProjectFileBreakdown.fromJson(
-          j['fileBreakdown'] as Map<String, dynamic>?,
-        ),
-      );
+    id: j['id'] as String,
+    name: j['name'] as String,
+    createdAt: DateTime.parse(j['createdAt'] as String),
+    updatedAt: DateTime.parse(j['updatedAt'] as String),
+    sessionCount: (j['sessionCount'] as num?)?.toInt() ?? 0,
+    fileCount: (j['fileCount'] as num?)?.toInt() ?? 0,
+    fileCap: (j['fileCap'] as num?)?.toInt() ?? 80,
+    fileBytes: (j['fileBytes'] as num?)?.toInt() ?? 0,
+    fileBreakdown: ProjectFileBreakdown.fromJson(
+      j['fileBreakdown'] as Map<String, dynamic>?,
+    ),
+  );
 
   final String id;
   final String name;
@@ -132,7 +132,8 @@ class ProjectDto {
 /// Per-bucket project file counts (W1 follow-up; server `fileBreakdown`).
 @immutable
 class ProjectFileBreakdown {
-  const ProjectFileBreakdown({    this.memory = 0,
+  const ProjectFileBreakdown({
+    this.memory = 0,
     this.attachments = 0,
     this.artifacts = 0,
   });
@@ -154,10 +155,7 @@ class ProjectFileBreakdown {
 /// optional `projectRefs` field on send (older servers omit it entirely).
 @immutable
 class ProjectsPayload {
-  const ProjectsPayload({
-    required this.items,
-    required this.turnProjectRefs,
-  });
+  const ProjectsPayload({required this.items, required this.turnProjectRefs});
 
   factory ProjectsPayload.fromJson(Map<String, dynamic> j) {
     final capabilities = j['capabilities'];
@@ -166,8 +164,8 @@ class ProjectsPayload {
         for (final item in (j['items'] as List? ?? const <dynamic>[]))
           if (item is Map<String, dynamic>) ProjectDto.fromJson(item),
       ],
-      turnProjectRefs: capabilities is Map &&
-          capabilities['turnProjectRefs'] == true,
+      turnProjectRefs:
+          capabilities is Map && capabilities['turnProjectRefs'] == true,
     );
   }
 
@@ -188,17 +186,17 @@ class MessageDto {
   });
 
   factory MessageDto.fromJson(Map<String, dynamic> j) => MessageDto(
-        id: j['id'] as String,
-        sessionId: j['sessionId'] as String,
-        role: j['role'] as String,
-        content: j['content'] as String,
-        createdAt: DateTime.parse(j['createdAt'] as String),
-        attachments: <MessageAttachmentDto>[
-          for (final a in (j['attachments'] as List? ?? const <dynamic>[]))
-            if (a is Map<String, dynamic>) MessageAttachmentDto.fromJson(a),
-        ],
-        reasoning: _optionalText(j['reasoning']),
-      );
+    id: j['id'] as String,
+    sessionId: j['sessionId'] as String,
+    role: j['role'] as String,
+    content: j['content'] as String,
+    createdAt: DateTime.parse(j['createdAt'] as String),
+    attachments: <MessageAttachmentDto>[
+      for (final a in (j['attachments'] as List? ?? const <dynamic>[]))
+        if (a is Map<String, dynamic>) MessageAttachmentDto.fromJson(a),
+    ],
+    reasoning: _optionalText(j['reasoning']),
+  );
 
   final String id;
   final String sessionId;
@@ -262,23 +260,24 @@ class MessagePage extends CloudPage<MessageDto> {
   });
 
   factory MessagePage.fromJson(Map<String, dynamic> j) => MessagePage(
-        items: <MessageDto>[
-          for (final item in (j['items'] as List? ?? const <dynamic>[])
+    items: <MessageDto>[
+      for (final item
+          in (j['items'] as List? ?? const <dynamic>[])
               .whereType<Map<String, dynamic>>())
-            MessageDto.fromJson(item),
-        ],
-        nextCursor: j['nextCursor'] as String?,
-        hasWatermark: j.containsKey('lastEventSeq'),
-        lastEventSeq: j['lastEventSeq'] as String?,
-        activeRunId: (j['activeRun'] as Map?)?['runId'] as String?,
-        activeRunStatus: (j['activeRun'] as Map?)?['status'] as String?,
-        rawEvents: j['events'] is List
-            ? <Map<String, dynamic>>[
-                for (final e in j['events'] as List)
-                  if (e is Map) Map<String, dynamic>.from(e),
-              ]
-            : null,
-      );
+        MessageDto.fromJson(item),
+    ],
+    nextCursor: j['nextCursor'] as String?,
+    hasWatermark: j.containsKey('lastEventSeq'),
+    lastEventSeq: j['lastEventSeq'] as String?,
+    activeRunId: (j['activeRun'] as Map?)?['runId'] as String?,
+    activeRunStatus: (j['activeRun'] as Map?)?['status'] as String?,
+    rawEvents: j['events'] is List
+        ? <Map<String, dynamic>>[
+            for (final e in j['events'] as List)
+              if (e is Map) Map<String, dynamic>.from(e),
+          ]
+        : null,
+  );
 
   final bool hasWatermark;
   final String? lastEventSeq;
@@ -289,10 +288,161 @@ class MessagePage extends CloudPage<MessageDto> {
   final List<Map<String, dynamic>>? rawEvents;
 }
 
+/// Canonical all-known subagent counts. These are server facts, never totals
+/// estimated from the currently loaded worker page.
+@immutable
+class SubagentCounts {
+  const SubagentCounts({
+    required this.total,
+    required this.running,
+    required this.awaitingNextUserTask,
+    required this.completed,
+    required this.failed,
+    required this.cancelled,
+    required this.timeout,
+  });
+
+  factory SubagentCounts.fromJson(Map<String, dynamic> j) => SubagentCounts(
+    total: (j['total'] as num).toInt(),
+    running: (j['running'] as num).toInt(),
+    awaitingNextUserTask: (j['awaiting_next_user_task'] as num).toInt(),
+    completed: (j['completed'] as num).toInt(),
+    failed: (j['failed'] as num).toInt(),
+    cancelled: (j['cancelled'] as num).toInt(),
+    timeout: (j['timeout'] as num).toInt(),
+  );
+
+  final int total;
+  final int running;
+  final int awaitingNextUserTask;
+  final int completed;
+  final int failed;
+  final int cancelled;
+  final int timeout;
+
+  Map<String, Object> toJson() => <String, Object>{
+    'total': total,
+    'running': running,
+    'awaiting_next_user_task': awaitingNextUserTask,
+    'completed': completed,
+    'failed': failed,
+    'cancelled': cancelled,
+    'timeout': timeout,
+  };
+}
+
+/// `GET /sessions/:id/subagents`. Worker maps remain additive-tolerant; the
+/// trajectory projection owns their detailed lifecycle normalization.
+@immutable
+class SubagentSessionProjection {
+  const SubagentSessionProjection({
+    required this.counts,
+    required this.items,
+    required this.nextCursor,
+  });
+
+  factory SubagentSessionProjection.fromJson(Map<String, dynamic> j) =>
+      SubagentSessionProjection(
+        counts: SubagentCounts.fromJson(
+          Map<String, dynamic>.from(j['counts'] as Map),
+        ),
+        items: <Map<String, dynamic>>[
+          for (final item in (j['items'] as List? ?? const <dynamic>[]))
+            if (item is Map) Map<String, dynamic>.from(item),
+        ],
+        nextCursor: j['nextCursor'] as String?,
+      );
+
+  final SubagentCounts counts;
+  final List<Map<String, dynamic>> items;
+  final String? nextCursor;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+    'counts': counts.toJson(),
+    'items': items,
+    'nextCursor': nextCursor,
+  };
+}
+
+/// Legacy exact-recall wire DTO retained for compatibility only.
+///
+/// The active Flutter Show-raw surface reads durable events through
+/// `RawTrajectoryPage`; this class is not a current gateway contract.
+@immutable
+class ExactRecallChunk {
+  const ExactRecallChunk({
+    required this.item,
+    required this.offset,
+    required this.data,
+    required this.nextOffset,
+    this.truncated = false,
+  });
+
+  factory ExactRecallChunk.fromJson(Map<String, dynamic> j) => ExactRecallChunk(
+    item: Map<String, dynamic>.from(j['item'] as Map),
+    offset: (j['offset'] as num).toInt(),
+    data: j['data'] as String,
+    nextOffset: (j['nextOffset'] as num?)?.toInt(),
+    truncated: j['truncated'] == true,
+  );
+
+  final Map<String, dynamic> item;
+  final int offset;
+  final String data;
+  final int? nextOffset;
+  final bool truncated;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+    'item': item,
+    'offset': offset,
+    'data': data,
+    'nextOffset': nextOffset,
+    if (truncated) 'truncated': true,
+  };
+}
+
+/// Legacy `GET /sessions/:id/history/raw` DTO retained for compatibility only.
+///
+/// This exact-history response is not wired into the active Flutter Show-raw
+/// surface, which reads the committed `/events` mirror instead.
+@immutable
+class RawHistoryPage {
+  const RawHistoryPage({
+    required this.chunks,
+    required this.nextCursor,
+    this.truncated = false,
+  });
+
+  factory RawHistoryPage.fromJson(Map<String, dynamic> j) => RawHistoryPage(
+    chunks: <ExactRecallChunk>[
+      for (final chunk in (j['chunks'] as List? ?? const <dynamic>[]))
+        if (chunk is Map)
+          ExactRecallChunk.fromJson(Map<String, dynamic>.from(chunk)),
+    ],
+    nextCursor: j['nextCursor'] as String?,
+    truncated: j['truncated'] == true,
+  );
+
+  final List<ExactRecallChunk> chunks;
+  final String? nextCursor;
+  final bool truncated;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+    'chunks': <Map<String, Object?>>[
+      for (final chunk in chunks) chunk.toJson(),
+    ],
+    'nextCursor': nextCursor,
+    if (truncated) 'truncated': true,
+  };
+}
+
 /// Wave 1b: `RegenerateResponse` (rest.ts) — the 202 of
 /// POST /sessions/:id/messages/:messageId/regenerate.
 class RegenerateResponse {
-  const RegenerateResponse({required this.runId, required this.promptMessageId});
+  const RegenerateResponse({
+    required this.runId,
+    required this.promptMessageId,
+  });
 
   factory RegenerateResponse.fromJson(Map<String, dynamic> j) =>
       RegenerateResponse(
@@ -312,15 +462,15 @@ class CloudPage<T> {
   factory CloudPage.fromJson(
     Map<String, dynamic> j,
     T Function(Map<String, dynamic>) parse,
-  ) =>
-      CloudPage(
-        items: [
-          for (final item in (j['items'] as List? ?? <dynamic>[])
+  ) => CloudPage(
+    items: [
+      for (final item
+          in (j['items'] as List? ?? <dynamic>[])
               .whereType<Map<String, dynamic>>())
-            parse(item),
-        ],
-        nextCursor: j['nextCursor'] as String?,
-      );
+        parse(item),
+    ],
+    nextCursor: j['nextCursor'] as String?,
+  );
 
   final List<T> items;
   final String? nextCursor;
@@ -376,19 +526,19 @@ class CloudTurnOptions {
   });
 
   factory CloudTurnOptions.fromJson(Map<String, dynamic> j) => CloudTurnOptions(
-        model: j['model'] as String?,
-        mode: j['mode'] as String?,
-        planMode: j['planMode'] as bool?,
-        presetId: j['presetId'] as String?,
-        sessionRefs: <String>[
-          for (final id in (j['sessionRefs'] as List? ?? const <dynamic>[]))
-            if (id is String && id.isNotEmpty) id,
-        ],
-        projectRefs: <String>[
-          for (final id in (j['projectRefs'] as List? ?? const <dynamic>[]))
-            if (id is String && id.isNotEmpty) id,
-        ],
-      );
+    model: j['model'] as String?,
+    mode: j['mode'] as String?,
+    planMode: j['planMode'] as bool?,
+    presetId: j['presetId'] as String?,
+    sessionRefs: <String>[
+      for (final id in (j['sessionRefs'] as List? ?? const <dynamic>[]))
+        if (id is String && id.isNotEmpty) id,
+    ],
+    projectRefs: <String>[
+      for (final id in (j['projectRefs'] as List? ?? const <dynamic>[]))
+        if (id is String && id.isNotEmpty) id,
+    ],
+  );
 
   static const CloudTurnOptions none = CloudTurnOptions();
 
@@ -413,13 +563,13 @@ class CloudTurnOptions {
 
   /// The wire fields (absent keys are omitted, never sent as null).
   Map<String, Object> toJson() => <String, Object>{
-        if (model != null && model!.trim().isNotEmpty) 'model': model!,
-        'mode': ?mode,
-        'planMode': ?planMode,
-        if (presetId != null && presetId!.isNotEmpty) 'presetId': presetId!,
-        if (sessionRefs.isNotEmpty) 'sessionRefs': sessionRefs,
-        if (projectRefs.isNotEmpty) 'projectRefs': projectRefs,
-      };
+    if (model != null && model!.trim().isNotEmpty) 'model': model!,
+    'mode': ?mode,
+    'planMode': ?planMode,
+    if (presetId != null && presetId!.isNotEmpty) 'presetId': presetId!,
+    if (sessionRefs.isNotEmpty) 'sessionRefs': sessionRefs,
+    if (projectRefs.isNotEmpty) 'projectRefs': projectRefs,
+  };
 }
 
 /// `GET/PATCH /cloud/v1/preferences` (Wave 1a, SE-005 / owner rule R1): the
@@ -484,11 +634,11 @@ class AttachmentUpload {
   });
 
   factory AttachmentUpload.fromJson(Map<String, dynamic> j) => AttachmentUpload(
-        attachmentId: j['attachmentId'] as String,
-        uploadUrl: j['uploadUrl'] as String,
-        path: j['path'] as String,
-        expiresAt: DateTime.parse(j['expiresAt'] as String),
-      );
+    attachmentId: j['attachmentId'] as String,
+    uploadUrl: j['uploadUrl'] as String,
+    path: j['path'] as String,
+    expiresAt: DateTime.parse(j['expiresAt'] as String),
+  );
 
   final String attachmentId;
   final String uploadUrl;
@@ -525,11 +675,11 @@ class ImportMessage {
   });
 
   factory ImportMessage.fromJson(Map<String, dynamic> j) => ImportMessage(
-        clientMsgId: j['clientMsgId'] as String,
-        role: j['role'] as String,
-        content: j['content'] as String,
-        createdAt: DateTime.parse(j['createdAt'] as String),
-      );
+    clientMsgId: j['clientMsgId'] as String,
+    role: j['role'] as String,
+    content: j['content'] as String,
+    createdAt: DateTime.parse(j['createdAt'] as String),
+  );
 
   final String clientMsgId;
   final String role;
@@ -537,13 +687,13 @@ class ImportMessage {
   final DateTime createdAt;
 
   Map<String, String> toJson() => <String, String>{
-        'clientMsgId': clientMsgId,
-        'role': role,
-        'content': content,
-        // The server's zod `.datetime()` wants a Z/offset-terminated ISO
-        // stamp; Dart's local toIso8601String() has neither, so pin UTC.
-        'createdAt': createdAt.toUtc().toIso8601String(),
-      };
+    'clientMsgId': clientMsgId,
+    'role': role,
+    'content': content,
+    // The server's zod `.datetime()` wants a Z/offset-terminated ISO
+    // stamp; Dart's local toIso8601String() has neither, so pin UTC.
+    'createdAt': createdAt.toUtc().toIso8601String(),
+  };
 }
 
 /// `ImportReport` (rest.ts, P8 Task 4) — the 201 answer of POST
@@ -557,10 +707,10 @@ class ImportReport {
   });
 
   factory ImportReport.fromJson(Map<String, dynamic> j) => ImportReport(
-        sessionId: j['sessionId'] as String,
-        imported: j['imported'] as int,
-        skipped: j['skipped'] as int,
-      );
+    sessionId: j['sessionId'] as String,
+    imported: j['imported'] as int,
+    skipped: j['skipped'] as int,
+  );
 
   final String sessionId;
   final int imported;
@@ -572,10 +722,7 @@ class CloudHealthChecks {
   const CloudHealthChecks({required this.db, required this.redisQ});
 
   factory CloudHealthChecks.fromJson(Map<String, dynamic> j) =>
-      CloudHealthChecks(
-        db: j['db'] as bool,
-        redisQ: j['redisQ'] as bool,
-      );
+      CloudHealthChecks(db: j['db'] as bool, redisQ: j['redisQ'] as bool);
 
   final bool db;
   final bool redisQ;
@@ -588,9 +735,9 @@ class CloudHealth {
   const CloudHealth({required this.status, required this.checks});
 
   factory CloudHealth.fromJson(Map<String, dynamic> j) => CloudHealth(
-        status: j['status'] as String,
-        checks: CloudHealthChecks.fromJson(j['checks'] as Map<String, dynamic>),
-      );
+    status: j['status'] as String,
+    checks: CloudHealthChecks.fromJson(j['checks'] as Map<String, dynamic>),
+  );
 
   /// "ok" | "degraded"
   final String status;
@@ -623,29 +770,28 @@ class OutboxEntry {
   });
 
   factory OutboxEntry.fromJson(Map<String, dynamic> j) => OutboxEntry(
-        clientMsgId: j['clientMsgId'] as String? ?? '',
-        sessionId: j['sessionId'] as String? ?? '',
-        content: j['content'] as String? ?? '',
-        attachmentIds: <String>[
-          for (final id in (j['attachmentIds'] as List? ?? const <dynamic>[]))
-            if (id is String && id.isNotEmpty) id,
-        ],
-        createdAt:
-            DateTime.tryParse(j['createdAt'] as String? ?? '') ?? DateTime.now(),
-        maxOutputTokens: j['maxOutputTokens'] as int?,
-        account: j['account'] as String?,
-        turn: j['turn'] is Map
-            ? CloudTurnOptions.fromJson(
-                Map<String, dynamic>.from(j['turn'] as Map))
-            : CloudTurnOptions.none,
-        attachmentFiles: <OutboxFile>[
-          for (final f in (j['attachmentFiles'] as List? ?? const <dynamic>[]))
-            if (f is Map) OutboxFile.fromJson(Map<String, dynamic>.from(f)),
-        ],
-        failedCode: j['failedCode'] as String?,
-        failedMessage: j['failedMessage'] as String?,
-        attempts: j['attempts'] as int? ?? 0,
-      );
+    clientMsgId: j['clientMsgId'] as String? ?? '',
+    sessionId: j['sessionId'] as String? ?? '',
+    content: j['content'] as String? ?? '',
+    attachmentIds: <String>[
+      for (final id in (j['attachmentIds'] as List? ?? const <dynamic>[]))
+        if (id is String && id.isNotEmpty) id,
+    ],
+    createdAt:
+        DateTime.tryParse(j['createdAt'] as String? ?? '') ?? DateTime.now(),
+    maxOutputTokens: j['maxOutputTokens'] as int?,
+    account: j['account'] as String?,
+    turn: j['turn'] is Map
+        ? CloudTurnOptions.fromJson(Map<String, dynamic>.from(j['turn'] as Map))
+        : CloudTurnOptions.none,
+    attachmentFiles: <OutboxFile>[
+      for (final f in (j['attachmentFiles'] as List? ?? const <dynamic>[]))
+        if (f is Map) OutboxFile.fromJson(Map<String, dynamic>.from(f)),
+    ],
+    failedCode: j['failedCode'] as String?,
+    failedMessage: j['failedMessage'] as String?,
+    attempts: j['attempts'] as int? ?? 0,
+  );
 
   final String clientMsgId;
 
@@ -703,22 +849,20 @@ class OutboxEntry {
     String? failedMessage,
     bool clearFailure = false,
     int? attempts,
-  }) =>
-      OutboxEntry(
-        clientMsgId: clientMsgId,
-        sessionId: sessionId ?? this.sessionId,
-        content: content,
-        attachmentIds: attachmentIds ?? this.attachmentIds,
-        createdAt: createdAt,
-        maxOutputTokens: maxOutputTokens ?? this.maxOutputTokens,
-        account: account ?? this.account,
-        turn: turn,
-        attachmentFiles: attachmentFiles ?? this.attachmentFiles,
-        failedCode: clearFailure ? null : (failedCode ?? this.failedCode),
-        failedMessage:
-            clearFailure ? null : (failedMessage ?? this.failedMessage),
-        attempts: attempts ?? this.attempts,
-      );
+  }) => OutboxEntry(
+    clientMsgId: clientMsgId,
+    sessionId: sessionId ?? this.sessionId,
+    content: content,
+    attachmentIds: attachmentIds ?? this.attachmentIds,
+    createdAt: createdAt,
+    maxOutputTokens: maxOutputTokens ?? this.maxOutputTokens,
+    account: account ?? this.account,
+    turn: turn,
+    attachmentFiles: attachmentFiles ?? this.attachmentFiles,
+    failedCode: clearFailure ? null : (failedCode ?? this.failedCode),
+    failedMessage: clearFailure ? null : (failedMessage ?? this.failedMessage),
+    attempts: attempts ?? this.attempts,
+  );
 
   Map<String, dynamic> toJson() {
     final turnJson = turn.toJson();
@@ -744,20 +888,27 @@ class OutboxEntry {
 /// A not-yet-uploaded attachment of an [OutboxEntry]: the staged file on
 /// disk. Uploaded at flush time, once the target server session exists.
 class OutboxFile {
-  const OutboxFile({required this.name, required this.path, required this.size});
+  const OutboxFile({
+    required this.name,
+    required this.path,
+    required this.size,
+  });
 
   factory OutboxFile.fromJson(Map<String, dynamic> j) => OutboxFile(
-        name: j['name'] as String? ?? 'file',
-        path: j['path'] as String? ?? '',
-        size: (j['size'] as num?)?.toInt() ?? 0,
-      );
+    name: j['name'] as String? ?? 'file',
+    path: j['path'] as String? ?? '',
+    size: (j['size'] as num?)?.toInt() ?? 0,
+  );
 
   final String name;
   final String path;
   final int size;
 
-  Map<String, dynamic> toJson() =>
-      <String, dynamic>{'name': name, 'path': path, 'size': size};
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    'name': name,
+    'path': path,
+    'size': size,
+  };
 }
 
 /// Client-side run state assembled from WS session events (P8 later tasks
@@ -777,15 +928,15 @@ class CloudRunState {
   });
 
   factory CloudRunState.fromJson(Map<String, dynamic> j) => CloudRunState(
-        runId: j['runId'] as String?,
-        busy: j['busy'] as bool? ?? false,
-        stopRequested: j['stopRequested'] as bool? ?? false,
-        statusLine: j['statusLine'] as String?,
-        retryAttempt: j['retryAttempt'] as int?,
-        retryNextBackoffMs: j['retryNextBackoffMs'] as int?,
-        lastErrorCode: j['lastErrorCode'] as String?,
-        lastErrorMessage: j['lastErrorMessage'] as String?,
-      );
+    runId: j['runId'] as String?,
+    busy: j['busy'] as bool? ?? false,
+    stopRequested: j['stopRequested'] as bool? ?? false,
+    statusLine: j['statusLine'] as String?,
+    retryAttempt: j['retryAttempt'] as int?,
+    retryNextBackoffMs: j['retryNextBackoffMs'] as int?,
+    lastErrorCode: j['lastErrorCode'] as String?,
+    lastErrorMessage: j['lastErrorMessage'] as String?,
+  );
 
   final String? runId;
   final bool busy;
@@ -832,8 +983,7 @@ extension AgentModeX on AgentMode {
       'Read-only. Asks for permission before every shell, browser, or write action.',
     AgentMode.auto =>
       'Runs shell and browser freely. Asks before pushing to the repo.',
-    AgentMode.drive =>
-      'Full access. Runs anything, anywhere, without asking.',
+    AgentMode.drive => 'Full access. Runs anything, anywhere, without asking.',
     AgentMode.studio =>
       'Studio mode — files edit, terminal run, repo access free. '
           'Asks for confirmation before publishing or committing.',
@@ -856,9 +1006,8 @@ extension AgentModeX on AgentMode {
 /// legacy sessions persisted as `safe` keep working and
 /// `/permission read-only` stays functional — but it is never a direct
 /// pick: the read-only policy is selected through the `plan` preset.
-List<AgentMode> modeOptionsForPicker() => AgentMode.values
-    .where((m) => m != AgentMode.safe)
-    .toList(growable: false);
+List<AgentMode> modeOptionsForPicker() =>
+    AgentMode.values.where((m) => m != AgentMode.safe).toList(growable: false);
 
 class ApprovalRequest {
   final String tool;

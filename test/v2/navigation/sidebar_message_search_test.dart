@@ -314,6 +314,110 @@ void main() {
     await tester.pump();
     expect(opened, 'sess-1');
   });
+
+  testWidgets(
+    'whole hit callback preserves the exact message among same-chat hits',
+    (tester) async {
+      MessageSearchHit? opened;
+      final source = _FakeSource(
+        (query, {limit, offset, sessionId}) async => MessageSearchPage(
+          items: [
+            _hit(),
+            _hit(messageId: 'm2'),
+          ],
+          total: 2,
+        ),
+      );
+      final controller = MessageSearchController(source: source);
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        _app(
+          Sidebar(
+            data: _data(),
+            messageSearch: controller,
+            onSearchHit: (hit) => opened = hit,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await _search(tester, 'zebra42');
+      await tester.tap(
+        find.byKey(const ValueKey<String>('v2-search-message-sess-1-m2')),
+      );
+
+      expect(opened?.messageId, 'm2');
+      expect(opened?.sessionId, 'sess-1');
+    },
+  );
+
+  testWidgets('load more appends through the existing search controller', (
+    tester,
+  ) async {
+    final source = _FakeSource((query, {limit, offset, sessionId}) async {
+      final older = offset != null;
+      return MessageSearchPage(
+        items: [_hit(messageId: older ? 'm2' : 'm1')],
+        total: 2,
+        limit: 1,
+        offset: older ? 1 : 0,
+      );
+    });
+    final controller = MessageSearchController(source: source, limit: 1);
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      _app(Sidebar(data: _data(), messageSearch: controller)),
+    );
+    await tester.pumpAndSettle();
+    await _search(tester, 'zebra42');
+
+    await tester.tap(find.text('Load more messages'));
+    await tester.pumpAndSettle();
+
+    expect(source.calls.map((call) => call.offset), [null, 1]);
+    expect(controller.state.hits.map((hit) => hit.messageId), ['m1', 'm2']);
+    expect(_hitText('zebra42', messageId: 'm2'), findsOneWidget);
+    expect(find.text('Load more messages'), findsNothing);
+  });
+
+  testWidgets(
+    'pagination failure preserves hits and retry loads the next page',
+    (tester) async {
+      var moreAttempts = 0;
+      final source = _FakeSource((query, {limit, offset, sessionId}) async {
+        if (offset != null && ++moreAttempts == 1) {
+          throw CloudApiException(
+            status: 500,
+            code: 'internal',
+            message: 'temporary',
+          );
+        }
+        return MessageSearchPage(
+          items: [_hit(messageId: offset == null ? 'm1' : 'm2')],
+          total: 2,
+          limit: 1,
+          offset: offset ?? 0,
+        );
+      });
+      final controller = MessageSearchController(source: source, limit: 1);
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        _app(Sidebar(data: _data(), messageSearch: controller)),
+      );
+      await tester.pumpAndSettle();
+      await _search(tester, 'zebra42');
+
+      await tester.tap(find.text('Load more messages'));
+      await tester.pumpAndSettle();
+      expect(find.text('More messages did not load.'), findsOneWidget);
+      expect(_hitText('zebra42'), findsOneWidget);
+
+      await tester.tap(find.text('Retry'));
+      await tester.pumpAndSettle();
+      expect(source.calls.map((call) => call.offset), [null, 1, 1]);
+      expect(controller.state.hits.map((hit) => hit.messageId), ['m1', 'm2']);
+      expect(find.text('More messages did not load.'), findsNothing);
+    },
+  );
 }
 
 class _FakeSource implements MessageSearchSource {

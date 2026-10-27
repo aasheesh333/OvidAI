@@ -47,16 +47,7 @@ class _FakeRest extends CloudRestClient {
   ];
   List<Map<String, dynamic>> childEvents = <Map<String, dynamic>>[];
   bool repeatRootEvents = false;
-  Map<String, dynamic> raw = <String, dynamic>{
-    'items': <Map<String, dynamic>>[
-      <String, dynamic>{
-        'id': 'raw-1',
-        'value': <String, dynamic>{'safe': true},
-      },
-    ],
-    'nextCursor': null,
-    'truncated': false,
-  };
+  bool repeatRawEvents = false;
 
   @override
   Future<Map<String, dynamic>> getJson(
@@ -69,7 +60,7 @@ class _FakeRest extends CloudRestClient {
     if (path == '/sessions/server%2Fsession/events') {
       final q = query ?? const <String, String>{};
       final limit = int.tryParse(q['limit'] ?? '') ?? events.length;
-      if (repeatRootEvents) {
+      if (repeatRootEvents || (repeatRawEvents && q.containsKey('after'))) {
         return <String, dynamic>{'events': events.take(limit).toList()};
       }
       if (q['tail'] == '1') {
@@ -88,7 +79,6 @@ class _FakeRest extends CloudRestClient {
     if (path == '/sessions/child-1/events') {
       return <String, dynamic>{'events': childEvents};
     }
-    if (path == '/sessions/server%2Fsession/history/raw') return raw;
     throw StateError('Unexpected path: $path');
   }
 }
@@ -107,52 +97,38 @@ class _FakeApi extends TrajectoryApi {
   final List<String?> childAfter = <String?>[];
   int rootCalls = 0;
   int childCalls = 0;
+  bool completeOnExpand = false;
   Completer<TrajectoryEventPage>? childGate;
 
   @override
   Future<TrajectoryRoot> root(String sessionId, {String? before}) async {
     rootCalls += 1;
     rootBefore.add(before);
-    return rootPage;
-  }
-
-  @override
-  Future<TrajectoryEventPage> workerEvents(
-    String childSessionId, {
-    String? after,
-  }) async {
-    childAfter.add(after);
-    childCalls += 1;
-    final page = TrajectoryEventPage(
-      events: <Map<String, dynamic>>[
-        <String, dynamic>{
-          'sessionId': 'session-1',
-          'seq': '8',
-          'type': 'tool_completed',
-          'ts': '2026-10-24T12:08:00.000Z',
-          'payload': <String, dynamic>{
-            'sessionId': 'session-1',
-            'runId': 'child-run-1',
-            'callId': 'child-call-8',
-            'name': 'read_file',
-            'content': 'child tool output',
-          },
+    if (!completeOnExpand) return rootPage;
+    return foldTrajectoryPages(<Object?>[
+      rootPage,
+      <String, dynamic>{
+        'counts': <String, dynamic>{
+          'total': 1,
+          'running': 0,
+          'awaiting_next_user_task': 0,
+          'completed': 1,
+          'failed': 0,
+          'cancelled': 0,
+          'timeout': 0,
         },
-        <String, dynamic>{
-          'sessionId': 'session-1',
-          'seq': '9',
-          'type': 'subagent_completed',
-          'ts': '2026-10-24T12:09:00.000Z',
-          'payload': <String, dynamic>{
-            'sessionId': 'session-1',
-            'childSessionId': childSessionId,
-            'childRunId': 'child-run-1',
+        'workers': <Map<String, dynamic>>[
+          <String, dynamic>{
             'logicalWorkerId': 'worker-1',
+            'childSessionId': 'child-1',
+            'childRunId': 'child-run-1',
             'status': 'completed',
+            'startKnown': true,
+            'startedAt': '2026-10-24T12:00:00.000Z',
             'endedAt': '2026-10-24T12:09:00.000Z',
             'summary': 'finished while expanded',
             'structuredReport': <String, dynamic>{
-              'subagent_id': childSessionId,
+              'subagent_id': 'child-1',
               'status': 'completed',
               'files_modified': <String>[],
               'artifacts_created': <String>[],
@@ -160,9 +136,36 @@ class _FakeApi extends TrajectoryApi {
               'error_if_any': null,
             },
           },
+        ],
+      },
+    ]);
+  }
+
+  @override
+  Future<TrajectoryEventPage> workerEvents(
+    String childSessionId, {
+    String? after,
+  }) async {
+    completeOnExpand = true;
+    childAfter.add(after);
+    childCalls += 1;
+    final page = TrajectoryEventPage(
+      events: <Map<String, dynamic>>[
+        <String, dynamic>{
+          'sessionId': childSessionId,
+          'seq': '8',
+          'type': 'tool_completed',
+          'ts': '2026-10-24T12:08:00.000Z',
+          'payload': <String, dynamic>{
+            'sessionId': childSessionId,
+            'runId': 'child-run-1',
+            'callId': 'child-call-8',
+            'name': 'read_file',
+            'content': 'child tool output',
+          },
         },
       ],
-      nextCursor: 'child-cursor-9',
+      nextCursor: 'child-cursor-8',
     );
     final gate = childGate;
     if (gate != null) return gate.future;
@@ -219,6 +222,65 @@ TrajectoryRoot _controllerRoot() => foldTrajectoryPages([
   },
 ]);
 
+TrajectoryRoot _parentLifecycleControllerRoot() => foldTrajectoryPages([
+  _controllerRoot(),
+  <String, dynamic>{
+    'steps': <Map<String, dynamic>>[
+      <String, dynamic>{
+        'cursor': 'session-1:1',
+        'sessionId': 'session-1',
+        'runId': 'root-1',
+        'seq': '1',
+        'actorKind': 'main',
+        'kind': 'model',
+        'type': 'message_completed',
+        'ts': '2026-10-24T12:00:00.000Z',
+        'output': 'main answer',
+      },
+      <String, dynamic>{
+        'cursor': 'session-1:2',
+        'sessionId': 'session-1',
+        'runId': 'root-1',
+        'seq': '2',
+        'actorKind': 'main',
+        'kind': 'subagent',
+        'type': 'subagent_started',
+        'ts': '2026-10-24T12:00:01.000Z',
+      },
+      <String, dynamic>{
+        'cursor': 'session-1:3',
+        'sessionId': 'session-1',
+        'runId': 'root-1',
+        'seq': '3',
+        'actorKind': 'main',
+        'kind': 'subagent',
+        'type': 'subagent_completed',
+        'ts': '2026-10-24T12:00:02.000Z',
+        'summary': 'parent lifecycle summary',
+      },
+      <String, dynamic>{
+        'cursor': 'session-1:4',
+        'sessionId': 'session-1',
+        'runId': 'root-1',
+        'seq': '4',
+        'actorKind': 'worker',
+        'kind': 'system',
+        'type': 'subagent_compacted',
+        'ts': '2026-10-24T12:00:03.000Z',
+        'workerId': 'worker-1',
+        'compactionId': 'compaction-worker-1',
+        'checkpointId': 'checkpoint-worker-1',
+        'model': 'fixture',
+        'contextLimit': 128000,
+        'beforeTokens': 102400,
+        'afterTokens': 24000,
+        'usageSource': 'measured',
+        'continuation': 'continuing_existing_task',
+      },
+    ],
+  },
+]);
+
 void main() {
   test(
     'root uses canonical counts and tail event reads without deriving totals',
@@ -245,7 +307,7 @@ void main() {
   );
 
   test(
-    'worker expansion forwards the last cursor and raw uses owner pagination',
+    'worker expansion forwards the last cursor and raw uses event pagination',
     () async {
       final rest = _FakeRest();
       rest.childEvents = <Map<String, dynamic>>[
@@ -257,17 +319,6 @@ void main() {
           'payload': <String, dynamic>{'name': 'read', 'content': 'ok'},
         },
       ];
-      rest.raw = <String, dynamic>{
-        'items': <Map<String, dynamic>>[
-          <String, dynamic>{
-            'id': 'raw-2',
-            'value': <String, dynamic>{'serverRedacted': true},
-            'truncated': true,
-          },
-        ],
-        'nextCursor': 'raw-page-2',
-        'truncated': true,
-      };
       final api = TrajectoryApi(rest);
 
       final child = await api.workerEvents('child-1', after: 'child-cursor-4');
@@ -277,13 +328,9 @@ void main() {
       expect(rest.requests.single['after'], 'child-cursor-4');
 
       final raw = await api.showRaw('server/session', after: 'raw-page-1');
-      expect(raw.nextCursor, 'raw-page-2');
-      expect(raw.truncated, isTrue);
-      expect(raw.entries.single.truncated, isTrue);
-      expect(
-        rest.requests[1]['path'],
-        '/sessions/server%2Fsession/history/raw',
-      );
+      expect(raw.entries.single.id, '1');
+      expect(raw.nextCursor, isNull);
+      expect(rest.requests[1]['path'], '/sessions/server%2Fsession/events');
       expect(rest.requests[1]['after'], 'raw-page-1');
       expect(rest.requests[1]['limit'], '50');
     },
@@ -338,8 +385,28 @@ void main() {
     },
   );
 
+  test('raw event pagination never repeats a consumed bound', () async {
+    final rest = _FakeRest()..repeatRawEvents = true;
+    rest.events = <Map<String, dynamic>>[
+      for (var i = 1; i <= TrajectoryApi.rawPageSize; i++)
+        <String, dynamic>{
+          'sessionId': 'server/session',
+          'seq': '$i',
+          'type': 'message_completed',
+          'ts': '2026-10-24T12:00:00.000Z',
+          'payload': <String, dynamic>{'content': 'event-$i'},
+        },
+    ];
+
+    final raw = await TrajectoryApi(rest).showRaw('server/session', after: '1');
+
+    expect(raw.nextCursor, isNull);
+    expect(rest.requests.single['path'], '/sessions/server%2Fsession/events');
+    expect(rest.requests.single['after'], '1');
+  });
+
   test(
-    'hidden controller stops fallback and collapsed workers never poll',
+    'hidden controller stops fallback and real parent/child expansion reconciles',
     () async {
       final api = _FakeApi(_controllerRoot());
       final timers = <_ManualTimer>[];
@@ -376,10 +443,10 @@ void main() {
         controller.root.workers.single.report!.keyFindings,
         'actual report',
       );
-      expect(controller.root.workers.single.lastCursor, 'child-cursor-9');
+      expect(controller.root.workers.single.lastCursor, 'child-cursor-8');
       expect(
         controller.root.workers.single.steps.map((step) => step.type),
-        <String>['tool_completed', 'subagent_completed'],
+        <String>['tool_completed'],
       );
       expect(
         controller.root.workers.single.steps.first.output,
@@ -390,6 +457,101 @@ void main() {
       timers.last.fire();
       await Future<void>.delayed(Duration.zero);
       expect(api.childAfter, hasLength(1));
+      controller.dispose();
+    },
+  );
+
+  test(
+    'hidden expansion starts no reads and late hidden results are fenced',
+    () async {
+      final api = _FakeApi(_controllerRoot());
+      final controller = TrajectoryController(api: api, sessionId: 'session-1');
+      await controller.start();
+      final initialRootCalls = api.rootCalls;
+      final gate = Completer<TrajectoryEventPage>();
+      api.childGate = gate;
+
+      final expanding = controller.expandWorker(
+        _controllerRoot().workers.single,
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(api.childCalls, 1);
+      expect(api.rootCalls, initialRootCalls + 1);
+
+      controller.setVisible(false);
+      final hiddenRootCalls = api.rootCalls;
+      await controller.expandWorker(_controllerRoot().workers.single);
+      expect(api.childCalls, 1);
+      expect(api.rootCalls, hiddenRootCalls);
+
+      gate.complete(
+        const TrajectoryEventPage(
+          events: <Map<String, dynamic>>[],
+          nextCursor: 'child-cursor-8',
+        ),
+      );
+      await expanding;
+      expect(controller.root.workers.single.status, 'running');
+      expect(controller.root.workers.single.steps, isEmpty);
+      expect(api.childCalls, 1);
+      expect(api.rootCalls, hiddenRootCalls);
+      controller.dispose();
+    },
+  );
+
+  test(
+    'controller start refresh expansion preserves canonical main provenance',
+    () async {
+      final api = _FakeApi(_parentLifecycleControllerRoot());
+      final controller = TrajectoryController(api: api, sessionId: 'session-1');
+      const mainTypes = <String>[
+        'message_completed',
+        'subagent_started',
+        'subagent_completed',
+        'subagent_compacted',
+      ];
+
+      await controller.start();
+      expect(controller.root.counts.total, 1);
+      expect(controller.root.workers, hasLength(1));
+      expect(controller.root.workers.single.lastCursor, 'child-cursor-4');
+      expect(controller.root.mainSteps.map((step) => step.type), mainTypes);
+      expect(
+        controller.root.mainSteps.every((step) => step.canonicalMain),
+        isTrue,
+      );
+      expect(
+        controller.root.workers.where((worker) => worker.status == 'unknown'),
+        isEmpty,
+      );
+
+      await controller.refresh();
+      expect(controller.root.workers, hasLength(1));
+      expect(controller.root.mainSteps.map((step) => step.type), mainTypes);
+      expect(
+        controller.root.mainSteps.every((step) => step.canonicalMain),
+        isTrue,
+      );
+
+      await controller.expandWorker(controller.root.workers.single);
+      expect(controller.root.workers, hasLength(1));
+      expect(controller.root.workers.single.status, 'completed');
+      expect(controller.root.workers.single.lastCursor, 'child-cursor-8');
+      expect(
+        controller.root.workers.single.steps.map((step) => step.type),
+        <String>['tool_completed'],
+      );
+      expect(controller.root.mainSteps.map((step) => step.type), mainTypes);
+      expect(controller.root.mainSteps.last.actorKind, 'worker');
+      expect(
+        controller.root.mainSteps.every((step) => step.canonicalMain),
+        isTrue,
+      );
+      expect(
+        controller.root.workers.where((worker) => worker.status == 'unknown'),
+        isEmpty,
+      );
+      expect(api.rootCalls, greaterThanOrEqualTo(3));
       controller.dispose();
     },
   );
@@ -570,6 +732,100 @@ void main() {
       controller.dispose();
     },
   );
+
+  test('refresh and Load earlier dedupe canonical diagnostics', () async {
+    final withDiagnostic = foldTrajectoryPages(<Object?>[
+      _controllerRoot(),
+      <String, dynamic>{
+        'events': <Map<String, dynamic>>[
+          <String, dynamic>{
+            'sessionId': 'session-1',
+            'seq': '40',
+            'type': 'compaction_completed',
+            'ts': '2026-10-24T12:10:00.000Z',
+            'payload': <String, dynamic>{
+              'type': 'compaction_completed',
+              'actorKind': 'main',
+              'sessionId': 'session-1',
+              'runId': 'root-1',
+              'compactionId': 'compaction-main-1',
+              'checkpointId': 'checkpoint-main-1',
+              'ts': '2026-10-24T12:10:00.000Z',
+              'model': 'fixture',
+              'contextLimit': 32000,
+              'beforeTokens': 25600,
+              'afterTokens': 6000,
+              'usageSource': 'measured',
+              'continuation': 'continuing_existing_task',
+            },
+          },
+        ],
+      },
+    ]);
+    final api = _FakeApi(withDiagnostic);
+    final controller = TrajectoryController(api: api, sessionId: 'session-1');
+    await controller.start();
+    await controller.refresh();
+    await controller.loadEarlier();
+
+    expect(controller.root.diagnostics, hasLength(1));
+    expect(
+      controller.root.diagnostics.single.compactionId,
+      'compaction-main-1',
+    );
+    expect(
+      controller.root.diagnostics.single.timestamp,
+      DateTime.utc(2026, 10, 24, 12, 10),
+    );
+    controller.dispose();
+  });
+
+  test('diagnostics-only root can Load earlier and stays content', () async {
+    final diagnosticsOnly = foldTrajectoryPages(<Object?>[
+      <String, dynamic>{
+        'earlierCursor': 'root-before-1',
+        'events': <Map<String, dynamic>>[
+          <String, dynamic>{
+            'sessionId': 'session-1',
+            'seq': '40',
+            'type': 'compaction_completed',
+            'ts': '2026-10-24T12:10:00.000Z',
+            'payload': <String, dynamic>{
+              'type': 'compaction_completed',
+              'actorKind': 'main',
+              'sessionId': 'session-1',
+              'runId': 'root-1',
+              'compactionId': 'compaction-main-1',
+              'checkpointId': 'checkpoint-main-1',
+              'ts': '2026-10-24T12:10:00.000Z',
+              'model': 'fixture',
+              'contextLimit': 32000,
+              'beforeTokens': 25600,
+              'afterTokens': 6000,
+              'usageSource': 'measured',
+              'continuation': 'continuing_existing_task',
+            },
+          },
+        ],
+      },
+    ]);
+    expect(diagnosticsOnly.mainSteps, isEmpty);
+    expect(diagnosticsOnly.workers, isEmpty);
+    expect(diagnosticsOnly.diagnostics, hasLength(1));
+
+    final api = _FakeApi(diagnosticsOnly);
+    final controller = TrajectoryController(api: api, sessionId: 'session-1');
+    await controller.start();
+    await controller.loadEarlier();
+
+    expect(api.rootBefore, <String?>[null, 'root-before-1']);
+    expect(controller.root.diagnostics, hasLength(1));
+    expect(
+      controller.root.diagnostics.single.timestamp,
+      DateTime.utc(2026, 10, 24, 12, 10),
+    );
+    controller.dispose();
+  });
 }
 
 TrajectoryWorker rootPageWorkerWithoutChild() => const TrajectoryWorker(

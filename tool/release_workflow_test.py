@@ -148,6 +148,18 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertEqual(_step("analyze", "Test release inventory gates")["run"],
                          "python3 -m unittest discover -s tool -p '*_test.py'")
 
+    def test_embedded_static_rich_content_policy_runs_before_native_tests(self):
+        names = [step.get("name") for step in _steps("analyze")]
+        policy = _step("analyze", "Test embedded static rich-content policy")
+        self.assertEqual(
+            policy["run"],
+            "node android/app/src/test/js/static_rich_content_policy_test.js",
+        )
+        self.assertLess(
+            names.index("Test embedded static rich-content policy"),
+            names.index("Native host tests"),
+        )
+
     def test_release_keeps_secret_handling_and_flag_guard(self):
         release = _job("release")
         self.assertEqual(release["env"]["OVID_ACCOUNT_ENABLED"], "${{ vars.OVID_ACCOUNT_ENABLED || 'false' }}")

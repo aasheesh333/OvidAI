@@ -54,7 +54,8 @@ class V2VoiceReplyData {
 
   final IconData actionIcon;
 
-  /// What Ovid said, verbatim. Shown only when the user asks for it.
+  /// The exact final assistant answer supplied by the host. Playback must use
+  /// this text, never the visual title, subtitle or a generated summary.
   final String? transcript;
 
   /// Total length of the spoken reply.

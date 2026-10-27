@@ -6,8 +6,10 @@ import 'package:flutter/services.dart';
 
 import '../../../core/cloud/cloud_agent_facade.dart';
 import '../../../core/cloud/cloud_session_store.dart';
-import '../../../core/cloud/trajectory_client.dart';
-import '../../../core/cloud/trajectory_projection.dart';
+import '../../../core/cloud/trajectory_api.dart';
+import '../../../core/cloud/trajectory_client.dart'
+    as legacy
+    show TrajectoryApi;
 import '../../../core/conversation_share_service.dart';
 import '../../../core/format.dart';
 import '../../../core/state.dart';
@@ -593,7 +595,7 @@ class _CanonicalTrajectoryHost extends StatefulWidget {
     this.onShareRun,
   });
 
-  final TrajectoryApi api;
+  final legacy.TrajectoryApi api;
   final String sessionId;
   final String title;
   final VoidCallback? onShareRun;
@@ -639,7 +641,7 @@ class CanonicalTrajectoryPage extends StatefulWidget {
     this.onBack,
   });
 
-  final TrajectoryApi api;
+  final legacy.TrajectoryApi api;
   final String sessionId;
   final String title;
   final VoidCallback? onShareRun;
@@ -761,7 +763,10 @@ class _CanonicalTrajectoryPageState extends State<CanonicalTrajectoryPage>
   @override
   Widget build(BuildContext context) {
     final root = _controller.root;
-    final empty = root.mainSteps.isEmpty && root.workers.isEmpty;
+    final empty =
+        root.mainSteps.isEmpty &&
+        root.workers.isEmpty &&
+        root.diagnostics.isEmpty;
     final loading = _controller.loading && empty;
     final failed = _controller.error != null && empty && !_controller.loading;
     return RunTrajectoryPage(

@@ -443,6 +443,10 @@ class _SubagentPageState extends State<SubagentPage> {
           ),
         if (compaction != null) ...[
           field('COMPACTION', compaction.compactionId),
+          field(
+            'COMPACTED AT',
+            compaction.timestamp.toLocal().toIso8601String(),
+          ),
           field('CHECKPOINT', compaction.checkpointId),
           field('MODEL', compaction.model),
           field('CONTEXT LIMIT', '${compaction.contextLimit}'),
